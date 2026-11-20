@@ -15,10 +15,11 @@ describe('QuotaLimiter', () => {
   it('halves on quota errors and recovers slowly', () => {
     const limiter = new QuotaLimiter({ rate: 40, maxRate: 90, minRate: 5 })
     limiter.penalize()
+    limiter.penalize() // same burst: ignored
     expect(limiter.rate).toBe(20)
-    for (let i = 0; i < 10; i++) limiter.penalize()
-    expect(limiter.rate).toBe(5)
-    for (let i = 0; i < 2000; i++) limiter.reward()
+    for (let i = 0; i < 20; i++) limiter.reward()
+    expect(limiter.rate).toBe(30)
+    for (let i = 0; i < 1000; i++) limiter.reward()
     expect(limiter.rate).toBe(90)
   })
 })

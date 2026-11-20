@@ -13,6 +13,7 @@ export class QuotaLimiter {
   #tokens: number
   #last: number
   #queue: Promise<void> = Promise.resolve()
+  #lastPenalty = 0
 
   constructor(options: { rate?: number; maxRate?: number; minRate?: number } = {}) {
     this.#maxRate = options.maxRate ?? 95
@@ -52,13 +53,17 @@ export class QuotaLimiter {
 
   /** A quota error: back off hard and drain the bucket. */
   penalize(): void {
+    // Parallel requests fail together; count one burst of failures as one signal.
+    const now = Date.now()
+    if (now - this.#lastPenalty < 5_000) return
+    this.#lastPenalty = now
     this.#rate = Math.max(this.#minRate, this.#rate / 2)
     this.#tokens = 0
   }
 
   /** A successful call: speed up slowly. */
   reward(): void {
-    this.#rate = Math.min(this.#maxRate, this.#rate * 1.005)
+    this.#rate = Math.min(this.#maxRate, this.#rate + 0.5)
   }
 }
 
