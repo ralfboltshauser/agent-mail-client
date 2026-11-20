@@ -32,6 +32,22 @@ _Avoid_: all inboxes, combined inbox
 A conversation: the messages that belong to one exchange, shown as one unit.
 _Avoid_: conversation, chain
 
+**Label**:
+A tag on a Thread; the one organising concept across all Accounts (an IMAP folder appears as a Label, and on IMAP a message can carry only one).
+_Avoid_: folder, tag, category
+
+**Archive**:
+Removing a Thread from the Inbox without deleting it; what "done" means in AMC.
+_Avoid_: done, file away, mark done
+
+**Snooze**:
+Hiding a Thread until a chosen time or until a condition (such as no reply arriving), then returning it to the Inbox.
+_Avoid_: remind me, defer
+
+**Mute**:
+A Thread state in which new replies skip both the Inbox and Interrupts.
+_Avoid_: ignore, silence
+
 ### Agents and attention
 
 **Agent**:
@@ -45,6 +61,14 @@ _Avoid_: LLM provider, model, API
 **Interrupt**:
 A notification that reaches the owner's attention immediately; mail that is not Interrupt-worthy arrives silently.
 _Avoid_: alert, ping, push (when the decision rather than the delivery is meant)
+
+**Quiet**:
+The view of mail that arrived without an Interrupt, so that nothing is ever hidden from the owner.
+_Avoid_: other, low priority, filtered
+
+**Agent Draft**:
+A reply written by an Agent and waiting for the owner; sending it always takes the owner's action unless Dangerously Allow Send is on.
+_Avoid_: suggestion, auto-reply
 
 **Dangerously Allow Send**:
 The explicit owner setting without which no Agent has any means of sending mail.
