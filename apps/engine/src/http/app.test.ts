@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createPairingCode, issueToken } from '../auth/tokens.ts'
+import { MIGRATIONS } from '../db/migrations.ts'
 import { silentLog, testConfig, testDb } from '../test-support.ts'
 import { createApp } from './app.ts'
 
@@ -44,7 +45,7 @@ describe('HTTP API', () => {
     const { secret } = issueToken(db, { kind: 'cli', name: 'mac', scopes: ['read'] })
     const res = await app.request('/v1/health', { headers: { Authorization: `Bearer ${secret}` } })
     expect(res.status).toBe(200)
-    expect(await res.json()).toMatchObject({ ok: true, schemaVersion: 1 })
+    expect(await res.json()).toMatchObject({ ok: true, schemaVersion: MIGRATIONS.length })
   })
 
   it('enforces scopes', async () => {

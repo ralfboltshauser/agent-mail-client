@@ -1,13 +1,17 @@
 import { statfsSync } from 'node:fs'
 import type { Health, Me, PublicHealth, Scope } from '@amc/protocol'
 import { hasScope, PairRequest } from '@amc/protocol'
+import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import { Hono, type MiddlewareHandler } from 'hono'
 import { HTTPException } from 'hono/http-exception'
 import { authenticate, type Principal, redeemPairingCode } from '../auth/tokens.ts'
 import { type Config, databasePath } from '../config.ts'
 import { type Db, fileSize, schemaVersion } from '../db/database.ts'
 import type { Logger } from '../log.ts'
+import { buildMcpServer } from '../mcp/server.ts'
 import { VERSION } from '../version.ts'
+import { type MailDeps, mailRoutes } from './mail.ts'
+import { tokenRoutes } from './tokens.ts'
 
 export interface AppEnv {
   Variables: { principal: Principal }
@@ -18,9 +22,10 @@ export interface AppDeps {
   config: Config
   log: Logger
   startedAt?: number
+  mail?: MailDeps
 }
 
-export function createApp({ db, config, log, startedAt = Date.now() }: AppDeps) {
+export function createApp({ db, config, log, startedAt = Date.now(), mail }: AppDeps) {
   const app = new Hono<AppEnv>()
 
   app.onError((error, c) => {
@@ -85,6 +90,25 @@ export function createApp({ db, config, log, startedAt = Date.now() }: AppDeps) 
     return c.json(health)
   })
 
+  v1.route('/', tokenRoutes(db))
+  if (mail) {
+    v1.route('/', mailRoutes(mail))
+
+    // MCP over Streamable HTTP, stateless: one server per request, built from the token's scopes.
+    app.all('/mcp', requireAuth(db), async (c) => {
+      const server = buildMcpServer(c.get('principal'), {
+        db,
+        queries: mail.queries,
+        drafts: mail.drafts,
+      })
+      const transport = new WebStandardStreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+        enableJsonResponse: true,
+      })
+      await server.connect(transport)
+      return transport.handleRequest(c.req.raw)
+    })
+  }
   app.route('/v1', v1)
   app.notFound((c) => c.json({ error: 'not_found', message: 'No such route' }, 404))
   return app
