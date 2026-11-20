@@ -2,6 +2,7 @@ import type { AccessTokens } from './oauth.ts'
 import { QUOTA_COST, QuotaLimiter } from './ratelimit.ts'
 import type {
   GmailApi,
+  GmailDraft,
   GmailHistoryList,
   GmailLabel,
   GmailListMessages,
@@ -22,36 +23,68 @@ export class GmailHttpError extends Error {
   }
 }
 
+export interface RetryInfo {
+  path: string
+  status: number
+  delayMs: number
+  rate: number
+}
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
-/** Gmail REST over fetch, with token refresh on 401 and backoff on rate limits and 5xx. */
+type Cost = keyof typeof QUOTA_COST
+
+interface CallOptions {
+  params?: Record<string, string | undefined>
+  method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
+  body?: unknown
+  cost?: Cost
+}
+
+/**
+ * Gmail REST over fetch: token refresh on 401, an adaptive quota limiter, and backoff on
+ * rate limits and server errors.
+ */
 export class GmailHttpApi implements GmailApi {
   readonly #tokens: AccessTokens
   readonly #fetch: typeof fetch
   readonly #limiter: QuotaLimiter
+  readonly #onRetry: ((info: RetryInfo) => void) | undefined
 
-  constructor(tokens: AccessTokens, fetchImpl: typeof fetch = fetch, limiter = new QuotaLimiter()) {
+  constructor(
+    tokens: AccessTokens,
+    fetchImpl: typeof fetch = fetch,
+    options: { limiter?: QuotaLimiter; onRetry?: (info: RetryInfo) => void } = {},
+  ) {
     this.#tokens = tokens
     this.#fetch = fetchImpl
-    this.#limiter = limiter
+    this.#limiter = options.limiter ?? new QuotaLimiter()
+    this.#onRetry = options.onRetry
   }
 
-  async #call<T>(
-    path: string,
-    params: Record<string, string | undefined> = {},
-    cost: keyof typeof QUOTA_COST = 'get',
-  ): Promise<T> {
+  async #call<T>(path: string, options: CallOptions = {}): Promise<T> {
     const url = new URL(BASE + path)
-    for (const [key, value] of Object.entries(params))
+    for (const [key, value] of Object.entries(options.params ?? {})) {
       if (value !== undefined) url.searchParams.set(key, value)
+    }
 
     let refreshed = false
     for (let attempt = 0; ; attempt++) {
-      await this.#limiter.take(QUOTA_COST[cost] ?? 5)
+      await this.#limiter.take(QUOTA_COST[options.cost ?? 'get'] ?? 5)
       const res = await this.#fetch(url, {
-        headers: { Authorization: `Bearer ${await this.#tokens.get()}` },
+        method: options.method ?? 'GET',
+        headers: {
+          Authorization: `Bearer ${await this.#tokens.get()}`,
+          ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        },
+        ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
       })
-      if (res.ok) return (await res.json()) as T
+      if (res.ok) {
+        this.#limiter.reward()
+        if (res.status === 204) return undefined as T
+        const text = await res.text()
+        return (text ? JSON.parse(text) : undefined) as T
+      }
 
       const body = (await res.json().catch(() => ({}))) as {
         error?: { message?: string; errors?: { reason?: string }[] }
@@ -63,15 +96,25 @@ export class GmailHttpApi implements GmailApi {
         this.#tokens.invalidate()
         continue
       }
-      const retryable =
+
+      const quota =
         res.status === 429 ||
-        res.status >= 500 ||
-        (res.status === 403 && /rateLimitExceeded|userRateLimitExceeded|backendError/.test(reason))
-      if (retryable && attempt < 6) {
+        (res.status === 403 &&
+          /rateLimitExceeded|userRateLimitExceeded|quotaExceeded|quota exceeded/i.test(
+            `${reason} ${message}`,
+          ))
+      const retryable =
+        quota || res.status >= 500 || (res.status === 403 && reason === 'backendError')
+      if (retryable && attempt < 8) {
+        if (quota) this.#limiter.penalize()
         const retryAfter = Number(res.headers.get('retry-after'))
-        const delay =
-          Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 2 ** attempt * 500
-        await sleep(delay + Math.random() * 250)
+        // Per-minute quotas need waits on the scale of the minute window.
+        const base = quota ? Math.min(5_000 * (attempt + 1), 60_000) : 2 ** attempt * 500
+        const delayMs =
+          (Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : base) +
+          Math.random() * 250
+        this.#onRetry?.({ path, status: res.status, delayMs, rate: this.#limiter.rate })
+        await sleep(delayMs)
         continue
       }
       throw new GmailHttpError(res.status, reason, `Gmail ${path}: ${res.status} ${message}`)
@@ -79,29 +122,29 @@ export class GmailHttpApi implements GmailApi {
   }
 
   profile() {
-    return this.#call<GmailProfile>('/profile', {}, 'profile')
+    return this.#call<GmailProfile>('/profile', { cost: 'profile' })
   }
 
   async labels() {
-    return (await this.#call<{ labels?: GmailLabel[] }>('/labels', {}, 'labels')).labels ?? []
+    return (await this.#call<{ labels?: GmailLabel[] }>('/labels', { cost: 'labels' })).labels ?? []
   }
 
   listMessages(options: { pageToken?: string; q?: string; maxResults?: number }) {
-    return this.#call<GmailListMessages>(
-      '/messages',
-      {
+    return this.#call<GmailListMessages>('/messages', {
+      params: {
         pageToken: options.pageToken,
         q: options.q,
         maxResults: String(options.maxResults ?? 500),
       },
-      'list',
-    )
+      cost: 'list',
+    })
   }
 
   async getMessage(id: string) {
     try {
       return await this.#call<GmailMessage>(`/messages/${encodeURIComponent(id)}`, {
-        format: 'full',
+        params: { format: 'full' },
+        cost: 'get',
       })
     } catch (error) {
       if (error instanceof GmailHttpError && error.status === 404) return null
@@ -112,9 +155,8 @@ export class GmailHttpApi implements GmailApi {
   async history(startHistoryId: string, pageToken?: string) {
     try {
       return await this.#call<GmailHistoryList>('/history', {
-        startHistoryId,
-        pageToken,
-        maxResults: '500',
+        params: { startHistoryId, pageToken, maxResults: '500' },
+        cost: 'history',
       })
     } catch (error) {
       // 404: the start point is too old; the caller must resync.
@@ -126,9 +168,38 @@ export class GmailHttpApi implements GmailApi {
   async attachment(messageId: string, attachmentId: string) {
     const res = await this.#call<{ data: string }>(
       `/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`,
-      {},
-      'attachment',
+      { cost: 'attachment' },
     )
     return Buffer.from(res.data, 'base64url')
+  }
+
+  saveDraft(input: { draftId?: string; raw: string; threadId?: string }) {
+    const message = {
+      raw: Buffer.from(input.raw, 'utf8').toString('base64url'),
+      ...(input.threadId ? { threadId: input.threadId } : {}),
+    }
+    return input.draftId
+      ? this.#call<GmailDraft>(`/drafts/${encodeURIComponent(input.draftId)}`, {
+          method: 'PUT',
+          body: { id: input.draftId, message },
+          cost: 'draftUpdate',
+        })
+      : this.#call<GmailDraft>('/drafts', {
+          method: 'POST',
+          body: { message },
+          cost: 'draftCreate',
+        })
+  }
+
+  async deleteDraft(draftId: string) {
+    try {
+      await this.#call<void>(`/drafts/${encodeURIComponent(draftId)}`, {
+        method: 'DELETE',
+        cost: 'draftDelete',
+      })
+    } catch (error) {
+      if (error instanceof GmailHttpError && error.status === 404) return
+      throw error
+    }
   }
 }

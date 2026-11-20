@@ -81,7 +81,11 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
       this.#o.oauthClient(),
       this.#o.sealer.open<GmailCredentials>(row.credentials),
     )
-    const api = this.#o.gmailApi ? this.#o.gmailApi(tokens) : new GmailHttpApi(tokens)
+    const api = this.#o.gmailApi
+      ? this.#o.gmailApi(tokens)
+      : new GmailHttpApi(tokens, fetch, {
+          onRetry: (info) => log.warn({ account: accountId, ...info }, 'gmail retry'),
+        })
     const sync = new GmailAccountSync(
       api,
       store,

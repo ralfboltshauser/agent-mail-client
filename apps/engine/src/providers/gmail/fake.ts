@@ -1,5 +1,6 @@
 import type {
   GmailApi,
+  GmailDraft,
   GmailHistoryList,
   GmailHistoryRecord,
   GmailLabel,
@@ -123,5 +124,37 @@ export class FakeGmail implements GmailApi {
 
   async attachment() {
     return new Uint8Array([1, 2, 3])
+  }
+
+  drafts = new Map<string, { raw: string; messageId: string; threadId: string }>()
+  #draftSeq = 0
+
+  async saveDraft(input: {
+    draftId?: string
+    raw: string
+    threadId?: string
+  }): Promise<GmailDraft> {
+    const draftId = input.draftId ?? `d${++this.#draftSeq}`
+    const old = this.drafts.get(draftId)
+    if (old) this.remove(old.messageId)
+    const messageId = `draftmsg${++this.#draftSeq}`
+    const subject = /^Subject: (.*)$/m.exec(input.raw)?.[1] ?? ''
+    const body = Buffer.from(input.raw.split('\r\n\r\n')[1] ?? '', 'base64').toString('utf8')
+    const m = this.add(messageId, {
+      threadId: input.threadId ?? `t-${messageId}`,
+      labels: ['DRAFT'],
+      subject,
+      from: this.address,
+      body,
+      date: Date.now(),
+    })
+    this.drafts.set(draftId, { raw: input.raw, messageId, threadId: m.threadId })
+    return { id: draftId, message: { id: messageId, threadId: m.threadId } }
+  }
+
+  async deleteDraft(draftId: string) {
+    const d = this.drafts.get(draftId)
+    if (d) this.remove(d.messageId)
+    this.drafts.delete(draftId)
   }
 }

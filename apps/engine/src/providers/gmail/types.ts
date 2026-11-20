@@ -77,4 +77,12 @@ export interface GmailApi {
   getMessage(id: string): Promise<GmailMessage | null>
   history(startHistoryId: string, pageToken?: string): Promise<GmailHistoryList | null>
   attachment(messageId: string, attachmentId: string): Promise<Uint8Array>
+  /** Creates or replaces a draft from a raw RFC 5322 message; returns the draft and its message. */
+  saveDraft(input: { draftId?: string; raw: string; threadId?: string }): Promise<GmailDraft>
+  deleteDraft(draftId: string): Promise<void>
+}
+
+export interface GmailDraft {
+  id: string
+  message: GmailMessageRef
 }
