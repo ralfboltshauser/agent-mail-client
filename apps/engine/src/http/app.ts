@@ -8,6 +8,7 @@ import { type Config, databasePath } from '../config.ts'
 import { type Db, fileSize, schemaVersion } from '../db/database.ts'
 import type { Logger } from '../log.ts'
 import { VERSION } from '../version.ts'
+import { type MailDeps, mailRoutes } from './mail.ts'
 
 export interface AppEnv {
   Variables: { principal: Principal }
@@ -18,9 +19,10 @@ export interface AppDeps {
   config: Config
   log: Logger
   startedAt?: number
+  mail?: MailDeps
 }
 
-export function createApp({ db, config, log, startedAt = Date.now() }: AppDeps) {
+export function createApp({ db, config, log, startedAt = Date.now(), mail }: AppDeps) {
   const app = new Hono<AppEnv>()
 
   app.onError((error, c) => {
@@ -85,6 +87,7 @@ export function createApp({ db, config, log, startedAt = Date.now() }: AppDeps) 
     return c.json(health)
   })
 
+  if (mail) v1.route('/', mailRoutes(mail))
   app.route('/v1', v1)
   app.notFound((c) => c.json({ error: 'not_found', message: 'No such route' }, 404))
   return app

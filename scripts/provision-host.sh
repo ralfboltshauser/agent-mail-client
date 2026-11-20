@@ -49,6 +49,13 @@ if [ -f "$OLD" ]; then
   echo "  moved the Google OAuth client to /etc/amc"
 fi
 
+# 4b. The key that seals provider credentials at rest (never leaves the Host).
+if ! sudo test -f /etc/amc/key; then
+  sudo sh -c 'head -c 32 /dev/urandom > /etc/amc/key'
+  sudo chown amc:amc /etc/amc/key && sudo chmod 600 /etc/amc/key
+  echo "  created the credential encryption key"
+fi
+
 # 5. Engine config (written once; edit /etc/amc/config.json by hand afterwards).
 if ! sudo test -f /etc/amc/config.json; then
   LOGIN=$(tailscale status --json | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['User'][str(d['Self']['UserID'])]['LoginName'])")

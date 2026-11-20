@@ -1,10 +1,16 @@
 import { mkdirSync } from 'node:fs'
 import { serve } from '@hono/node-server'
 import { createPairingCode } from './auth/tokens.ts'
+import { BlobStore } from './blobs.ts'
 import { databasePath, loadConfig } from './config.ts'
+import { Sealer } from './crypto.ts'
 import { migrate, openDatabase } from './db/database.ts'
 import { createApp } from './http/app.ts'
 import { createLogger } from './log.ts'
+import { MailQueries } from './mail/queries.ts'
+import { MailStore } from './mail/store.ts'
+import { loadOAuthClient, type OAuthClient } from './providers/gmail/oauth.ts'
+import { SyncManager } from './sync/manager.ts'
 import { VERSION } from './version.ts'
 
 const USAGE = `amc-engine ${VERSION}
@@ -47,16 +53,33 @@ async function main(argv: string[]) {
       return
     }
     case 'serve': {
-      const app = createApp({ db, config, log })
+      const sealer = Sealer.fromSecretsDir(config.secretsDir)
+      const blobs = new BlobStore(config.blobDir)
+      const store = new MailStore(db, blobs)
+      const queries = new MailQueries(db)
+      let oauth: OAuthClient | null = null
+      const oauthClient = () => {
+        oauth ??= loadOAuthClient(config.secretsDir)
+        return oauth
+      }
+      const sync = new SyncManager({ db, store, sealer, log, oauthClient })
+      const app = createApp({
+        db,
+        config,
+        log,
+        mail: { db, store, queries, blobs, sealer, sync, oauthClient, log },
+      })
       const server = serve({
         fetch: app.fetch,
         hostname: config.listen.host,
         port: config.listen.port,
       })
       log.info({ version: VERSION, schemaVersion: version, ...config.listen }, 'engine listening')
+      sync.start()
       const shutdown = (signal: string) => {
         log.info({ signal }, 'shutting down')
-        server.close(() => {
+        server.close(async () => {
+          await sync.stop()
           db.close()
           process.exit(0)
         })
