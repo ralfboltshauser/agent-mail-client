@@ -1,0 +1,233 @@
+# AMC v1 build plan (Mac + Host)
+
+Status: **proposed**, waiting for the owner to confirm the open decisions at the bottom.
+Scope: everything in AMC v1 ([What exactly is in AMC v1?](https://github.com/ralfboltshauser/agent-mail-client/issues/8)) **except the Android app**, which comes after this plan. Terms follow [GLOSSARY.md](../GLOSSARY.md). ADR [0001](adr/0001-agents-cannot-send-by-construction.md) (Agents cannot send) and ADR [0002](adr/0002-agents-run-through-the-owners-harness.md) (Agents run through the installed CLIs) hold throughout.
+
+**Done means:** Ralf runs all four Accounts in AMC on the Mac for two weeks without opening Spark on the Mac. Until the Android app exists, the phone keeps a stock mail app for reading.
+
+---
+
+## 1. Shape
+
+```
+                       Tailscale (tailnet only, HTTPS via `tailscale serve`)
+ ┌──────────── Mac ─────────────┐            ┌──────────────── Host: ralfs-ubuntu ────────────────┐
+ │ AMC desktop (Electron)        │  sync API  │ Engine (Node, one process, systemd --user)          │
+ │  main: replica (SQLite),      │◀──────────▶│  provider connectors: Gmail API, IMAP (imapflow),   │
+ │        sync client, keychain  │  WebSocket │                       SMTP (Nodemailer)             │
+ │  renderer: React + shadcn     │            │  store: SQLite (NVMe) + blobs (/srv HDD)            │
+ │                               │            │  sync: change log, mutation queue, writeback        │
+ │ T3 Code / Codex / Claude ─────┼── MCP ────▶│  agent API: MCP + `amc` CLI, scoped tokens          │
+ │   side panel ─ composer link ─┼── WS ─────▶│  composer: Yjs docs (Hocuspocus)                    │
+ └───────────────────────────────┘            │  agent runner: installed `claude` / `codex`         │
+                                              │  scheduler: snooze, send-later, triage, backups     │
+                                              └─────────────────────────────────────────────────────┘
+```
+
+- The **Engine** is the single source of truth. Every **Client** (the desktop app, the `amc` CLI, Agents over MCP, a composer link) works through its API. No Client talks to Gmail or IMAP directly.
+- The **desktop app** keeps a local **replica**, so every read and every action is local and instant. It syncs with the Engine in the background.
+- **Agents** never see more than their token allows. The send tool simply does not exist for them unless Dangerously Allow Send is on.
+
+## 2. Stack
+
+| Area | Choice | Why |
+|---|---|---|
+| Language | TypeScript everywhere, `pnpm` workspaces | One language for Engine, desktop and shared protocol; the Host already has Node 26 and pnpm |
+| Engine runtime | Node 26, Hono (HTTP), `ws` (WebSocket) | Stable, all mail libraries are Node-first |
+| Engine store | SQLite via `better-sqlite3`, WAL, FTS5 | One file, fast, full-text search built in, trivial backups |
+| Gmail | `googleapis` Gmail API: `history.list`, `messages.get`, `modify`, `drafts`, `send` | Research ticket #3 |
+| IMAP / SMTP | `imapflow` (IDLE, CONDSTORE/QRESYNC), `nodemailer` | Research ticket #3 |
+| MIME | `postal-mime` (parse), `nodemailer` MailComposer (build) | Small, permissive licences |
+| Desktop shell | **Electron** via `electron-vite` | Shares TypeScript with the Engine; `better-sqlite3` in the main process; mature notifications, menus, global shortcuts, Keychain. T3 Code ships the same way |
+| Desktop UI | React 19, Tailwind v4, **shadcn/ui** (Sidebar, Command, Resizable, Sonner, Dialog), TanStack Virtual, `cmdk` | The shadcn sidebar look Ralf wants; virtual lists for 100k+ Threads |
+| Composer | TipTap (ProseMirror) + Yjs, served by Hocuspocus | Rich text, live co-editing between owner and Agent, change attribution for "what changed" |
+| Mail HTML | Sandboxed `iframe`, DOMPurify, strict CSP, remote images off by default and proxied by the Engine when allowed | Safety and tracking-pixel blocking |
+| Agents | MCP TypeScript SDK (streamable HTTP), Claude Agent SDK pointed at the installed `claude`, `codex app-server` | ADR 0001, ADR 0002 |
+| Tests | Vitest; Gmail fake; Dovecot/GreenMail in Docker for IMAP; Playwright for Electron | Writeback bugs are the scary ones |
+
+**Not shadcn + Vercel UI SDK:** the UI SDK exposes on-screen controls to Agents, which would put a Send button in an Agent's reach and break ADR 0001.
+
+## 3. Repository layout
+
+```
+apps/engine        Engine service (Host)
+apps/desktop       Electron app (Mac): main/ (replica, sync, keychain), renderer/ (React + shadcn)
+apps/cli           `amc` CLI (owner and Agents)
+packages/protocol  zod schemas: entities, sync API, mutations, MCP tool shapes
+packages/mail      MIME parse/build, threading, HTML sanitising, address handling
+packages/sync      replica apply + optimistic mutation queue (used by desktop and CLI)
+packages/composer  TipTap + Yjs editor shared by desktop and the composer page
+packages/ui        shadcn components and the AMC theme
+docs/              plan, ADRs, runbooks
+```
+
+## 4. Engine
+
+### 4.1 Data model (SQLite)
+
+- `account`: kind (`gmail` | `imap`), address, display name, encrypted credentials, provider sync cursor (Gmail `historyId`; IMAP per-folder `UIDVALIDITY`/`HIGHESTMODSEQ`), health.
+- `thread`: Account, provider thread id, subject, participants, last date, unread count, Label ids, triage fields (Bucket, reason, summary, Interrupt), snoozed until, muted, `modseq`.
+- `message`: provider id(s), `Message-ID`, `In-Reply-To`, `References`, from/to/cc/bcc, date, snippet, plain text body, HTML body blob ref, flags, size, `modseq`.
+- `label`: provider id, name, system or user, colour. `message_label` join.
+- `attachment`: name, type, size, content id, blob ref, fetched yes or no.
+- `draft`: Account, Thread (optional), headers, Yjs state, provider draft id, last author (owner or Agent), `modseq`.
+- `outbox`: draft snapshot, send at, undo until, status, provider message id.
+- `contact`: address, name, last seen, frequency (built from mail; feeds autocomplete and Agents).
+- `change_log`: global monotonic `modseq`, entity, id, op. Drives sync.
+- `mutation`: client-generated id, kind, args, status, error. Makes every change idempotent.
+- `agent_action`: Agent, tool, arguments, before and after, undone. Shown and undoable in the desktop app.
+- `fts_message`: FTS5 index over subject, participants, body text, attachment names.
+
+Threading: Gmail Threads come from Gmail. IMAP Threads use `References`/`In-Reply-To` (JWZ), with a subject fallback inside a short time window.
+
+### 4.2 Storage on the Host
+
+The root NVMe disk is at **97%** (7.5 GB free), and `/srv` is a 1.8 TB spinning disk with 1.3 TB free.
+
+- **SQLite database and FTS index** on NVMe at `~/.local/share/amc/`. This holds metadata and text for the entire history across all four Accounts. Expect a few GB up to roughly 20 GB.
+- **Raw MIME, HTML bodies and attachments** in a content-addressed blob store at `/srv/amc/blobs`. Spinning-disk latency is fine for opening a single message.
+- Attachments are fetched lazily on first open, then kept.
+- Milestone 0 frees at least 30 GB on the root disk first: Docker build cache and dangling images, plus whatever Ralf picks from `.microsandbox` (49 GB) and the caches.
+
+### 4.3 Provider sync
+
+- **Backfill:** the entire history, newest first, resumable, rate-limited. The inbox and the last 90 days come first so the app is usable within minutes, and older mail streams in behind.
+- **Gmail incremental:** `history.list` from the last `historyId`, polled every 15 seconds per Account. A Pub/Sub watch for instant delivery is an optional switch (it needs billing on the Cloud project). On a `historyId` too old, fall back to a full resync.
+- **IMAP incremental:** IDLE on INBOX, and CONDSTORE/QRESYNC on every folder every few minutes. Without those extensions, UID-range diffs (see the IMAP extensions ticket).
+- **Label mapping:** Gmail labels map 1:1. IMAP folders map to Labels, so a message carries at most one. Special-use folders (`\Archive`, `\Sent`, `\Trash`, `\Drafts`) map to the system Labels.
+
+### 4.4 Mutations and writeback
+
+1. A Client sends `POST /mutations` with a batch of `{id, kind, args}` (archive, label, read, star, trash, snooze, mute, draft edits, send).
+2. The Engine applies the batch locally in one transaction. That bumps `modseq` and logs the changes, so every other Client sees the result at once.
+3. A per-Account writeback queue applies it at the provider (Gmail `modify`; IMAP `STORE`/`MOVE`), with retries and backoff.
+4. If the provider refuses permanently, a compensating change reverts the local state and the error shows in the desktop app. Nothing fails silently.
+
+Engine-side features that providers lack:
+- **Snooze:** remove from Inbox, add the `AMC/Snoozed` Label, return at the chosen time or on the "no reply by" condition.
+- **Mute:** new replies skip the Inbox and Interrupts.
+- **Send-later** and **undo-send:** the outbox holds the message until its send time. The default undo window is 10 seconds.
+
+### 4.5 Sending
+
+- **Gmail:** `users.messages.send` with the right `threadId`, `In-Reply-To` and `References`.
+- **IMAP Accounts:** SMTP through Nodemailer, then `APPEND` to the Sent folder unless the provider does that itself.
+- **Who can send:** sending is a mutation only the owner principal may issue. The send code path checks the principal, not the UI.
+
+## 5. Sync protocol (Engine ↔ desktop)
+
+JMAP-style "changes since state X" over one global `modseq`. This was the top pick in [the local-first sync research](https://github.com/ralfboltshauser/agent-mail-client/issues/5).
+
+- **Bootstrap:** page through `GET /sync/changes?since=0` until caught up. The replica fills newest-first, so the inbox appears first.
+- **Live:** a WebSocket sends `{modseq}` nudges. The client pulls `GET /sync/changes?since=<its modseq>`.
+- **Writes:** the client applies a mutation optimistically to an overlay on the replica and queues it (durably, so it survives restarts and offline time). When the Engine's change carrying that mutation id comes back, the overlay entry is dropped. On error, the overlay is rolled back and a toast explains why.
+- **Replica scope:** metadata for every Thread, plus bodies for the last 12 months and every unarchived, starred or draft Thread. Older bodies come from the Engine on open and are then cached.
+- **Search:** typing filters the replica instantly. In parallel, the query goes to the Engine's FTS5 index over the entire history, and the results are merged.
+- **Budgets:** any keyboard action under 50 ms to a visible result. A 60 fps list at 100k Threads. New mail on the Mac within 20 seconds with polling, or within 5 seconds with Pub/Sub or IDLE.
+
+## 6. Security and principals
+
+- The Engine listens on `127.0.0.1` only. `tailscale serve` exposes it over HTTPS to the tailnet. It is never on the public internet.
+- **Principals and tokens:**
+  - **Owner device:** the desktop app, paired once with a code shown by `amc pair`. Its token lives in the macOS Keychain. It can do everything, including sending.
+  - **Agent token:** created by the owner with scopes `read`, `organize`, `draft`. `send` is grantable only while Dangerously Allow Send is on. The MCP tool list is computed from the token, so a missing scope means the tool does not exist.
+  - **Composer link:** a capability token for one draft, edit only, expiring after 24 hours. It cannot send, list or read other mail.
+- **Dangerously Allow Send:** toggled only in the desktop app, behind a confirmation. Every send by an Agent is logged, and turning the setting on is announced in a notification.
+- **Provider credentials** (OAuth refresh tokens, IMAP passwords) are encrypted at rest with a key in `~/.config/amc/key` (mode 600). The Google OAuth client is already at `~/.config/amc/google-oauth-client.json`.
+- **Tests:** a test suite proves ADR 0001 by listing MCP tools for every scope combination with the setting off and asserting there is no send tool and no send route.
+
+## 7. Agents
+
+### 7.1 Agent API
+- An MCP server over streamable HTTP at `/mcp`.
+- **Read tools:** `list_threads` (by Bucket, Label, query), `get_thread`, `search`, `search_contacts`, `get_attachment_text`.
+- **Organize tools:** `set_triage`, `archive`, `label`, `snooze`, `mute`, `mark_read`.
+- **Draft tools:** `create_draft`, `read_draft`, `update_draft`, `comment_on_draft` (questions for the owner), `composer_link`.
+- **Send:** `send_draft` exists **only** with Dangerously Allow Send on and the `send` scope.
+- **`amc` CLI:** the same surface for scripts and Agents that prefer a shell.
+- **Undo:** every Agent call is written to `agent_action` and can be undone from the desktop app.
+
+### 7.2 Agent runner (the Engine's own Agents)
+- **Claude adapter:** the Claude Agent SDK with `pathToClaudeCodeExecutable` set to the installed `claude`, `settingSources: []`, `strictMcpConfig`, and an explicit `tools` list containing only the AMC MCP server under a scoped token.
+- **Codex adapter:** `codex app-server` with `-c` overrides that disable owner MCP servers and tools.
+- Both share the owner's login, per ADR 0002. The sandbox ticket confirms the isolation, and the headless proof ticket proves both run unattended on the Host.
+- Runs are queued and limited to two at a time, with a time limit per run. Their output is only ever MCP calls.
+
+### 7.3 Triage
+- New Threads (and new messages in non-muted Threads) are batched every 30 seconds and given to the triage Agent.
+- It sets one **Bucket**, a one-line reason, a short summary and whether the Thread is Interrupt-worthy (rules from [What makes a message Interrupt-worthy?](https://github.com/ralfboltshauser/agent-mail-client/issues/10)).
+- When Ralf moves a Thread to another Bucket, that's a correction. Corrections are kept as examples in the triage prompt, so triage learns his taste.
+- Interrupt-worthy Threads notify the Mac with the reason. Everything else arrives silently and stays visible.
+
+### 7.4 Handoff and the live composer
+From [How does the owner hand a Thread to an Agent and iterate on the reply together?](https://github.com/ralfboltshauser/agent-mail-client/issues/17):
+- **Hand off** (key `H`): pick a project (T3 projects if [the T3 research](https://github.com/ralfboltshauser/agent-mail-client/issues/18) says AMC can list them; otherwise a configured list of project folders), then choose:
+  - **Copy prompt:** for any agent app. Contains the Thread id, the composer link and MCP setup.
+  - **Open in T3:** starts or continues a T3 thread in that project, if T3 allows it.
+  - **Run here:** an Engine Agent with that project folder as its working directory, read-only.
+- **Composer page:** served by the Engine at a composer link and opened in T3's side panel or any browser. It's the same TipTap + Yjs editor as the desktop app. The Agent's `update_draft` calls become Yjs edits attributed to the Agent, so they appear live. Ralf's typing syncs straight back. **There is no Send button on this page.**
+- **What changed:** the draft highlights everything changed since Ralf last looked, so he rereads only that.
+- **Select and revise:** select text, type or dictate an instruction, and the Agent rewrites just that span. It goes to the linked T3 thread when there is one, otherwise to an Engine Agent with the Thread and draft as context.
+- Agent questions from `comment_on_draft` show next to the draft.
+- **Later:** suggest the project from past handoffs by sender and domain, then pre-draft replies for the Reply Bucket before Ralf opens them.
+
+## 8. Desktop app
+
+- **Layout:** a shadcn inset Sidebar, a virtual Thread list, and a reading pane, in resizable panels.
+- **Sidebar:**
+  - Account switcher: Unified, or one Account.
+  - Buckets with counts: Reply, Action, Follow-up, Update, Later, When I have time.
+  - Quiet, Snoozed, Drafts, Sent, Labels.
+  - Sync status per Account, at the bottom.
+- **Keyboard first:** everything in a ⌘K command palette.
+  - Movement and views: `j`/`k` move, `↵` open, `e` archive, `#` trash, `l` label, `b` snooze, `m` mute, `s` star, `u` toggle read.
+  - Compose: `r`/`a`/`f` reply, reply-all, forward. `c` compose. `⌘↵` send.
+  - Navigate: `/` search, `g` then `i`/`d`/`s` go to a view.
+  - Agents: `H` hand off, `z` undo.
+  - Shortcuts are shown in the menus and the palette.
+- **Reading:** Thread view with collapsed history, sanitised HTML in a sandboxed iframe, a remote-images toggle per sender, attachments with Quick Look preview, the Agent summary at the top, and the Bucket reason shown.
+- **Compose:** the TipTap composer, recipients with contact autocomplete, attachments by drag-drop or paste, per-Account signatures, send-later, an undo-send toast, and the same live Agent drafting as the composer page.
+- **Notifications:** native macOS notifications for Interrupts only, showing the reason. The Dock badge shows the Reply Bucket count.
+- **Settings:** Accounts (add via a browser OAuth sign-in with a loopback redirect into the desktop app, then the code goes to the Engine), signatures, Agent tokens, Dangerously Allow Send, triage examples, shortcuts.
+- **Distribution:** built locally and signed ad hoc for Ralf. Notarisation and auto-update come with polished onboarding, after v1.
+
+## 9. Operations on the Host
+
+- **Service:** `amc-engine.service` as a systemd user service, with lingering enabled. It restarts on failure and logs to journald as JSON (pino).
+- **Deploy:** `pnpm deploy:host` (from the Mac) runs, over SSH:
+  1. `git pull` the tagged commit into `~/apps/amc`
+  2. install and build
+  3. run migrations
+  4. restart
+  5. health check; if it fails, roll back to the previous build
+- **Migrations:** numbered SQL files, applied at startup inside a transaction, with a backup taken first.
+- **Backups:** nightly `VACUUM INTO` of the database plus a blob manifest to `/srv/backups/amc`, kept 14 days. An offsite copy is still to be decided. A restore drill is part of cutover.
+- **Health:** `/health` reports per-Account sync lag, writeback queue depth, the last error and disk headroom. The desktop app shows it and notifies when lag exceeds 10 minutes or a sign-in has expired.
+- **Running the Engine on the Mac:** supported for development (`pnpm dev` starts the Engine and the desktop app against a test Account). The Host stays the production Engine.
+
+## 10. Milestones
+
+Each milestone is one GitHub ticket with a checklist and ends with something Ralf can use. The arrows show what each one needs first.
+
+| # | Milestone | Needs | Ralf can then… |
+|---|---|---|---|
+| M0 | Foundations: monorepo, CI, Host disk freed, `/srv/amc`, systemd unit, `tailscale serve`, deploy script, owner pairing | — | — |
+| M1 | Gmail Engine: both Gmail Accounts, OAuth sign-in, full backfill, incremental sync, threading, store, FTS | M0 | query his mail with `amc` |
+| M2 | Desktop shell and sync: Electron, replica, sync protocol, shadcn sidebar, list, reading pane, search, palette | M1, UI prototype | read all Gmail in AMC |
+| M3 | Organise: mutation pipeline and writeback; archive, trash, read, star, Labels, Snooze, Mute, undo | M2 | triage by hand in AMC |
+| M4 | Compose and send: composer (Yjs from day one), reply/forward/new, attachments, signatures, contacts, drafts sync, outbox with send-later and undo-send | M3 | stop using Gmail and Spark for Gmail Accounts |
+| M5 | IMAP Accounts: imapflow sync, folders as Labels, SMTP send, Sent append | M1, IMAP extensions check | have all four Accounts in AMC |
+| M6 | Agent platform: MCP server, `amc` CLI, scoped tokens, ADR 0001 test suite, agent runner, action log with undo, Dangerously Allow Send | M3, headless proof, sandbox, permission model | point T3, Codex or Claude at his mail safely |
+| M7 | Triage: Buckets, reasons, summaries, Interrupts, Quiet, corrections, Mac notifications | M6, Interrupt rules | open AMC to a sorted inbox |
+| M8 | Handoff and live composer: composer links, live Agent drafting, what-changed, select-and-revise, project picker, T3 integration | M4, M6, handoff design, T3 research | do the T3 reply flow without copy-paste |
+| M9 | Hardening and cutover: backups and restore drill, credential encryption audit, performance budgets, health alerts, optional Gmail Pub/Sub, two weeks without Spark on the Mac | all | cancel Spark on the Mac |
+
+Runs in parallel once M1 lands: M5 alongside M2–M4, and the agent tickets (headless proof, sandbox, permission model) alongside M2–M3.
+
+## 11. Open decisions for Ralf
+
+1. **Desktop shell:** Electron (recommended) or Tauri.
+2. **Instant Gmail:** enable billing on `amc-mail-x097y3` for Pub/Sub push, which costs nothing at this volume, or keep 15-second polling.
+3. **Root disk:** which of `.microsandbox` (49 GB), the Docker cache (about 13 GB reclaimable) and `~/.cache` (14 GB) may go.
+4. **Offsite backups:** where the nightly copy goes besides `/srv` (for example the Mac, or an existing backup target).
+5. **First Gmail Account** for M1.

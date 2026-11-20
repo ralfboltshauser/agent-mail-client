@@ -48,6 +48,10 @@ _Avoid_: remind me, defer
 A Thread state in which new replies skip both the Inbox and Interrupts.
 _Avoid_: ignore, silence
 
+**Bucket**:
+The one place triage puts a Thread, named by what the Thread asks of the owner: Reply, Action, Follow-up, Update, Later, or When I have time.
+_Avoid_: category, priority, folder
+
 ### Agents and attention
 
 **Agent**:
@@ -73,3 +77,11 @@ _Avoid_: suggestion, auto-reply
 **Dangerously Allow Send**:
 The explicit owner setting without which no Agent has any means of sending mail.
 _Avoid_: auto-send, send permission
+
+**Handoff**:
+Giving a Thread to an Agent working in one of the owner's projects, so that it drafts the reply with that project's context.
+_Avoid_: delegate, forward to AI
+
+**Composer Link**:
+A link that opens one draft for live editing by the owner and an Agent together, and can do nothing else (it can never send).
+_Avoid_: share link, draft URL
