@@ -23,3 +23,17 @@ describe('QuotaLimiter', () => {
     expect(limiter.rate).toBe(90)
   })
 })
+
+describe('QuotaLimiter priorities', () => {
+  it('serves urgent calls before queued background calls', async () => {
+    const limiter = new QuotaLimiter({ rate: 100, maxRate: 100 })
+    await limiter.take(200) // drain the bucket
+    const order: string[] = []
+    const background = Promise.all(
+      [1, 2, 3].map((i) => limiter.take(20).then(() => order.push(`bg${i}`))),
+    )
+    await limiter.take(20, true).then(() => order.push('urgent'))
+    await background
+    expect(order[0]).toBe('urgent')
+  })
+})

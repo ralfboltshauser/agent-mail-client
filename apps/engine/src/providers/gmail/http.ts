@@ -39,6 +39,8 @@ interface CallOptions {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
   body?: unknown
   cost?: Cost
+  /** Skip ahead of backfill in the quota queue. */
+  urgent?: boolean
 }
 
 /**
@@ -70,7 +72,10 @@ export class GmailHttpApi implements GmailApi {
 
     let refreshed = false
     for (let attempt = 0; ; attempt++) {
-      await this.#limiter.take(QUOTA_COST[options.cost ?? 'get'] ?? 5)
+      await this.#limiter.take(
+        QUOTA_COST[options.cost ?? 'get'] ?? 5,
+        options.urgent ?? (options.cost !== 'get' && options.cost !== 'list'),
+      )
       const res = await this.#fetch(url, {
         method: options.method ?? 'GET',
         headers: {
@@ -140,11 +145,12 @@ export class GmailHttpApi implements GmailApi {
     })
   }
 
-  async getMessage(id: string) {
+  async getMessage(id: string, urgent = false) {
     try {
       return await this.#call<GmailMessage>(`/messages/${encodeURIComponent(id)}`, {
         params: { format: 'full' },
         cost: 'get',
+        urgent,
       })
     } catch (error) {
       if (error instanceof GmailHttpError && error.status === 404) return null

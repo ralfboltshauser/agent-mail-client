@@ -74,7 +74,8 @@ export interface GmailApi {
     q?: string
     maxResults?: number
   }): Promise<GmailListMessages>
-  getMessage(id: string): Promise<GmailMessage | null>
+  /** `urgent` = live sync: served before backfill under the quota. */
+  getMessage(id: string, urgent?: boolean): Promise<GmailMessage | null>
   history(startHistoryId: string, pageToken?: string): Promise<GmailHistoryList | null>
   attachment(messageId: string, attachmentId: string): Promise<Uint8Array>
   /** Creates or replaces a draft from a raw RFC 5322 message; returns the draft and its message. */

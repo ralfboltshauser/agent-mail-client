@@ -14,6 +14,7 @@ export class QuotaLimiter {
   #last: number
   #queue: Promise<void> = Promise.resolve()
   #lastPenalty = 0
+  #urgentWaiting = 0
 
   constructor(options: { rate?: number; maxRate?: number; minRate?: number } = {}) {
     this.#maxRate = options.maxRate ?? 95
@@ -27,28 +28,42 @@ export class QuotaLimiter {
     return this.#rate
   }
 
-  /** Waits until `units` can be spent. Calls are served in order. */
-  take(units: number): Promise<void> {
+  /**
+   * Waits until `units` can be spent. Background calls are served in order; urgent calls
+   * (new mail, drafts, attachments the owner opened) skip that queue and go next.
+   */
+  take(units: number, urgent = false): Promise<void> {
+    if (urgent) {
+      this.#urgentWaiting++
+      return this.#wait(units).finally(() => {
+        this.#urgentWaiting--
+      })
+    }
     const turn = this.#queue.then(async () => {
-      for (;;) {
-        const now = Date.now()
-        // Never bank more than two seconds' worth, so a quiet spell does not become a burst.
-        this.#tokens = Math.min(
-          this.#rate * 2,
-          this.#tokens + ((now - this.#last) / 1000) * this.#rate,
-        )
-        this.#last = now
-        if (this.#tokens >= units) {
-          this.#tokens -= units
-          return
-        }
-        await new Promise((resolve) =>
-          setTimeout(resolve, ((units - this.#tokens) / this.#rate) * 1000),
-        )
-      }
+      while (this.#urgentWaiting > 0) await new Promise((resolve) => setTimeout(resolve, 50))
+      await this.#wait(units)
     })
     this.#queue = turn
     return turn
+  }
+
+  async #wait(units: number): Promise<void> {
+    for (;;) {
+      const now = Date.now()
+      // Never bank more than two seconds' worth, so a quiet spell does not become a burst.
+      this.#tokens = Math.min(
+        this.#rate * 2,
+        this.#tokens + ((now - this.#last) / 1000) * this.#rate,
+      )
+      this.#last = now
+      if (this.#tokens >= units) {
+        this.#tokens -= units
+        return
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, ((units - this.#tokens) / this.#rate) * 1000),
+      )
+    }
   }
 
   /** A quota error: back off hard and drain the bucket. */

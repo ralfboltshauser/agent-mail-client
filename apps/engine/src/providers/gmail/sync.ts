@@ -197,7 +197,9 @@ export class GmailAccountSync {
     let stored = 0
     for (let i = 0; i < ids.length; i += STORE_CHUNK) {
       const chunk = ids.slice(i, i + STORE_CHUNK)
-      const messages = await mapLimit(chunk, FETCH_CONCURRENCY, (id) => this.#api.getMessage(id))
+      const messages = await mapLimit(chunk, FETCH_CONCURRENCY, (id) =>
+        this.#api.getMessage(id, perMessage),
+      )
       const incoming = messages.filter((m) => m !== null).map(fromGmail)
       if (perMessage) {
         for (const msg of incoming)
