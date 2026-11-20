@@ -1,0 +1,20 @@
+{
+  "name": "@amc/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "amc": "dist/amc.mjs"
+  },
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@amc/protocol": "workspace:*",
+    "commander": "^14.0.1",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.11"
+  }
+}

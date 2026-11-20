@@ -1,0 +1,36 @@
+[Unit]
+Description=AMC Engine (Agent Mail Client)
+Documentation=https://github.com/ralfboltshauser/agent-mail-client
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=amc
+Group=amc
+Environment=AMC_CONFIG=/etc/amc/config.json
+Environment=NODE_ENV=production
+ExecStart=/opt/amc/node/bin/node --disable-warning=ExperimentalWarning --enable-source-maps /opt/amc/current/amc-engine.mjs serve
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+
+# ADR 0003: the Engine's data and secrets are its own. Lock everything else down.
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+ReadWritePaths=/srv/amc /var/lib/amc
+ReadOnlyPaths=/etc/amc /opt/amc
+
+[Install]
+WantedBy=multi-user.target

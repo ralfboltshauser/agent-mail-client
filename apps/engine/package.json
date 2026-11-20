@@ -1,0 +1,20 @@
+{
+  "name": "@amc/engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node --watch src/main.ts serve"
+  },
+  "dependencies": {
+    "@amc/protocol": "workspace:*",
+    "@hono/node-server": "^1.19.5",
+    "hono": "^4.10.1",
+    "pino": "^10.0.0",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.11"
+  }
+}
