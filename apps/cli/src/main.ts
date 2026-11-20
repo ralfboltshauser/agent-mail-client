@@ -1,6 +1,7 @@
 import { hostname } from 'node:os'
 import type {
   AccountSummary,
+  Contact,
   GmailAuthStartResponse,
   Health,
   Me,
@@ -175,6 +176,97 @@ program
     if (opts.json) return printJson(hits)
     if (hits.length === 0) return console.log('Nothing found.')
     printThreads(hits)
+  })
+
+const token = program.command('token').description('Tokens for Agents (MCP)')
+
+token
+  .command('create')
+  .description('Create an Agent token and print how to connect Claude Code, Codex or T3 Code')
+  .requiredOption('--name <name>', 'who will use it, e.g. t3 or codex')
+  .option('--scopes <list>', 'comma-separated: read, organize, draft', 'read,draft')
+  .option('--days <n>', 'expire after n days')
+  .action(async (opts: { name: string; scopes: string; days?: string }) => {
+    const config = requireConfig()
+    const res = await authed(config)<{ id: string; token: string; scopes: string[] }>(
+      '/v1/tokens',
+      {
+        method: 'POST',
+        body: {
+          name: opts.name,
+          scopes: opts.scopes
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean),
+          ...(opts.days ? { expiresInDays: Number(opts.days) } : {}),
+        },
+      },
+    )
+    const url = new URL('/mcp', config.engineUrl).toString()
+    console.log(
+      `Created ${res.id} (${opts.name}) with scopes: ${res.scopes.join(', ')}. It is shown only once.\n`,
+    )
+    console.log('Claude Code:')
+    console.log(
+      `  claude mcp add --scope user --transport http amc ${url} --header "Authorization: Bearer ${res.token}"\n`,
+    )
+    console.log('Codex (~/.codex/config.toml):')
+    console.log(
+      `  [mcp_servers.amc]\n  url = "${url}"\n  http_headers = { Authorization = "Bearer ${res.token}" }\n`,
+    )
+    console.log(
+      'Anything else: an MCP Streamable HTTP server at the URL above, with that Authorization header.',
+    )
+  })
+
+token
+  .command('list')
+  .description('List tokens')
+  .action(async () => {
+    const { tokens } = await authed(requireConfig())<{
+      tokens: {
+        id: string
+        kind: string
+        name: string
+        scopes: string[]
+        last_used_at: number | null
+        revoked_at: number | null
+      }[]
+    }>('/v1/tokens')
+    for (const t of tokens) {
+      const state = t.revoked_at
+        ? 'revoked'
+        : t.last_used_at
+          ? `used ${ago(t.last_used_at)}`
+          : 'unused'
+      console.log(
+        `${t.id}  ${t.kind.padEnd(8)} ${t.name.padEnd(16)} ${t.scopes.join(',').padEnd(30)} ${state}`,
+      )
+    }
+  })
+
+token
+  .command('revoke')
+  .description('Revoke a token')
+  .argument('<id>', 'token id')
+  .action(async (id: string) => {
+    await authed(requireConfig())(`/v1/tokens/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    console.log(`Revoked ${id}`)
+  })
+
+program
+  .command('contacts')
+  .description('Find people you have mailed with')
+  .argument('<query>', 'part of a name or address')
+  .action(async (query: string) => {
+    const { contacts } = await authed(requireConfig())<{ contacts: Contact[] }>(
+      `/v1/contacts?q=${encodeURIComponent(query)}`,
+    )
+    if (contacts.length === 0) return console.log('Nobody found.')
+    for (const c of contacts)
+      console.log(
+        `${(c.name ?? '').padEnd(28)} ${c.address}  (${c.sentCount} sent, ${c.receivedCount} received)`,
+      )
   })
 
 function printThreads(threads: ThreadSummary[]) {

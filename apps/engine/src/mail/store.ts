@@ -44,7 +44,7 @@ export interface IncomingLabel {
   color: string | null
 }
 
-export type Entity = 'account' | 'label' | 'thread' | 'message'
+export type Entity = 'account' | 'label' | 'thread' | 'message' | 'draft'
 
 export const labelId = (accountId: string, providerLabel: string) => `${accountId}:${providerLabel}`
 export const threadId = (accountId: string, providerThreadId: string) =>

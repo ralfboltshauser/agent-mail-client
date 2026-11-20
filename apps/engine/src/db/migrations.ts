@@ -179,4 +179,31 @@ export const MIGRATIONS: readonly Migration[] = [
       END;
     `,
   },
+  {
+    version: 3,
+    name: 'drafts',
+    sql: `
+      -- AMC's own drafts. M1b mirrors each one to a provider draft so it shows up in Gmail;
+      -- M4/M8 make the text a live Yjs document.
+      CREATE TABLE draft (
+        id                  TEXT PRIMARY KEY,
+        account_id          TEXT NOT NULL REFERENCES account (id) ON DELETE CASCADE,
+        thread_id           TEXT,             -- the Thread it replies to, if any
+        provider_draft_id   TEXT,
+        provider_message_id TEXT,
+        to_json             TEXT NOT NULL DEFAULT '[]',
+        cc_json             TEXT NOT NULL DEFAULT '[]',
+        bcc_json            TEXT NOT NULL DEFAULT '[]',
+        subject             TEXT NOT NULL DEFAULT '',
+        body_text           TEXT NOT NULL DEFAULT '',
+        in_reply_to         TEXT,
+        refs                TEXT,
+        last_author         TEXT NOT NULL,    -- 'owner' or the agent token's name
+        created_at          INTEGER NOT NULL,
+        updated_at          INTEGER NOT NULL,
+        modseq              INTEGER NOT NULL DEFAULT 0
+      ) STRICT;
+      CREATE INDEX draft_thread ON draft (thread_id);
+    `,
+  },
 ]

@@ -100,3 +100,27 @@ export const GmailAuthStart = z.object({ redirectUri: z.string().url() })
 export const GmailAuthStartResponse = z.object({ authUrl: z.string().url(), state: z.string() })
 export type GmailAuthStartResponse = z.infer<typeof GmailAuthStartResponse>
 export const GmailAuthComplete = z.object({ code: z.string().min(1), state: z.string().min(1) })
+
+export const Draft = z.object({
+  id: z.string(),
+  accountId: z.string(),
+  threadId: z.string().nullable(),
+  from: z.string(),
+  to: z.array(Address),
+  cc: z.array(Address),
+  bcc: z.array(Address),
+  subject: z.string(),
+  body: z.string(),
+  lastAuthor: z.string(),
+  updatedAt: z.number(),
+})
+export type Draft = z.infer<typeof Draft>
+
+export const Contact = z.object({
+  address: z.string(),
+  name: z.string().nullable(),
+  lastSeenAt: z.number(),
+  receivedCount: z.number(),
+  sentCount: z.number(),
+})
+export type Contact = z.infer<typeof Contact>

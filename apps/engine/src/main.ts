@@ -7,6 +7,7 @@ import { Sealer } from './crypto.ts'
 import { migrate, openDatabase } from './db/database.ts'
 import { createApp } from './http/app.ts'
 import { createLogger } from './log.ts'
+import { Drafts } from './mail/drafts.ts'
 import { MailQueries } from './mail/queries.ts'
 import { MailStore } from './mail/store.ts'
 import { loadOAuthClient, type OAuthClient } from './providers/gmail/oauth.ts'
@@ -63,11 +64,12 @@ async function main(argv: string[]) {
         return oauth
       }
       const sync = new SyncManager({ db, store, sealer, log, oauthClient })
+      const drafts = new Drafts(db, store, (accountId) => sync.gmailApi(accountId))
       const app = createApp({
         db,
         config,
         log,
-        mail: { db, store, queries, blobs, sealer, sync, oauthClient, log },
+        mail: { db, store, queries, blobs, sealer, sync, oauthClient, drafts, log },
       })
       const server = serve({
         fetch: app.fetch,

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { issueToken } from '../auth/tokens.ts'
 import { BlobStore } from '../blobs.ts'
 import { Sealer } from '../crypto.ts'
+import { Drafts } from '../mail/drafts.ts'
 import { MailQueries } from '../mail/queries.ts'
 import { MailStore } from '../mail/store.ts'
 import { FakeGmail } from '../providers/gmail/fake.ts'
@@ -38,6 +39,7 @@ function setup() {
       sealer,
       sync,
       oauthClient,
+      drafts: new Drafts(db, store, (id) => sync.gmailApi(id)),
       log: silentLog,
     },
   })

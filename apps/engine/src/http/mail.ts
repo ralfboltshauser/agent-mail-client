@@ -6,6 +6,7 @@ import type { BlobStore } from '../blobs.ts'
 import type { Sealer } from '../crypto.ts'
 import type { Db } from '../db/database.ts'
 import type { Logger } from '../log.ts'
+import { DraftError, type Drafts, searchContacts } from '../mail/drafts.ts'
 import type { MailQueries } from '../mail/queries.ts'
 import type { MailStore } from '../mail/store.ts'
 import { GmailHttpApi } from '../providers/gmail/http.ts'
@@ -28,6 +29,7 @@ export interface MailDeps {
   sealer: Sealer
   sync: SyncManager
   oauthClient: () => OAuthClient
+  drafts: Drafts
   log: Logger
   fetchImpl?: typeof fetch
 }
@@ -119,6 +121,33 @@ export function mailRoutes(deps: MailDeps) {
         error instanceof OAuthError ? error.message : 'Could not complete the Google sign-in'
       log.warn({ err: (error as Error).message }, 'gmail sign-in failed')
       return c.json({ error: 'oauth_failed', message }, 400)
+    }
+  })
+
+  r.get('/contacts', requireScope('read'), (c) =>
+    c.json({
+      contacts: searchContacts(db, c.req.query('q') ?? '', intParam(c.req.query('limit')) ?? 10),
+    }),
+  )
+
+  r.get('/drafts', requireScope('read'), (c) => {
+    const threadId = c.req.query('threadId')
+    return c.json({ drafts: deps.drafts.list(threadId ? { threadId } : {}) })
+  })
+
+  r.post('/drafts', requireScope('draft'), async (c) => {
+    try {
+      const body = (await c.req.json()) as Parameters<Drafts['create']>[0]
+      return c.json(
+        await deps.drafts.create(
+          body,
+          c.get('principal').kind === 'agent' ? c.get('principal').name : 'owner',
+        ),
+      )
+    } catch (error) {
+      if (error instanceof DraftError)
+        return c.json({ error: 'bad_request', message: error.message }, 400)
+      throw error
     }
   })
 
