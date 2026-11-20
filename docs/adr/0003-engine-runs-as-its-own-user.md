@@ -12,3 +12,7 @@ The Engine's own agent runner is the only AMC process that runs as `ralf`, becau
 - Deploys need `sudo` on the Host to install releases and restart the system service.
 - The owner's `amc` CLI on the Host authenticates with a token like any other Client; it does not read the database directly.
 - On the Mac, the owner token lives in the Keychain, restricted to the AMC app, for the same reason.
+
+## Open risk: passwordless sudo
+
+On the owner's Host, `ralf` has passwordless `sudo`. Any process running as `ralf` (including a coding agent in full-access mode) can therefore still become `amc` or root and read the Engine's secrets. The separation holds only once `sudo` asks for a password (or the agents run as a user without `sudo`). Until the owner decides, ADR 0001 is guaranteed against AMC's own Agents (which only ever hold scoped tokens) but not against an arbitrary coding agent that deliberately escalates with `sudo`.
