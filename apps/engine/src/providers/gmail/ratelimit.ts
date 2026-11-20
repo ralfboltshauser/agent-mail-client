@@ -15,9 +15,9 @@ export class QuotaLimiter {
   #queue: Promise<void> = Promise.resolve()
 
   constructor(options: { rate?: number; maxRate?: number; minRate?: number } = {}) {
-    this.#maxRate = options.maxRate ?? 90
-    this.#minRate = options.minRate ?? 5
-    this.#rate = options.rate ?? 40
+    this.#maxRate = options.maxRate ?? 95
+    this.#minRate = options.minRate ?? 10
+    this.#rate = options.rate ?? 80
     this.#tokens = this.#rate
     this.#last = Date.now()
   }
@@ -58,7 +58,7 @@ export class QuotaLimiter {
 
   /** A successful call: speed up slowly. */
   reward(): void {
-    this.#rate = Math.min(this.#maxRate, this.#rate * 1.01)
+    this.#rate = Math.min(this.#maxRate, this.#rate * 1.005)
   }
 }
 
@@ -66,7 +66,9 @@ export const QUOTA_COST: Record<string, number> = {
   profile: 1,
   labels: 1,
   list: 5,
-  get: 5,
+  // Not the documented 5: new projects are charged about 20 per messages.get under the
+  // 6,000 units/user/min "Total Query Cost" limit (observed; see the M1 PR).
+  get: 20,
   history: 2,
   attachment: 5,
   draftCreate: 10,

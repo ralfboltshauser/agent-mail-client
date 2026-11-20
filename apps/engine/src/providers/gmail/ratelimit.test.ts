@@ -18,7 +18,7 @@ describe('QuotaLimiter', () => {
     expect(limiter.rate).toBe(20)
     for (let i = 0; i < 10; i++) limiter.penalize()
     expect(limiter.rate).toBe(5)
-    for (let i = 0; i < 1000; i++) limiter.reward()
+    for (let i = 0; i < 2000; i++) limiter.reward()
     expect(limiter.rate).toBe(90)
   })
 })
