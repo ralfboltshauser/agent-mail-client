@@ -88,6 +88,7 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
       new DbAccountState(db, accountId, [row.address]),
       log,
     )
+    sync.onProgress = () => this.emit('change')
     const controller = new AbortController()
     const signal = controller.signal
 

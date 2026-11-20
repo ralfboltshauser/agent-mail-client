@@ -28,7 +28,8 @@ export interface AccountState {
 }
 
 const RECENT_QUERY = '{in:inbox newer_than:90d}'
-const FETCH_CONCURRENCY = 8
+const FETCH_CONCURRENCY = 6
+const STORE_CHUNK = 50
 
 async function mapLimit<T, R>(
   items: T[],
@@ -69,6 +70,8 @@ export class GmailAccountSync {
   readonly #state: AccountState
   readonly #log: Logger
   readonly #seen = new Set<string>()
+  /** Called after each stored chunk (the manager uses it to tell live Clients). */
+  onProgress?: (stored: number) => void
   #reconcileTrusted = false
 
   constructor(api: GmailApi, store: MailStore, state: AccountState, log: Logger) {
@@ -189,17 +192,23 @@ export class GmailAccountSync {
     return next.phase !== 'done'
   }
 
+  /** Fetches in small chunks and stores each one, so an error never discards finished work. */
   async #fetchAndStore(ids: string[], perMessage: boolean): Promise<number> {
-    if (ids.length === 0) return 0
-    const messages = await mapLimit(ids, FETCH_CONCURRENCY, (id) => this.#api.getMessage(id))
-    const incoming = messages.filter((m) => m !== null).map(fromGmail)
-    if (perMessage) {
-      for (const msg of incoming)
-        this.#store.putMessage(this.#state.accountId, this.#state.ownAddresses, msg)
-    } else {
-      this.#store.putMessages(this.#state.accountId, this.#state.ownAddresses, incoming)
+    let stored = 0
+    for (let i = 0; i < ids.length; i += STORE_CHUNK) {
+      const chunk = ids.slice(i, i + STORE_CHUNK)
+      const messages = await mapLimit(chunk, FETCH_CONCURRENCY, (id) => this.#api.getMessage(id))
+      const incoming = messages.filter((m) => m !== null).map(fromGmail)
+      if (perMessage) {
+        for (const msg of incoming)
+          this.#store.putMessage(this.#state.accountId, this.#state.ownAddresses, msg)
+      } else {
+        this.#store.putMessages(this.#state.accountId, this.#state.ownAddresses, incoming)
+      }
+      stored += incoming.length
+      this.onProgress?.(incoming.length)
     }
-    return incoming.length
+    return stored
   }
 
   /** History is gone (Gmail keeps about a week): start from now and rescan everything. */

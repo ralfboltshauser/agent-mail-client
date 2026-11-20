@@ -1,4 +1,5 @@
 import type { AccessTokens } from './oauth.ts'
+import { QUOTA_COST, QuotaLimiter } from './ratelimit.ts'
 import type {
   GmailApi,
   GmailHistoryList,
@@ -27,19 +28,26 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 export class GmailHttpApi implements GmailApi {
   readonly #tokens: AccessTokens
   readonly #fetch: typeof fetch
+  readonly #limiter: QuotaLimiter
 
-  constructor(tokens: AccessTokens, fetchImpl: typeof fetch = fetch) {
+  constructor(tokens: AccessTokens, fetchImpl: typeof fetch = fetch, limiter = new QuotaLimiter()) {
     this.#tokens = tokens
     this.#fetch = fetchImpl
+    this.#limiter = limiter
   }
 
-  async #call<T>(path: string, params: Record<string, string | undefined> = {}): Promise<T> {
+  async #call<T>(
+    path: string,
+    params: Record<string, string | undefined> = {},
+    cost: keyof typeof QUOTA_COST = 'get',
+  ): Promise<T> {
     const url = new URL(BASE + path)
     for (const [key, value] of Object.entries(params))
       if (value !== undefined) url.searchParams.set(key, value)
 
     let refreshed = false
     for (let attempt = 0; ; attempt++) {
+      await this.#limiter.take(QUOTA_COST[cost] ?? 5)
       const res = await this.#fetch(url, {
         headers: { Authorization: `Bearer ${await this.#tokens.get()}` },
       })
@@ -71,19 +79,23 @@ export class GmailHttpApi implements GmailApi {
   }
 
   profile() {
-    return this.#call<GmailProfile>('/profile')
+    return this.#call<GmailProfile>('/profile', {}, 'profile')
   }
 
   async labels() {
-    return (await this.#call<{ labels?: GmailLabel[] }>('/labels')).labels ?? []
+    return (await this.#call<{ labels?: GmailLabel[] }>('/labels', {}, 'labels')).labels ?? []
   }
 
   listMessages(options: { pageToken?: string; q?: string; maxResults?: number }) {
-    return this.#call<GmailListMessages>('/messages', {
-      pageToken: options.pageToken,
-      q: options.q,
-      maxResults: String(options.maxResults ?? 500),
-    })
+    return this.#call<GmailListMessages>(
+      '/messages',
+      {
+        pageToken: options.pageToken,
+        q: options.q,
+        maxResults: String(options.maxResults ?? 500),
+      },
+      'list',
+    )
   }
 
   async getMessage(id: string) {
@@ -114,6 +126,8 @@ export class GmailHttpApi implements GmailApi {
   async attachment(messageId: string, attachmentId: string) {
     const res = await this.#call<{ data: string }>(
       `/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`,
+      {},
+      'attachment',
     )
     return Buffer.from(res.data, 'base64url')
   }
