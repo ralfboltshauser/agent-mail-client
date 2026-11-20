@@ -1,7 +1,7 @@
 /**
- * A token bucket in Gmail quota units. Gmail allows 15,000 units per user per minute
- * (messages.get = 5, list = 5, history = 2); we stay under it with headroom, because the
- * owner's other Gmail clients share nothing with us but Google may still count bursts.
+ * A token bucket in Gmail quota units. New Cloud projects get a "Total Query Cost" limit of
+ * 6,000 units per user per minute (100/s; messages.get = 5, list = 5, history = 2). We pace at
+ * 80/s so the 15-second history polls and attachment opens always have room.
  */
 export class QuotaLimiter {
   readonly #ratePerSecond: number
@@ -10,7 +10,7 @@ export class QuotaLimiter {
   #last: number
   #queue: Promise<void> = Promise.resolve()
 
-  constructor(ratePerSecond = 150, capacity = 300) {
+  constructor(ratePerSecond = 80, capacity = 160) {
     this.#ratePerSecond = ratePerSecond
     this.#capacity = capacity
     this.#tokens = capacity
