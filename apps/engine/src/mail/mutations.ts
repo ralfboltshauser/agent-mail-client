@@ -523,7 +523,12 @@ export class Mutations {
       const thread = this.#thread(target.thread_id)
       const stateError = this.#undoStateError(target, request.id)
       if (stateError) throw new MutationError(stateError)
-      if (thread.kind === 'imap' && !this.#hasVerifiedImapUndo(target))
+      // The per-account queue settles the original first. Writeback checks its final journal.
+      if (
+        thread.kind === 'imap' &&
+        target.status !== 'pending' &&
+        !this.#hasVerifiedImapUndo(target)
+      )
         throw new MutationError(IMAP_UNDO_UNVERIFIED)
       const state = this.#undoState(target, this.#state(thread))
       const changes = this.#undoChanges(target)
@@ -1182,6 +1187,7 @@ export class Mutations {
             () => this.#saveJournal(row, journal),
             allowTrash,
             beforeWrite,
+            this.#log.child({ mutation: row.id }),
             snoozing,
           ),
         )
