@@ -27,6 +27,7 @@ const systemLabels = new Map([
 export interface Folder {
   path: string
   label: IncomingLabel
+  trash?: boolean
 }
 
 export function mapFolders(list: ListResponse[]): Folder[] {
@@ -35,6 +36,9 @@ export function mapFolders(list: ListResponse[]): Folder[] {
   for (const folder of list) {
     if (folder.flags.has('\\Noselect') || folder.flags.has('\\NonExistent')) continue
     const path = /^inbox$/i.test(folder.path) ? 'INBOX' : folder.path
+    const trash =
+      [...folder.flags].some((flag) => flag.toLowerCase() === '\\trash') ||
+      (folder.specialUse?.toLowerCase() === '\\trash' && folder.specialUseSource !== 'name')
     const special = path === 'INBOX' ? '\\Inbox' : folder.specialUse
     // ImapFlow also guesses special-use from names. Moves require server-designated folders.
     const guessedMoveTarget =
@@ -51,7 +55,7 @@ export function mapFolders(list: ListResponse[]): Folder[] {
             color: null,
           }
     labels.add(label.providerId)
-    folders.push({ path, label })
+    folders.push({ path, label, trash })
   }
   return folders.sort((a, b) => Number(b.path === 'INBOX') - Number(a.path === 'INBOX'))
 }

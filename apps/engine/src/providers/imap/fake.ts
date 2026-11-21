@@ -143,11 +143,12 @@ export class FakeImap extends EventEmitter {
   }
 
   async list(): Promise<Partial<ListResponse>[]> {
-    return [...this.folders.values()].map(({ path, specialUse }) => ({
-      path,
-      specialUse,
-      flags: new Set(),
-    }))
+    const assigned = new Set<string>()
+    return [...this.folders.values()].map(({ path, specialUse }) => {
+      const primary = specialUse && !assigned.has(specialUse) ? specialUse : undefined
+      if (primary) assigned.add(primary)
+      return { path, specialUse: primary, flags: new Set(specialUse ? [specialUse] : []) }
+    })
   }
 
   async mailboxOpen(path: string): Promise<MailboxObject> {
@@ -248,9 +249,9 @@ export class FakeImap extends EventEmitter {
     return true
   }
 
-  async messageMove(range: string, destination: string, options: MessageRangeOptions) {
+  async uidMove(uid: number, destination: string) {
     if (!this.capabilities.has('MOVE')) throw new Error('MOVE is unavailable')
-    const { path, uid } = this.#write('UID MOVE', range, options)
+    const { path } = this.#write('UID MOVE', String(uid), { uid: true })
     const copied = this.#copy(path, uid, destination)
     if (copied) this.expunge(path, uid)
     return copied
@@ -261,11 +262,10 @@ export class FakeImap extends EventEmitter {
     return this.#copy(path, uid, destination)
   }
 
-  async messageDelete(range: string, options: MessageRangeOptions) {
-    if (!this.capabilities.has('UIDPLUS')) throw new Error('A mailbox-wide EXPUNGE is unsafe')
-    if (!(await this.messageFlagsAdd(range, ['\\Deleted'], options))) return false
-    const { path, uid } = this.#write('UID EXPUNGE', range, options)
-    this.expunge(path, uid)
+  async uidExpunge(uid: number) {
+    const { path } = this.#write('UID EXPUNGE', String(uid), { uid: true })
+    if (!this.capabilities.has('UIDPLUS')) return false
+    if (this.folder(path).messages.get(uid)?.flags.has('\\Deleted')) this.expunge(path, uid)
     return true
   }
 

@@ -1,11 +1,17 @@
-import { statfsSync } from 'node:fs'
+import { existsSync, statfsSync } from 'node:fs'
 import type { Health, Me, PublicHealth, Scope } from '@amc/protocol'
 import { hasScope, PairRequest } from '@amc/protocol'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import { Hono, type MiddlewareHandler } from 'hono'
 import { HTTPException } from 'hono/http-exception'
-import { authenticate, type Principal, redeemPairingCode } from '../auth/tokens.ts'
+import {
+  authenticate,
+  invalidTokenMessage,
+  type Principal,
+  redeemPairingCode,
+} from '../auth/tokens.ts'
 import { type Config, databasePath } from '../config.ts'
+import { latestBackup } from '../db/backups.ts'
 import { type Db, fileSize, schemaVersion } from '../db/database.ts'
 import type { Logger } from '../log.ts'
 import { DraftError } from '../mail/drafts.ts'
@@ -13,6 +19,7 @@ import type { Mutations } from '../mail/mutations.ts'
 import type { Outbox } from '../mail/outbox.ts'
 import { buildMcpServer } from '../mcp/server.ts'
 import { VERSION } from '../version.ts'
+import { agentActionRoutes } from './agent-actions.ts'
 import { composeRoutes } from './compose.ts'
 import { type MailDeps, mailRoutes } from './mail.ts'
 import { mutationRoutes } from './mutations.ts'
@@ -100,13 +107,39 @@ export function createApp({
 
   v1.get('/health', requireScope('read'), (c) => {
     const dbPath = databasePath(config)
+    const now = Date.now()
+    const accounts = db
+      .prepare('SELECT address, status, last_sync_at, last_error FROM account ORDER BY address')
+      .all() as {
+      address: string
+      status: NonNullable<Health['accounts']>[number]['status']
+      last_sync_at: number | null
+      last_error: string | null
+    }[]
+    const pending = db
+      .prepare("SELECT count(*) AS depth FROM mutation WHERE status = 'pending'")
+      .get()
+    const unsent = db
+      .prepare("SELECT count(*) AS depth FROM outbox WHERE status IN ('queued', 'dispatching')")
+      .get()
+    const disks = new Set([config.dataDir, config.blobDir])
+    if (existsSync(config.backupDir)) disks.add(config.backupDir)
     const health: Health = {
       ok: true,
       version: VERSION,
-      uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
+      uptimeSeconds: Math.round((now - startedAt) / 1000),
       schemaVersion: schemaVersion(db),
       database: { path: dbPath, bytes: fileSize(dbPath) + fileSize(`${dbPath}-wal`) },
-      disks: [config.dataDir, config.blobDir].map((path) => {
+      lastBackup: latestBackup(config.backupDir),
+      accounts: accounts.map(({ address, status, last_sync_at, last_error }) => ({
+        address,
+        status,
+        syncLagSeconds: last_sync_at === null ? null : Math.max(0, (now - last_sync_at) / 1000),
+        lastError: last_error,
+      })),
+      outboxDepth: Number(unsent?.depth),
+      mutationQueueDepth: Number(pending?.depth),
+      disks: [...disks].map((path) => {
         const s = statfsSync(path)
         return { path, freeBytes: s.bavail * s.bsize, totalBytes: s.blocks * s.bsize }
       }),
@@ -115,7 +148,10 @@ export function createApp({
   })
 
   v1.route('/', tokenRoutes(db))
-  if (mutations) v1.route('/', mutationRoutes(mutations))
+  if (mutations) {
+    v1.route('/', mutationRoutes(mutations))
+    v1.route('/', agentActionRoutes(db, mutations))
+  }
   if (mail) {
     if (outbox) v1.route('/compose', composeRoutes(mail, outbox))
     v1.route('/', mailRoutes(mail))
@@ -127,6 +163,7 @@ export function createApp({
         db,
         queries: mail.queries,
         drafts: mail.drafts,
+        mutations,
       })
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
@@ -147,7 +184,7 @@ export function requireAuth(db: Db): MiddlewareHandler<AppEnv> {
     const secret = header.startsWith('Bearer ') ? header.slice(7).trim() : ''
     const principal = secret ? authenticate(db, secret) : null
     if (!principal) {
-      return c.json({ error: 'unauthorized', message: 'Missing or invalid token' }, 401)
+      return c.json({ error: 'unauthorized', message: invalidTokenMessage(db, secret) }, 401)
     }
     c.set('principal', principal)
     await next()
@@ -161,4 +198,14 @@ export function requireScope(scope: Scope): MiddlewareHandler<AppEnv> {
     }
     await next()
   }
+}
+
+export const requireOwnerAdmin: MiddlewareHandler<AppEnv> = async (c, next) => {
+  const { kind, scopes } = c.get('principal')
+  if ((kind !== 'desktop' && kind !== 'cli') || !hasScope(scopes, 'admin'))
+    return c.json(
+      { error: 'forbidden', message: 'This action requires a paired owner Client' },
+      403,
+    )
+  await next()
 }

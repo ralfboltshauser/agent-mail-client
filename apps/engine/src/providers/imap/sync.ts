@@ -1,11 +1,9 @@
 import type { FetchMessageObject, MailboxObject, SearchObject } from 'imapflow'
 import { transaction } from '../../db/database.ts'
 import type { MailStore } from '../../mail/store.ts'
-import type { ImapClient } from './client.ts'
+import { type ImapClient, imapMoveSupport } from './client.ts'
 import { ImapLocations, PAGE } from './locations.ts'
 import { type Folder, mapFolders, messageFlags, parseMessage } from './mapping.ts'
-
-import { imapMoveSupport } from './organise.ts'
 
 const RECONCILE_PAGE = 512
 const INBOX_WINDOW_INTERVAL = 1000
@@ -211,6 +209,7 @@ export class ImapAccountSync {
       }
     }
 
+    this.#folders = folders
     transaction(this.store.db, () => {
       this.store.syncLabels(
         this.accountId,
@@ -233,13 +232,15 @@ export class ImapAccountSync {
       this.#saveCursor()
       if (changed) this.store.recordChange('account', this.accountId, 'upsert')
     })
-    this.#folders = folders
   }
 
   #saveCursor(): void {
     const json = JSON.stringify({
       folders: [...this.#cursor.values()],
       imapMoves: this.#moveSupport,
+      imapTrashLabels: this.#folders
+        .filter(({ trash }) => trash)
+        .map(({ label }) => label.providerId),
     })
     this.store.db
       .prepare('UPDATE account SET cursor = ? WHERE id = ? AND cursor != ?')

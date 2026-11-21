@@ -7,12 +7,12 @@ import {
   imapActionError,
   imapActionLabels,
   type LabelPatch,
-  type MessageDetail,
   type MutationRequest,
   MutationResponse,
   type MutationResult,
   OrganiseAction,
   SNOOZED_LABEL,
+  type ThreadMessage,
   type ThreadSummary,
 } from '@amc/protocol'
 import type { OrganiseNotice } from '../shared/api'
@@ -55,7 +55,7 @@ export const ORGANISE_SCHEMA = `
 
 function applyPatch(
   thread: ThreadSummary,
-  messages: MessageDetail[],
+  messages: ThreadMessage[],
   patch: Patch,
   kind: OrganiseAction['kind'],
   imap: boolean,
@@ -107,7 +107,7 @@ function applyPatch(
 function patchesFor(
   action: Exclude<OrganiseAction, { kind: 'undo' }>,
   thread: ThreadSummary,
-  messages: MessageDetail[],
+  messages: ThreadMessage[],
   imap: boolean,
 ) {
   const patch: Patch = { labels: {} }
@@ -204,6 +204,8 @@ export class LocalOrganise {
           for (const id of JSON.parse(row.superseded) as string[]) delete patch.labels[id]
         }
         delete patch.snoozedUntil
+        const thread = threadId && this.replica.baseThread(threadId)
+        if (thread && this.#account(thread.thread.accountId)?.kind === 'imap') patch.labels = {}
         target = row.id
       }
       action = { kind: 'undo', threadId, mutationId: target }
@@ -243,11 +245,12 @@ export class LocalOrganise {
     return id
   }
 
-  messages(thread: ThreadSummary, base: MessageDetail[]): MessageDetail[] {
+  messages(thread: ThreadSummary, base: ThreadMessage[]): ThreadMessage[] {
     const rows = this.#db
       .prepare(
         `SELECT patch, json_extract(request, '$.action.kind') AS kind FROM organise_queue
-         WHERE thread_id = ? AND (modseq IS NULL OR modseq > ?) ORDER BY seq`,
+         WHERE thread_id = ? AND (modseq IS NULL OR modseq > ?)
+           AND (status != 'pending' OR error IS NULL) ORDER BY seq`,
       )
       .all(thread.id, this.replica.modseq ?? -1) as {
       patch: string
@@ -370,12 +373,14 @@ export class LocalOrganise {
           ).length
         : outcomes.length
       const uncertain = outcomes.some((item) => item.uncertainLabels?.length)
+      const accountId = row.thread_id?.split(':')[0]
+      const imap = accountId && this.#account(accountId)?.kind === 'imap'
       const verb = action.kind === 'archive' ? 'Archived' : 'Changed'
       let message = row.message
       if (trash && total) {
-        const detail = failed && !uncertain ? `${failed} couldn't be changed` : row.message
+        const detail = failed && !uncertain && !imap ? `${failed} couldn't be changed` : row.message
         message = `${verb} ${applied} of ${total}. ${detail}`
-      } else if (failed && !uncertain) {
+      } else if (failed && !uncertain && !imap) {
         message = `${verb} ${applied} of ${total}. ${failed} couldn't be changed`
       }
       return {
@@ -519,7 +524,7 @@ export class OrganiseSync extends EventEmitter<{ changed: [] }> {
         const res = await post('/v1/mutations/status', { ids: pending })
         if (signal.aborted) return
         this.#local.resolve(res.mutations)
-        if (res.mutations.some((row) => row.status !== 'pending')) this.emit('changed')
+        if (res.mutations.some((row) => row.status !== 'pending' || row.error)) this.emit('changed')
       }
       this.#failures = 0
       this.#retryAt = 0

@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { type MutationRequest, type OrganiseAction, SNOOZED_LABEL } from '@amc/protocol'
 import { describe, expect, it, vi } from 'vitest'
 import { DbAccountState } from '../accounts.ts'
-import { issueToken } from '../auth/tokens.ts'
+import { authenticate, DAY_MS, issueToken, revokeToken } from '../auth/tokens.ts'
 import { BlobStore } from '../blobs.ts'
 import { Config } from '../config.ts'
 import { migrate, openDatabase } from '../db/database.ts'
@@ -13,9 +13,10 @@ import { createApp } from '../http/app.ts'
 import { FakeGmail } from '../providers/gmail/fake.ts'
 import { GmailHttpApi, GmailHttpError } from '../providers/gmail/http.ts'
 import { AccessTokens } from '../providers/gmail/oauth.ts'
-import { QuotaLimiter } from '../providers/gmail/ratelimit.ts'
+import { QUOTA_COST, QuotaLimiter } from '../providers/gmail/ratelimit.ts'
 import { GmailAccountSync } from '../providers/gmail/sync.ts'
 import { silentLog, tempDir, testConfig, testDb } from '../test-support.ts'
+import { agentAction, organizeAsAgent } from './agent-actions.ts'
 import { Mutations } from './mutations.ts'
 import { MailQueries } from './queries.ts'
 import { MailStore } from './store.ts'
@@ -166,7 +167,12 @@ describe('Snooze disabled', () => {
 describe('Gmail Organise writeback', () => {
   it('applies a batch atomically and idempotently under the organize scope', async () => {
     const { db, queue, request, thread } = await setup()
-    const reader = issueToken(db, { kind: 'agent', name: 'Reader', scopes: ['read'] })
+    const reader = issueToken(db, {
+      kind: 'agent',
+      expiresAt: Date.now() + DAY_MS,
+      name: 'Reader',
+      scopes: ['read'],
+    })
     const writer = issueToken(db, { kind: 'cli', name: 'CLI', scopes: ['organize'] })
     vi.spyOn(queue, 'kick').mockImplementation(() => {})
     const app = createApp({
@@ -202,9 +208,14 @@ describe('Gmail Organise writeback', () => {
     ).toBe(409)
   })
 
-  it('rejects Organise for legacy Agent tokens and reserves Trash for owner Clients', async () => {
+  it('rejects Agent access to the owner Organise endpoint and reserves Trash for owner Clients', async () => {
     const { db, gmail, queue, request } = await setup()
-    const agent = issueToken(db, { kind: 'agent', name: 'Legacy Agent', scopes: ['organize'] })
+    const agent = issueToken(db, {
+      kind: 'agent',
+      expiresAt: Date.now() + DAY_MS,
+      name: 'Legacy Agent',
+      scopes: ['organize'],
+    })
     const limited = issueToken(db, { kind: 'cli', name: 'Limited CLI', scopes: ['organize'] })
     const owner = issueToken(db, {
       kind: 'desktop',
@@ -374,6 +385,23 @@ describe('Gmail Organise writeback', () => {
     expect(thread()?.messages.map((m) => [...m.labelIds].sort())).toEqual(
       before?.map((labels) => [...labels].sort()),
     )
+  })
+
+  it('refuses Gmail Mute Undo after another owner sets a newer Mute', async () => {
+    const { gmail, queue, submit, request, thread, db } = await setup()
+    try {
+      const first = submit({ kind: 'mute', value: true, threadId: THREAD })
+      await queue.tick()
+      queue.submit('other-owner', [request({ kind: 'mute', value: true, threadId: THREAD })])
+      await queue.tick()
+      expect(() => submit({ kind: 'undo', mutationId: first.id })).toThrow(
+        'Mute has changed since this action',
+      )
+      expect(thread()?.muted).toBe(true)
+      expect(await gmail.getMessageLabels('m1')).not.toContain('INBOX')
+    } finally {
+      db.close()
+    }
   })
 
   it('keeps other Gmail edits when reconciling a permanent refusal', async () => {
@@ -1767,6 +1795,79 @@ describe('Gmail history attribution', () => {
     })
   })
 })
+
+it.each(['expiry', 'revocation'])(
+  'cancels a queued Agent write on %s while waiting for Gmail quota',
+  async (end) => {
+    await withFixture(async ({ db, gmail, store, now, advance }) => {
+      const clock = vi.spyOn(Date, 'now').mockImplementation(now)
+      try {
+        const tokens = new AccessTokens(
+          { clientId: 'client', clientSecret: 'secret' },
+          { refreshToken: 'token', scope: '' },
+          () => Promise.reject(new Error('Unexpected OAuth refresh')),
+        )
+        tokens.seed('synthetic-token', now() + 2 * DAY_MS)
+        const limiter = new QuotaLimiter()
+        const quota = vi.spyOn(limiter, 'take').mockImplementation(async (cost) => {
+          if (cost !== QUOTA_COST.modify) return
+          if (end === 'expiry') advance(DAY_MS)
+          else revokeToken(db, token.id, now())
+        })
+        const fetchGmail = vi.fn<typeof fetch>(async (input, init) => {
+          const url = new URL(String(input))
+          if (init?.method === 'POST') return Response.json({})
+          if (url.pathname.endsWith('/threads/thread'))
+            return Response.json({ messages: await gmail.getThreadMessages('thread') })
+          if (url.pathname.endsWith('/history'))
+            return Response.json(await gmail.history(url.searchParams.get('startHistoryId') ?? ''))
+          throw new Error(`Unexpected Gmail request ${url.pathname}`)
+        })
+        const token = issueToken(
+          db,
+          {
+            kind: 'agent',
+            name: 'test',
+            scopes: ['organize'],
+            expiresAt: now() + DAY_MS,
+            accountId: 'a',
+          },
+          now(),
+        )
+        const principal = authenticate(db, token.secret, now())
+        if (!principal) throw new Error('Missing Agent grant')
+        const queue = new Mutations(
+          store,
+          () => new GmailHttpApi(tokens, fetchGmail, { limiter }),
+          silentLog,
+          { now },
+        )
+        const submitted = organizeAsAgent(db, queue, principal, 'star', [
+          { kind: 'star', threadId: THREAD, value: true },
+        ])
+        expect(submitted.error).toBeNull()
+        await queue.tick()
+        expect(quota).toHaveBeenCalledWith(QUOTA_COST.modify, true)
+        expect(fetchGmail.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false)
+        expect(agentAction(db, queue, token.id, submitted.id)).toMatchObject({
+          status: 'failed',
+          mutations: [
+            {
+              status: 'failed',
+              error: 'Agent grant expired',
+              messages: [
+                { messageId: 'a:m1', status: 'failed', failedLabels: ['a:STARRED'] },
+                { messageId: 'a:m2', status: 'failed', failedLabels: [] },
+              ],
+            },
+          ],
+        })
+      } finally {
+        clock.mockRestore()
+      }
+    })
+  },
+)
 
 it('times out and retries a stalled Gmail labels body while unrelated writeback proceeds', async () => {
   await withFixture(async ({ db, gmail, store, request, now, state }) => {

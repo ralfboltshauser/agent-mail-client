@@ -1,9 +1,17 @@
-import { hasScope, type Scope } from '@amc/protocol'
+import { hasScope, type OrganiseAction, type Scope } from '@amc/protocol'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
-import type { Principal } from '../auth/tokens.ts'
+import { type Principal, withinAccount } from '../auth/tokens.ts'
 import type { Db } from '../db/database.ts'
+import {
+  agentAction,
+  agentCreatedDraft,
+  draftAsAgent,
+  organizeAsAgent,
+  threadAccount,
+} from '../mail/agent-actions.ts'
 import { DraftError, type Drafts, searchContacts } from '../mail/drafts.ts'
+import type { Mutations } from '../mail/mutations.ts'
 import type { MailQueries } from '../mail/queries.ts'
 import { VERSION } from '../version.ts'
 
@@ -11,6 +19,7 @@ export interface McpDeps {
   db: Db
   queries: MailQueries
   drafts: Drafts
+  mutations?: Mutations | undefined
 }
 
 const AddressInput = z.object({
@@ -21,6 +30,7 @@ const toAddresses = (list: z.infer<typeof AddressInput>[] | undefined) =>
   list?.map((a) => ({ name: a.name ?? null, address: a.address }))
 
 const MAX_BODY = 20_000
+const MAX_THREAD_TEXT = 100_000
 
 function json(value: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(value, null, 1) }] }
@@ -46,7 +56,10 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
     },
   )
   const can = (scope: Scope) => hasScope(principal.scopes, scope)
-  const { queries, drafts, db } = deps
+  const { queries, drafts, db, mutations } = deps
+  const agent = principal.kind === 'agent' ? principal : undefined
+  const accountId = agent?.accountId
+  const draftOptions = accountId ? { accountId } : {}
 
   server.registerTool(
     'whoami',
@@ -54,7 +67,14 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
       description: 'Which AMC token this is and what it may do. Sending mail is not among them.',
       annotations: { readOnlyHint: true },
     },
-    async () => json({ name: principal.name, scopes: principal.scopes }),
+    async () =>
+      json({
+        name: principal.name,
+        scopes: principal.scopes.filter(
+          (scope) => !agent || (scope !== 'admin' && scope !== 'send'),
+        ),
+        accountId: accountId ?? null,
+      }),
   )
 
   if (can('read')) {
@@ -65,7 +85,11 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
         annotations: { readOnlyHint: true },
       },
       async () =>
-        json(queries.accounts().map(({ id, address, status }) => ({ id, address, status }))),
+        json(
+          (accountId ? [queries.account(accountId)] : queries.accounts()).flatMap((account) =>
+            account ? [{ id: account.id, address: account.address, status: account.status }] : [],
+          ),
+        ),
     )
 
     server.registerTool(
@@ -94,7 +118,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
             inbox: a.view === 'inbox' && !a.label_id,
             ...(a.label_id ? { labelId: a.label_id } : {}),
             ...(a.unread !== undefined ? { unread: a.unread } : {}),
-            ...(a.account_id ? { accountId: a.account_id } : {}),
+            ...((accountId ?? a.account_id) ? { accountId: accountId ?? a.account_id } : {}),
             ...(a.before !== undefined ? { before: a.before } : {}),
             limit: a.limit,
           }),
@@ -105,24 +129,34 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
       'get_thread',
       {
         description:
-          'Read a whole Thread: every message with sender, recipients, date, plain-text body and attachments.',
+          'Read a Thread with every message, including sender, recipients, date, plain-text body and attachments. Text is capped at 20,000 characters per message and 100,000 per Thread, prioritizing newer messages. Use get_message when […truncated] marks omitted text.',
         inputSchema: { thread_id: z.string() },
         annotations: { readOnlyHint: true },
       },
       async ({ thread_id }) => {
-        const thread = queries.thread(thread_id)
+        const thread = withinAccount(principal, threadAccount(db, thread_id))
+          ? queries.agentThread(thread_id, MAX_BODY, MAX_THREAD_TEXT)
+          : null
         if (!thread) return failure(`No Thread ${thread_id}`)
         return json({
           ...thread,
-          messages: thread.messages.map((m) => ({
-            ...m,
-            bodyText:
-              m.bodyText.length > MAX_BODY
-                ? `${m.bodyText.slice(0, MAX_BODY)}\n[…truncated]`
-                : m.bodyText,
-          })),
-          drafts: drafts.list({ threadId: thread_id }),
+          drafts: drafts.list({ ...draftOptions, threadId: thread_id }),
         })
+      },
+    )
+
+    server.registerTool(
+      'get_message',
+      {
+        description: 'Read one message. Text beyond 20,000 characters is marked with […truncated].',
+        inputSchema: { messageId: z.string() },
+        annotations: { readOnlyHint: true },
+      },
+      async ({ messageId }) => {
+        const message = queries.agentMessage(messageId, MAX_BODY)
+        return message && withinAccount(principal, message.accountId)
+          ? json(message)
+          : failure(`No message ${messageId}`)
       },
     )
 
@@ -141,25 +175,26 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
       async (a) =>
         json(
           queries.search(a.query, {
-            ...(a.account_id ? { accountId: a.account_id } : {}),
+            ...((accountId ?? a.account_id) ? { accountId: accountId ?? a.account_id } : {}),
             limit: a.limit,
           }),
         ),
     )
 
-    server.registerTool(
-      'search_contacts',
-      {
-        description:
-          'Find people the owner has mailed with, by name or address. Most frequent first.',
-        inputSchema: {
-          query: z.string().min(1),
-          limit: z.number().int().min(1).max(25).default(10),
+    if (!accountId)
+      server.registerTool(
+        'search_contacts',
+        {
+          description:
+            'Find people the owner has mailed with, by name or address. Most frequent first.',
+          inputSchema: {
+            query: z.string().min(1),
+            limit: z.number().int().min(1).max(25).default(10),
+          },
+          annotations: { readOnlyHint: true },
         },
-        annotations: { readOnlyHint: true },
-      },
-      async (a) => json(searchContacts(db, a.query, a.limit)),
-    )
+        async (a) => json(searchContacts(db, a.query, a.limit)),
+      )
 
     server.registerTool(
       'list_labels',
@@ -168,17 +203,18 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
         inputSchema: { account_id: z.string().optional() },
         annotations: { readOnlyHint: true },
       },
-      async (a) => json(queries.labels(a.account_id)),
+      async (a) => json(queries.labels(accountId ?? a.account_id)),
     )
 
     server.registerTool(
       'list_drafts',
       {
         description: 'List AMC drafts, newest first, optionally for one Thread.',
-        inputSchema: { thread_id: z.string().optional() },
+        inputSchema: { thread_id: z.string().max(512).optional() },
         annotations: { readOnlyHint: true },
       },
-      async (a) => json(drafts.list(a.thread_id ? { threadId: a.thread_id } : {})),
+      async (a) =>
+        json(drafts.list({ ...draftOptions, ...(a.thread_id ? { threadId: a.thread_id } : {}) })),
     )
 
     server.registerTool(
@@ -190,7 +226,67 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
       },
       async ({ draft_id }) => {
         const draft = drafts.get(draft_id)
-        return draft ? json(draft) : failure(`No draft ${draft_id}`)
+        return draft && withinAccount(principal, draft.accountId)
+          ? json(draft)
+          : failure(`No draft ${draft_id}`)
+      },
+    )
+  }
+
+  if (agent && mutations && can('organize')) {
+    type Action = Exclude<OrganiseAction, { kind: 'trash' | 'snooze' | 'undo' }>
+    const tools: [string, string, (threadId: string, labelId: string) => Action][] = [
+      ['archive', 'Archive', (threadId) => ({ kind: 'archive', threadId })],
+      ['mark_read', 'Mark as read', (threadId) => ({ kind: 'read', threadId, value: true })],
+      ['mark_unread', 'Mark as unread', (threadId) => ({ kind: 'read', threadId, value: false })],
+      ['star', 'Star', (threadId) => ({ kind: 'star', threadId, value: true })],
+      ['unstar', 'Unstar', (threadId) => ({ kind: 'star', threadId, value: false })],
+      [
+        'add_label',
+        'Add a user Label to',
+        (threadId, labelId) => ({ kind: 'label', threadId, labelId, value: true }),
+      ],
+      [
+        'remove_label',
+        'Remove a user Label from',
+        (threadId, labelId) => ({ kind: 'label', threadId, labelId, value: false }),
+      ],
+      ['mute', 'Mute', (threadId) => ({ kind: 'mute', threadId, value: true })],
+    ]
+    for (const [tool, verb, action] of tools) {
+      server.registerTool(
+        tool,
+        {
+          description: `${verb} the given Gmail Threads. Returns per-message status. Use organize_status to check pending writeback.`,
+          inputSchema: {
+            thread_ids: z.array(z.string().min(1).max(512)).min(1).max(20),
+            ...(tool.endsWith('_label') ? { label_id: z.string().min(1).max(512) } : {}),
+          },
+        },
+        async ({ thread_ids, label_id }) => {
+          const entry = organizeAsAgent(
+            db,
+            mutations,
+            agent,
+            tool,
+            [...new Set(thread_ids)].map((id) => action(id, label_id ?? '')),
+          )
+          if (entry.error) return failure(entry.error)
+          mutations.kick()
+          return json(agentAction(db, mutations, agent.tokenId, entry.id))
+        },
+      )
+    }
+    server.registerTool(
+      'organize_status',
+      {
+        description: 'Check the writeback result of one of this token’s organize actions.',
+        inputSchema: { action_id: z.uuid() },
+        annotations: { readOnlyHint: true },
+      },
+      async ({ action_id }) => {
+        const action = agentAction(db, mutations, agent.tokenId, action_id)
+        return action ? json(action) : failure('No action for this token')
       },
     )
   }
@@ -203,7 +299,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
           'Write a draft. With thread_id it is a reply: recipients, "Re:" subject and threading headers are filled in ' +
           '(override any of them). It appears in Gmail as a draft for the owner to review and send. It is never sent.',
         inputSchema: {
-          thread_id: z.string().optional(),
+          thread_id: z.string().max(512).optional(),
           account_id: z
             .string()
             .optional()
@@ -219,11 +315,16 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
       },
       async (a) => {
         try {
-          return json(
-            await drafts.create(
+          const write = () => {
+            const target = a.thread_id
+              ? threadAccount(db, a.thread_id)
+              : (a.account_id ?? accountId)
+            if (!withinAccount(principal, target))
+              throw new DraftError('Account unavailable to this Agent')
+            return drafts.create(
               {
                 ...(a.thread_id ? { threadId: a.thread_id } : {}),
-                ...(a.account_id ? { accountId: a.account_id } : {}),
+                ...(target ? { accountId: target } : {}),
                 ...(a.to ? { to: toAddresses(a.to) } : {}),
                 ...(a.cc ? { cc: toAddresses(a.cc) } : {}),
                 ...(a.bcc ? { bcc: toAddresses(a.bcc) } : {}),
@@ -232,7 +333,12 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
                 ...(a.reply_all !== undefined ? { replyAll: a.reply_all } : {}),
               },
               principal.name,
-            ),
+            )
+          }
+          return json(
+            agent
+              ? await draftAsAgent(db, agent, 'create_draft', a.thread_id ?? null, write)
+              : await write(),
           )
         } catch (error) {
           if (error instanceof DraftError) return failure(error.message)
@@ -244,8 +350,9 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
     server.registerTool(
       'update_draft',
       {
-        description:
-          'Change a draft. Only the fields you pass change. Read it first: the owner may have edited it.',
+        description: can('read')
+          ? 'Change a draft. Only the fields you pass change. Read it first: the owner may have edited it.'
+          : 'Change a draft created by this grant. Only the fields you pass change.',
         inputSchema: {
           draft_id: z.string(),
           to: z.array(AddressInput).optional(),
@@ -258,8 +365,17 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
       },
       async (a) => {
         try {
-          return json(
-            await drafts.update(
+          const draft = db
+            .prepare('SELECT account_id, thread_id FROM draft WHERE id = ?')
+            .get(a.draft_id) as { account_id: string; thread_id: string | null } | undefined
+          const allowed =
+            !agent ||
+            (draft &&
+              withinAccount(agent, draft.account_id) &&
+              (can('read') || agentCreatedDraft(db, agent, a.draft_id)))
+          const write = () => {
+            if (!allowed) throw new DraftError('Draft unavailable to this Agent')
+            return drafts.update(
               a.draft_id,
               {
                 ...(a.to ? { to: toAddresses(a.to) } : {}),
@@ -269,7 +385,18 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
                 ...(a.body !== undefined ? { body: a.body } : {}),
               },
               principal.name,
-            ),
+            )
+          }
+          return json(
+            agent
+              ? await draftAsAgent(
+                  db,
+                  agent,
+                  'update_draft',
+                  allowed ? (draft?.thread_id ?? null) : null,
+                  write,
+                )
+              : await write(),
           )
         } catch (error) {
           if (error instanceof DraftError) return failure(error.message)
@@ -278,18 +405,19 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
       },
     )
 
-    server.registerTool(
-      'delete_draft',
-      {
-        description: 'Discard a draft (also removes it from Gmail).',
-        inputSchema: { draft_id: z.string() },
-        annotations: { destructiveHint: true },
-      },
-      async ({ draft_id }) => {
-        await drafts.delete(draft_id)
-        return json({ deleted: draft_id })
-      },
-    )
+    if (!agent)
+      server.registerTool(
+        'delete_draft',
+        {
+          description: 'Discard a draft (also removes it from Gmail).',
+          inputSchema: { draft_id: z.string() },
+          annotations: { destructiveHint: true },
+        },
+        async ({ draft_id }) => {
+          await drafts.delete(draft_id)
+          return json({ deleted: draft_id })
+        },
+      )
   }
 
   return server

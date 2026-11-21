@@ -411,6 +411,13 @@ function MailApp() {
               <div className="flex h-full flex-col">
                 <div className="app-drag flex h-12 shrink-0 items-center gap-1 border-b px-3">
                   {organise.controls.length > 0 && <OrganiseToolbar controls={organise.controls} />}
+                  {activeThread &&
+                    organiseAccount?.kind === 'imap' &&
+                    organiseAccount.imapMoves === false && (
+                      <span className="text-muted-foreground text-xs">
+                        This IMAP server does not support safe moves
+                      </span>
+                    )}
                   {activeThread && (
                     <>
                       <Button

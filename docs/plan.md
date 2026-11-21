@@ -233,6 +233,8 @@ Each milestone is one GitHub ticket with a checklist and ends with something Ral
 | M8 | Handoff and live composer: composer links, live Agent drafting, what-changed, select-and-revise, project picker, T3 integration | M4, M6, handoff design, T3 research | do the T3 reply flow without copy-paste |
 | M9 | Hardening and cutover: backups and restore drill, credential encryption audit, performance budgets, health alerts, optional Gmail Pub/Sub, two weeks without Spark on the Mac | all | cancel Spark on the Mac |
 
+M6 v1 uses expiring Agent tokens for external clients. The Host sandbox runner, per-run token minting, trusted forwarder, and Dangerously Allow Send are deferred.
+
 Runs in parallel once M1 lands: M5 alongside M2–M4, and the agent tickets (headless proof, sandbox, permission model) alongside M2–M3.
 
 ## 11. Decisions (defaults taken 2026-11-20)

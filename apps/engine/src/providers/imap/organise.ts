@@ -1,7 +1,7 @@
 import type { LabelPatch } from '@amc/protocol'
 import { transaction } from '../../db/database.ts'
 import { labelId } from '../../mail/store.ts'
-import type { ImapClient } from './client.ts'
+import { type ImapClient, imapMoveSupport } from './client.ts'
 import type { MessageLocation } from './locations.ts'
 import { type Folder, mapFolders, messageFlags } from './mapping.ts'
 import type { ImapAccountSync } from './sync.ts'
@@ -16,18 +16,19 @@ export interface ImapChange {
   before: Record<string, boolean | null>
   after: LabelPatch
   revisions?: Record<string, string>
+  moveFrom?: Pick<MessageLocation, 'path_key' | 'validity'>
 }
 
 interface Move {
   source: MessageLocation
   destination: Folder
-  validity: string
-  firstUid: number
+  flags: ReturnType<typeof messageFlags>
 }
 
 interface Pending {
   change: ImapChange
   move?: Move
+  copied?: { uid?: number; validity?: string }
 }
 
 export interface ImapJournalEntry {
@@ -45,21 +46,20 @@ export function imapLocationRevision(
   return JSON.stringify([location.path_key, location.validity, location.uid])
 }
 
-export function imapMoveSupport(client: ImapClient) {
-  const native =
-    client.capabilities.has('MOVE') ||
-    client.enabled.has('IMAP4REV2') ||
-    (client.capabilities.has('IMAP4rev2') && !client.capabilities.has('IMAP4rev1'))
-  return { native, available: native || client.capabilities.has('UIDPLUS') }
-}
+export const IMAP_COPY_INCOMPLETE = 'Copied, original not removed'
+export const IMAP_UNDO_UNVERIFIED = 'Undo unavailable: the IMAP server did not verify the moved UID'
 
 async function readFlags(client: ImapClient, uid: number) {
   for await (const message of client.fetch([uid], { flags: true }, { uid: true })) {
-    if (message.uid === uid) return message.flags
+    if (message.uid === uid) return message.flags ?? new Set<string>()
   }
 }
 
-async function openSource(client: ImapClient, source: MessageLocation, readOnly: boolean) {
+async function openSource(
+  client: ImapClient,
+  source: Pick<MessageLocation, 'path_key' | 'validity'>,
+  readOnly: boolean,
+) {
   try {
     const box = await client.mailboxOpen(decodeURIComponent(source.path_key), { readOnly })
     return String(box.uidValidity) === source.validity
@@ -75,6 +75,8 @@ export async function executeImap(
   changes: ImapChange[],
   entry: ImapJournalEntry,
   save: () => void,
+  allowTrash: boolean,
+  beforeWrite: () => void,
 ) {
   const { client, store, accountId, locations } = sync
   const unreadId = labelId(accountId, 'UNREAD')
@@ -86,6 +88,69 @@ export async function executeImap(
     ),
   )
   const folders = new Map<string, Folder>()
+
+  const finishMove = async (change: ImapChange, move: Move, uid?: number, validity?: string) => {
+    const { source, destination, flags } = move
+    const path = decodeURIComponent(source.path_key)
+    if (!uid || !validity) await sync.refreshOrganiseFolder(destination)
+    transaction(store.db, () => {
+      change.moveFrom = { path_key: source.path_key, validity: source.validity }
+      const observed = uid && validity ? locations.get(destination.path, validity, uid) : undefined
+      if (uid && validity && (!observed || observed.message_id === change.message_id)) {
+        const revision = imapLocationRevision({
+          path_key: encodeURIComponent(destination.path),
+          validity,
+          uid,
+        })
+        change.revisions = Object.fromEntries(Object.keys(change.after).map((id) => [id, revision]))
+      } else {
+        delete change.revisions
+      }
+      entry.applied.push(change)
+      delete entry.pending
+      done.add(change.message_id)
+      save()
+      if (uid && validity && !observed) locations.moved(source, destination, validity, uid, flags)
+      else locations.remove(path, source.validity, source.uid)
+    })
+  }
+
+  const removeCopiedSource = async (pending: Pending & { move: Move }, flags?: Set<string>) => {
+    const { source, destination } = pending.move
+    const { uid } = source
+    const current =
+      flags ?? ((await openSource(client, source, false)) && (await readFlags(client, uid)))
+    if (current === false) {
+      transaction(store.db, () => {
+        entry.failed.push(pending.change)
+        entry.error = `${IMAP_COPY_INCOMPLETE}. The source folder changed; cleanup stopped`
+        delete entry.pending
+        done.add(pending.change.message_id)
+        save()
+        locations.remove(decodeURIComponent(source.path_key), source.validity, uid)
+      })
+      return true
+    }
+    beforeWrite()
+    let removed = false
+    try {
+      removed =
+        !current ||
+        ((current.has('\\Deleted') ||
+          (await client.messageFlagsAdd(String(uid), ['\\Deleted'], { uid: true }))) &&
+          (await client.uidExpunge(uid)) &&
+          !(await readFlags(client, uid)))
+    } catch {
+      // The copy is confirmed. A later pass can find this UID already gone if
+      // the server removed it before the connection or its response was lost.
+    }
+    if (!removed) {
+      await sync.refreshOrganiseFolder(destination)
+      return false
+    }
+    await finishMove(pending.change, pending.move, pending.copied?.uid, pending.copied?.validity)
+    return true
+  }
 
   const uncertain = async () => {
     const pending = entry.pending
@@ -124,7 +189,12 @@ export async function executeImap(
       folders.set(labelId(accountId, folder.label.providerId), folder)
     }
   }
-  await uncertain()
+  const pending = entry.pending
+  if (pending?.move && pending.copied) {
+    if (!(await removeCopiedSource({ ...pending, move: pending.move }))) return
+  } else {
+    await uncertain()
+  }
 
   for (const change of changes) {
     const { message_id, before, after, revisions } = change
@@ -153,7 +223,8 @@ export async function executeImap(
       local.some(({ label_id }) => !expectedFolders.includes(label_id)) ||
       (revision && revision !== imapLocationRevision(source))
     ) {
-      finish('superseded')
+      if (change.moveFrom) finish('failed', 'Undo unavailable: the moved IMAP UID changed')
+      else finish('superseded')
       continue
     }
     if (local.length !== 1) {
@@ -162,36 +233,47 @@ export async function executeImap(
     }
 
     const destinationId = Object.keys(after).find((id) => !isFlag(id) && after[id])
-    let move: Move | undefined
-    const moveSupport = imapMoveSupport(client)
+    let destination: Folder | undefined
     if (destinationId) {
-      const destination = folders.get(destinationId)
+      destination = folders.get(destinationId)
       const sourceFolder = folders.get(source.label_id)
       if (sourceFolder?.path !== decodeURIComponent(source.path_key)) {
         finish('superseded')
         continue
       }
-      if (!destination || !moveSupport.available) {
+      if (!destination) {
         finish(
           'failed',
-          !destination
-            ? 'The IMAP destination folder is unavailable'
-            : 'This IMAP server does not support safe moves',
+          change.moveFrom
+            ? 'Undo unavailable: the original IMAP folder is unavailable'
+            : 'The IMAP destination folder is unavailable',
         )
         continue
       }
-      const box = await client.mailboxOpen(destination.path, { readOnly: true })
-      move = { source, destination, validity: String(box.uidValidity), firstUid: box.uidNext }
+      if (!allowTrash && (sourceFolder.trash || destination.trash)) {
+        finish('failed', 'Only the owner can move mail to or from Trash')
+        continue
+      }
+      if (
+        change.moveFrom &&
+        (encodeURIComponent(destination.path) !== change.moveFrom.path_key ||
+          !(await openSource(client, change.moveFrom, true)))
+      ) {
+        finish('failed', 'Undo unavailable: the original IMAP folder changed')
+        continue
+      }
     }
 
     const uid = String(source.uid)
     const path = decodeURIComponent(source.path_key)
     const flags = (await openSource(client, source, false)) && (await readFlags(client, source.uid))
     if (!flags || flags.has('\\Deleted')) {
-      finish('superseded')
+      if (change.moveFrom) finish('failed', 'Undo unavailable: the moved IMAP UID changed')
+      else finish('superseded')
       continue
     }
     const current = messageFlags(flags)
+    const move = destination ? { source, destination, flags: current } : undefined
     locations.flags(path, source.validity, source.uid, current.unread, current.starred)
     const flagId = Object.keys(after).find(isFlag)
     if (flagId && (flagId === unreadId ? current.unread : current.starred) !== before[flagId]) {
@@ -200,50 +282,31 @@ export async function executeImap(
     }
     if (!move && (!flagId || before[flagId] === after[flagId])) continue
 
+    beforeWrite()
     entry.pending = move ? { change, move } : { change }
     save()
     if (move) {
-      const response = moveSupport.native
-        ? await client.messageMove(uid, move.destination.path, { uid: true })
+      const support = imapMoveSupport(client)
+      if (!support.available) {
+        finish('failed', 'This IMAP server does not support safe moves')
+        continue
+      }
+      const response = support.native
+        ? await client.uidMove(source.uid, move.destination.path)
         : await client.messageCopy(uid, move.destination.path, { uid: true })
-      if (!response || (!moveSupport.native && !(await client.messageDelete(uid, { uid: true })))) {
+      if (!response) {
         await uncertain()
         continue
       }
       const targetUid = response.uidMap?.get(source.uid)
       const targetValidity = response.uidValidity?.toString()
-      if (targetUid && targetValidity) {
-        const target = move
-        transaction(store.db, () => {
-          locations.moved(source, target.destination, targetValidity, targetUid, current)
-          acknowledge({
-            path_key: encodeURIComponent(target.destination.path),
-            validity: targetValidity,
-            uid: targetUid,
-          })
-        })
+      if (support.native) {
+        await finishMove(change, move, targetUid, targetValidity)
       } else {
-        // COPYUID is optional. Discover the new UID with the same fingerprint lookup as sync.
-        await sync.refreshOrganiseFolder(move.destination)
-        const target = locations
-          .forMessage(message_id)
-          .filter(
-            (item) =>
-              item.path_key === encodeURIComponent(move.destination.path) &&
-              item.validity === move.validity &&
-              item.uid >= move.firstUid,
-          )
-        const sourceExists =
-          (await openSource(client, source, true)) && (await readFlags(client, source.uid))
-        const [location] = target
-        if (target.length !== 1 || !location || sourceExists) {
-          await uncertain()
-          continue
-        }
-        transaction(store.db, () => {
-          acknowledge(location)
-          locations.remove(path, source.validity, source.uid)
-        })
+        const copied = { change, move, copied: { uid: targetUid, validity: targetValidity } }
+        entry.pending = copied
+        save()
+        if (!(await removeCopiedSource(copied, flags))) return
       }
     } else if (flagId) {
       const flag = flagId === unreadId ? '\\Seen' : '\\Flagged'

@@ -6,6 +6,7 @@ import {
   type ImapClient,
   type ImapClientFactory,
   type ImapCredentials,
+  imapMoveSupport,
 } from './client.ts'
 import { mapFolders } from './mapping.ts'
 
@@ -136,13 +137,16 @@ export class ImapProvider {
     if (String(mailbox.uidValidity) !== location.uidValidity) return false
     let present = false
     for await (const draft of client.fetch(String(location.uid), { flags: true }, { uid: true })) {
-      present = !draft.flags?.has('\\Deleted')
+      present = draft.uid === location.uid
     }
     if (!present) return false
     // UID EXPUNGE is safe only when the server supports UIDPLUS or IMAP4rev2.
     if (!this.#supportsUidExpunge(client))
       throw new Error('IMAP Draft replacement needs UID EXPUNGE')
-    return client.messageDelete(String(location.uid), { uid: true })
+    return (
+      (await client.messageFlagsAdd(String(location.uid), ['\\Deleted'], { uid: true })) &&
+      (await client.uidExpunge(location.uid))
+    )
   }
 
   #supportsUidExpunge(client: ImapClient): boolean {
@@ -172,14 +176,16 @@ export class ImapProvider {
 
   move(location: ImapMessageLocation, destination: string): Promise<boolean> {
     return this.#withMessage(location, async (client) => {
-      const rev2 =
-        client.enabled.has('IMAP4REV2') ||
-        (client.capabilities.has('IMAP4rev2') && !client.capabilities.has('IMAP4rev1'))
-      if (!rev2 && !client.capabilities.has('MOVE') && !client.capabilities.has('UIDPLUS')) {
-        // ImapFlow's fallback would issue a mailbox-wide EXPUNGE.
-        return false
-      }
-      return Boolean(await client.messageMove(String(location.uid), destination, { uid: true }))
+      const { native, available } = imapMoveSupport(client)
+      if (native) return Boolean(await client.uidMove(location.uid, destination))
+      if (!available) return false
+      const uid = String(location.uid)
+      const options = { uid: true }
+      return Boolean(
+        (await client.messageCopy(uid, destination, options)) &&
+          (await client.messageFlagsAdd(uid, ['\\Deleted'], options)) &&
+          (await client.uidExpunge(location.uid)),
+      )
     })
   }
 

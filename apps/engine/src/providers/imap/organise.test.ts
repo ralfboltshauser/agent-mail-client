@@ -1,11 +1,17 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import type { OrganiseAction } from '@amc/protocol'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { afterEach, expect, it, vi } from 'vitest'
+import { authenticate, issueToken } from '../../auth/tokens.ts'
 import { BlobStore } from '../../blobs.ts'
 import { Sealer } from '../../crypto.ts'
+import { organizeAsAgent } from '../../mail/agent-actions.ts'
+import { Drafts } from '../../mail/drafts.ts'
 import { Mutations } from '../../mail/mutations.ts'
 import { MailQueries } from '../../mail/queries.ts'
 import { MailStore } from '../../mail/store.ts'
+import { buildMcpServer } from '../../mcp/server.ts'
 import { SyncManager } from '../../sync/manager.ts'
 import { silentLog, tempDir, testDb } from '../../test-support.ts'
 import { FakeImap } from './fake.ts'
@@ -15,7 +21,12 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup()
 })
 
-async function fixture({ archive = true, capability = 'MOVE', copyUid = true } = {}) {
+async function fixture({
+  archive = true,
+  capability = 'MOVE',
+  copyUid = true,
+  secondaryTrash = false,
+} = {}) {
   const db = testDb()
   const store = new MailStore(db, new BlobStore(tempDir()))
   const queries = new MailQueries(db)
@@ -27,6 +38,7 @@ async function fixture({ archive = true, capability = 'MOVE', copyUid = true } =
   else imap.addFolder('Archive')
   imap.addFolder('Deleted mail', '\\Trash')
   imap.addFolder('Project')
+  if (secondaryTrash) imap.addFolder('Secondary Deleted', '\\Trash')
   const uid = imap.add('INBOX', 'Message-ID: <example@example.com>\r\nSubject: Organise me')
   db.prepare(
     "INSERT INTO account (id, kind, address, credentials, created_at) VALUES ('a', 'imap', 'owner@example.com', ?, 0)",
@@ -49,7 +61,7 @@ async function fixture({ archive = true, capability = 'MOVE', copyUid = true } =
     db.close()
   })
   sync.start()
-  await vi.waitFor(() => expect(queries.accounts()[0]?.status).toBe('ready'))
+  await vi.waitFor(() => expect(queries.accounts()[0]?.status).toBe('ready'), { timeout: 3000 })
   const threadId = 'a:imap:example%40example.com'
   const view = () => queries.thread(threadId)
   const messageId = view()?.messages[0]?.id
@@ -67,7 +79,21 @@ async function fixture({ archive = true, capability = 'MOVE', copyUid = true } =
     return result
   }
   const run = (action: Input<OrganiseAction>) => settle(enqueue(action))
-  return { db, imap, imapClient, queue, queries, uid, messageId, view, enqueue, settle, run }
+  return {
+    db,
+    imap,
+    imapClient,
+    queue,
+    queries,
+    store,
+    threadId,
+    uid,
+    messageId,
+    view,
+    enqueue,
+    settle,
+    run,
+  }
 }
 
 it('sets and clears Seen and Flagged and undoes acknowledged flag changes on the runner', async () => {
@@ -173,9 +199,14 @@ it('requires a real Archive special-use folder', async () => {
 })
 
 it('requires MOVE or UIDPLUS and never runs mailbox-wide EXPUNGE', async () => {
-  const { enqueue, imap } = await fixture({ capability: '' })
+  const { enqueue, imap, run } = await fixture({ capability: '' })
   expect(() => enqueue({ kind: 'archive' })).toThrow('This IMAP server does not support safe moves')
-  expect(imap.writes).toEqual([])
+  expect(() => enqueue({ kind: 'trash', value: true })).toThrow('does not support safe moves')
+  expect(() => enqueue({ kind: 'label', labelId: 'a:folder:Project', value: true })).toThrow(
+    'does not support safe moves',
+  )
+  expect((await run({ kind: 'star', value: true }))?.status).toBe('applied')
+  expect(imap.writes.map(({ command }) => command)).toEqual(['UID STORE +FLAGS'])
 })
 
 it('falls back to UID COPY, Deleted, and UID EXPUNGE for just the source UID', async () => {
@@ -191,19 +222,146 @@ it('falls back to UID COPY, Deleted, and UID EXPUNGE for just the source UID', a
   expect(view()?.messages[0]).toMatchObject({ id: messageId, labelIds: ['a:ARCHIVE'] })
 })
 
-it('reconciles a native move without COPYUID and can undo it using the discovered UID', async () => {
-  const { imap, messageId, view, run } = await fixture({ copyUid: false })
+it('syncs an acknowledged move without COPYUID and refuses to undo an identical replacement', async () => {
+  const { imap, messageId, view, run, enqueue } = await fixture({ copyUid: false })
+  const move = imap.uidMove.bind(imap)
+  vi.spyOn(imap, 'uidMove').mockImplementationOnce(async (...args) => {
+    const result = await move(...args)
+    const archive = imap.folder('Filed mail')
+    const target = [...archive.messages.entries()][0]
+    if (!target) throw new Error('Missing moved message')
+    const [uid, message] = target
+    imap.expunge('Filed mail', uid)
+    archive.messages.set(archive.nextUid++, message)
+    return result
+  })
   expect((await run({ kind: 'archive' }))?.messages?.[0]?.status).toBe('applied')
   expect(view()?.messages[0]).toMatchObject({ id: messageId, labelIds: ['a:ARCHIVE'] })
-  expect((await run({ kind: 'undo' }))?.messages?.[0]?.status).toBe('applied')
-  expect(view()?.messages[0]).toMatchObject({ id: messageId, labelIds: ['a:INBOX'] })
-  expect(imap.folder('Filed mail').messages.size).toBe(0)
+  expect(() => enqueue({ kind: 'undo' })).toThrow('IMAP server did not verify the moved UID')
+  expect(imap.writes).toHaveLength(1)
+  expect(imap.folder('Filed mail').messages.size).toBe(1)
+})
+
+it('refuses to undo a move into a replacement folder with changed UIDVALIDITY', async () => {
+  const { imap, run, view } = await fixture()
+  await run({ kind: 'label', labelId: 'a:folder:Project', value: true })
+  await run({ kind: 'trash', value: true })
+  imap.addFolder('Project').validity = 2n
+  expect(await run({ kind: 'undo' })).toMatchObject({
+    status: 'failed',
+    error: 'Undo unavailable: the original IMAP folder changed',
+  })
+  expect(imap.folder('Project').messages.size).toBe(0)
+  expect(view()?.messages[0]?.labelIds).toEqual(['a:TRASH'])
+})
+
+it.each([
+  { sameValidity: true, acknowledged: false },
+  { sameValidity: false, acknowledged: false },
+  { sameValidity: true, acknowledged: true },
+])(
+  'retries an expunge that left the source present (same UIDVALIDITY: $sameValidity, acknowledged: $acknowledged)',
+  async ({ sameValidity, acknowledged }) => {
+    const { imap, uid, messageId, view, enqueue, queue, settle } = await fixture({
+      capability: 'UIDPLUS',
+    })
+    const expunge = vi.spyOn(imap, 'uidExpunge').mockResolvedValueOnce(acknowledged)
+    const id = enqueue({ kind: 'archive' })
+    await queue.tick()
+    expect(queue.lookup('owner', [id])[0]).toMatchObject({
+      status: 'pending',
+      error: 'Copied, original not removed',
+    })
+    expect(imap.folder('INBOX').messages.get(uid)?.flags.has('\\Deleted')).toBe(true)
+    expect(view()?.messages[0]).toMatchObject({ id: messageId, labelIds: ['a:ARCHIVE', 'a:INBOX'] })
+    if (!sameValidity) imap.folder('INBOX').validity++
+    expect((await settle(id))?.status).toBe(sameValidity ? 'applied' : 'failed')
+    expect(expunge.mock.calls).toEqual(sameValidity ? [[uid], [uid]] : [[uid]])
+    expect(imap.writes.filter(({ command }) => command === 'UID COPY')).toHaveLength(1)
+    expect(imap.folder('Filed mail').messages.size).toBe(1)
+  },
+)
+
+it('refuses to undo a mute touched by a newer owner client', async () => {
+  const { queue, view, run, enqueue, threadId } = await fixture()
+  await run({ kind: 'mute', value: true })
+  const id = randomUUID()
+  queue.submit('other-owner', [{ id, action: { kind: 'mute', value: true, threadId } }])
+  await queue.tick()
+  expect(queue.lookup('other-owner', [id])[0]?.status).toBe('applied')
+  expect(() => enqueue({ kind: 'undo' })).toThrow('Mute has changed since this action')
+  expect(view()?.muted).toBe(true)
+})
+
+it('uses the mailbox role to refuse a scoped CLI and an agent filing into a second Trash', async () => {
+  const { db, imap, queue, queries, store, threadId } = await fixture({ secondaryTrash: true })
+  const labelId = 'a:folder:Secondary%20Deleted'
+  const action = { kind: 'label', labelId, value: true, threadId } as const
+  const cli = issueToken(db, { kind: 'cli', name: 'Scoped CLI', scopes: ['organize'] })
+  expect(() => queue.submit(cli.id, [{ id: randomUUID(), action }], false)).toThrow(
+    'Only the owner can move mail to or from Trash',
+  )
+  const token = issueToken(db, {
+    kind: 'agent',
+    name: 'Agent',
+    scopes: ['organize'],
+    expiresAt: Date.now() + 60_000,
+  })
+  const agent = authenticate(db, token.secret)
+  if (!agent) throw new Error('Missing agent principal')
+  const server = buildMcpServer(agent, {
+    db,
+    queries,
+    drafts: new Drafts(db, store, () => null),
+    mutations: queue,
+  })
+  const [a, b] = InMemoryTransport.createLinkedPair()
+  const client = new Client({ name: 'test', version: '0' })
+  try {
+    await Promise.all([server.connect(a), client.connect(b)])
+    expect(
+      await client.callTool({
+        name: 'add_label',
+        arguments: { thread_ids: [threadId], label_id: labelId },
+      }),
+    ).toMatchObject({
+      isError: true,
+      content: [{ text: 'Only the owner can move mail to or from Trash' }],
+    })
+  } finally {
+    await Promise.all([client.close(), server.close()])
+  }
+  await queue.tick()
+  expect(imap.writes).toEqual([])
+})
+
+it('rechecks the Trash role before dispatching a queued agent label change', async () => {
+  const { db, imap, queue, threadId } = await fixture()
+  const token = issueToken(db, {
+    kind: 'agent',
+    name: 'Agent',
+    scopes: ['organize'],
+    expiresAt: Date.now() + 60_000,
+  })
+  const agent = authenticate(db, token.secret)
+  if (!agent) throw new Error('Missing agent principal')
+  const action = organizeAsAgent(db, queue, agent, 'add_label', [
+    { kind: 'label', labelId: 'a:folder:Project', value: true, threadId },
+  ])
+  expect(action.error).toBeNull()
+  imap.folder('Project').specialUse = '\\Trash'
+  await queue.tick()
+  expect(queue.agentResults(action.id)[0]).toMatchObject({
+    status: 'failed',
+    error: 'Only the owner can move mail to or from Trash',
+  })
+  expect(imap.writes).toEqual([])
 })
 
 it('reconciles a move whose response is lost without replaying it or offering an inverse', async () => {
   const { db, imap, messageId, view, run } = await fixture()
-  const move = imap.messageMove.bind(imap)
-  vi.spyOn(imap, 'messageMove').mockImplementationOnce(async (...args) => {
+  const move = imap.uidMove.bind(imap)
+  vi.spyOn(imap, 'uidMove').mockImplementationOnce(async (...args) => {
     await move(...args)
     return false
   })

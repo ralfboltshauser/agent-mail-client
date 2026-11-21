@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import {
+  type AgentMutationResult,
   actionLabels,
   imapActionError,
   imapActionLabels,
@@ -10,6 +11,7 @@ import {
   type OrganiseAction,
   SNOOZED_LABEL,
 } from '@amc/protocol'
+import { agentGrantActive } from '../auth/tokens.ts'
 import { transaction } from '../db/database.ts'
 import type { Logger } from '../log.ts'
 import { GmailHttpError } from '../providers/gmail/http.ts'
@@ -23,6 +25,9 @@ import type {
 import type { MessageLocation } from '../providers/imap/locations.ts'
 import {
   executeImap,
+  IMAP_COPY_INCOMPLETE,
+  IMAP_UNDO_UNVERIFIED,
+  type ImapChange,
   type ImapJournalEntry,
   type ImapMutationRunner,
   imapLocationRevision,
@@ -57,6 +62,7 @@ interface ThreadRow {
 }
 
 interface MutationRow {
+  seq: number
   id: string
   account_id: string
   thread_id: string
@@ -74,6 +80,8 @@ interface MutationRow {
   state_before: string
   intent_id: string | null
   undo_of: string | null
+  agent_action_id: string | null
+  agent_message_ids: string
 }
 
 interface Intent {
@@ -266,6 +274,8 @@ function inverse(changes: Change[]): Change[] {
 
 export const SNOOZE_DISABLED = 'Snooze is disabled on this Engine'
 
+const GRANT_EXPIRED = 'Agent grant expired'
+
 export class MutationError extends Error {}
 export class MutationPermissionError extends MutationError {}
 
@@ -333,6 +343,62 @@ export class Mutations {
     })
   }
 
+  agentResults(actionId: string): AgentMutationResult[] {
+    const rows = this.#db
+      .prepare('SELECT * FROM mutation WHERE agent_action_id = ? ORDER BY seq')
+      .all(actionId) as unknown as MutationRow[]
+    return rows.map((row) => {
+      const outcome = result(row)
+      const messages = new Map<string, AgentMutationResult['messages'][number]>(
+        outcome.messages?.map((message) => [message.messageId, message]),
+      )
+      for (const messageId of JSON.parse(row.agent_message_ids) as string[]) {
+        if (messages.has(messageId)) continue
+        messages.set(messageId, {
+          messageId,
+          status:
+            row.status === 'applied'
+              ? 'unchanged'
+              : row.status === 'partial'
+                ? 'failed'
+                : row.status,
+          appliedLabels: [],
+          failedLabels: [],
+          supersededLabels: [],
+        })
+      }
+      const undo = this.#agentUndoFor(row.id)
+      return { ...outcome, messages: [...messages.values()], undo: undo ? result(undo) : null }
+    })
+  }
+
+  #agentUndoFor(id: string): MutationRow | undefined {
+    return this.#db
+      .prepare('SELECT * FROM mutation WHERE undo_of = ? ORDER BY seq DESC LIMIT 1')
+      .get(id) as MutationRow | undefined
+  }
+
+  undoAgentAction(owner: string, actionId: string): MutationResult[] {
+    return transaction(this.#db, () => {
+      const targets = this.#db
+        .prepare(`
+        SELECT * FROM mutation WHERE agent_action_id = ? AND status != 'failed' ORDER BY seq DESC
+      `)
+        .all(actionId) as unknown as MutationRow[]
+      if (!targets.length) throw new MutationError('This action has no changes to undo')
+      return targets.map((target) => {
+        const existing = this.#agentUndoFor(target.id)
+        if (existing && existing.status !== 'failed') return result(existing)
+        return this.#submit(
+          owner,
+          { id: randomUUID(), action: { kind: 'undo', mutationId: target.id } },
+          false,
+          target,
+        )
+      })
+    })
+  }
+
   internalFailures(since: number, through: number): MutationResult[] {
     const rows = this.#db
       .prepare(
@@ -389,7 +455,12 @@ export class Mutations {
     )
   }
 
-  #submit(principal: string, request: MutationRequest, allowTrash: boolean): MutationResult {
+  #submit(
+    principal: string,
+    request: MutationRequest,
+    allowTrash: boolean,
+    agentUndoTarget?: MutationRow,
+  ): MutationResult {
     const action = request.action
     if (!this.snoozeEnabled && action.kind === 'snooze') throw new MutationError(SNOOZE_DISABLED)
     if (action.kind === 'trash' && !allowTrash)
@@ -405,19 +476,21 @@ export class Mutations {
     }
 
     if (action.kind === 'undo') {
-      const target = this.#db
-        .prepare(
-          `SELECT m.* FROM mutation m JOIN thread t ON t.id = m.thread_id
+      const target =
+        agentUndoTarget ??
+        (this.#db
+          .prepare(
+            `SELECT m.* FROM mutation m JOIN thread t ON t.id = m.thread_id
          WHERE m.principal = ? AND (?2 IS NULL OR m.thread_id = ?2)
            AND m.status != 'failed' AND m.undo_of IS NULL
            AND NOT EXISTS (SELECT 1 FROM mutation u WHERE u.undo_of = m.id AND u.status != 'failed')
          ORDER BY m.seq DESC LIMIT 1`,
-        )
-        .get(
-          principal,
-          action.threadId ??
-            (action.mutationId ? (this.#row(action.mutationId)?.thread_id ?? '') : null),
-        ) as MutationRow | undefined
+          )
+          .get(
+            principal,
+            action.threadId ??
+              (action.mutationId ? (this.#row(action.mutationId)?.thread_id ?? '') : null),
+          ) as MutationRow | undefined)
       if (!target || (action.mutationId && target.id !== action.mutationId)) {
         throw new MutationError('There is no matching action to undo')
       }
@@ -428,10 +501,18 @@ export class Mutations {
       if (target.status !== 'pending' && target.prepared !== 1)
         throw new MutationError('This action predates verified Gmail undo')
       const thread = this.#thread(target.thread_id)
+      const stateError = this.#undoStateError(target, request.id)
+      if (stateError) throw new MutationError(stateError)
+      if (thread.kind === 'imap' && !this.#hasVerifiedImapUndo(target))
+        throw new MutationError(IMAP_UNDO_UNVERIFIED)
       const state = this.#undoState(target, this.#state(thread))
-      const inverses = new Map(
-        this.#undoChanges(target).map((change) => [change.message_id, change.after]),
-      )
+      const changes = this.#undoChanges(target)
+      if (!allowTrash && thread.kind === 'imap') {
+        const trash = this.#imapTrashLabels(thread.account_id)
+        if (changes.some(({ after }) => Object.keys(after).some((id) => trash.has(id))))
+          throw new MutationPermissionError('Only the owner can undo changes to Trash')
+      }
+      const inverses = new Map(changes.map((change) => [change.message_id, change.after]))
       return this.#insert(
         request.id,
         principal,
@@ -461,6 +542,13 @@ export class Mutations {
       if (error) throw new MutationError(error)
     }
     if (action.kind === 'label') {
+      if (
+        thread.kind === 'imap' &&
+        !allowTrash &&
+        action.value &&
+        this.#imapTrashLabels(thread.account_id).has(action.labelId)
+      )
+        throw new MutationPermissionError('Only the owner can move mail to or from Trash')
       const allowed = this.#db
         .prepare(
           "SELECT 1 FROM label WHERE id = ? AND account_id = ? AND kind = 'user' AND name != ?",
@@ -623,8 +711,47 @@ export class Mutations {
     this.#db.prepare('UPDATE mutation SET modseq = ? WHERE id = ?').run(row.modseq, mutationId)
   }
 
+  #imapTrashLabels(accountId: string): Set<string> {
+    const account = this.#db.prepare('SELECT cursor FROM account WHERE id = ?').get(accountId)
+    const { imapTrashLabels = [] } = JSON.parse(String(account?.cursor ?? '{}')) as {
+      imapTrashLabels?: string[]
+    }
+    return new Set(['TRASH', ...imapTrashLabels].map((id) => labelId(accountId, id)))
+  }
+
+  #undoStateError(original: MutationRow, undoId: string): string | undefined {
+    const { kind } = JSON.parse(original.request)
+    if (kind !== 'mute' && kind !== 'snooze') return
+    const field = kind === 'mute' ? 'muted' : 'snoozeIntent'
+    const newer = this.#db
+      .prepare(`
+      SELECT 1 FROM mutation
+      WHERE thread_id = ? AND seq > ? AND id != ? AND status IN ('applied', 'pending')
+        AND json_type(state_patch, ?) IS NOT NULL
+      LIMIT 1
+    `)
+      .get(original.thread_id, original.seq, undoId, `$.${field}`)
+    if (newer)
+      return kind === 'mute'
+        ? 'Undo unavailable: Mute has changed since this action'
+        : 'Undo unavailable: Snooze has changed since this action'
+  }
+
+  #hasVerifiedImapUndo(original: MutationRow): boolean {
+    const { kind } = JSON.parse(original.request)
+    if (!['archive', 'trash', 'label'].includes(kind)) return true
+    const moves: ImapChange[] = readJournal(original).flatMap((entry) => entry.applied)
+    return (
+      moves.length > 0 &&
+      moves.every(
+        ({ moveFrom, revisions }) => moveFrom && Object.values(revisions ?? {}).some(Boolean),
+      )
+    )
+  }
+
   #undoState(original: MutationRow, current: ThreadState): Partial<ThreadState> {
-    const state: Partial<ThreadState> = current.snoozedUntil === null ? {} : { ...CLEAR_SNOOZE }
+    const state: Partial<ThreadState> =
+      current.snoozeIntent === original.id ? { ...CLEAR_SNOOZE } : {}
     if (original.status !== 'partial') {
       const { muted, muteIntent } = JSON.parse(original.state_before) as Partial<ThreadState>
       if (muted !== undefined) state.muted = muted
@@ -944,13 +1071,16 @@ export class Mutations {
         this.#finish(row, 'failed', SNOOZE_DISABLED, undefined, { discard: true })
         continue
       }
-      // Older Engine builds allowed scoped Agent tokens to enqueue Organise.
       const nonOwner = this.#db
         .prepare("SELECT 1 FROM token WHERE id = ? AND kind NOT IN ('desktop', 'cli')")
         .get(row.principal)
-      if (nonOwner) {
+      if (!row.agent_action_id && nonOwner) {
         const message = 'Organise requires a paired owner Client'
         this.#finish(row, 'failed', message)
+        continue
+      }
+      if (row.agent_action_id && !this.#agentGrantActive(row)) {
+        this.#stopAgentWrite(row, readJournal(row))
         continue
       }
       if (row.kind === 'imap') {
@@ -985,34 +1115,105 @@ export class Mutations {
 
   async #writeImap(row: MutationRow) {
     const original = row.undo_of ? this.#row(row.undo_of) : undefined
+    const journal = readJournal(row)
+    const entry: ImapJournalEntry = journal[0] ?? { applied: [], superseded: [], failed: [] }
+    journal[0] = entry
     if (original && (!['applied', 'partial'].includes(original.status) || !original.prepared)) {
       this.#finish(row, 'failed', 'The original IMAP action has no verified changes to undo')
       return
     }
-    const changes = original ? this.#undoChanges(original) : this.#patches(row.id).map(fromPatch)
-    const journal = readJournal(row)
-    const entry: ImapJournalEntry = journal[0] ?? { applied: [], superseded: [], failed: [] }
-    journal[0] = entry
+    if (original) {
+      const error =
+        this.#undoStateError(original, row.id) ??
+        (this.#hasVerifiedImapUndo(original) ? undefined : IMAP_UNDO_UNVERIFIED)
+      if (error) {
+        this.#finish(row, 'failed', error)
+        return
+      }
+    }
+    const changes: ImapChange[] = original
+      ? this.#undoChanges(original)
+      : this.#patches(row.id).map(fromPatch)
+    if (original) {
+      const sources = new Map(
+        readJournal(original).flatMap(({ applied }) =>
+          (applied as ImapChange[]).map(
+            ({ message_id, moveFrom }) => [message_id, moveFrom] as const,
+          ),
+        ),
+      )
+      for (const change of changes) change.moveFrom = sources.get(change.message_id)
+    }
+    const restricted = this.#db
+      .prepare(`
+      SELECT 1 FROM token WHERE id = ? AND (
+        kind = 'agent' OR 'admin' NOT IN (SELECT value FROM json_each(token.scopes))
+      )
+    `)
+      .get(row.principal)
+    const allowTrash = !row.agent_action_id && !original?.agent_action_id && !restricted
+    const beforeWrite = () => {
+      if (row.agent_action_id && !this.#agentGrantActive(row))
+        throw new MutationPermissionError(GRANT_EXPIRED)
+    }
     try {
-      if (changes.length) {
+      if (changes.length || entry.pending) {
         const ran = await this.#imap?.(row.account_id, (sync) =>
-          executeImap(sync, changes, entry, () => this.#saveJournal(row, journal)),
+          executeImap(
+            sync,
+            changes,
+            entry,
+            () => this.#saveJournal(row, journal),
+            allowTrash,
+            beforeWrite,
+          ),
         )
         if (!ran) return
       }
     } catch (error) {
-      if (this.#retry(row, error)) return
-      entry.error ??= 'Could not verify the change with the IMAP server'
-      if (entry.pending) {
-        entry.uncertain ??= []
-        entry.uncertain.push(entry.pending.change)
+      if (error instanceof MutationPermissionError) {
+        this.#stopAgentWrite(row, journal, entry.pending?.copied ? IMAP_COPY_INCOMPLETE : undefined)
+        return
       }
+      if (!entry.pending?.copied && this.#retry(row, error)) return
+      if (!entry.pending?.copied) {
+        entry.error ??= 'Could not verify the change with the IMAP server'
+        if (entry.pending) {
+          entry.uncertain ??= []
+          entry.uncertain.push(entry.pending.change)
+        }
+        const done = new Set(messageResults(journal).map(({ messageId }) => messageId))
+        entry.failed.push(...changes.filter(({ message_id }) => !done.has(message_id)))
+      }
+    }
+    if (entry.pending?.copied) {
+      const { change } = entry.pending
+      transaction(this.#db, () => {
+        this.#db
+          .prepare('UPDATE mutation SET error = ? WHERE id = ?')
+          .run(IMAP_COPY_INCOMPLETE, row.id)
+        this.#db
+          .prepare(
+            "UPDATE mutation_message SET patch = '{}' WHERE mutation_id = ? AND message_id = ?",
+          )
+          .run(row.id, change.message_id)
+        this.#store.refreshMessageLabels(change.message_id)
+        this.#refreshThread(row.thread_id, row.id)
+      })
+      // Try once on the next pass, then use the existing bounded backoff.
+      if (row.error !== IMAP_COPY_INCOMPLETE || this.#retry(row, new Error(IMAP_COPY_INCOMPLETE)))
+        return
+      entry.error = IMAP_COPY_INCOMPLETE
+      entry.failed.push(change)
       const done = new Set(messageResults(journal).map(({ messageId }) => messageId))
-      entry.failed.push(...changes.filter(({ message_id }) => !done.has(message_id)))
+      entry.failed.push(
+        ...changes.filter(
+          ({ message_id, after }) => !done.has(message_id) && Object.keys(after).length,
+        ),
+      )
     }
     transaction(this.#db, () => {
       this.#db.prepare('UPDATE mutation SET prepared = 1 WHERE id = ?').run(row.id)
-      // Undo may have been queued before the original's partial result was known.
       if (original) {
         row.state_patch = JSON.stringify(
           this.#undoState(original, this.#committedState(row.thread_id)),
@@ -1028,6 +1229,20 @@ export class Mutations {
         journal,
       )
     })
+  }
+
+  #stopAgentWrite(row: MutationRow, journal: JournalEntry[], detail = row.error) {
+    for (const entry of journal) {
+      if (!entry.pending) continue
+      entry.uncertain = [...(entry.uncertain ?? []), entry.pending.change]
+      delete entry.pending
+    }
+    this.#failRemaining(row, journal, this.#writePlan(row).steps)
+    this.#finishWrite(row, journal, detail ? `${detail}. ${GRANT_EXPIRED}` : GRANT_EXPIRED)
+  }
+
+  #agentGrantActive(row: MutationRow): boolean {
+    return agentGrantActive(this.#db, row.principal, 'organize', this.#now(), row.account_id)
   }
 
   #snoozedLabel(account: string): string | undefined {
@@ -1424,6 +1639,12 @@ export class Mutations {
         return true
       }
 
+      const beforeDispatch = row.agent_action_id
+        ? () => {
+            if (!this.#agentGrantActive(row)) throw new MutationPermissionError(GRANT_EXPIRED)
+          }
+        : undefined
+      beforeDispatch?.()
       const { message_id, after } = candidate
       const historyId = current.get(message_id)?.historyId
       entry.pending = { change: candidate, historyId }
@@ -1455,9 +1676,18 @@ export class Mutations {
             const label = key === snoozed ? snoozedId : rawId(key)
             if (label) (present ? add : remove).push(label)
           }
-          acknowledge(await api.modifyMessage(rawId(message_id), add, remove))
+          acknowledge(
+            beforeDispatch
+              ? await api.modifyMessage(rawId(message_id), add, remove, beforeDispatch)
+              : await api.modifyMessage(rawId(message_id), add, remove),
+          )
         }
       } catch (error) {
+        if (error instanceof MutationPermissionError) {
+          // The request never started. Clear the journal marker before stopping the grant.
+          delete entry.pending
+          throw error
+        }
         const ambiguous =
           !(error instanceof GmailHttpError || error instanceof OAuthError) ||
           (error instanceof GmailHttpError && (error.status === 408 || error.status >= 500))
@@ -1628,6 +1858,11 @@ export class Mutations {
       this.#finish(row, 'failed', 'The original action has no verified Gmail undo')
       return
     }
+    const stateError = original && this.#undoStateError(original, row.id)
+    if (stateError) {
+      this.#finish(row, 'failed', stateError)
+      return
+    }
     if (!row.prepared) {
       try {
         await this.#prepare(api, row, original)
@@ -1665,6 +1900,10 @@ export class Mutations {
         row.progress = progress + 1
       }
     } catch (error) {
+      if (error instanceof MutationPermissionError) {
+        this.#stopAgentWrite(row, journal)
+        return
+      }
       if (this.#retry(row, error)) return
       this.#failRemaining(row, journal, steps)
       row.attempts = 0
@@ -1854,7 +2093,12 @@ export class Mutations {
         : (JSON.parse(row.state_patch) as Partial<ThreadState>)
       const userAction = row.principal !== INTERNAL
       const succeeded = status === 'applied' || status === 'partial'
-      const cancelsSnooze = userAction && succeeded && JSON.parse(row.request).kind !== 'snooze'
+      const { kind } = JSON.parse(row.request)
+      const cancelsSnooze =
+        userAction &&
+        succeeded &&
+        kind !== 'snooze' &&
+        (kind !== 'undo' || statePatch.snoozeIntent === null)
       const patch =
         !discard && (status === 'applied' || (!userAction && statePatch.snoozedUntil === null))
           ? { ...statePatch }

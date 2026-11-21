@@ -1,9 +1,9 @@
 import { spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { SCOPES } from '@amc/protocol'
+import { MessageDetail, SCOPES, ThreadDetail } from '@amc/protocol'
 import { describe, expect, it, vi } from 'vitest'
-import { issueToken } from '../auth/tokens.ts'
+import { DAY_MS, issueToken } from '../auth/tokens.ts'
 import { BlobStore } from '../blobs.ts'
 import { Sealer } from '../crypto.ts'
 import { gmailDelivery, publishSent } from '../mail/delivery.ts'
@@ -12,6 +12,7 @@ import { Outbox } from '../mail/outbox.ts'
 import { MailQueries } from '../mail/queries.ts'
 import { MailStore } from '../mail/store.ts'
 import { FakeGmail } from '../providers/gmail/fake.ts'
+import { fromGmail } from '../providers/gmail/mapping.ts'
 import type { ImapCredentials } from '../providers/imap/client.ts'
 import { FakeImap } from '../providers/imap/fake.ts'
 import { LAZY_ATTACHMENT_THRESHOLD } from '../providers/imap/mapping.ts'
@@ -71,14 +72,19 @@ function setup(
     },
   })
   const admin = issueToken(db, { kind: 'cli', name: 'mac', scopes: ['read', 'admin'] }).secret
-  const reader = issueToken(db, { kind: 'agent', name: 'agent', scopes: ['read'] }).secret
+  const reader = issueToken(db, {
+    kind: 'agent',
+    expiresAt: Date.now() + DAY_MS,
+    name: 'agent',
+    scopes: ['read'],
+  }).secret
   const call = (path: string, token: string, body?: unknown) =>
     app.request(path, {
       method: body === undefined ? 'GET' : 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     })
-  return { app, db, sealer, sync, gmail, imap, verifyImap, call, admin, reader, outbox }
+  return { app, db, sealer, store, sync, gmail, imap, verifyImap, call, admin, reader, outbox }
 }
 
 const login = {
@@ -100,6 +106,55 @@ const login = {
 }
 
 describe('mail routes', () => {
+  it('defers old read bodies on request and preserves full bodies for older clients', async () => {
+    const { db, store, gmail, call, reader } = setup()
+    db.prepare(
+      "INSERT INTO account (id, kind, address, credentials, created_at) VALUES ('a', 'gmail', 'owner@example.com', x'00', 0)",
+    ).run()
+    const body = 'Long message text. '.repeat(20_000)
+    for (const n of [6, 3, 2, 1, 5, 4]) {
+      const message = gmail.add(`m${n}`, {
+        threadId: 'thread',
+        labels: n === 2 ? ['INBOX', 'UNREAD'] : ['INBOX'],
+        body: `${body}\0End ${n}`,
+        date: n === 4 ? 3000 : n * 1000,
+      })
+      store.putMessage('a', ['owner@example.com'], fromGmail(message))
+    }
+
+    const response = await call('/v1/threads/a%3Athread?deferBodies=1', reader)
+    expect(response.status).toBe(200)
+    const thread = ThreadDetail.parse(await response.json())
+    expect(thread.messages.map((m) => m.id)).toEqual([
+      'a:m1',
+      'a:m2',
+      'a:m3',
+      'a:m4',
+      'a:m5',
+      'a:m6',
+    ])
+    expect(thread.messages.map((m) => m.bodyText === null)).toEqual([
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+    ])
+    expect(thread.messages[0]).toMatchObject({
+      from: { name: 'Alice', address: 'alice@example.com' },
+      snippet: body.slice(0, 50),
+      unread: false,
+    })
+
+    const older = await call('/v1/messages/a%3Am1', reader)
+    expect(older.status).toBe(200)
+    expect(MessageDetail.parse(await older.json()).bodyText).toBe(`${body}\0End 1`)
+    const full = await call('/v1/threads/a%3Athread', reader)
+    expect(ThreadDetail.parse(await full.json()).messages[0]?.bodyText).toBe(`${body}\0End 1`)
+    expect((await call('/v1/messages/missing', reader)).status).toBe(404)
+  })
+
   it('verifies IMAP/SMTP under admin, seals the login, and syncs Inbox updates alongside Gmail', async () => {
     const { db, sealer, sync, gmail, imap, verifyImap, call, admin, reader } = setup()
     try {
@@ -422,17 +477,16 @@ it('has no SMTP submission dispatch through Agent tokens, HTTP, MCP or the CLI (
     .spyOn(ImapProvider.prototype, 'send')
     .mockRejectedValue(new Error('Unexpected send'))
   const gmailSend = vi.spyOn(gmail, 'sendMessage')
-  const limited = issueToken(db, {
-    kind: 'agent',
-    name: 'agent',
-    scopes: SCOPES.filter((scope) => scope !== 'send'),
-  }).secret
   setSetting(db, 'dangerouslyAllowSend', true)
-  const agent = issueToken(db, {
+  const grant = issueToken(db, {
     kind: 'agent',
-    name: 'agent with send scope',
-    scopes: SCOPES,
-  }).secret
+    name: 'agent fixture',
+    scopes: ['read'],
+    expiresAt: Date.now() + DAY_MS,
+  })
+  const combinations = Array.from({ length: 2 ** SCOPES.length }, (_, mask) =>
+    SCOPES.filter((_scope, index) => mask & (1 << index)),
+  )
   try {
     expect((await call('/v1/accounts/imap', admin, login)).status).toBe(200)
     const account = db.prepare('SELECT id FROM account').get()?.id
@@ -442,7 +496,11 @@ it('has no SMTP submission dispatch through Agent tokens, HTTP, MCP or the CLI (
       subject: 'Synthetic',
       text: 'Synthetic',
     }
-    for (const token of [limited, agent, admin]) {
+    for (const scopes of [null, ...combinations]) {
+      // Simulate restored grants with obsolete send or admin scopes.
+      const token = scopes ? grant.secret : admin
+      if (scopes)
+        db.prepare('UPDATE token SET scopes = ? WHERE id = ?').run(JSON.stringify(scopes), grant.id)
       for (const path of [
         '/v1/send',
         '/v1/messages/send',
@@ -487,7 +545,7 @@ it('has no SMTP submission dispatch through Agent tokens, HTTP, MCP or the CLI (
           ...process.env,
           XDG_CONFIG_HOME: tempDir(),
           AMC_ENGINE_URL: 'http://127.0.0.1:1',
-          AMC_TOKEN: agent,
+          AMC_TOKEN: grant.secret,
         },
       })
       expect(processResult.status).toBe(1)

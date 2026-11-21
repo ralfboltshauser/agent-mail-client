@@ -1,5 +1,7 @@
 import type { ImapAccountInput } from '@amc/protocol'
-import { ImapFlow } from 'imapflow'
+import { type CopyResponseObject, ImapFlow } from 'imapflow'
+import { parseCopyUid } from 'imapflow/lib/commands/copyuid-parser'
+import { encodePath, normalizePath } from 'imapflow/lib/tools'
 import nodemailer, { type SMTPTransportOptions } from 'nodemailer'
 
 export type ImapCredentials = Omit<ImapAccountInput, 'address'>
@@ -21,18 +23,72 @@ export type ImapClient = Pick<
   | 'on'
   | 'off'
   | 'append'
-  | 'messageMove'
   | 'messageCopy'
-  | 'messageDelete'
   | 'messageFlagsAdd'
   | 'messageFlagsRemove'
   | 'messageFlagsSet'
->
+> & {
+  uidMove(uid: number, destination: string): Promise<CopyResponseObject | false | undefined>
+  uidExpunge(uid: number): Promise<boolean>
+}
+
+export function imapMoveSupport(client: Pick<ImapClient, 'capabilities' | 'enabled'>) {
+  const native =
+    client.capabilities.has('MOVE') ||
+    client.enabled.has('IMAP4REV2') ||
+    (client.capabilities.has('IMAP4rev2') && !client.capabilities.has('IMAP4rev1'))
+  return { native, available: native || client.capabilities.has('UIDPLUS') }
+}
+
+// These commands run on a selected mailbox after a public command has ended IDLE.
+// ImapFlow's high-level MOVE and delete methods can fall back to mailbox-wide EXPUNGE.
+type ImapResponse = Parameters<typeof parseCopyUid>[0]
+type ImapCommands = {
+  exec(
+    command: 'UID MOVE' | 'UID EXPUNGE',
+    attributes: { type: 'SEQUENCE' | 'ATOM'; value: string }[],
+    options?: { untagged: { OK(response: ImapResponse): Promise<void> } },
+  ): Promise<{ response: ImapResponse; next(): void }>
+}
+
+function validUid(uid: number): boolean {
+  return Number.isInteger(uid) && uid > 0 && uid <= 0xffff_ffff
+}
+
+export class ExactUidImapFlow extends ImapFlow {
+  async uidMove(uid: number, path: string) {
+    if (!this.mailbox || !validUid(uid) || !imapMoveSupport(this).native) return false
+    const destination = normalizePath(this, path)
+    const result: CopyResponseObject = { path: this.mailbox.path, destination }
+    const commands = this as unknown as ImapCommands
+    const response = await commands.exec(
+      'UID MOVE',
+      [
+        { type: 'SEQUENCE', value: String(uid) },
+        { type: 'ATOM', value: encodePath(this, destination) },
+      ],
+      {
+        untagged: { OK: async (untagged) => parseCopyUid(untagged, result) },
+      },
+    )
+    response.next()
+    parseCopyUid(response.response, result)
+    return result
+  }
+
+  async uidExpunge(uid: number) {
+    if (!this.mailbox || !validUid(uid)) return false
+    const commands = this as unknown as ImapCommands
+    const response = await commands.exec('UID EXPUNGE', [{ type: 'SEQUENCE', value: String(uid) }])
+    response.next()
+    return true
+  }
+}
 
 export type ImapClientFactory = (credentials: ImapCredentials['imap']) => ImapClient
 
 export const createImapClient: ImapClientFactory = ({ host, port, tls, username, password }) =>
-  new ImapFlow({
+  new ExactUidImapFlow({
     host,
     port,
     secure: tls === 'implicit',

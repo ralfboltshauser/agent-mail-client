@@ -3,10 +3,12 @@ import { hostname } from 'node:os'
 import { setTimeout as delay } from 'node:timers/promises'
 import type {
   AccountSummary,
+  AgentAction,
   Contact,
   GmailAuthStartResponse,
   Health,
   Me,
+  MessageDetail,
   MutationResponse,
   OrganiseAction,
   PairResponse,
@@ -15,6 +17,7 @@ import type {
   ThreadList,
   ThreadSummary,
 } from '@amc/protocol'
+import { doctorWarnings } from '@amc/protocol'
 import { Command } from 'commander'
 import { authed, EngineError, request } from './client.ts'
 import { readConfig, writeConfig } from './config.ts'
@@ -47,7 +50,7 @@ program
 
 program
   .command('status')
-  .description('Show the Engine version, storage and who this token is')
+  .description('Show Engine health and token details')
   .option('--json', 'print JSON')
   .action(async (opts: { json?: boolean }) => {
     const api = authed(requireConfig())
@@ -61,11 +64,40 @@ program
     )
     console.log(`Token  ${me.name} (${me.kind}) · ${me.scopes.join(', ')}`)
     console.log(`Database ${formatBytes(health.database.bytes)}`)
+    if (health.lastBackup !== undefined) {
+      const b = health.lastBackup
+      console.log(
+        `Backup ${b ? `${new Date(b.at).toISOString()} · ${formatBytes(b.bytes)}` : 'none yet'}`,
+      )
+    }
+    for (const account of health.accounts ?? []) {
+      const lag = account.syncLagSeconds
+      console.log(
+        `Account ${account.address} · ${account.status} · ${lag === null ? 'never synced' : `sync lag ${formatDuration(Math.floor(lag))}`}`,
+      )
+      if (account.lastError) console.log(`  ${account.lastError}`)
+    }
+    if (health.outboxDepth !== undefined) {
+      console.log(`Outbox ${health.outboxDepth} pending`)
+    }
+    if (health.mutationQueueDepth !== undefined) {
+      console.log(`Mutation queue ${health.mutationQueueDepth} pending`)
+    }
     for (const disk of health.disks) {
       console.log(
         `Disk   ${disk.path}: ${formatBytes(disk.freeBytes)} free of ${formatBytes(disk.totalBytes)}`,
       )
     }
+  })
+
+program
+  .command('doctor')
+  .description('Warn about stale backups, slow sync, low disk space and Account errors')
+  .action(async () => {
+    const health = await authed(requireConfig())<Health>('/v1/health')
+    const warnings = doctorWarnings(health)
+    if (!warnings.length) return console.log('No health warnings.')
+    for (const warning of warnings) console.warn(`Warning: ${warning}`)
   })
 
 const account = program.command('account').description('Manage mail Accounts')
@@ -158,10 +190,15 @@ program
   .argument('<id>', 'Thread id')
   .option('--json', 'print JSON')
   .action(async (id: string, opts: { json?: boolean }) => {
-    const t = await authed(requireConfig())<ThreadDetail>(`/v1/threads/${encodeURIComponent(id)}`)
-    if (opts.json) return printJson(t)
-    console.log(`# ${t.subject || '(no subject)'}\n`)
+    const api = authed(requireConfig())
+    const t = await api<ThreadDetail>(`/v1/threads/${encodeURIComponent(id)}?deferBodies=1`)
+    if (!opts.json) console.log(`# ${t.subject || '(no subject)'}\n`)
     for (const m of t.messages) {
+      if (m.bodyText === null) {
+        const detail = await api<MessageDetail>(`/v1/messages/${encodeURIComponent(m.id)}`)
+        m.bodyText = detail.bodyText
+      }
+      if (opts.json) continue
       const from = m.from
         ? m.from.name
           ? `${m.from.name} <${m.from.address}>`
@@ -174,6 +211,7 @@ program
         console.log(`📎    ${a.filename} (${formatBytes(a.size)})`)
       console.log(`\n${m.bodyText}\n\n${'─'.repeat(60)}\n`)
     }
+    if (opts.json) printJson(t)
   })
 
 program
@@ -209,6 +247,10 @@ async function organise(action: OrganiseAction) {
   }
   if (result.status === 'applied' && result.superseded?.length) {
     console.log(`Skipped ${result.superseded.length} changed message(s) · ${id}`)
+    return
+  }
+  if (result.status === 'pending' && result.error) {
+    console.log(`${result.error} · cleanup queued · ${id}`)
     return
   }
   console.log(`${result.status === 'applied' ? 'Applied' : 'Queued'} · ${id}`)
@@ -257,28 +299,32 @@ const token = program.command('token').description('Tokens for Agents (MCP)')
 token
   .command('create')
   .description('Create an Agent token and print how to connect Claude Code, Codex or T3 Code')
-  .requiredOption('--name <name>', 'who will use it, e.g. t3 or codex')
+  .requiredOption('--agent <name>', 'who will use it, e.g. t3 or codex')
   .option('--scopes <list>', 'comma-separated: read, organize, draft', 'read,draft')
-  .option('--days <n>', 'expire after n days')
-  .action(async (opts: { name: string; scopes: string; days?: string }) => {
+  .requiredOption('--expires <duration>', 'expiry in days, e.g. 30d (maximum 90d)')
+  .option('--account <id>', 'limit this token to one Account')
+  .action(async (opts: { agent: string; scopes: string; expires: string; account?: string }) => {
+    const match = /^([1-9]\d?)d$/.exec(opts.expires)
+    if (!match || Number(match[1]) > 90) throw new Error('Use an expiry between 1d and 90d')
     const config = requireConfig()
     const res = await authed(config)<{ id: string; token: string; scopes: string[] }>(
       '/v1/tokens',
       {
         method: 'POST',
         body: {
-          name: opts.name,
+          name: opts.agent,
           scopes: opts.scopes
             .split(',')
             .map((s) => s.trim())
             .filter(Boolean),
-          ...(opts.days ? { expiresInDays: Number(opts.days) } : {}),
+          expiresInDays: Number(match[1]),
+          ...(opts.account ? { accountId: opts.account } : {}),
         },
       },
     )
     const url = new URL('/mcp', config.engineUrl).toString()
     console.log(
-      `Created ${res.id} (${opts.name}) with scopes: ${res.scopes.join(', ')}. It is shown only once.\n`,
+      `Created ${res.id} (${opts.agent}) for ${opts.expires} with scopes: ${res.scopes.join(', ')}. It is shown only once.\n`,
     )
     console.log('Claude Code:')
     console.log(
@@ -305,16 +351,23 @@ token
         scopes: string[]
         last_used_at: number | null
         revoked_at: number | null
+        expires_at: number | null
+        account_id: string | null
       }[]
     }>('/v1/tokens')
     for (const t of tokens) {
-      const state = t.revoked_at
-        ? 'revoked'
-        : t.last_used_at
-          ? `used ${ago(t.last_used_at)}`
-          : 'unused'
+      const state =
+        t.kind === 'agent' && t.expires_at === null
+          ? 'legacy token · re-issue with an expiry'
+          : t.revoked_at
+            ? 'revoked'
+            : t.expires_at !== null && t.expires_at <= Date.now()
+              ? 'expired'
+              : t.last_used_at
+                ? `used ${ago(t.last_used_at)}`
+                : 'unused'
       console.log(
-        `${t.id}  ${t.kind.padEnd(8)} ${t.name.padEnd(16)} ${t.scopes.join(',').padEnd(30)} ${state}`,
+        `${t.id}  ${t.kind.padEnd(8)} ${t.name.padEnd(16)} ${t.scopes.join(',').padEnd(30)} ${state}${t.account_id ? ` · ${t.account_id}` : ''}`,
       )
     }
   })
@@ -326,6 +379,34 @@ token
   .action(async (id: string) => {
     await authed(requireConfig())(`/v1/tokens/${encodeURIComponent(id)}`, { method: 'DELETE' })
     console.log(`Revoked ${id}`)
+  })
+
+const agent = program.command('agent').description('Review Agent activity')
+
+agent
+  .command('log')
+  .description('List recent Agent actions')
+  .option('--before <cursor>', 'show the next page using nextBefore')
+  .action(async ({ before }: { before?: string }) => {
+    const query = before ? `?before=${encodeURIComponent(before)}` : ''
+    printJson(
+      await authed(requireConfig())<{ actions: AgentAction[]; nextBefore: number | null }>(
+        `/v1/agent/log${query}`,
+      ),
+    )
+  })
+
+agent
+  .command('undo')
+  .description('Undo an Agent organize action')
+  .argument('<id>', 'action id from amc agent log')
+  .action(async (id: string) => {
+    printJson(
+      await authed(requireConfig())<MutationResponse>(
+        `/v1/agent/log/${encodeURIComponent(id)}/undo`,
+        { method: 'POST' },
+      ),
+    )
   })
 
 program
