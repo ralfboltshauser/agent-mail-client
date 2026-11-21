@@ -487,9 +487,16 @@ export class Mutations {
         agentUndoTarget ??
         (this.#db
           .prepare(
-            `SELECT m.* FROM mutation m JOIN thread t ON t.id = m.thread_id
+            `SELECT m.* FROM mutation m JOIN account a ON a.id = m.account_id
          WHERE m.principal = ? AND (?2 IS NULL OR m.thread_id = ?2)
            AND m.status != 'failed' AND m.undo_of IS NULL
+           AND NOT (
+             a.kind = 'imap' AND m.status = 'applied' AND m.prepared = 1
+             AND json_extract(m.request, '$.kind') IN ('read', 'star')
+             AND NOT EXISTS (
+               SELECT 1 FROM json_each(m.write_journal) j WHERE json_array_length(j.value, '$.applied') > 0
+             )
+           )
            AND NOT EXISTS (SELECT 1 FROM mutation u WHERE u.undo_of = m.id AND u.status != 'failed')
          ORDER BY m.seq DESC LIMIT 1`,
           )

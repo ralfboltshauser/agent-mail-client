@@ -183,7 +183,7 @@ function agentDraftResult(db: Db, agent: Principal, draft: VersionedDraft) {
     : { id: draft.id, revision: draft.revision, status: 'applied' as const }
 }
 
-function actionResult(queue: Mutations, row: ActionRow): AgentAction {
+function actionResult(queue: Mutations, row: ActionRow, draftMirrorError = false): AgentAction {
   const mutations = queue.agentResults(row.id)
   const statuses = mutations.map(({ status }) => status)
   let status: AgentAction['status'] = row.status
@@ -199,7 +199,11 @@ function actionResult(queue: Mutations, row: ActionRow): AgentAction {
     threads: JSON.parse(row.threads) as string[],
     createdAt: row.created_at,
     status,
-    error: row.error,
+    error:
+      row.error ??
+      (draftMirrorError
+        ? 'Draft saved locally. Mirroring to the provider failed and will retry.'
+        : null),
     draftId: row.draft_id,
     mutations,
   }
@@ -208,12 +212,16 @@ function actionResult(queue: Mutations, row: ActionRow): AgentAction {
 export function listAgentActions(db: Db, queue: Mutations, before?: number) {
   const rows = db
     .prepare(`
-    SELECT * FROM agent_action WHERE (?1 IS NULL OR seq < ?1) ORDER BY seq DESC LIMIT 51
+    SELECT agent_action.*, (draft.mirror_dirty = 1 AND draft.mirror_error = 1) AS draft_mirror_error
+    FROM agent_action LEFT JOIN draft ON draft.id = agent_action.draft_id
+    WHERE (?1 IS NULL OR seq < ?1) ORDER BY seq DESC LIMIT 51
   `)
-    .all({ '1': before ?? null }) as unknown as Array<ActionRow & { seq: number }>
+    .all({ '1': before ?? null }) as unknown as Array<
+    ActionRow & { seq: number; draft_mirror_error: number | null }
+  >
   const page = rows.slice(0, 50)
   return {
-    actions: page.map((row) => actionResult(queue, row)),
+    actions: page.map((row) => actionResult(queue, row, row.draft_mirror_error === 1)),
     nextBefore: rows.length > 50 ? (page.at(-1)?.seq ?? null) : null,
   }
 }

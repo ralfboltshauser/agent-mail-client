@@ -297,6 +297,28 @@ it.each([
 
 const longBody = `${'A line in a large message. '.repeat(32)}\r\n`
 
+it.each(['<img src="data:image/png;base64,', '<img alt="sample > text" src="', '<!-- '])(
+  'keeps clipped HTML markup out of IMAP snippets and search (%s)',
+  async (start) => {
+    const { imap, makeSync, blobs, queries } = fixture()
+    const close = start.startsWith('<!--') ? '-->' : '">'
+    const html = `<p>Visible content</p>${start}${'hiddenpayload '.repeat(50_000)}${close}<p>Actual message</p>`
+    imap.add(
+      'INBOX',
+      'Subject: Clipped HTML\r\nContent-Type: multipart/mixed; boundary=body',
+      `--body\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n${html}\r\n--body--`,
+    )
+    await makeSync().step('all')
+    const [thread] = queries.threads({}).threads
+    expect(thread?.snippet).toBe('Visible content')
+    const [message] = queries.thread(thread?.id ?? '')?.messages ?? []
+    expect(message?.bodySearchTruncated).toBe(true)
+    expect(queries.search('visible', {})).toHaveLength(1)
+    expect(queries.search('hiddenpayload', {})).toHaveLength(0)
+    expect(queries.messageHtml(message?.id ?? '', blobs)).toContain('<p>Actual message</p>')
+  },
+)
+
 it('stores oversized raw and displayed bodies completely and marks the FTS prefix', async () => {
   const { imap, makeSync, db, blobs, queries } = fixture()
   const lines = longBody.repeat(

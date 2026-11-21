@@ -2,6 +2,7 @@ import DOMPurify from 'dompurify'
 import { ImageOff } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { getAmc } from '@/lib/amc'
 
 const BASE_CSS = `
   :root { color-scheme: light; }
@@ -70,7 +71,7 @@ export function HtmlBody({ html }: { html: string }) {
         if (!link) return
         event.preventDefault()
         const href = link.getAttribute('href') ?? ''
-        if (/^(https?|mailto):/i.test(href)) void window.amc.openExternal(href)
+        if (/^(https?|mailto):/i.test(href)) void getAmc().openExternal(href)
       })
     }
     el.addEventListener('load', onLoad)
@@ -119,11 +120,12 @@ export function TextBody({ text }: { text: string }) {
   )
   const visible = quoteStart > 0 && !showQuoted ? lines.slice(0, quoteStart) : lines
   return (
-    <div className="select-text whitespace-pre-wrap break-words text-[14px] leading-relaxed text-foreground/90">
+    <div className="max-w-[65ch] select-text wrap-anywhere whitespace-pre-wrap text-sm leading-[1.7] text-foreground/95">
       {linkify(visible.join('\n').trimEnd())}
       {quoteStart > 0 && !showQuoted && (
         <button
           type="button"
+          aria-label="Show quoted text"
           className="mt-2 block rounded bg-muted px-2 text-xs text-muted-foreground hover:bg-muted/70"
           onClick={() => setShowQuoted(true)}
         >
@@ -145,7 +147,7 @@ function linkify(text: string): React.ReactNode[] {
         className="text-primary underline-offset-2 hover:underline"
         onClick={(e) => {
           e.preventDefault()
-          void window.amc.openExternal(part)
+          void getAmc().openExternal(part)
         }}
       >
         {part}

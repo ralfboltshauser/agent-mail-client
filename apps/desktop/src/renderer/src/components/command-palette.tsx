@@ -1,5 +1,16 @@
-import type { AccountSummary, Label } from '@amc/protocol'
-import { Moon, RefreshCw, Search, Sun, Tag, Undo2, Users } from 'lucide-react'
+import { type AccountSummary, BUCKETS, type Label } from '@amc/protocol'
+import { defaultFilter } from 'cmdk'
+import {
+  Layers,
+  type LucideIcon,
+  Moon,
+  RefreshCw,
+  Search,
+  Sun,
+  Tag,
+  Undo2,
+  Users,
+} from 'lucide-react'
 import { useState } from 'react'
 import {
   CommandDialog,
@@ -10,8 +21,17 @@ import {
   CommandList,
   CommandShortcut,
 } from '@/components/ui/command'
+import { getAmc } from '@/lib/amc'
 import type { View } from '../../../shared/api'
 import { navigableLabels, systemViews } from './app-sidebar'
+import { Kbd } from './ui/kbd'
+
+interface CommandAction {
+  name: string
+  shortcut?: string
+  icon: LucideIcon
+  run: () => void
+}
 
 interface Props {
   open: boolean
@@ -24,7 +44,10 @@ interface Props {
   onToggleTheme: () => void
   dark: boolean
   snoozeEnabled: boolean
-  organise: { name: string; shortcut: string; icon: typeof Moon; run: () => void }[]
+  organise: CommandAction[]
+  actions: CommandAction[]
+  appActions: CommandAction[]
+  onCloseAutoFocus: (event: Event) => void
   undo?: (() => void) | undefined
 }
 
@@ -41,6 +64,9 @@ export function CommandPalette({
   dark,
   snoozeEnabled,
   organise,
+  actions,
+  appActions,
+  onCloseAutoFocus,
   undo,
 }: Props) {
   const [query, setQuery] = useState('')
@@ -49,39 +75,43 @@ export function CommandPalette({
     setQuery('')
     fn()
   }
+  const renderAction = (item: CommandAction) => (
+    <CommandItem key={item.name} value={item.name} onSelect={run(item.run)}>
+      <item.icon />
+      {item.name}
+      {item.shortcut && <CommandShortcut>{item.shortcut}</CommandShortcut>}
+    </CommandItem>
+  )
   return (
     <CommandDialog
       open={open}
-      onOpenChange={onOpenChange}
+      onOpenChange={(next) => {
+        if (!next) setQuery('')
+        onOpenChange(next)
+      }}
+      onCloseAutoFocus={onCloseAutoFocus}
       title="Command palette"
-      description="Go anywhere, do anything"
+      description="Run an action, switch views or search all mail."
+      showCloseButton={false}
+      filter={(value, search, keywords) =>
+        value === 'mail-search-fallback' ? 0.001 : defaultFilter(value, search, keywords)
+      }
     >
       <CommandInput
         placeholder="Type a command or search mail…"
         value={query}
         onValueChange={setQuery}
       />
-      <CommandList>
-        <CommandEmpty>Nothing matches.</CommandEmpty>
-        {query.trim() && (
-          <CommandGroup heading="Search">
-            <CommandItem value={`search ${query}`} onSelect={run(() => onSearch(query.trim()))}>
-              <Search />
-              Search all mail for “{query.trim()}”<CommandShortcut>↵</CommandShortcut>
-            </CommandItem>
-          </CommandGroup>
+      <CommandList className="max-h-[min(26rem,60dvh)] p-1.5">
+        <CommandEmpty>No commands found.</CommandEmpty>
+        {actions.length > 0 && (
+          <CommandGroup heading="Message">{actions.map(renderAction)}</CommandGroup>
         )}
         {(organise.length > 0 || undo) && (
           <CommandGroup heading="Organise">
-            {organise.map((item) => (
-              <CommandItem key={item.name} value={item.name} onSelect={run(item.run)}>
-                <item.icon />
-                {item.name}
-                <CommandShortcut>{item.shortcut}</CommandShortcut>
-              </CommandItem>
-            ))}
+            {organise.map(renderAction)}
             {undo && (
-              <CommandItem value="undo organise" onSelect={run(undo)}>
+              <CommandItem value="Undo" keywords={['organise']} onSelect={run(undo)}>
                 <Undo2 />
                 Undo
                 <CommandShortcut>Z</CommandShortcut>
@@ -112,6 +142,18 @@ export function CommandPalette({
             </CommandItem>
           ))}
         </CommandGroup>
+        <CommandGroup heading="Buckets">
+          {BUCKETS.map((bucket) => (
+            <CommandItem
+              key={bucket}
+              value={`go to bucket ${bucket}`}
+              onSelect={run(() => onView({ kind: 'bucket', bucket }))}
+            >
+              <Layers />
+              {bucket}
+            </CommandItem>
+          ))}
+        </CommandGroup>
         <CommandGroup heading="Accounts">
           <CommandItem value="account all" onSelect={run(() => onAccount(null))}>
             <Users />
@@ -131,16 +173,40 @@ export function CommandPalette({
           ))}
         </CommandGroup>
         <CommandGroup heading="App">
-          <CommandItem value="sync now refresh" onSelect={run(() => void window.amc.syncNow())}>
+          {appActions.map(renderAction)}
+          <CommandItem value="sync now refresh" onSelect={run(() => void getAmc().syncNow())}>
             <RefreshCw />
             Sync now
           </CommandItem>
-          <CommandItem value="toggle theme dark light" onSelect={run(onToggleTheme)}>
+          <CommandItem
+            value={dark ? 'Light mode' : 'Dark mode'}
+            keywords={['toggle', 'theme']}
+            onSelect={run(onToggleTheme)}
+          >
             {dark ? <Sun /> : <Moon />}
             {dark ? 'Light mode' : 'Dark mode'}
           </CommandItem>
         </CommandGroup>
+        {query.trim() && (
+          <CommandGroup heading="Search all mail">
+            <CommandItem value="mail-search-fallback" onSelect={run(() => onSearch(query.trim()))}>
+              <Search />
+              Search for “{query.trim()}”
+            </CommandItem>
+          </CommandGroup>
+        )}
       </CommandList>
+      <div className="flex items-center gap-3 border-t px-4 py-2 text-xs text-muted-foreground">
+        <span>
+          <Kbd>↑</Kbd> <Kbd>↓</Kbd> Navigate
+        </span>
+        <span>
+          <Kbd>↵</Kbd> Select
+        </span>
+        <span className="ml-auto">
+          <Kbd>esc</Kbd> Close
+        </span>
+      </div>
     </CommandDialog>
   )
 }

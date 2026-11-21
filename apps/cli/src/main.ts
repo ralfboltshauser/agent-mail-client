@@ -100,6 +100,8 @@ program
   .action(async () => {
     const health = await authed(requireConfig())<Health>('/v1/health')
     const warnings = doctorWarnings(health)
+    if (health.lastBackup === undefined)
+      warnings.unshift('Backup status is unavailable from this Engine.')
     if (!warnings.length) return console.log('No health warnings.')
     for (const warning of warnings) console.warn(`Warning: ${warning}`)
   })

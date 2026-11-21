@@ -1,11 +1,15 @@
 import { type AccountSummary, BUCKETS, type Label, SNOOZED_LABEL } from '@amc/protocol'
 import {
+  Activity,
   Archive,
   ChevronsUpDown,
+  CircleHelp,
   Clock3,
   FileText,
   Inbox,
+  Layers,
   Mail,
+  Search,
   Send,
   SquarePen,
   Star,
@@ -37,8 +41,8 @@ import {
 } from '@/components/ui/sidebar'
 import { cn } from '@/lib/utils'
 import type { Counts, SyncStatus, View } from '../../../shared/api'
-import { AgentActivity } from './agent-activity'
 import { SyncIndicator } from './sync-indicator'
+import { Kbd } from './ui/kbd'
 
 const SYSTEM_VIEWS: { view: View; title: string; icon: typeof Inbox; keys: string }[] = [
   { view: { kind: 'inbox' }, title: 'Inbox', icon: Inbox, keys: 'G I' },
@@ -81,6 +85,9 @@ interface Props {
   view: View
   onView: (view: View) => void
   onCompose: () => void
+  onPalette: () => void
+  onShortcuts: () => void
+  onAgent: () => void
   composing: boolean
   counts: Counts
   labels: Label[]
@@ -107,6 +114,9 @@ export function AppSidebar({
   view,
   onView,
   onCompose,
+  onPalette,
+  onShortcuts,
+  onAgent,
   composing,
   counts,
   labels,
@@ -124,9 +134,13 @@ export function AppSidebar({
   }
 
   return (
-    <Sidebar variant="inset" collapsible="offcanvas">
+    <Sidebar
+      variant="sidebar"
+      collapsible="none"
+      className="app-sidebar border-r border-sidebar-border"
+    >
       {/* Room for the macOS traffic lights; the strip drags the window. */}
-      <div className="app-drag h-10 shrink-0" />
+      <div className="app-drag h-11 shrink-0" />
       <SidebarHeader className="pt-0">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -168,24 +182,25 @@ export function AppSidebar({
           </DropdownMenuContent>
         </DropdownMenu>
         <Button
-          className="mt-1 justify-start"
+          className="mt-1 h-9 justify-start px-3 shadow-none"
           size="sm"
-          variant="outline"
           onClick={onCompose}
           disabled={composing}
         >
-          <SquarePen /> Compose <span className="ml-auto text-xs text-muted-foreground">C</span>
+          <SquarePen /> Compose{' '}
+          <Kbd className="ml-auto bg-primary-foreground/15 text-primary-foreground">C</Kbd>
         </Button>
       </SidebarHeader>
 
-      <SidebarContent>
+      <SidebarContent className="gap-0">
         <SidebarGroup>
           <SidebarGroupContent>
-            <SidebarMenu>
+            <SidebarMenu className="gap-0.5">
               {systemViews(status?.snoozeEnabled === true).map((item) => (
                 <SidebarMenuItem key={item.view.kind}>
                   <SidebarMenuButton
                     isActive={sameView(view, item.view)}
+                    aria-current={sameView(view, item.view) ? 'page' : undefined}
                     onClick={() => onView(item.view)}
                     tooltip={`${item.title} (${item.keys})`}
                   >
@@ -204,18 +219,23 @@ export function AppSidebar({
         </SidebarGroup>
 
         <SidebarGroup>
-          <SidebarGroupLabel>Triage</SidebarGroupLabel>
+          <SidebarGroupLabel>Buckets</SidebarGroupLabel>
           <SidebarGroupContent>
-            <SidebarMenu>
+            <SidebarMenu className="gap-0.5">
               {BUCKETS.map((bucket) => {
                 const next: View = { kind: 'bucket', bucket }
                 return (
                   <SidebarMenuItem key={bucket}>
-                    <SidebarMenuButton isActive={sameView(view, next)} onClick={() => onView(next)}>
+                    <SidebarMenuButton
+                      isActive={sameView(view, next)}
+                      aria-current={sameView(view, next) ? 'page' : undefined}
+                      onClick={() => onView(next)}
+                    >
+                      <Layers className="text-muted-foreground" />
                       <span>{bucket}</span>
                     </SidebarMenuButton>
                     <SidebarMenuBadge className="tabular-nums">
-                      {(counts.buckets[bucket] ?? 0).toLocaleString()}
+                      {counts.buckets[bucket]?.toLocaleString()}
                     </SidebarMenuBadge>
                   </SidebarMenuItem>
                 )
@@ -228,7 +248,7 @@ export function AppSidebar({
           <SidebarGroup>
             <SidebarGroupLabel>Labels</SidebarGroupLabel>
             <SidebarGroupContent>
-              <SidebarMenu>
+              <SidebarMenu className="gap-0.5">
                 {folderLabels.map((label) => {
                   const v: View = { kind: 'label', labelId: label.id }
                   return (
@@ -246,8 +266,27 @@ export function AppSidebar({
         )}
       </SidebarContent>
 
-      <SidebarFooter>
-        <AgentActivity />
+      <SidebarFooter className="gap-1 border-t border-sidebar-border pt-2">
+        <SidebarMenu className="gap-0.5">
+          <SidebarMenuItem>
+            <SidebarMenuButton onClick={onAgent}>
+              <Activity />
+              Agent activity
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <SidebarMenuButton onClick={onPalette}>
+              <Search />
+              Command palette<Kbd className="ml-auto">⌘K</Kbd>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <SidebarMenuButton onClick={onShortcuts}>
+              <CircleHelp />
+              Keyboard shortcuts<Kbd className="ml-auto">?</Kbd>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
         <SyncIndicator status={status} accounts={accounts} />
       </SidebarFooter>
     </Sidebar>

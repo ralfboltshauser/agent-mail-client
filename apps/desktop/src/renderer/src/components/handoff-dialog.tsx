@@ -1,5 +1,6 @@
 import type { ComposeDraft } from '@amc/protocol'
 import { useCallback, useEffect, useId, useState } from 'react'
+import { getAmc } from '@/lib/amc'
 import type { T3Project } from '../../../shared/api'
 import { Button } from './ui/button'
 import {
@@ -35,7 +36,7 @@ export function HandoffDialog({
     setBusy(true)
     setError('')
     try {
-      const known = await window.amc.t3Projects(url)
+      const known = await getAmc().t3Projects(url)
       const previous = localStorage.getItem('amc-handoff-project')
       setProjects(known)
       setProjectId(known.find((project) => project.id === previous)?.id ?? known[0]?.id ?? '')
@@ -47,7 +48,7 @@ export function HandoffDialog({
   }, [])
 
   useEffect(() => {
-    void window.amc
+    void getAmc()
       .t3Setup()
       .then((setup) => {
         setKind(setup.kind)
@@ -64,7 +65,7 @@ export function HandoffDialog({
     setError('')
     setAttempted(true)
     try {
-      const draft = await window.amc.handoff(
+      const draft = await getAmc().handoff(
         kind === 'cli' ? null : address.trim(),
         projectId,
         threadId,
@@ -83,7 +84,7 @@ export function HandoffDialog({
     if (attempted) {
       setBusy(true)
       try {
-        await window.amc.cancelHandoff(projectId, threadId)
+        await getAmc().cancelHandoff(projectId, threadId)
       } catch (cause) {
         setError((cause as Error).message)
         setBusy(false)
