@@ -12,6 +12,8 @@ const api: AmcApi = {
   t3Projects: invoke('t3Projects') as AmcApi['t3Projects'],
   handoff: invoke('handoff') as AmcApi['handoff'],
   cancelHandoff: invoke('cancelHandoff') as AmcApi['cancelHandoff'],
+  activeHandoff: invoke('activeHandoff') as AmcApi['activeHandoff'],
+  endHandoff: invoke('endHandoff') as AmcApi['endHandoff'],
   pair: invoke('pair') as AmcApi['pair'],
   unpair: invoke('unpair') as AmcApi['unpair'],
   status: invoke('status') as AmcApi['status'],

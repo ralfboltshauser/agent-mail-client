@@ -20,7 +20,8 @@ it('launches the chosen T3 project with scoped context and retries a lost respon
     .mockRejectedValueOnce(new Error('lost response'))
     .mockResolvedValueOnce({ threadId: 'new-t3-thread' })
 
-  const handoff = new Handoff()
+  using db = new DatabaseSync(':memory:')
+  const handoff = new Handoff(db)
   await expect(handoff.launch(engine, 'project-1', 'mail-thread', launch)).rejects.toThrow(
     'lost response',
   )
@@ -47,8 +48,90 @@ it('launches the chosen T3 project with scoped context and retries a lost respon
   })
 })
 
+it.each(['Engine POST', 'T3 launch', 'Engine confirmation'])(
+  'recovers a lost %s reply after reopening the desktop database',
+  async (lostReply) => {
+    const dir = mkdtempSync(join(tmpdir(), 'amc-handoff-'))
+    const path = join(dir, 'replica.db')
+    let id = ''
+    const response = {
+      draftId: 'draft-1',
+      composerUrl: 'https://engine.example.test/compose/draft-1#token=synthetic',
+      agentToken: 'synthetic-grant',
+    }
+    const request = vi.fn(async (_path, init) => {
+      if (init.method === 'POST') {
+        id = init.body.requestId
+        if (lostReply === 'Engine POST') throw new Error('lost response')
+        return response
+      }
+      if (init.method === 'PUT') throw new Error('lost response')
+      return { cancelled: true }
+    })
+    const engine = {
+      baseUrl: 'https://engine.example.test',
+      request,
+    } as unknown as EngineClient
+    const launch = vi.fn(async () => {
+      if (lostReply === 'T3 launch') throw new Error('lost response')
+      return { threadId: 't3-thread' }
+    })
+    try {
+      {
+        using db = new DatabaseSync(path)
+        await expect(
+          new Handoff(db).launch(engine, 'project-1', 'mail-thread', launch),
+        ).rejects.toThrow('lost response')
+        expect(db.prepare('SELECT * FROM pending_handoff').all()).toEqual([
+          { id, engine_url: engine.baseUrl },
+        ])
+      }
+      {
+        using db = new DatabaseSync(path)
+        const restarted = new Handoff(db)
+        request.mockRejectedValueOnce(new Error('offline'))
+        await expect(restarted.recover(engine)).rejects.toThrow('offline')
+        expect(db.prepare('SELECT id FROM pending_handoff').all()).toEqual([{ id }])
+        await restarted.recover(engine)
+        expect(request).toHaveBeenLastCalledWith(
+          `/v1/compose/handoff/${id}?pending=1`,
+          expect.objectContaining({ method: 'DELETE' }),
+        )
+        expect(db.prepare('SELECT id FROM pending_handoff').all()).toEqual([])
+        expect(launch).toHaveBeenCalledTimes(lostReply === 'Engine POST' ? 0 : 1)
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  },
+)
+
+it('ends the saved hand-off after a successful stubbed launch', async () => {
+  using db = new DatabaseSync(':memory:')
+  const request = vi.fn().mockResolvedValue({
+    draftId: 'draft-1',
+    composerUrl: 'https://engine.example.test/compose/draft-1#token=synthetic',
+    agentToken: 'synthetic-grant',
+  })
+  const get = vi.fn().mockResolvedValueOnce({ id: 'draft-1' })
+  const engine = { baseUrl: 'https://engine.example.test', request, get } as unknown as EngineClient
+  const launch = vi.fn().mockResolvedValue({ threadId: 't3-thread' })
+  const handoff = new Handoff(db)
+  await handoff.launch(engine, 'project-1', 'mail-thread', launch)
+  const id = launch.mock.calls[0]?.[0].clientRequestId
+  get.mockResolvedValueOnce({ active: { id } })
+  expect(await handoff.active(engine, 'mail-thread')).toEqual({ id })
+  await handoff.end(engine, id)
+  expect(request).toHaveBeenLastCalledWith(`/v1/compose/handoff/${id}`, { method: 'DELETE' })
+})
+
 it('converts the MCP thread link into an installed T3 deep link', () => {
   expect(t3NavigationLink('[Draft reply](t3-thread://v2/env/mcp:launch:123)')).toBe(
     't3code://threads/env/mcp%3Alaunch%3A123',
   )
 })
+
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'

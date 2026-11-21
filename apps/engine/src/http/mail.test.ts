@@ -677,10 +677,10 @@ async function setupHandoff() {
     name: 'AMC',
     scopes: ['read', 'draft', 'send'],
   }).secret
-  const start = async (target = threadId) => {
+  const start = async (target = threadId, requestId = randomUUID()) => {
     const result = await call('/v1/compose/handoff', owner, {
       threadId: target,
-      requestId: randomUUID(),
+      requestId,
     })
     expect(result.status).toBe(201)
     const { draftId, composerUrl, agentToken } = (await result.json()) as {
@@ -808,6 +808,78 @@ it('mints a separate four-hour Agent grant per handoff and revokes the previous 
     expect(
       (await app.request('/mcp', { headers: { Authorization: `Bearer ${agentToken}` } })).status,
     ).toBe(401)
+  } finally {
+    db.close()
+  }
+})
+
+it('keeps confirmed handoffs across recovery and revokes both grants when the owner ends them', async () => {
+  const { db, app, call, owner, threadId, start, session } = await setupHandoff()
+  const id = randomUUID()
+  const path = `/v1/compose/handoff/${id}`
+  const active = () => call(`/v1/compose/handoff?threadId=${encodeURIComponent(threadId)}`, owner)
+  const remove = (url: string) =>
+    app.request(url, { method: 'DELETE', headers: { Authorization: `Bearer ${owner}` } })
+  try {
+    const { draftId, agentToken, token } = await start(threadId, id)
+    expect(await (await active()).json()).toEqual({ active: null })
+    const confirmed = await app.request(path, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${owner}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ t3ThreadId: 'stub-t3-thread' }),
+    })
+    expect(confirmed.status).toBe(200)
+    expect((await remove(`${path}?pending=1`)).status).toBe(200)
+    expect(await (await active()).json()).toMatchObject({ active: { id } })
+    expect(authenticate(db, agentToken)).not.toBeNull()
+    expect((await session(draftId, token)).status).toBe(204)
+
+    expect((await remove(path)).status).toBe(200)
+    expect(authenticate(db, agentToken)).toBeNull()
+    expect((await session(draftId, token)).status).toBe(403)
+    expect(await (await active()).json()).toEqual({ active: null })
+    expect(db.prepare('SELECT state FROM closed_handoff WHERE id = ?').get(id)?.state).toBe('ended')
+  } finally {
+    db.close()
+  }
+})
+
+it('rotates both grants after a lost Engine reply and revokes the replacements on pending recovery', async () => {
+  const { db, app, call, owner, threadId, start } = await setupHandoff()
+  const id = randomUUID()
+  const remove = (requestId: string) =>
+    app.request(`/v1/compose/handoff/${requestId}?pending=1`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${owner}` },
+    })
+  const post = (requestId: string) => call('/v1/compose/handoff', owner, { threadId, requestId })
+  try {
+    const first = await start(threadId, id)
+    const retry = await start(threadId, id)
+    expect(retry.draftId).toBe(first.draftId)
+    expect(authenticate(db, first.agentToken)).toBeNull()
+    expect(authenticate(db, first.token)).toBeNull()
+    expect(authenticate(db, retry.agentToken)).not.toBeNull()
+    expect(authenticate(db, retry.token)).not.toBeNull()
+
+    expect((await remove(id)).status).toBe(200)
+    expect(authenticate(db, retry.agentToken)).toBeNull()
+    expect(authenticate(db, retry.token)).toBeNull()
+    expect(db.prepare('SELECT state FROM closed_handoff WHERE id = ?').get(id)?.state).toBe(
+      'failed',
+    )
+    expect((await post(id)).status).toBe(409)
+
+    const delayed = randomUUID()
+    expect((await remove(delayed)).status).toBe(200)
+    expect((await post(delayed)).status).toBe(409)
+    expect(
+      db
+        .prepare(
+          "SELECT id FROM token WHERE kind IN ('agent', 'composer') AND name IN ('T3 Handoff', 'Composer Link') AND revoked_at IS NULL",
+        )
+        .all(),
+    ).toEqual([])
   } finally {
     db.close()
   }
