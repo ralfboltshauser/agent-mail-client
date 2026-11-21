@@ -48,6 +48,7 @@ interface CallOptions {
   /** Durable writeback handles retries for these calls. */
   writeback?: boolean
   submission?: boolean
+  beforeDispatch?: (() => void) | undefined
 }
 
 /**
@@ -95,6 +96,7 @@ export class GmailHttpApi implements GmailApi {
       let text: string
       try {
         const token = await this.#tokens.get()
+        options.beforeDispatch?.()
         res = await this.#fetch(url, {
           method: options.method ?? 'GET',
           signal: AbortSignal.timeout(options.submission ? 60_000 : this.#timeoutMs),
@@ -259,12 +261,18 @@ export class GmailHttpApi implements GmailApi {
     }
   }
 
-  modifyMessage(id: string, addLabelIds: string[], removeLabelIds: string[]) {
+  modifyMessage(
+    id: string,
+    addLabelIds: string[],
+    removeLabelIds: string[],
+    beforeDispatch?: () => void,
+  ) {
     return this.#call<GmailMessageState>(`/messages/${encodeURIComponent(id)}/modify`, {
       method: 'POST',
       params: { fields: 'labelIds,historyId' },
       body: { addLabelIds, removeLabelIds },
       cost: 'modify',
+      beforeDispatch,
       urgent: true,
       writeback: true,
     })

@@ -84,6 +84,7 @@ export interface GmailApi {
     id: string,
     addLabelIds: string[],
     removeLabelIds: string[],
+    beforeDispatch?: () => void,
   ): Promise<GmailMessageState>
   setTrashed(id: string, trashed: boolean): Promise<GmailMessageState>
   createLabel(name: string): Promise<GmailLabel>

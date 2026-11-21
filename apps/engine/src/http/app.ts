@@ -4,7 +4,12 @@ import { hasScope, PairRequest } from '@amc/protocol'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import { Hono, type MiddlewareHandler } from 'hono'
 import { HTTPException } from 'hono/http-exception'
-import { authenticate, type Principal, redeemPairingCode } from '../auth/tokens.ts'
+import {
+  authenticate,
+  invalidTokenMessage,
+  type Principal,
+  redeemPairingCode,
+} from '../auth/tokens.ts'
 import { type Config, databasePath } from '../config.ts'
 import { latestBackup } from '../db/backups.ts'
 import { type Db, fileSize, schemaVersion } from '../db/database.ts'
@@ -14,6 +19,7 @@ import type { Mutations } from '../mail/mutations.ts'
 import type { Outbox } from '../mail/outbox.ts'
 import { buildMcpServer } from '../mcp/server.ts'
 import { VERSION } from '../version.ts'
+import { agentActionRoutes } from './agent-actions.ts'
 import { composeRoutes } from './compose.ts'
 import { type MailDeps, mailRoutes } from './mail.ts'
 import { mutationRoutes } from './mutations.ts'
@@ -142,7 +148,10 @@ export function createApp({
   })
 
   v1.route('/', tokenRoutes(db))
-  if (mutations) v1.route('/', mutationRoutes(mutations))
+  if (mutations) {
+    v1.route('/', mutationRoutes(mutations))
+    v1.route('/', agentActionRoutes(db, mutations))
+  }
   if (mail) {
     if (outbox) v1.route('/compose', composeRoutes(mail, outbox))
     v1.route('/', mailRoutes(mail))
@@ -154,6 +163,7 @@ export function createApp({
         db,
         queries: mail.queries,
         drafts: mail.drafts,
+        mutations,
       })
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
@@ -174,7 +184,7 @@ export function requireAuth(db: Db): MiddlewareHandler<AppEnv> {
     const secret = header.startsWith('Bearer ') ? header.slice(7).trim() : ''
     const principal = secret ? authenticate(db, secret) : null
     if (!principal) {
-      return c.json({ error: 'unauthorized', message: 'Missing or invalid token' }, 401)
+      return c.json({ error: 'unauthorized', message: invalidTokenMessage(db, secret) }, 401)
     }
     c.set('principal', principal)
     await next()
@@ -188,4 +198,14 @@ export function requireScope(scope: Scope): MiddlewareHandler<AppEnv> {
     }
     await next()
   }
+}
+
+export const requireOwnerAdmin: MiddlewareHandler<AppEnv> = async (c, next) => {
+  const { kind, scopes } = c.get('principal')
+  if ((kind !== 'desktop' && kind !== 'cli') || !hasScope(scopes, 'admin'))
+    return c.json(
+      { error: 'forbidden', message: 'This action requires a paired owner Client' },
+      403,
+    )
+  await next()
 }

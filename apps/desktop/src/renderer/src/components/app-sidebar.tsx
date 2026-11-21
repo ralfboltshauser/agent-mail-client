@@ -37,6 +37,7 @@ import {
 } from '@/components/ui/sidebar'
 import { cn } from '@/lib/utils'
 import type { Counts, SyncStatus, View } from '../../../shared/api'
+import { AgentActivity } from './agent-activity'
 import { SyncIndicator } from './sync-indicator'
 
 const SYSTEM_VIEWS: { view: View; title: string; icon: typeof Inbox; keys: string }[] = [
@@ -224,6 +225,7 @@ export function AppSidebar({
       </SidebarContent>
 
       <SidebarFooter>
+        <AgentActivity />
         <SyncIndicator status={status} accounts={accounts} />
       </SidebarFooter>
     </Sidebar>
