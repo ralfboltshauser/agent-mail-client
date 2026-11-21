@@ -4,12 +4,18 @@
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws:; frame-src 'self' about:; object-src 'none'"
+      content="default-src 'self'; script-src 'self' 'sha256-rq8rZzGQ9kTq6p8FImI9QFoQnbBuCY/8FuJJcwKfY34='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws:; frame-src 'self' about:; object-src 'none'"
     />
     <title>AMC</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <main style="margin: 5rem auto; text-align: center; font: 16px system-ui; color: CanvasText; color-scheme: light dark">
+        <p>AMC is starting…</p>
+        <button id="startup-reload" type="button">Reload</button>
+      </main>
+    </div>
+    <script>document.getElementById('startup-reload').addEventListener('click', () => location.reload())</script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

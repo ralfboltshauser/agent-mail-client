@@ -571,7 +571,11 @@ function MailApp({
       />
       <SidebarInset className="overflow-hidden">
         {view.kind === 'drafts' && !search ? (
-          <DraftsView accountId={accountId} onOpen={(id) => void openDraft(id)} />
+          <DraftsView
+            accountId={accountId}
+            onOpen={(id) => void openDraft(id)}
+            onDiscarded={(id) => setMinimised((current) => (current?.id === id ? null : current))}
+          />
         ) : view.kind === 'outbox' && !search ? (
           <OutboxView
             accountId={accountId}
@@ -820,6 +824,7 @@ function MailApp({
             draft={draft}
             accounts={accounts}
             onQueued={queued}
+            onDiscarded={() => setDraft(null)}
             onMinimise={(subject) => {
               setMinimised({ id: draft.id, subject })
               setDraft(null)

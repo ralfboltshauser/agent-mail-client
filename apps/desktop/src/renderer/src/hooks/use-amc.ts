@@ -38,9 +38,29 @@ export function useReplicaQuery<T>(load: () => Promise<T>, deps: unknown[], init
 
 export function useSyncStatus(): SyncStatus | null {
   const [status, setStatus] = useState<SyncStatus | null>(null)
+  const [error, setError] = useState<Error | null>(null)
   useEffect(() => {
-    void getAmc().status().then(setStatus)
-    return getAmc().onStatus(setStatus)
+    const amc = getAmc()
+    let active = true
+    let receivedStatus = false
+    const unsubscribe = amc.onStatus((next) => {
+      receivedStatus = true
+      setStatus(next)
+      setError(null)
+    })
+    void amc.status().then(
+      (next) => {
+        if (active && !receivedStatus) setStatus(next)
+      },
+      (cause: unknown) => {
+        if (active && !receivedStatus) setError(new Error('Could not read AMC status', { cause }))
+      },
+    )
+    return () => {
+      active = false
+      unsubscribe()
+    }
   }, [])
+  if (error) throw error
   return status
 }

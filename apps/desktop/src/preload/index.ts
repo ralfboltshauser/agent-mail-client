@@ -54,6 +54,7 @@ const api: AmcApi = {
   startCompose: invoke('startCompose') as AmcApi['startCompose'],
   composeDrafts: invoke('composeDrafts') as AmcApi['composeDrafts'],
   composeDraft: invoke('composeDraft') as AmcApi['composeDraft'],
+  discardDraft: invoke('discardDraft') as AmcApi['discardDraft'],
   stageComposeBody(id: string, patch: ComposePatch) {
     const error = ipcRenderer.sendSync('amc:stageComposeBody', id, patch)
     if (error) throw new Error(error)

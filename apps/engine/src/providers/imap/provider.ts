@@ -169,7 +169,7 @@ export class ImapProvider {
       if (!box.exists) return []
       const drafts: ImapDraftLocation[] = []
       for await (const item of client.fetch('1:*', { flags: true, size: true }, { uid: true })) {
-        if (item.flags?.has('\\Deleted')) continue
+        if (!item.flags?.has('\\Draft') || item.flags.has('\\Deleted')) continue
         drafts.push({
           folder,
           uid: item.uid,
@@ -193,7 +193,12 @@ export class ImapProvider {
         { flags: true, source: true, bodyStructure: true },
         { uid: true },
       )) {
-        if (item.uid === location.uid && item.source && !item.flags?.has('\\Deleted'))
+        if (
+          item.uid === location.uid &&
+          item.source &&
+          item.flags?.has('\\Draft') &&
+          !item.flags.has('\\Deleted')
+        )
           return { raw: item.source, structure: item.bodyStructure }
       }
       return null
@@ -242,14 +247,32 @@ export class ImapProvider {
         matches =
           draft.uid === location.uid &&
           !!draft.source &&
-          !draft.flags?.has('\\Deleted') &&
+          !!draft.flags &&
+          draft.flags.has('\\Draft') &&
+          !draft.flags.has('\\Deleted') &&
           draftSourceHash(draft.source) === sourceHash
       }
       if (!matches || location.endpoint !== currentEndpoint()) return false
-      return (
-        (await client.messageFlagsAdd(String(location.uid), ['\\Deleted'], { uid: true })) &&
-        (await client.uidExpunge(location.uid))
-      )
+      const uid = String(location.uid)
+      const options = { uid: true }
+      if (!(await client.messageFlagsAdd(uid, ['\\Deleted'], options))) return false
+      // Flag changes can arrive after the source read. Check again after STORE,
+      // immediately before UID EXPUNGE, which only tests for \\Deleted server-side.
+      matches = false
+      for await (const draft of client.fetch(uid, { flags: true }, options)) {
+        if (
+          draft.uid === location.uid &&
+          draft.flags?.has('\\Draft') &&
+          draft.flags.has('\\Deleted') &&
+          location.endpoint === currentEndpoint()
+        ) {
+          matches = true
+          break
+        }
+      }
+      if (matches && location.endpoint === currentEndpoint()) return client.uidExpunge(location.uid)
+      await client.messageFlagsRemove(uid, ['\\Deleted'], options)
+      return false
     })
   }
 

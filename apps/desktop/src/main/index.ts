@@ -11,7 +11,16 @@ import type {
   SendRequest,
 } from '@amc/protocol'
 import { BucketInput } from '@amc/protocol'
-import { app, BrowserWindow, ipcMain, Menu, Notification, nativeTheme, shell } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  Notification,
+  nativeTheme,
+  shell,
+} from 'electron'
 import type { SyncStatus, ThreadQuery, TriageStatus } from '../shared/api'
 import { clearPairing, loadPairing, savePairing } from './auth'
 import { AutoTriage } from './auto-triage'
@@ -24,6 +33,7 @@ import {
   parseNotificationSettings,
 } from './notifications'
 import { OrganiseSync } from './organise'
+import { loadRenderer } from './renderer-load'
 import { Replica } from './replica'
 import { SyncLoop } from './sync'
 import { mcpLauncher, savedT3Url } from './t3'
@@ -345,6 +355,16 @@ function registerComposeIpc() {
     await draftRecovery
     return requireEngine().get(draftPath(id))
   })
+  ipcMain.handle('amc:discardDraft', async (_e, id: string) => {
+    const client = requireEngine()
+    // Use the guarded delete endpoint, which older Engines do not expose.
+    const result = await client.request<{ warning?: string }>(draftPath(id), { method: 'DELETE' })
+    if (engine === client) {
+      openReplica().draftUpdates.discard(id)
+      void sync?.pull().catch(() => {}) // Normal sync retries if this pull fails.
+    }
+    return result
+  })
   ipcMain.on('amc:stageComposeBody', (event, id: string, patch: ComposePatch) => {
     try {
       openReplica().draftUpdates.stage(id, patch)
@@ -515,23 +535,43 @@ function createWindow() {
       devTools: !app.isPackaged,
     },
   })
+  const current = window
   threadNavigationReady = false
-  window.webContents.on('did-start-navigation', ({ isMainFrame, isSameDocument }) => {
+  current.webContents.on('did-start-navigation', ({ isMainFrame, isSameDocument }) => {
     if (isMainFrame && !isSameDocument) threadNavigationReady = false
   })
-  window.once('ready-to-show', () => window?.show())
+  current.webContents.on('render-process-gone', () => {
+    threadNavigationReady = false
+  })
+  current.once('ready-to-show', () => current.show())
   // Never let the app window navigate away or open windows; links go to the browser.
-  window.webContents.setWindowOpenHandler(({ url }) => {
+  current.webContents.setWindowOpenHandler(({ url }) => {
     if (/^(https?|mailto):/.test(url)) void shell.openExternal(url)
     return { action: 'deny' }
   })
-  window.webContents.on('will-navigate', (event, url) => {
-    if (url !== window?.webContents.getURL()) event.preventDefault()
+  current.webContents.on('will-navigate', (event, url) => {
+    if (url !== current.webContents.getURL()) event.preventDefault()
   })
-  if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) {
-    void window.loadURL(process.env.ELECTRON_RENDERER_URL)
-  } else void window.loadFile(join(import.meta.dirname, '../renderer/index.html'))
-  const current = window
+  const devUrl = app.isPackaged ? undefined : process.env.ELECTRON_RENDERER_URL
+  loadRenderer(
+    current,
+    () =>
+      devUrl
+        ? current.loadURL(devUrl)
+        : current.loadFile(join(import.meta.dirname, '../renderer/index.html')),
+    async (reload) => {
+      current.show()
+      const { response } = await dialog.showMessageBox(current, {
+        type: 'error',
+        message: 'AMC is starting…',
+        buttons: ['Reload', 'Close'],
+        cancelId: 1,
+      })
+      if (current.isDestroyed()) return
+      if (response === 0) setImmediate(reload)
+      else current.close()
+    },
+  )
   let closing = false
   let flushed = false
   current.on('close', (event) => {

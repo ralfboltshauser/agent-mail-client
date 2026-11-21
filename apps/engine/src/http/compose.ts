@@ -126,6 +126,7 @@ export function composeRoutes(deps: MailDeps, outbox: Outbox, composerOrigin?: s
     if (!draft) throw new HTTPException(404, { message: 'Draft does not exist' })
     return c.json(draft)
   })
+  r.delete('/drafts/:id', async (c) => c.json(await deps.drafts.delete(c.req.param('id'))))
   r.put('/drafts/:id', async (c) =>
     c.json(deps.drafts.saveCompose(c.req.param('id'), await body<ComposePatch>(c, patch))),
   )

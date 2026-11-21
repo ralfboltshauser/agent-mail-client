@@ -649,4 +649,9 @@ export const MIGRATIONS: readonly Migration[] = [
       DROP TABLE legacy_snooze_mutation;
     `,
   },
+  {
+    version: 18,
+    name: 'Track the provider revision written by AMC',
+    sql: 'ALTER TABLE draft ADD COLUMN mirror_written_hash TEXT',
+  },
 ]

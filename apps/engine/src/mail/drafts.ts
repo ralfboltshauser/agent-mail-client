@@ -69,6 +69,7 @@ interface DraftRow {
   mirror_error: number
   mirror_dirty: number
   mirror_hash: string | null
+  mirror_written_hash: string | null
   mirror_conflict: number
   mirror_left: number
   imap_content: string | null
@@ -443,7 +444,8 @@ export class Drafts {
           body_text = ?, yjs = ?, updated_at = ?, last_author = ?, mirror_dirty = 1,
           provider_draft_id = CASE WHEN account_id = ? THEN provider_draft_id ELSE NULL END,
           provider_message_id = CASE WHEN account_id = ? THEN provider_message_id ELSE NULL END,
-          mirror_hash = CASE WHEN account_id = ? THEN mirror_hash ELSE NULL END
+          mirror_hash = CASE WHEN account_id = ? THEN mirror_hash ELSE NULL END,
+          mirror_written_hash = CASE WHEN account_id = ? THEN mirror_written_hash ELSE NULL END
           WHERE id = ?`,
         )
         .run(
@@ -457,6 +459,7 @@ export class Drafts {
           Y.encodeStateAsUpdate(doc),
           Date.now(),
           author,
+          accountId,
           accountId,
           accountId,
           accountId,
@@ -580,7 +583,7 @@ export class Drafts {
           throw new DraftError(MIRROR_CHANGED, 409)
       }
       this.#db
-        .prepare(`UPDATE draft SET provider_draft_id = NULL, provider_message_id = NULL, mirror_hash = NULL
+        .prepare(`UPDATE draft SET provider_draft_id = NULL, provider_message_id = NULL, mirror_hash = NULL, mirror_written_hash = NULL
         WHERE id = ? AND account_id = ? AND provider_draft_id = ?`)
         .run(id, row.account_id, row.provider_draft_id)
     }
@@ -1207,31 +1210,49 @@ export class Drafts {
     return this.get(id) as VersionedDraft
   }
 
-  async delete(id: string): Promise<boolean> {
+  async delete(id: string): Promise<{ deleted: string; warning?: string }> {
     return this.#withMirror(id, async () => {
       const row = this.#row(id)
-      if (!row) return false
+      if (!row) return { deleted: id }
       this.#checkEditable(id)
+      const pending = this.#db
+        .prepare('SELECT account_id FROM draft_mirror_removal WHERE draft_id = ? LIMIT 1')
+        .get(id) as { account_id: string } | undefined
       transaction(this.#db, () => {
-        if (row.provider_draft_id) this.#queueMirrorRemoval(row)
+        // The queued cleanup may refer to an imported revision. Cancel it on discard.
+        this.#db.prepare('DELETE FROM draft_mirror_removal WHERE draft_id = ?').run(id)
         this.#db.prepare('DELETE FROM draft WHERE id = ?').run(id)
         this.#store.recordChange('draft', id, 'delete')
       })
-      const removals = this.#db
-        .prepare('SELECT * FROM draft_mirror_removal WHERE draft_id = ?')
-        .all(id) as unknown as MirrorRemoval[]
-      const results = await Promise.allSettled(
-        removals.map((removal) => this.#removeOldMirror(removal)),
-      )
-      return (
-        Boolean(row.mirror_left) ||
-        results.some((result, index) =>
-          result.status === 'fulfilled'
-            ? result.value === 'left'
-            : this.#isImap(removals[index]?.account_id ?? ''),
-        )
-      )
+
+      const provider = this.#isImap(row.account_id) ? 'IMAP' : 'Gmail'
+      let kept: string | undefined
+      if (row.mirror_left) kept = 'IMAP'
+      if (pending) kept = this.#isImap(pending.account_id) ? 'IMAP' : 'Gmail'
+      if (row.provider_draft_id && !(await this.#discardMirror(row).catch(() => false)))
+        kept = provider
+
+      return {
+        deleted: id,
+        ...(kept && { warning: `The copy in ${kept} was changed elsewhere and was kept` }),
+      }
     })
+  }
+
+  async #discardMirror(row: DraftRow): Promise<boolean> {
+    const id = row.provider_draft_id
+    if (!id) return true
+    const api = this.#api(row.account_id)
+    const hash = row.mirror_written_hash
+    if (this.#isImap(row.account_id)) return this.#removeImapMirror(api, id, hash)
+    if (!api?.getDraft) return false
+    const remote = await api.getDraft(id)
+    if (!remote) return true
+    if (hash !== mirrorHash(remote.message.id)) return false
+    // Gmail has no conditional draft delete. An edit can still replace the message
+    // under the same draft ID in the window between this GET and DELETE.
+    await api.deleteDraft(id)
+    return true
   }
 
   #push(id: string): Promise<void> {
@@ -1264,17 +1285,19 @@ export class Drafts {
         raw,
         threadId: providerThread,
       })
+      const savedHash = saved.sourceHash ?? mirrorHash(saved.message.id)
       transaction(this.#db, () => {
         const updated = this.#db
           .prepare(
-            `UPDATE draft SET provider_draft_id = ?, provider_message_id = ?, mirror_hash = ?, mirror_error = 0,
+            `UPDATE draft SET provider_draft_id = ?, provider_message_id = ?, mirror_hash = ?, mirror_written_hash = ?, mirror_error = 0,
              mirror_conflict = MAX(mirror_conflict, ?),
              mirror_dirty = CASE WHEN modseq = ? THEN 0 ELSE 1 END WHERE id = ? AND account_id = ? AND provider_draft_id IS ?`,
           )
           .run(
             saved.id,
             saved.message.id,
-            saved.sourceHash ?? mirrorHash(saved.message.id),
+            savedHash,
+            savedHash,
             Number(Boolean(diverged)),
             row.modseq,
             id,
@@ -1285,7 +1308,7 @@ export class Drafts {
           this.#queueMirrorRemoval({
             ...row,
             provider_draft_id: saved.id,
-            mirror_hash: saved.sourceHash ?? mirrorHash(saved.message.id),
+            mirror_hash: savedHash,
             imap_content: null,
           })
         } else if (previous && previous !== saved.id && remote === undefined) {
