@@ -268,7 +268,7 @@ export class GmailHttpApi implements GmailApi {
   async getMessageState(id: string, writeback = false, signal?: AbortSignal) {
     try {
       return await this.#call<GmailMessageState>(`/messages/${encodeURIComponent(id)}`, {
-        params: { format: 'full', fields: 'labelIds,historyId' },
+        params: { format: 'minimal', fields: 'labelIds,historyId' },
         cost: 'get',
         urgent: true,
         writeback,

@@ -367,6 +367,51 @@ describe('Gmail Organise writeback', () => {
     expect(thread()).toMatchObject({ inInbox: true, messageCount: 3 })
   })
 
+  it.each(['none', 'expired history', 'after archive'] as const)(
+    'undoes Archive without a Gmail acknowledgement history ID with %s',
+    async (scenario) => {
+      const { gmail, queue, submit, lookup, sync, thread } = await setup()
+      gmail.setLabels('m2', ['INBOX', 'SENT'])
+      await sync.incremental()
+      if (scenario === 'expired history') {
+        const before = gmail.messages.get('m1')?.historyId
+        if (!before) throw new Error('Missing pre-write Gmail history ID')
+        gmail.oldestHistory = Number((await gmail.profile()).historyId)
+        expect(await gmail.history(before)).toBeNull()
+      }
+      const modify = gmail.modifyMessage.bind(gmail)
+      vi.spyOn(gmail, 'modifyMessage').mockImplementation(async (...args) => {
+        const { labelIds } = await modify(...args)
+        return { labelIds }
+      })
+
+      const archive = submit({ kind: 'archive', threadId: THREAD })
+      await queue.tick()
+      expect(lookup(archive.id)).toMatchObject({ status: 'applied', superseded: [] })
+      expect(await gmail.getMessageLabels('m1')).toEqual(['UNREAD'])
+      if (scenario === 'expired history') gmail.setLabels('m1', ['UNREAD', 'STARRED'])
+      const ownerChanged = scenario === 'after archive'
+      if (ownerChanged) {
+        gmail.setLabels('m2', ['INBOX', 'SENT'])
+        gmail.setLabels('m2', ['SENT'])
+      }
+      await sync.incremental()
+
+      const undo = submit({ kind: 'undo', mutationId: archive.id })
+      await queue.tick()
+      await sync.incremental()
+      expect(lookup(undo.id)).toMatchObject({
+        status: 'applied',
+        superseded: ownerChanged ? ['a:m2'] : [],
+      })
+      expect(await gmail.getMessageLabels('m1')).toContain('INBOX')
+      if (scenario === 'expired history')
+        expect(await gmail.getMessageLabels('m1')).toContain('STARRED')
+      expect((await gmail.getMessageLabels('m2'))?.includes('INBOX')).toBe(!ownerChanged)
+      expect(thread()?.inInbox).toBe(true)
+    },
+  )
+
   it('projects changes immediately, writes both messages, and restores per-message state on undo', async () => {
     const { gmail, queue, thread, submit, lookup, db } = await setup()
     const before = thread()?.messages.map((m) => m.labelIds)

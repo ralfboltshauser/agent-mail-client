@@ -1644,37 +1644,26 @@ export class Mutations {
       entry.pending = { change: candidate, historyId }
       save()
       const acknowledge = async (message: GmailMessageState) => {
-        let revisions = this.#revisions(after, message.historyId)
-        if (!message.historyId && historyId && JSON.parse(row.request).kind === 'snooze') {
-          // Gmail may omit the revision from its write response. Attribute only
-          // an unambiguous transition between dispatch and the next message read.
+        let checkpoint = message
+        if (!message.historyId) {
+          // Undo checks for label edits after Gmail's post-write checkpoint.
+          // Gmail cannot distinguish an owner Archive in the accepted read-to-write
+          // window from our own, and an edit before this follow-up read can also
+          // be included in the checkpoint.
           try {
-            const observed = await api.getMessageState(rawId(message_id), true)
-            if (observed?.historyId) {
-              const found = this.#messageHistory(
-                account,
-                message_id,
-                observed.historyId,
-                await this.#readHistory(api, historyId),
-              )
-              const events = found?.events.filter(
-                ({ label, revision }) =>
-                  label === inbox && this.#historyIncludes(observed.historyId ?? null, revision),
-              )
-              if (!found?.deleted && events?.length === 1 && events[0]?.present === false)
-                revisions = { [inbox]: events[0].revision }
-            }
+            checkpoint = (await api.getMessageState(rawId(message_id), true)) ?? message
           } catch {
-            // Keep the acknowledged write even when history cannot identify its revision.
+            // Keep the acknowledgement even if the checkpoint read fails.
           }
         }
+        const revisions = this.#revisions(after, checkpoint.historyId)
         transaction(this.#db, () => {
           this.#bumpEpoch(account)
           this.#store.putProviderLabels(
             account,
             rawId(message_id),
-            message.labelIds ?? [],
-            message.historyId,
+            checkpoint.labelIds ?? [],
+            checkpoint.historyId,
           )
           entry.applied = combine([...entry.applied, { ...candidate, revisions }])
           delete entry.pending
