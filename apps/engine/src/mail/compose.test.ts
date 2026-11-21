@@ -684,6 +684,33 @@ it('keeps a CID-linked PDF as a file and an inline image inline after an IMAP su
   db.close()
 })
 
+it('keeps clean local and remote IMAP drafts separate when only Message-ID matches', async () => {
+  const { account, db, drafts, fake, provider } = imapDraftSetup()
+  try {
+    const add = (body: string) =>
+      fake.add('Drafts', 'Subject: Draft\r\nMessage-ID: <shared@example.test>', body, ['\\Draft'])
+    const uid = add('Original content')
+    await drafts.pullImap(account, provider)
+    const original = fixture(drafts.list()[0])
+
+    fake.expunge('Drafts', uid)
+    add('Changed bytes at a new UID')
+    await drafts.pullImap(account, provider)
+    expect(drafts.compose(original.id)).toMatchObject({
+      body: 'Original content',
+      mirrorConflict: true,
+    })
+    expect(
+      drafts
+        .list()
+        .map(({ body }) => body)
+        .sort(),
+    ).toEqual(['Changed bytes at a new UID', 'Original content'])
+  } finally {
+    db.close()
+  }
+})
+
 it('keeps an IMAP draft when its full source changes at the same UID', async () => {
   const { account, addPlainDraft, db, drafts, fake, folder, provider } = imapDraftSetup()
   const uid = addPlainDraft('Original content')

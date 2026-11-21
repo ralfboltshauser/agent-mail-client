@@ -5,6 +5,34 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { expect, it } from 'vitest'
 
+it('reports unavailable backup health from an older Engine in doctor', async () => {
+  const server = createServer((_req, res) => {
+    res.setHeader('Content-Type', 'application/json')
+    res.end(JSON.stringify({ disks: [] }))
+  })
+  server.listen(0, '127.0.0.1')
+  try {
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('Expected a TCP address')
+    const { stdout, stderr } = await promisify(execFile)(
+      process.execPath,
+      [fileURLToPath(new URL('./main.ts', import.meta.url)), 'doctor'],
+      {
+        env: {
+          ...process.env,
+          AMC_ENGINE_URL: `http://127.0.0.1:${address.port}`,
+          AMC_TOKEN: 'test',
+        },
+      },
+    )
+    expect(stderr).toContain('Backup status is unavailable from this Engine.')
+    expect(stdout).not.toContain('No health warnings.')
+  } finally {
+    server.close()
+  }
+})
+
 it('fetches deferred bodies before printing a thread', async () => {
   const requests: string[] = []
   const server = createServer((req, res) => {
