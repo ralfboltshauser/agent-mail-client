@@ -5,8 +5,9 @@ export function doctorWarnings(
   now = Date.now(),
 ): string[] {
   const warnings: string[] = []
-  if (health.lastBackup === null) warnings.push('No nightly backup found.')
-  else if (health.lastBackup && now - health.lastBackup.at > 36 * 60 * 60 * 1000) {
+  if (health.lastBackup === null || health.lastBackup?.bytes === 0) {
+    warnings.push('No valid nightly backup found.')
+  } else if (health.lastBackup && now - health.lastBackup.at > 36 * 60 * 60 * 1000) {
     warnings.push('Last nightly backup is older than 36 hours.')
   }
   for (const account of health.accounts ?? []) {

@@ -4,24 +4,34 @@ import {
   existsSync,
   fsyncSync,
   linkSync,
+  lstatSync,
   mkdtempSync,
   openSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
-  statSync,
 } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { backupTo, type Db, schemaVersion } from './database.ts'
 import { MIGRATIONS } from './migrations.ts'
 
 const NIGHTLY = /^amc-\d{8}\.db$/
 const DAY_MS = 86_400_000
+let verifiedBackup: string | undefined
+
+function nightlyDate(name: string): Date {
+  return new Date(`${name.slice(4, 8)}-${name.slice(8, 10)}-${name.slice(10, 12)}T00:00:00Z`)
+}
 
 function nightlyFiles(names: string[]) {
   return names
-    .filter((name) => NIGHTLY.test(name))
+    .filter((name) => {
+      if (!NIGHTLY.test(name) || name.slice(4, 8) === '0000') return false
+      // Date parsing can normalize out-of-range days into the following month.
+      return nightlyDate(name).toJSON()?.slice(0, 10).replaceAll('-', '') === name.slice(4, 12)
+    })
     .sort()
     .reverse()
 }
@@ -31,9 +41,7 @@ export function backupsToPrune(names: string[]): string[] {
   return nightlyFiles(names)
     .slice(14)
     .filter((name) => {
-      const date = new Date(
-        `${name.slice(4, 8)}-${name.slice(8, 10)}-${name.slice(10, 12)}T00:00:00Z`,
-      )
+      const date = nightlyDate(name)
       const monday = date.getTime() - ((date.getUTCDay() + 6) % 7) * DAY_MS
       if (weeks.size === 8 || weeks.has(monday)) return true
       weeks.add(monday)
@@ -43,23 +51,43 @@ export function backupsToPrune(names: string[]): string[] {
 
 function listBackups(dir: string): string[] {
   try {
-    return readdirSync(dir, { withFileTypes: true })
-      .filter((entry) => entry.isFile())
-      .map((entry) => entry.name)
+    return readdirSync(dir)
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
     throw error
   }
 }
 
+function regularFile(path: string) {
+  const stat = lstatSync(path, { throwIfNoEntry: false })
+  return stat?.isFile() ? stat : undefined
+}
+
 export function latestBackup(dir: string): { at: number; bytes: number } | null {
   for (const name of nightlyFiles(listBackups(dir))) {
-    try {
-      const stat = statSync(join(dir, name))
-      return { at: Math.trunc(stat.mtimeMs), bytes: stat.size }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    const path = join(dir, name)
+    const stat = regularFile(path)
+    if (!stat) continue
+    if (stat.size === 0) return null
+
+    // Desktop polls health every minute. Recheck when the snapshot changes.
+    const fingerprint = JSON.stringify([
+      path,
+      stat.dev,
+      stat.ino,
+      stat.size,
+      stat.mtimeMs,
+      stat.ctimeMs,
+    ])
+    if (fingerprint !== verifiedBackup) {
+      try {
+        prepareSnapshot(path, false)
+      } catch {
+        return null
+      }
+      verifiedBackup = fingerprint
     }
+    return { at: Math.trunc(stat.mtimeMs), bytes: stat.size }
   }
   return null
 }
@@ -141,11 +169,21 @@ function publishSnapshot(source: string, target: string, beforeRestoreSwap?: () 
 }
 
 export function backupDatabase(source: string, dir: string, now = new Date()): string {
+  const backupDir = resolve(dir)
+  requireRealBackupDir(backupDir)
   const date = now.toISOString().slice(0, 10).replaceAll('-', '')
   const target = join(dir, `amc-${date}.db`)
   publishSnapshot(source, target)
-  for (const name of backupsToPrune(listBackups(dir))) rmSync(join(dir, name), { force: true })
+  requireRealBackupDir(backupDir)
+  const files = listBackups(backupDir).filter((name) => regularFile(join(backupDir, name)))
+  for (const name of backupsToPrune(files)) rmSync(join(backupDir, name), { force: true })
   return target
+}
+
+function requireRealBackupDir(path: string): void {
+  if (realpathSync(path) !== path || !lstatSync(path).isDirectory()) {
+    throw new Error(`Backup directory must be a real directory at ${path}`)
+  }
 }
 
 export function restoreDatabase(source: string, target: string): string | null {

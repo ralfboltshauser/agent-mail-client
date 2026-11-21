@@ -1,5 +1,16 @@
-import { existsSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  truncateSync,
+  writeFileSync,
+} from 'node:fs'
 import { join } from 'node:path'
+import { doctorWarnings } from '@amc/protocol'
 import { afterEach, describe, expect, it } from 'vitest'
 import { tempDir } from '../test-support.ts'
 import {
@@ -14,7 +25,7 @@ import { migrate, openDatabase, schemaVersion } from './database.ts'
 const dirs: string[] = []
 
 function fixture() {
-  const dir = tempDir()
+  const dir = realpathSync(tempDir())
   dirs.push(dir)
   const path = join(dir, 'amc.db')
   const db = openDatabase(path)
@@ -40,9 +51,75 @@ describe('backup retention', () => {
     expect(names.filter((name) => !prune.includes(name))).toEqual(keep)
     expect(prune.some((name) => unrelated.includes(name))).toBe(false)
   })
+
+  it('admits real UTC calendar dates only, including leap days', () => {
+    const recent = Array.from(
+      { length: 14 },
+      (_, day) => `amc-202603${String(day + 1).padStart(2, '0')}.db`,
+    )
+    const older = Array.from({ length: 8 }, (_, week) => {
+      const date = new Date(Date.UTC(2026, 1, 28 - 7 * week))
+      return `amc-${date.toISOString().slice(0, 10).replaceAll('-', '')}.db`
+    })
+    const invalid = ['amc-20250229.db', 'amc-20250431.db', 'amc-20251340.db', 'amc-20250010.db']
+    expect(backupsToPrune([...recent, ...older, ...invalid, 'amc-20240229.db'])).toEqual([
+      'amc-20240229.db',
+    ])
+  })
+
+  it('rejects a symlinked backup directory or a symlink in its parent path', () => {
+    const { dir, path, db } = fixture()
+    db.close()
+    const outside = join(dir, 'outside')
+    const alias = join(dir, 'alias')
+    mkdirSync(outside)
+    mkdirSync(join(outside, 'child'))
+    symlinkSync(outside, alias)
+    const before = readdirSync(outside)
+    for (const backupDir of [alias, join(alias, 'child')]) {
+      expect(() => backupDatabase(path, backupDir)).toThrow('Backup directory')
+    }
+    expect(readdirSync(outside)).toEqual(before)
+    expect(readdirSync(join(outside, 'child'))).toEqual([])
+  })
+
+  it('prunes only regular files directly inside the backup directory', () => {
+    const { dir, path, db } = fixture()
+    db.close()
+    for (let day = 1; day <= 22; day++) {
+      const date = new Date(Date.UTC(2026, 2, 30 - day * 7))
+      writeFileSync(join(dir, `amc-${date.toISOString().slice(0, 10).replaceAll('-', '')}.db`), '')
+    }
+    const old = join(dir, 'amc-20240101.db')
+    const link = join(dir, 'amc-20240102.db')
+    const subdir = join(dir, 'amc-20240103.db')
+    writeFileSync(old, '')
+    symlinkSync(path, link)
+    mkdirSync(subdir)
+    backupDatabase(path, dir, new Date('2026-03-30'))
+    expect(existsSync(old)).toBe(false)
+    expect(lstatSync(link).isSymbolicLink()).toBe(true)
+    expect(lstatSync(subdir).isDirectory()).toBe(true)
+    expect(existsSync(path)).toBe(true)
+  })
 })
 
 describe('database snapshots', () => {
+  it.each([
+    ['empty', 0],
+    ['corrupt', 4096],
+  ] as const)('warns when the newest nightly is %s', (_label, size) => {
+    const { dir, path, db } = fixture()
+    db.close()
+    backupDatabase(path, dir, new Date('2026-01-02'))
+    const newest = backupDatabase(path, dir, new Date('2026-01-03'))
+    expect(latestBackup(dir)).not.toBeNull()
+    truncateSync(newest, size)
+    const lastBackup = latestBackup(dir)
+    expect(lastBackup).toBeNull()
+    expect(doctorWarnings({ lastBackup, disks: [] })).toEqual(['No valid nightly backup found.'])
+  })
+
   it('publishes a private, consistent snapshot including committed WAL writes', () => {
     const { dir, path, db } = fixture()
     try {

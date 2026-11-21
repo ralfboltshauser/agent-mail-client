@@ -55,7 +55,10 @@ describe('doctor warnings', () => {
 
   it('warns when no backup exists and accepts health data from an older Engine', () => {
     expect(doctorWarnings({ lastBackup: null, disks: [] }, now)).toEqual([
-      'No nightly backup found.',
+      'No valid nightly backup found.',
+    ])
+    expect(doctorWarnings({ lastBackup: { at: now, bytes: 0 }, disks: [] }, now)).toEqual([
+      'No valid nightly backup found.',
     ])
     expect(doctorWarnings({ disks: [] }, now)).toEqual([])
   })

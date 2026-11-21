@@ -38,6 +38,8 @@ registration. Desktop upgrades move the previous app bundle to the Trash.
 | `/srv/amc/blobs` | raw mail and attachments (a cache) | `amc`, 700 dir |
 | `/srv/amc/backups` | pre-migration and nightly backups | `amc`, 700 dir |
 
+Keep the database, blobs, and backups on the data disk under `/srv/amc`, with systemd unit files and small runtime state allowed on the root disk.
+
 The Engine runs as the `amc` system user so that nothing running as the owner, including coding agents, can read its credentials ([ADR 0003](adr/0003-engine-runs-as-its-own-user.md)).
 
 ## Everyday commands
