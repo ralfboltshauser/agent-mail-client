@@ -80,6 +80,7 @@ interface AutomaticRequest {
   replied: boolean
   snooze: boolean
   checkThrough: string
+  cancelled?: boolean
 }
 
 interface PatchRow {
@@ -380,9 +381,9 @@ export class Mutations {
       if (target.status !== 'pending' && target.prepared !== 1)
         throw new MutationError('This action predates verified Gmail undo')
       const thread = this.#thread(target.thread_id)
-      const state = this.#undoState(target)
+      const state = this.#undoState(target, this.#state(thread))
       const inverses = new Map(
-        this.#undoChanges(target, state).map((change) => [change.message_id, change.after]),
+        this.#undoChanges(target).map((change) => [change.message_id, change.after]),
       )
       return this.#insert(
         request.id,
@@ -424,7 +425,6 @@ export class Mutations {
   ) {
     const patch = actionLabels(action, account)
     const statePatch: Partial<ThreadState> = {}
-    const snoozed = labelId(account, SNOOZED_LABEL)
     if (action.kind === 'snooze') {
       Object.assign(statePatch, {
         snoozeIntent: intentId,
@@ -432,18 +432,14 @@ export class Mutations {
         noReply: action.noReply ?? false,
         startedAt,
       })
-      patch[snoozed] = true
+      patch[labelId(account, SNOOZED_LABEL)] = true
     }
     if (action.kind === 'mute') {
       statePatch.muted = action.value
       statePatch.muteIntent = action.value ? intentId : null
     }
-    if (
-      state.snoozedUntil !== null &&
-      (action.kind === 'archive' || (action.kind === 'trash' && action.value))
-    ) {
+    if (action.kind !== 'snooze' && state.snoozedUntil !== null) {
       Object.assign(statePatch, CLEAR_SNOOZE)
-      patch[snoozed] = false
     }
     return { patch, statePatch }
   }
@@ -541,26 +537,24 @@ export class Mutations {
     this.#db.prepare('UPDATE mutation SET modseq = ? WHERE id = ?').run(row.modseq, mutationId)
   }
 
-  #undoState(original: MutationRow): Partial<ThreadState> {
-    if (original.status === 'partial') return {}
-    const state = JSON.parse(original.state_before) as Partial<ThreadState>
-    if (
-      (state.snoozedUntil && state.snoozedUntil <= this.#now()) ||
-      (state.snoozeIntent && this.#intent(state.snoozeIntent)?.status !== 'active')
-    ) {
-      Object.assign(state, CLEAR_SNOOZE)
+  #undoState(original: MutationRow, current: ThreadState): Partial<ThreadState> {
+    const state: Partial<ThreadState> = current.snoozedUntil === null ? {} : { ...CLEAR_SNOOZE }
+    if (original.status !== 'partial') {
+      const { muted, muteIntent } = JSON.parse(original.state_before) as Partial<ThreadState>
+      if (muted !== undefined) state.muted = muted
+      if (muteIntent !== undefined) state.muteIntent = muteIntent
     }
     return state
   }
 
-  #undoChanges(original: MutationRow, state: Partial<ThreadState>): Change[] {
+  #undoChanges(original: MutationRow): Change[] {
     const snoozed = labelId(original.account_id, SNOOZED_LABEL)
     const applied =
       original.status === 'pending'
         ? this.#patches(original.id).map(fromPatch)
         : readJournal(original).flatMap((entry) => entry.applied)
     return inverse(applied).map((change) => {
-      if (change.after[snoozed] && !state.snoozedUntil) delete change.after[snoozed]
+      delete change.after[snoozed]
       return change
     })
   }
@@ -612,15 +606,20 @@ export class Mutations {
       let patchFor: (id: string, labels: string[]) => LabelPatch
       const undo = new Map<string, Change>()
       if (original) {
-        statePatch = this.#undoState(original)
-        for (const change of this.#undoChanges(original, statePatch))
-          undo.set(change.message_id, change)
+        statePatch = this.#undoState(original, state)
+        for (const change of this.#undoChanges(original)) undo.set(change.message_id, change)
         patchFor = (id) => undo.get(id)?.after ?? {}
       } else if (row.intent_id) {
-        const { work, snooze, replied } = JSON.parse(row.request) as AutomaticRequest
+        const { work, snooze, replied, cancelled } = JSON.parse(row.request) as AutomaticRequest
         const exiting = work === 'wake'
-        statePatch = exiting ? CLEAR_SNOOZE : {}
-        const sweep = this.#snoozeSweep(account, state.muted, snooze, exiting, replied)
+        statePatch = exiting && !cancelled ? CLEAR_SNOOZE : {}
+        const sweep = this.#snoozeSweep(
+          account,
+          state.muted,
+          snooze,
+          exiting,
+          replied || !!cancelled,
+        )
         const scoped = new Set(this.#intentMessages(row.intent_id, work))
         messages.sort(
           (a, b) =>
@@ -636,9 +635,8 @@ export class Mutations {
       const stateBefore = Object.fromEntries(
         Object.keys(statePatch).map((key) => [key, state[key as keyof ThreadState]]),
       )
-      const retainBaseline =
-        (row.principal === INTERNAL && statePatch.snoozedUntil === null) ||
-        (!original && JSON.parse(row.request).kind === 'archive')
+      const snoozeExit = this.#isSnoozeExit(row)
+      const retainBaseline = snoozeExit || (!original && action.kind === 'archive')
       const projected = this.#patches(row.id)
       this.#db.prepare('DELETE FROM mutation_message WHERE mutation_id = ?').run(row.id)
       const insert = this.#db.prepare('INSERT INTO mutation_message VALUES (?, ?, ?, ?, ?)')
@@ -659,9 +657,9 @@ export class Mutations {
           ),
         )
         if (Object.keys(patch).length || retainBaseline) {
-          const baseline = retainBaseline
-            ? { [inbox]: false, [labelId(account, SNOOZED_LABEL)]: false, ...patch }
-            : patch
+          const baseline = { ...patch }
+          if (retainBaseline) baseline[inbox] ??= false
+          if (snoozeExit) baseline[labelId(account, SNOOZED_LABEL)] ??= false
           const expected = undo.get(id)?.before ?? {}
           const before = {
             ...this.#before(account, baseline, labels),
@@ -724,6 +722,12 @@ export class Mutations {
         .run(row.state_patch, row.state_before, row.id)
       this.#refreshThread(row.thread_id, row.id)
     })
+  }
+
+  #isSnoozeExit(row: MutationRow): boolean {
+    return (
+      row.principal === INTERNAL && (JSON.parse(row.request) as AutomaticRequest).work === 'wake'
+    )
   }
 
   #intent(id: string): Intent | undefined {
@@ -1012,8 +1016,12 @@ export class Mutations {
     const sourceJournals = intent ? this.#intentJournals(row, intent.id) : []
     const save = () => this.#saveJournal(row, journal)
     const snoozedId = this.#snoozedLabel(account)
+    const startsSnooze = JSON.parse(row.request).kind === 'snooze' && this.#intent(row.id)
+    const mayWriteMarker = automatic?.snooze || startsSnooze
+    // A queued replacement Snooze can claim the marker before cleanup reaches the head.
+    if (automatic?.cancelled && this.#committedState(row.thread_id).snoozeIntent) return true
     if (journal.some((item) => item.intentSuperseded)) return true
-    if (step.patch[snoozed] && !snoozedId && !automatic) {
+    if (mayWriteMarker && step.patch[snoozed] && !snoozedId && !automatic) {
       entry.error = 'Gmail Snooze label is unavailable. Try again after the Account syncs.'
       entry.failed = step.changes
       save()
@@ -1203,6 +1211,9 @@ export class Mutations {
         }
         for (const [key, value] of Object.entries(change.after)) {
           if (key in done || key in superseded || (key === snoozed && !snoozedId)) continue
+          // Older prepared user actions can still contain marker steps. Keep their
+          // progress and acknowledgement indexes, but do not dispatch those writes.
+          if (!mayWriteMarker && (key === snoozed || rawId(key) === snoozedId)) continue
           const revision = change.revisions?.[key]
           if (
             !labels ||
@@ -1313,11 +1324,10 @@ export class Mutations {
       if (labels && !labels.includes(labelId(account, 'DRAFT'))) live.set(id, labels)
     }
     for (const change of entry.observations ?? []) baseline.set(change.message_id, change)
-    const clearingSnooze = JSON.parse(row.state_patch).snoozedUntil === null
     const changes: Change[] = []
     let wake: string | undefined
-    if (!archive) {
-      const { replied } = JSON.parse(row.request) as { replied?: boolean }
+    const { replied, cancelled } = JSON.parse(row.request) as AutomaticRequest
+    if (!archive && !cancelled) {
       const state = this.#committedState(row.thread_id)
       const eligible = (labels: string[]) =>
         !labels.includes(labelId(account, 'TRASH')) && !labels.includes(labelId(account, 'SPAM'))
@@ -1378,7 +1388,6 @@ export class Mutations {
       const after: LabelPatch = {}
       if (archive) {
         after[inbox] = false
-        if (clearingSnooze) after[marker] = false
       } else {
         if (labels.includes(marker) || original?.before[marker]) after[marker] = false
         if (id === wake) after[inbox] = true
@@ -1388,7 +1397,11 @@ export class Mutations {
         delete after[key]
       }
       const before = {
-        ...this.#before(account, { [inbox]: false, [marker]: false }, labels),
+        ...this.#before(
+          account,
+          archive ? { [inbox]: false } : { [inbox]: false, [marker]: false },
+          labels,
+        ),
         ...original?.before,
       }
       const change = {
@@ -1420,13 +1433,8 @@ export class Mutations {
 
   #writePlan(row: MutationRow) {
     const changes = this.#patches(row.id).map(fromPatch)
-    const dynamic =
-      row.principal === INTERNAL
-        ? JSON.parse(row.state_patch).snoozedUntil === null
-        : JSON.parse(row.request).kind === 'archive'
-    const steps: Step[] = dynamic
-      ? [{ patch: { [labelId(row.account_id, SNOOZED_LABEL)]: false }, changes }]
-      : stepsFor(row.account_id, changes)
+    const dynamic = this.#isSnoozeExit(row) || JSON.parse(row.request).kind === 'archive'
+    const steps: Step[] = dynamic ? [{ patch: {}, changes }] : stepsFor(row.account_id, changes)
     if (row.intent_id && !steps.length) steps.push({ patch: {}, changes: [] })
     return { changes, dynamic, steps }
   }
@@ -1595,7 +1603,7 @@ export class Mutations {
     status: MutationResult['status'],
     journal: JournalEntry[],
   ): boolean {
-    const { work, snooze, checkThrough } = JSON.parse(row.request) as AutomaticRequest
+    const { work, snooze, checkThrough, cancelled } = JSON.parse(row.request) as AutomaticRequest
     const superseded = journal.some((entry) => entry.intentSuperseded)
     const outcomes = new Map(messageResults(journal).map((outcome) => [outcome.messageId, outcome]))
     const settle = this.#db.prepare(
@@ -1615,7 +1623,29 @@ export class Mutations {
     this.#db
       .prepare('UPDATE organise_intent SET checked_history_id = ?, status = ? WHERE id = ?')
       .run(checkThrough, superseded ? 'superseded' : work === 'wake' ? 'done' : 'active', intentId)
-    return snooze && superseded
+    return snooze && superseded && !cancelled
+  }
+
+  #queueSnoozeCleanup(thread: ThreadRow, intentId: string) {
+    const intent = this.#intent(intentId)
+    if (intent?.status !== 'active') return
+    const request: AutomaticRequest = {
+      work: 'wake',
+      snooze: true,
+      replied: false,
+      cancelled: true,
+      checkThrough: intent.checked_history_id,
+    }
+    this.#insert(
+      randomUUID(),
+      INTERNAL,
+      JSON.stringify(request),
+      thread,
+      {},
+      () => ({}),
+      null,
+      intentId,
+    )
   }
 
   #finish(
@@ -1638,21 +1668,31 @@ export class Mutations {
       const statePatch = clearSupersededSnooze
         ? CLEAR_SNOOZE
         : (JSON.parse(row.state_patch) as Partial<ThreadState>)
-      if (
-        status === 'applied' ||
-        (row.principal === INTERNAL && statePatch.snoozedUntil === null)
-      ) {
+      const userAction = row.principal !== INTERNAL
+      const succeeded = status === 'applied' || status === 'partial'
+      const cancelsSnooze = userAction && succeeded && JSON.parse(row.request).kind !== 'snooze'
+      const patch =
+        status === 'applied' || (!userAction && statePatch.snoozedUntil === null)
+          ? { ...statePatch }
+          : {}
+      if (cancelsSnooze) Object.assign(patch, CLEAR_SNOOZE)
+      if (Object.keys(patch).length) {
         const thread = this.#db
-          .prepare('SELECT organise_state FROM thread WHERE id = ?')
-          .get(row.thread_id) as { organise_state: string } | undefined
-        if (thread)
-          this.#db.prepare('UPDATE thread SET organise_state = ? WHERE id = ?').run(
-            JSON.stringify({
-              ...JSON.parse(thread.organise_state),
-              ...statePatch,
-            }),
-            row.thread_id,
-          )
+          .prepare('SELECT id, account_id, organise_state FROM thread WHERE id = ?')
+          .get(row.thread_id) as ThreadRow | undefined
+        if (thread) {
+          const state = this.#committedState(row.thread_id)
+          this.#db
+            .prepare('UPDATE thread SET organise_state = ? WHERE id = ?')
+            .run(JSON.stringify({ ...state, ...patch }), row.thread_id)
+          if (userAction && state.snoozeIntent) {
+            if (cancelsSnooze) this.#queueSnoozeCleanup(thread, state.snoozeIntent)
+            else if (patch.snoozeIntent && patch.snoozeIntent !== state.snoozeIntent)
+              this.#db
+                .prepare("UPDATE organise_intent SET status = 'done' WHERE id = ?")
+                .run(state.snoozeIntent)
+          }
+        }
       }
       for (const patch of this.#patches(row.id)) this.#store.refreshMessageLabels(patch.message_id)
       this.#refreshThread(row.thread_id, row.id)

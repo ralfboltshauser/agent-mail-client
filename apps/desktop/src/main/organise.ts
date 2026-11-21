@@ -50,12 +50,21 @@ export const ORGANISE_SCHEMA = `
     UNION ALL SELECT * FROM organise_thread;
 `
 
-function applyPatch(thread: ThreadSummary, messages: MessageDetail[], patch: Patch) {
+function applyPatch(
+  thread: ThreadSummary,
+  messages: MessageDetail[],
+  patch: Patch,
+  kind: OrganiseAction['kind'],
+) {
   const prefix = `${thread.accountId}:`
+  const marker = `${prefix}${SNOOZED_LABEL}`
   for (const [index, message] of messages.entries()) {
     const next = patch.labels[message.id]
     if (!next) continue
-    const labelIds = applyLabelPatch(message.labelIds, next)
+    // Older outbox entries can still carry optimistic marker cleanup.
+    const labels = { ...next }
+    if (kind !== 'snooze') delete labels[marker]
+    const labelIds = applyLabelPatch(message.labelIds, labels)
     messages[index] = {
       ...message,
       labelIds,
@@ -64,13 +73,13 @@ function applyPatch(thread: ThreadSummary, messages: MessageDetail[], patch: Pat
     }
   }
   if (patch.muted !== undefined) thread.muted = patch.muted
-  if (patch.snoozedUntil !== undefined) thread.snoozedUntil = patch.snoozedUntil
+  thread.snoozedUntil = kind === 'snooze' ? (patch.snoozedUntil ?? null) : null
   if (messages.length === thread.messageCount && messages.length) {
     thread.labelIds = [...new Set(messages.flatMap((m) => m.labelIds))].sort()
     thread.unreadCount = messages.filter((m) => m.unread).length
     thread.starred = messages.some((m) => m.starred)
   } else if (
-    patch.snoozedUntil ||
+    thread.snoozedUntil ||
     patch.muted ||
     messages.some((m) => patch.labels[m.id]?.[`${prefix}INBOX`] === false)
   ) {
@@ -104,21 +113,15 @@ function patchesFor(
   }
   if (action.kind === 'snooze') {
     patch.snoozedUntil = action.until
-    inverse.snoozedUntil = thread.snoozedUntil ?? null
     state[snoozed] = true
-  } else if (
-    thread.snoozedUntil &&
-    (action.kind === 'archive' || (action.kind === 'trash' && action.value))
-  ) {
-    patch.snoozedUntil = null
-    inverse.snoozedUntil = thread.snoozedUntil
-    state[snoozed] = false
   }
   for (const message of messages) {
     if (message.labelIds.includes(`${thread.accountId}:DRAFT`)) continue
     patch.labels[message.id] = state
     inverse.labels[message.id] = Object.fromEntries(
-      Object.keys(state).map((id) => [id, message.labelIds.includes(id)]),
+      Object.keys(state)
+        .filter((id) => id !== snoozed)
+        .map((id) => [id, message.labelIds.includes(id)]),
     )
   }
   return { patch, inverse }
@@ -174,19 +177,11 @@ export class LocalOrganise {
           )
           if (row.status === 'partial') {
             delete patch.muted
-            delete patch.snoozedUntil
           }
         } else {
           for (const id of JSON.parse(row.superseded) as string[]) delete patch.labels[id]
         }
-        if (patch.snoozedUntil && patch.snoozedUntil <= Date.now()) {
-          patch.snoozedUntil = null
-          for (const labels of Object.values(patch.labels)) {
-            for (const key of Object.keys(labels)) {
-              if (key.endsWith(`:${SNOOZED_LABEL}`) && labels[key]) delete labels[key]
-            }
-          }
-        }
+        delete patch.snoozedUntil
         target = row.id
       }
       action = { kind: 'undo', threadId, mutationId: target }
@@ -230,10 +225,14 @@ export class LocalOrganise {
   messages(thread: ThreadSummary, base: MessageDetail[]): MessageDetail[] {
     const rows = this.#db
       .prepare(
-        'SELECT patch FROM organise_queue WHERE thread_id = ? AND (modseq IS NULL OR modseq > ?) ORDER BY seq',
+        `SELECT patch, json_extract(request, '$.action.kind') AS kind FROM organise_queue
+         WHERE thread_id = ? AND (modseq IS NULL OR modseq > ?) ORDER BY seq`,
       )
-      .all(thread.id, this.replica.modseq ?? -1) as { patch: string }[]
-    for (const row of rows) applyPatch(thread, base, JSON.parse(row.patch) as Patch)
+      .all(thread.id, this.replica.modseq ?? -1) as {
+      patch: string
+      kind: OrganiseAction['kind']
+    }[]
+    for (const row of rows) applyPatch(thread, base, JSON.parse(row.patch) as Patch, row.kind)
     return base
   }
 
