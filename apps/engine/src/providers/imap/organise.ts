@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { LabelPatch } from '@amc/protocol'
 import { transaction } from '../../db/database.ts'
 import { labelId } from '../../mail/store.ts'
@@ -23,6 +24,7 @@ interface Move {
   source: MessageLocation
   destination: Folder
   flags: ReturnType<typeof messageFlags>
+  lookup?: { messageId: string; validity: string; firstNewUid: number }
 }
 
 interface Pending {
@@ -70,6 +72,57 @@ async function openSource(
   }
 }
 
+async function moveLookup(sync: ImapAccountSync, source: MessageLocation, destination: Folder) {
+  if (!source.source_blob) return
+  const row = sync.store.db
+    .prepare('SELECT rfc_message_id FROM message WHERE id = ?')
+    .get(source.message_id) as { rfc_message_id: string | null } | undefined
+  if (!row?.rfc_message_id) return
+  try {
+    const box = await sync.client.mailboxOpen(destination.path, { readOnly: true })
+    if (box.uidValidity && Number.isSafeInteger(box.uidNext) && box.uidNext > 0) {
+      return {
+        messageId: row.rfc_message_id,
+        validity: String(box.uidValidity),
+        firstNewUid: box.uidNext,
+      }
+    }
+  } catch {
+    // A missing snapshot only disables the fallback. The move can still return COPYUID.
+  }
+}
+
+async function findMovedUid(client: ImapClient, move: Move, reportedValidity?: string) {
+  const { destination, source, lookup } = move
+  if (!lookup || !source.source_blob) return
+  const { messageId, validity, firstNewUid } = lookup
+  if (reportedValidity && reportedValidity !== validity) return
+
+  try {
+    const open = () => client.mailboxOpen(destination.path, { readOnly: true })
+    if (String((await open()).uidValidity) !== validity) return
+    const matches = await client.search({ header: { 'Message-ID': messageId } }, { uid: true })
+    if (!matches || !matches.length) return
+
+    let uid: number | undefined
+    for (const candidate of new Set(matches)) {
+      const { content } = await client.download(String(candidate), undefined, { uid: true })
+      if (!content) return
+      const hash = createHash('sha256')
+      for await (const chunk of content) hash.update(chunk)
+      if (hash.digest('hex') !== source.source_blob) continue
+      // A UID already allocated before the move cannot identify the moved copy.
+      if (uid !== undefined || candidate < firstNewUid) return
+      uid = candidate
+    }
+    if (uid !== undefined && String((await open()).uidValidity) === validity) {
+      return { uid, validity }
+    }
+  } catch {
+    // The write was acknowledged. A failed verification leaves it applied without an inverse.
+  }
+}
+
 export async function executeImap(
   sync: ImapAccountSync,
   changes: ImapChange[],
@@ -93,7 +146,12 @@ export async function executeImap(
   const finishMove = async (change: ImapChange, move: Move, uid?: number, validity?: string) => {
     const { source, destination, flags } = move
     const path = decodeURIComponent(source.path_key)
-    if (!uid || !validity) await sync.refreshOrganiseFolder(destination)
+    if (!uid || !validity) {
+      const recovered = await findMovedUid(client, move, validity)
+      uid = recovered?.uid
+      validity = recovered?.validity
+      if (!recovered) await sync.refreshOrganiseFolder(destination)
+    }
     transaction(store.db, () => {
       change.moveFrom = { path_key: source.path_key, validity: source.validity }
       const observed = uid && validity ? locations.get(destination.path, validity, uid) : undefined
@@ -267,6 +325,7 @@ export async function executeImap(
       }
     }
 
+    const lookup = destination && (await moveLookup(sync, source, destination))
     const uid = String(source.uid)
     const path = decodeURIComponent(source.path_key)
     const flags = (await openSource(client, source, false)) && (await readFlags(client, source.uid))
@@ -276,7 +335,9 @@ export async function executeImap(
       continue
     }
     const current = messageFlags(flags)
-    const move = destination ? { source, destination, flags: current } : undefined
+    const move = destination
+      ? { source, destination, flags: current, ...(lookup && { lookup }) }
+      : undefined
     locations.flags(path, source.validity, source.uid, current.unread, current.starred)
     const flagId = Object.keys(after).find(isFlag)
     if (flagId && (flagId === unreadId ? current.unread : current.starred) !== before[flagId]) {
