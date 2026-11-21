@@ -251,7 +251,11 @@ export class FakeGmail implements GmailApi {
     const records = this.#history.filter(
       (record) =>
         BigInt(record.id) > BigInt(startHistoryId) &&
-        (!writeback || record.labelsAdded || record.labelsRemoved || record.messagesDeleted),
+        (!writeback ||
+          record.messagesAdded ||
+          record.labelsAdded ||
+          record.labelsRemoved ||
+          record.messagesDeleted),
     )
     const offset = Number(pageToken ?? 0)
     const end = offset + this.historyPageSize

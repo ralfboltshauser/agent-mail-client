@@ -1110,6 +1110,26 @@ describe('seeded Gmail writeback interleavings', () => {
               checkUndoAba(fixture, targeted(2) ? 'TRASH' : 'Label_work', targeted(2) ? 1 : 500),
             (fixture) => checkRetryAba(fixture, targeted(2) ? 'm1' : 'm2', targeted(2) ? 429 : 401),
           )
+          // Each automatic path gets an owner edit after the action has settled.
+          // Vary the path, pagination, and whether a first dispatch was refused.
+          scenarios.push((fixture) => {
+            fixture.gmail.historyPageSize = targeted(2) ? 1 : 500
+            const retry = Boolean(targeted(2))
+            switch (targeted(6)) {
+              case 0:
+                return checkSuppressionOwnerEdit(fixture, 'snooze', retry)
+              case 1:
+                return checkSuppressionOwnerEdit(fixture, 'mute', retry)
+              case 2:
+                return checkSnoozeMarkerEdit(fixture, 'reply', Boolean(targeted(2)))
+              case 3:
+                return checkSnoozeMarkerEdit(fixture, 'timer', Boolean(targeted(2)))
+              case 4:
+                return checkWakeCleanupOwnerEdit(fixture, retry)
+              default:
+                return checkWakeInboxEdit(fixture, retry)
+            }
+          })
           const scenario = targeted(scenarios.length)
           trace.push(`targeted interleaving ${scenario}`)
           const runScenario = scenarios[scenario]
@@ -1156,8 +1176,12 @@ async function checkMuteSuppression(
   expect(await gmail.getMessageLabels('m3')).toContain('INBOX')
   expect(writes).toEqual(['m3'])
   expect(
-    db.prepare("SELECT mute_suppression_handled AS handled FROM message WHERE id = 'a:m3'").get(),
-  ).toEqual({ handled: 1 })
+    db
+      .prepare(
+        "SELECT status FROM organise_intent_message WHERE message_id = 'a:m3' AND work = 'suppress'",
+      )
+      .get(),
+  ).toEqual({ status: failure ? 'superseded' : 'done' })
 
   // Apply history since the last sync, with a freshly restored older reply and a fresh delivery.
   gmail.add('m4', { threadId: 'thread', labels: ['UNREAD'] })
@@ -1610,6 +1634,8 @@ it('times out and retries a stalled Gmail labels body while unrelated writeback 
         } else json({ labels: gmail.labelList })
       } else if (path?.endsWith('/labels')) {
         json(await gmail.createLabel(SNOOZED_LABEL))
+      } else if (path?.endsWith('/profile')) {
+        json(await gmail.profile())
       } else if (path?.endsWith('/threads/thread')) {
         json({ messages: await gmail.getThreadMessages('thread') })
       } else {
@@ -1652,5 +1678,191 @@ it('times out and retries a stalled Gmail labels body while unrelated writeback 
       await new Promise<void>((resolve) => server.close(() => resolve()))
       await provision
     }
+  })
+})
+
+async function checkSnoozeMarkerEdit(
+  { gmail, queue, submit, sync, now, advance, thread }: OrganiseFixture,
+  path: 'timer' | 'reply' | 'active',
+  readd: boolean,
+) {
+  const snooze = submit({
+    kind: 'snooze',
+    threadId: THREAD,
+    until: now() + (path === 'timer' ? 1000 : 60_000),
+    noReply: path === 'reply',
+  })
+  await queue.tick()
+  expect(queue.lookup(REQUESTOR, [snooze.id])[0]?.status).toBe('applied')
+  const marker = gmail.labelList.find(({ name }) => name === SNOOZED_LABEL)?.id
+  if (!marker) throw new Error('Missing Snoozed label')
+  const labels = (await gmail.getMessageLabels('m1')) ?? []
+  expect(labels).toContain(marker)
+  gmail.setLabels(
+    'm1',
+    labels.filter((label) => label !== marker),
+  )
+  if (readd) gmail.setLabels('m1', labels)
+  advance(1000)
+  if (path === 'reply') gmail.add('m3', { threadId: 'thread', date: now() })
+  await sync.incremental()
+  const attempts = vi.spyOn(gmail, 'modifyMessage')
+  await queue.tick()
+  expect(thread()?.snoozedUntil).toBeNull()
+  expect(attempts).not.toHaveBeenCalled()
+  expect((await gmail.getMessageLabels('m1'))?.includes(marker)).toBe(readd)
+  expect(await gmail.getMessageLabels('m2')).toContain(marker)
+  advance(60_000)
+  await queue.tick()
+  expect(attempts).not.toHaveBeenCalled()
+}
+
+it('preserves an owner-readded Snoozed marker at the scheduled wake', async () => {
+  await withFixture((fixture) => checkSnoozeMarkerEdit(fixture, 'timer', true))
+})
+
+it('clears the schedule if the Gmail owner removes the marker before the deadline', async () => {
+  await withFixture((fixture) => checkSnoozeMarkerEdit(fixture, 'active', false))
+})
+
+async function checkWakeCleanupOwnerEdit(
+  { gmail, queue, submit, now, advance, thread }: OrganiseFixture,
+  loseResponse: boolean,
+) {
+  submit({ kind: 'snooze', threadId: THREAD, until: now() + 1000 })
+  await queue.tick()
+  const marker = gmail.labelList.find(({ name }) => name === SNOOZED_LABEL)?.id ?? ''
+  const modify = gmail.modifyMessage.bind(gmail)
+  const attempts = vi.spyOn(gmail, 'modifyMessage').mockImplementationOnce(async (...args) => {
+    const result = await modify(...args)
+    flipAwayAndBack(gmail, 'm1', marker)
+    if (loseResponse) throw lostResponse()
+    return result
+  })
+  advance(1000)
+  await queue.tick()
+  advance(2000)
+  await queue.tick()
+  expect(attempts.mock.calls).toEqual([['m2', ['INBOX'], [marker]]])
+  expect(await gmail.getMessageLabels('m1')).toContain(marker)
+  expect(thread()?.snoozedUntil).toBeNull()
+}
+
+it('cancels remaining wake cleanup when the Gmail owner edits a sibling marker after the first write', async () => {
+  await withFixture((fixture) => checkWakeCleanupOwnerEdit(fixture, false))
+})
+
+it('distinguishes a lost Star acknowledgement from an owner edit when history expires', async () => {
+  const { gmail, queue, submit, advance, lookup } = await setup()
+  gmail.batchFailure = { applied: 1, error: new Error('response lost') }
+  const action = submit({ kind: 'star', value: true, threadId: THREAD })
+  await queue.tick()
+  gmail.oldestHistory = Number((await gmail.profile()).historyId)
+  advance(2000)
+  await queue.tick()
+  expect(await gmail.getMessageLabels('m1')).toContain('STARRED')
+  expect(lookup(action.id)).toMatchObject({
+    superseded: [],
+    messages: [{ messageId: 'a:m1', status: 'uncertain', uncertainLabels: ['a:STARRED'] }],
+  })
+})
+
+async function checkSuppressionOwnerEdit(
+  { db, gmail, queue, submit, sync, now, advance, store }: OrganiseFixture,
+  kind: 'snooze' | 'mute',
+  retry: boolean,
+) {
+  const intent = submit(
+    kind === 'snooze'
+      ? { kind, threadId: THREAD, until: now() + 60_000 }
+      : { kind, threadId: THREAD, value: true },
+  )
+  await queue.tick()
+  gmail.add('m3', { threadId: 'thread', labels: ['INBOX', 'UNREAD'] })
+  await sync.incremental()
+  const attempts = vi.spyOn(gmail, 'modifyMessage')
+  if (retry) {
+    gmail.batchFailure = {
+      applied: 0,
+      error: new GmailHttpError(429, 'rateLimitExceeded', 'refused'),
+    }
+    await queue.tick()
+    expect(attempts).toHaveBeenCalledTimes(1)
+  }
+  flipAwayAndBack(gmail, 'm3', 'INBOX')
+  await sync.incremental()
+  advance(2000)
+  const restarted = new Mutations(store, () => gmail, silentLog, now)
+  await restarted.tick()
+  expect(await gmail.getMessageLabels('m3')).toContain('INBOX')
+  await restarted.tick()
+  expect(await gmail.getMessageLabels('m3')).toContain('INBOX')
+  expect(attempts).toHaveBeenCalledTimes(retry ? 1 : 0)
+  expect(
+    db
+      .prepare(
+        "SELECT status FROM organise_intent_message WHERE intent_id = ? AND message_id = 'a:m3' AND work = 'suppress'",
+      )
+      .get(intent.id),
+  ).toEqual({ status: 'superseded' })
+
+  gmail.add('m4', { threadId: 'thread' })
+  await sync.incremental()
+  await restarted.tick()
+  expect(await gmail.getMessageLabels('m3')).toContain('INBOX')
+  expect(await gmail.getMessageLabels('m4')).not.toContain('INBOX')
+}
+
+async function checkWakeInboxEdit(
+  { gmail, queue, submit, advance, now, thread }: OrganiseFixture,
+  retry: boolean,
+) {
+  submit({ kind: 'snooze', threadId: THREAD, until: now() + 1000 })
+  await queue.tick()
+  advance(1000)
+  const attempts = vi.spyOn(gmail, 'modifyMessage')
+  if (retry) {
+    gmail.batchFailure = {
+      applied: 0,
+      error: new GmailHttpError(429, 'rateLimitExceeded', 'refused'),
+    }
+    await queue.tick()
+  }
+  flipAwayAndBack(gmail, 'm2', 'INBOX')
+  advance(2000)
+  await queue.tick()
+  await queue.tick()
+  expect(thread()?.snoozedUntil).toBeNull()
+  expect(attempts.mock.calls.filter(([, add]) => add.includes('INBOX'))).toHaveLength(retry ? 1 : 0)
+  expect(await gmail.getMessageLabels('m1')).not.toContain('INBOX')
+  expect(await gmail.getMessageLabels('m2')).not.toContain('INBOX')
+}
+
+it('does not enqueue a fresh suppression after a snooze retry yields to owner Inbox ABA', async () => {
+  await withFixture((fixture) => checkSuppressionOwnerEdit(fixture, 'snooze', true))
+})
+
+it('preserves owner Inbox ABA before the first Mute suppression', async () => {
+  await withFixture((fixture) => checkSuppressionOwnerEdit(fixture, 'mute', false))
+})
+
+it('consumes a Snooze wake after the owner edits the target Inbox label', async () => {
+  await withFixture((fixture) => checkWakeInboxEdit(fixture, true))
+})
+
+it('keeps an old Mute effective for witnessed deliveries after its Gmail history expires', async () => {
+  await withFixture(async ({ gmail, queue, submit, sync }) => {
+    submit({ kind: 'mute', threadId: THREAD, value: true })
+    await queue.tick()
+    gmail.add('m3', { threadId: 'thread' })
+    // Let sync witness the deliveries before expiring their original Mute checkpoint.
+    const firstDelivery = Number((await gmail.profile()).historyId)
+    flipAwayAndBack(gmail, 'm3', 'INBOX')
+    gmail.add('m4', { threadId: 'thread' })
+    await sync.incremental()
+    gmail.oldestHistory = firstDelivery
+    await queue.tick()
+    expect(await gmail.getMessageLabels('m3')).toContain('INBOX')
+    expect(await gmail.getMessageLabels('m4')).not.toContain('INBOX')
   })
 })

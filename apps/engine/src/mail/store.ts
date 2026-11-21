@@ -24,7 +24,7 @@ export interface IncomingMessage {
   /** Provider label ids, e.g. Gmail's INBOX, UNREAD, Label_123. */
   labels: string[]
   providerHistoryId?: string
-  inboxRestored?: boolean
+  providerDeliveryHistoryId?: string | null | undefined
   listUnsubscribe: string | null
   attachments: IncomingAttachment[]
 }
@@ -189,7 +189,7 @@ export class MailStore extends EventEmitter<{ change: [] }> {
            id, account_id, thread_id, provider_id, rfc_message_id, in_reply_to, refs,
            from_json, to_json, cc_json, bcc_json, reply_to_json, subject, snippet, body_text,
            html_blob, sent_at, size, label_ids, unread, starred, list_unsubscribe, provider_label_ids,
-           first_seen_at, provider_history_id, mute_suppression_handled
+           first_seen_at, provider_history_id, provider_delivery_history_id
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            thread_id = excluded.thread_id, rfc_message_id = excluded.rfc_message_id,
@@ -201,7 +201,7 @@ export class MailStore extends EventEmitter<{ change: [] }> {
            unread = excluded.unread, starred = excluded.starred,
            list_unsubscribe = excluded.list_unsubscribe, provider_label_ids = excluded.provider_label_ids,
            provider_history_id = excluded.provider_history_id,
-           mute_suppression_handled = MAX(message.mute_suppression_handled, excluded.mute_suppression_handled)`,
+           provider_delivery_history_id = COALESCE(message.provider_delivery_history_id, excluded.provider_delivery_history_id)`,
       )
       .run(
         mid,
@@ -229,7 +229,7 @@ export class MailStore extends EventEmitter<{ change: [] }> {
         JSON.stringify(providerLabels),
         this.#now(),
         stale ? previous.provider_history_id : (msg.providerHistoryId ?? null),
-        Number(msg.inboxRestored ?? false),
+        msg.providerDeliveryHistoryId ?? null,
       )
 
     this.#putAttachments(mid, msg.attachments)
@@ -348,10 +348,6 @@ export class MailStore extends EventEmitter<{ change: [] }> {
       if (this.refreshMessageLabels(mid)) this.refreshThread(stored.thread_id)
     }
     return { labels: providerLabels, historyId }
-  }
-
-  markMuteSuppressionHandled(id: string): void {
-    this.db.prepare('UPDATE message SET mute_suppression_handled = 1 WHERE id = ?').run(id)
   }
 
   private projectLabels(id: string, base: string[]): string[] {

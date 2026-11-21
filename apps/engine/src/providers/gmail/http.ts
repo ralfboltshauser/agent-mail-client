@@ -203,7 +203,9 @@ export class GmailHttpApi implements GmailApi {
           startHistoryId,
           pageToken,
           maxResults: '500',
-          historyTypes: writeback ? ['labelAdded', 'labelRemoved', 'messageDeleted'] : undefined,
+          historyTypes: writeback
+            ? ['messageAdded', 'labelAdded', 'labelRemoved', 'messageDeleted']
+            : undefined,
         },
         writeback,
         cost: 'history',

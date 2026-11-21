@@ -44,7 +44,8 @@ describe('migrate', () => {
       expect(
         db
           .prepare(`SELECT count(*) AS n FROM message WHERE label_ids = '["a:INBOX"]'
-        AND provider_label_ids IS NULL AND provider_history_id IS NULL AND mute_suppression_handled = 0`)
+        AND provider_label_ids IS NULL AND provider_history_id IS NULL
+        AND provider_delivery_history_id IS NULL`)
           .get(),
       ).toEqual({ n: 10000 })
       expect(db.prepare('SELECT subject FROM draft').get()).toEqual({ subject: 'Existing draft' })

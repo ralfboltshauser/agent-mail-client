@@ -1,8 +1,8 @@
 import { SNOOZED_LABEL } from '@amc/protocol'
 import type { Logger } from '../../log.ts'
-import { type MailStore, messageId } from '../../mail/store.ts'
+import type { MailStore } from '../../mail/store.ts'
 import { fromGmail } from './mapping.ts'
-import type { GmailApi, GmailLabel, GmailMessageRef } from './types.ts'
+import type { GmailApi, GmailLabel } from './types.ts'
 
 export interface GmailCursor {
   historyId?: string
@@ -127,9 +127,8 @@ export class GmailAccountSync {
     const account = this.#state.accountId
     const epoch = this.#store.writeEpoch(account)
 
-    const added = new Map<string, GmailMessageRef>()
+    const added = new Map<string, string | null>()
     const labelUpdates = new Set<string>()
-    const inboxRestored = new Set<string>()
     const deleted = new Set<string>()
     let pageToken: string | undefined
     let latest = startId
@@ -142,18 +141,26 @@ export class GmailAccountSync {
       }
       for (const record of page.history ?? []) {
         for (const { message } of record.messagesAdded ?? []) {
-          added.set(message.id, message)
+          // A delivery revision can prove the start of this message's history
+          // when a long-lived Mute's mailbox checkpoint has expired.
+          const changedOnDelivery =
+            record.labelsRemoved?.some(
+              (change) =>
+                change.message.id === message.id &&
+                change.labelIds.some((label) => ['INBOX', 'TRASH', 'SPAM'].includes(label)),
+            ) ||
+            record.labelsAdded?.some(
+              (change) =>
+                change.message.id === message.id &&
+                change.labelIds.some((label) => ['TRASH', 'SPAM'].includes(label)),
+            )
+          added.set(message.id, changedOnDelivery ? null : record.id)
           deleted.delete(message.id)
         }
         for (const { message } of record.messagesDeleted ?? []) {
           deleted.add(message.id)
           added.delete(message.id)
           labelUpdates.delete(message.id)
-        }
-        const delivered = new Set(record.messagesAdded?.map(({ message }) => message.id))
-        for (const { message, labelIds } of record.labelsAdded ?? []) {
-          if (labelIds.includes('INBOX') && !delivered.has(message.id))
-            inboxRestored.add(message.id)
         }
         for (const change of [...(record.labelsAdded ?? []), ...(record.labelsRemoved ?? [])]) {
           if (!deleted.has(change.message.id)) labelUpdates.add(change.message.id)
@@ -168,7 +175,7 @@ export class GmailAccountSync {
     const known = [...labelUpdates].filter((id) => {
       if (added.has(id)) return false
       if (this.#store.hasMessage(account, id)) return true
-      added.set(id, { id, threadId: '' })
+      added.set(id, null)
       return false
     })
     const current = await mapLimit(known, FETCH_CONCURRENCY, (id) => this.#api.getMessageState(id))
@@ -182,13 +189,12 @@ export class GmailAccountSync {
     for (const [index, id] of known.entries()) {
       this.#backfillChanges?.add(id)
       const message = current[index]
-      if (inboxRestored.has(id)) this.#store.markMuteSuppressionHandled(messageId(account, id))
       if (message)
         this.#store.setMessageLabels(account, id, message.labelIds ?? [], message.historyId)
       else this.#store.deleteMessage(account, id)
       changes++
     }
-    changes += await this.#fetchAndStore([...added.keys()], true, undefined, inboxRestored)
+    changes += await this.#fetchAndStore([...added.keys()], true, undefined, added)
 
     if (this.#store.writeEpoch(account) !== epoch) return changes
     this.#state.saveCursor({ historyId: latest })
@@ -262,7 +268,7 @@ export class GmailAccountSync {
     ids: string[],
     perMessage: boolean,
     scan?: { generation: number; changed: Set<string> },
-    inboxRestored?: Set<string>,
+    deliveries?: ReadonlyMap<string, string | null>,
   ): Promise<number> {
     let stored = 0
     for (let i = 0; i < ids.length; i += STORE_CHUNK) {
@@ -281,7 +287,7 @@ export class GmailAccountSync {
         .filter((m) => !scan?.changed.has(m.id))
         .map((message) => ({
           ...fromGmail(message),
-          inboxRestored: inboxRestored?.has(message.id),
+          providerDeliveryHistoryId: deliveries?.get(message.id),
         }))
       if (perMessage) {
         for (const msg of incoming) {
