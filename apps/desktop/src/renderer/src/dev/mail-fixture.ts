@@ -396,7 +396,7 @@ export function createFixture(scenario: string): AmcApi {
     inlineAttachment: async () => '',
     openAttachment: async () => {},
     openExternal: async () => {},
-    savedT3Url: async () => '',
+    t3Setup: async () => ({ kind: 'mcp', address: '' }),
     t3Projects: async () => [],
     handoff: async () => {
       throw new Error('Hand off is unavailable in the fixture.')

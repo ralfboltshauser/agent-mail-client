@@ -17,11 +17,12 @@ import { clearPairing, loadPairing, savePairing } from './auth'
 import { AutoTriage } from './auto-triage'
 import { composeDraftPath } from './draft-updates'
 import { EngineClient, EngineError } from './engine'
-import { Handoff, t3NavigationLink } from './handoff'
+import { Handoff, type T3Launcher, t3NavigationLink } from './handoff'
 import { OrganiseSync } from './organise'
 import { Replica } from './replica'
 import { SyncLoop } from './sync'
-import { launchInT3, savedT3Url, t3Projects } from './t3'
+import { mcpLauncher, savedT3Url } from './t3'
+import { cliLauncher, detectT3Cli } from './t3-cli'
 import { createTray } from './tray'
 import { onLowBattery, runTriageProcess } from './triage-process'
 
@@ -261,17 +262,27 @@ async function pair(engineUrl: string, code: string) {
 
 function registerComposeIpc() {
   handoff = new Handoff(openReplica().db)
-  ipcMain.handle('amc:savedT3Url', () => savedT3Url())
-  ipcMain.handle('amc:t3Projects', (_e, address: string) => t3Projects(address))
+  let local: T3Launcher | null = null
+  ipcMain.handle('amc:t3Setup', async () => {
+    const cli = local ? null : await detectT3Cli()
+    if (cli) local = cliLauncher(cli)
+    return { kind: local ? 'cli' : 'mcp', address: savedT3Url() }
+  })
+  const launcher = (address: string | null) => {
+    if (address !== null) return mcpLauncher(address)
+    if (!local) throw new Error('AMC could not find the local T3 CLI.')
+    return local
+  }
+  ipcMain.handle('amc:t3Projects', (_e, address: string | null) => launcher(address).projects())
   ipcMain.handle(
     'amc:handoff',
-    async (_e, address: string, projectId: string, threadId: string) => {
+    async (_e, address: string | null, projectId: string, threadId: string) => {
       await draftRecovery
       const { draft, thread } = await handoff.launch(
         requireEngine(),
         projectId,
         threadId,
-        (request) => launchInT3(address, request),
+        launcher(address).launch,
       )
       const link = thread.link && t3NavigationLink(thread.link)
       if (link) void shell.openExternal(link).catch(() => {})

@@ -116,9 +116,9 @@ export interface AmcApi {
   setAutoTriage(enabled: boolean): Promise<void>
   triageNow(accountId: string | null): Promise<void>
   onTriageStatus(listener: (status: TriageStatus) => void): () => void
-  savedT3Url(): Promise<string>
-  t3Projects(address: string): Promise<T3Project[]>
-  handoff(address: string, projectId: string, threadId: string): Promise<ComposeDraft>
+  t3Setup(): Promise<{ kind: 'cli' | 'mcp'; address: string }>
+  t3Projects(address: string | null): Promise<T3Project[]>
+  handoff(address: string | null, projectId: string, threadId: string): Promise<ComposeDraft>
   cancelHandoff(projectId: string, threadId: string): Promise<void>
   activeHandoff(threadId: string): Promise<ActiveHandoff | null>
   endHandoff(id: string): Promise<void>

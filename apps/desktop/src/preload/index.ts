@@ -17,7 +17,7 @@ const api: AmcApi = {
     ipcRenderer.on('amc:triageStatus', handler)
     return () => ipcRenderer.off('amc:triageStatus', handler)
   },
-  savedT3Url: invoke('savedT3Url') as AmcApi['savedT3Url'],
+  t3Setup: invoke('t3Setup') as AmcApi['t3Setup'],
   t3Projects: invoke('t3Projects') as AmcApi['t3Projects'],
   handoff: invoke('handoff') as AmcApi['handoff'],
   cancelHandoff: invoke('cancelHandoff') as AmcApi['cancelHandoff'],
