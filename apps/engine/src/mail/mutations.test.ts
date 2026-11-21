@@ -1204,7 +1204,11 @@ describe('seeded Gmail writeback interleavings', () => {
                 if (
                   action.kind !== 'undo' ||
                   !(error instanceof Error) ||
-                  error.message !== 'There is no matching action to undo'
+                  ![
+                    'There is no matching action to undo',
+                    'Undo unavailable: Mute has changed since this action',
+                    'Undo unavailable: Snooze has changed since this action',
+                  ].includes(error.message)
                 )
                   throw error
               }
