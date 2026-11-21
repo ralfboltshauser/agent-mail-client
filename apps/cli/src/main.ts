@@ -14,6 +14,7 @@ import type {
 import { Command } from 'commander'
 import { authed, EngineError, request } from './client.ts'
 import { readConfig, writeConfig } from './config.ts'
+import { addImapAccount } from './imap-signin.ts'
 import { loopbackSignIn } from './signin.ts'
 
 declare const AMC_VERSION: string | undefined
@@ -67,11 +68,18 @@ const account = program.command('account').description('Manage mail Accounts')
 
 account
   .command('add')
-  .description('Add an Account (opens a browser to sign in)')
-  .argument('<kind>', 'gmail')
+  .description('Add an Account')
+  .argument('<kind>', 'gmail or imap')
   .action(async (kind: string) => {
+    if (kind === 'imap') {
+      const res = await addImapAccount(requireConfig())
+      console.log(
+        `${res.created ? 'Added' : 'Signed in again to'} ${res.address}. Sync has started; watch it with \`amc accounts\`.`,
+      )
+      return
+    }
     if (kind !== 'gmail') {
-      console.error('Only gmail is supported so far.')
+      console.error('Choose gmail or imap.')
       process.exit(2)
     }
     const api = authed(requireConfig())
@@ -100,7 +108,7 @@ program
     )
     if (opts.json) return printJson(accounts)
     if (accounts.length === 0)
-      return console.log('No Accounts yet. Add one with `amc account add gmail`.')
+      return console.log('No Accounts yet. Run `amc account add gmail` or `amc account add imap`.')
     for (const a of accounts) {
       const progress =
         a.backfill.phase && a.backfill.phase !== 'done'

@@ -1,6 +1,16 @@
-import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import {
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs'
+import { mkdir, rename, rm } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { type Readable, Transform } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 
 /** Content-addressed store on the big disk: raw mail, HTML bodies, attachments (plan §4.2). */
 export class BlobStore {
@@ -21,6 +31,41 @@ export class BlobStore {
       renameSync(tmp, path)
     }
     return hash
+  }
+
+  async putStream(
+    source: Readable,
+    expectedSize?: number,
+  ): Promise<{ hash: string; size: number }> {
+    const hash = createHash('sha256')
+    const tmp = join(this.root, `stream-${randomUUID()}.tmp`)
+    let size = 0
+    const meter = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        size += chunk.length
+        if (expectedSize !== undefined && size > expectedSize) {
+          return callback(new Error('Blob size differs from the expected size'))
+        }
+        hash.update(chunk)
+        callback(null, chunk)
+      },
+    })
+    try {
+      await mkdir(this.root, { recursive: true })
+      await pipeline(source, meter, createWriteStream(tmp, { flags: 'wx' }))
+      if (expectedSize !== undefined && size !== expectedSize) {
+        throw new Error('Blob size differs from the expected size')
+      }
+      const digest = hash.digest('hex')
+      const path = this.path(digest)
+      if (!existsSync(path)) {
+        await mkdir(dirname(path), { recursive: true })
+        await rename(tmp, path)
+      }
+      return { hash: digest, size }
+    } finally {
+      await rm(tmp, { force: true })
+    }
   }
 
   get(hash: string): Buffer | null {

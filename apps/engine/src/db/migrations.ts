@@ -206,4 +206,111 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX draft_thread ON draft (thread_id);
     `,
   },
+  {
+    version: 4,
+    name: 'IMAP message locations and threading',
+    sql: `
+      ALTER TABLE message ADD COLUMN imap_fingerprint TEXT;
+      CREATE UNIQUE INDEX message_imap_content
+        ON message (account_id, rfc_message_id, imap_fingerprint) WHERE imap_fingerprint IS NOT NULL;
+
+      CREATE TABLE imap_location (
+        account_id TEXT NOT NULL REFERENCES account (id) ON DELETE CASCADE,
+        path_key TEXT NOT NULL,
+        validity TEXT NOT NULL,
+        uid INTEGER NOT NULL,
+        message_id TEXT NOT NULL REFERENCES message (id) ON DELETE CASCADE,
+        label_id TEXT NOT NULL,
+        unread INTEGER NOT NULL,
+        starred INTEGER NOT NULL,
+        verified INTEGER NOT NULL DEFAULT 1,
+        source_blob TEXT,
+        PRIMARY KEY (account_id, path_key, validity, uid)
+      ) STRICT;
+      CREATE INDEX imap_location_folder_message ON imap_location (account_id, path_key, message_id);
+      CREATE INDEX imap_location_message ON imap_location (message_id);
+
+      -- Existing IMAP provider IDs are encoded-path:UIDVALIDITY:UID.
+      WITH paths AS (
+        SELECT m.*, instr(m.provider_id, ':') AS separator
+        FROM message m JOIN account a ON a.id = m.account_id WHERE a.kind = 'imap'
+      ), parts AS (
+        SELECT *, substr(provider_id, separator + 1) AS suffix FROM paths
+      )
+      INSERT INTO imap_location (account_id, path_key, validity, uid, message_id, label_id, unread, starred, verified)
+        SELECT account_id, substr(provider_id, 1, separator - 1),
+          substr(suffix, 1, instr(suffix, ':') - 1), CAST(substr(suffix, instr(suffix, ':') + 1) AS INTEGER),
+          id, json_extract(label_ids, '$[0]'), unread, starred, 0 FROM parts;
+
+      CREATE TABLE imap_thread_alias (
+        account_id TEXT NOT NULL REFERENCES account (id) ON DELETE CASCADE,
+        rfc_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL REFERENCES thread (id) ON DELETE CASCADE,
+        PRIMARY KEY (account_id, rfc_id)
+      ) STRICT;
+      CREATE INDEX imap_thread_alias_thread ON imap_thread_alias (thread_id);
+      CREATE TABLE imap_thread_subject (
+        message_id TEXT PRIMARY KEY REFERENCES message (id) ON DELETE CASCADE,
+        account_id TEXT NOT NULL REFERENCES account (id) ON DELETE CASCADE,
+        subject TEXT NOT NULL,
+        sent_at INTEGER NOT NULL,
+        reply INTEGER NOT NULL,
+        has_parent INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX imap_thread_subject_lookup ON imap_thread_subject (account_id, subject, sent_at);
+    `,
+  },
+  {
+    version: 5,
+    name: 'Index IMAP body prefixes and refresh legacy previews',
+    sql: `
+      ALTER TABLE message ADD COLUMN body_search_limit INTEGER;
+
+      DROP TRIGGER message_fts_insert;
+      DROP TRIGGER message_fts_update;
+      CREATE TRIGGER message_fts_insert AFTER INSERT ON message BEGIN
+        INSERT INTO message_fts (rowid, subject, people, body, attachments)
+        VALUES (new.rowid, new.subject, new.from_json || ' ' || new.to_json || ' ' || new.cc_json,
+          coalesce(substr(new.body_text, 1, new.body_search_limit), new.body_text), '');
+      END;
+      CREATE TRIGGER message_fts_update
+        AFTER UPDATE OF subject, body_text, body_search_limit, from_json, to_json, cc_json ON message BEGIN
+        DELETE FROM message_fts WHERE rowid = old.rowid;
+        INSERT INTO message_fts (rowid, subject, people, body, attachments)
+        VALUES (new.rowid, new.subject, new.from_json || ' ' || new.to_json || ' ' || new.cc_json,
+          coalesce(substr(new.body_text, 1, new.body_search_limit), new.body_text), '');
+      END;
+
+      -- Re-download v4 preview-only locations at the next reconciliation, in place.
+      UPDATE message SET imap_fingerprint = NULL WHERE id IN
+        (SELECT message_id FROM imap_location WHERE source_blob IS NULL);
+      UPDATE imap_location SET verified = 0 WHERE source_blob IS NULL;
+    `,
+  },
+  {
+    version: 6,
+    name: 'Verify IMAP message and mailbox identity',
+    sql: `
+      ALTER TABLE imap_location ADD COLUMN envelope TEXT;
+      ALTER TABLE imap_location ADD COLUMN rfc822_size INTEGER;
+
+      -- Reprocess each UID independently. A single legacy header fingerprint
+      -- may have combined locations that refer to different raw sources.
+      UPDATE imap_location SET verified = 0 WHERE message_id IN
+        (SELECT id FROM message WHERE imap_fingerprint GLOB 'headers:*');
+    `,
+  },
+  {
+    version: 7,
+    name: 'Retire IMAP metadata fingerprints',
+    sql: `
+      ALTER TABLE imap_location DROP COLUMN envelope;
+      ALTER TABLE imap_location DROP COLUMN rfc822_size;
+
+      -- Download each UID again because an older EMAILID match may have joined
+      -- locations with different sources into the same cached message.
+      UPDATE imap_location SET verified = 0 WHERE message_id IN
+        (SELECT id FROM message WHERE imap_fingerprint GLOB 'email-id:*');
+    `,
+  },
 ]

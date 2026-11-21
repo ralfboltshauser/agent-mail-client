@@ -11,7 +11,7 @@ import {
   CommandShortcut,
 } from '@/components/ui/command'
 import type { View } from '../../../shared/api'
-import { SYSTEM_VIEWS } from './app-sidebar'
+import { navigableLabels, SYSTEM_VIEWS } from './app-sidebar'
 
 interface Props {
   open: boolean
@@ -77,18 +77,16 @@ export function CommandPalette({
               <CommandShortcut>{item.keys}</CommandShortcut>
             </CommandItem>
           ))}
-          {labels
-            .filter((l) => l.kind === 'user')
-            .map((l) => (
-              <CommandItem
-                key={l.id}
-                value={`label ${l.name}`}
-                onSelect={run(() => onView({ kind: 'label', labelId: l.id }))}
-              >
-                <Tag />
-                {l.name}
-              </CommandItem>
-            ))}
+          {navigableLabels(labels, accounts).map((l) => (
+            <CommandItem
+              key={l.id}
+              value={`label ${l.name}`}
+              onSelect={run(() => onView({ kind: 'label', labelId: l.id }))}
+            >
+              <Tag />
+              {l.name}
+            </CommandItem>
+          ))}
         </CommandGroup>
         <CommandGroup heading="Accounts">
           <CommandItem value="account all" onSelect={run(() => onAccount(null))}>
