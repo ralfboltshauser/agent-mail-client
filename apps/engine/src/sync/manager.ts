@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import type { Health } from '@amc/protocol'
 import { ImapFlowErrorCode } from 'imapflow/lib/errors'
 import {
   DbAccountState,
@@ -11,14 +12,14 @@ import type { Sealer } from '../crypto.ts'
 import type { Db } from '../db/database.ts'
 import type { Logger } from '../log.ts'
 import type { MailStore } from '../mail/store.ts'
-import { GmailHttpApi } from '../providers/gmail/http.ts'
+import { GmailHttpApi, GmailHttpError } from '../providers/gmail/http.ts'
 import {
   AccessTokens,
   type GmailCredentials,
   type OAuthClient,
   OAuthError,
 } from '../providers/gmail/oauth.ts'
-import type { GmailPubSub } from '../providers/gmail/pubsub.ts'
+import { type GmailPubSub, GmailPubSubError } from '../providers/gmail/pubsub.ts'
 import { GmailAccountSync } from '../providers/gmail/sync.ts'
 import type { GmailApi } from '../providers/gmail/types.ts'
 import {
@@ -81,11 +82,15 @@ export interface SyncManagerOptions {
   labelsEveryMs?: number
 }
 
+type GmailPushHealth = NonNullable<NonNullable<Health['accounts']>[number]['gmailPush']>
+type GmailPubSubHealth = NonNullable<Health['gmailPubSub']>
+
 interface Runner {
   stop: () => void
   done: Promise<void>
   api?: GmailApi
-  gmailNotification?: (address: string) => void
+  gmailHealth?: () => GmailPushHealth
+  gmailNotification?: (address: string, at: number) => void
   gmailWake?: () => void
   imap?: () => ImapAccountSync | undefined
 }
@@ -115,6 +120,9 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
   #stopping = false
   #pubSub?: { controller: AbortController; done: Promise<void> }
   #pullHealthy = false
+  #lastNotificationAt: number | null = null
+  #pullErrorCount = 0
+  #lastPullError: GmailPubSubHealth['lastPullError'] = null
 
   constructor(options: SyncManagerOptions) {
     super()
@@ -138,17 +146,43 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
     }
   }
 
+  gmailPubSubHealth(): GmailPubSubHealth {
+    return {
+      enabled: this.#o.gmailPubSub !== undefined,
+      pullHealthy: this.#pullHealthy,
+      lastNotificationAt: this.#lastNotificationAt,
+      pullErrorCount: this.#pullErrorCount,
+      lastPullError: this.#lastPullError,
+    }
+  }
+
+  gmailPushHealth(accountId: string): GmailPushHealth {
+    return (
+      this.#runners.get(accountId)?.gmailHealth?.() ?? {
+        watchExpiresAt: null,
+        lastNotificationAt: null,
+        pollIntervalMs: null,
+      }
+    )
+  }
+
   async #pullGmailNotifications(pubSub: GmailPubSub, signal: AbortSignal): Promise<void> {
     while (!signal.aborted) {
+      let operation = 'pull'
       try {
         const messages = await pubSub.pull(signal)
         if (signal.aborted) return
+        const receivedAt = Date.now()
         for (const { address } of messages) {
           if (!address) continue
-          for (const runner of this.#runners.values()) runner.gmailNotification?.(address)
+          this.#lastNotificationAt = receivedAt
+          for (const runner of this.#runners.values()) {
+            runner.gmailNotification?.(address, receivedAt)
+          }
         }
         // These are wake-up hints. The stored Gmail cursor and periodic poll recover missed work.
         if (messages.length) {
+          operation = 'acknowledge'
           await pubSub.acknowledge(
             messages.map(({ ackId }) => ackId),
             signal,
@@ -162,7 +196,17 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
           this.#pullHealthy = false
           for (const runner of this.#runners.values()) runner.gmailWake?.()
         }
-        this.#o.log.warn({ err: error }, 'Gmail Pub/Sub pull failed')
+        const detail =
+          error instanceof GmailPubSubError
+            ? error.message
+            : error instanceof SyntaxError
+              ? 'Invalid response'
+              : error instanceof DOMException && error.name === 'TimeoutError'
+                ? 'Request timed out'
+                : 'Request failed'
+        this.#pullErrorCount++
+        this.#lastPullError = { at: Date.now(), message: `${operation}: ${detail}` }
+        this.#o.log.warn({ operation, detail }, 'Gmail Pub/Sub pull failed')
         await sleep(this.#o.pollMs, signal)
       }
     }
@@ -377,7 +421,10 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
 
     const pubSub = this.#o.gmailPubSub
     const address = row.address.toLowerCase()
-    let watchExpiresAt = 0
+    let watchExpiresAt: number | null = null
+    let watchHealthy = false
+    let lastNotificationAt: number | null = null
+    let pollIntervalMs: number | null = null
     let notified = false
     let waiting: AbortController | undefined
     const wake = () => waiting?.abort()
@@ -392,14 +439,22 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
             throw new Error('Gmail returned an invalid watch expiration')
           }
           watchExpiresAt = expiration
+          watchHealthy = true
+          log.info({ account: accountId, watchExpiresAt }, 'Gmail watch renewed')
           await sleep(Math.min(WATCH_RENEW_MS, Math.max(1_000, remaining - 60_000)), signal)
         } catch (error) {
           if (signal.aborted) return
-          if (watchExpiresAt) {
-            watchExpiresAt = 0
+          if (watchHealthy) {
+            watchHealthy = false
             wake()
           }
-          log.warn({ account: accountId, err: error }, 'Gmail watch failed')
+          log.warn(
+            {
+              account: accountId,
+              status: error instanceof GmailHttpError ? error.status : undefined,
+            },
+            'Gmail watch failed',
+          )
           await sleep(WATCH_RETRY_MS, signal)
         }
       }
@@ -426,17 +481,20 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
         } catch (error) {
           if (fail(error)) return
           backoff = Math.min(backoff * 2, 5 * 60_000)
+          pollIntervalMs = backoff
           await sleep(backoff, signal)
           continue
         }
         if (!pubSub) {
+          pollIntervalMs = backoff
           await sleep(backoff, signal)
           continue
         }
         if (!notified) {
           waiting = new AbortController()
-          const healthy = this.#pullHealthy && watchExpiresAt > Date.now()
-          await sleep(healthy ? PUSH_POLL_MS : backoff, AbortSignal.any([signal, waiting.signal]))
+          const healthy = this.#pullHealthy && watchHealthy && (watchExpiresAt ?? 0) > Date.now()
+          pollIntervalMs = healthy ? PUSH_POLL_MS : backoff
+          await sleep(pollIntervalMs, AbortSignal.any([signal, waiting.signal]))
           waiting = undefined
         }
         if (notified) await sleep(NOTIFICATION_DEBOUNCE_MS, signal)
@@ -474,10 +532,16 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
       stop,
       done,
       api,
+      gmailHealth: () => ({
+        watchExpiresAt,
+        lastNotificationAt,
+        pollIntervalMs: signal.aborted ? null : pollIntervalMs,
+      }),
       gmailWake: pubSub ? wake : undefined,
       gmailNotification: pubSub
-        ? (mailbox) => {
-            if (mailbox !== address) return
+        ? (mailbox, at) => {
+            if (signal.aborted || mailbox !== address) return
+            lastNotificationAt = at
             notified = true
             wake()
           }

@@ -74,12 +74,42 @@ program
         `Backup ${b ? `${new Date(b.at).toISOString()} · ${formatBytes(b.bytes)}` : 'none yet'}`,
       )
     }
+    if (health.gmailPubSub) {
+      const { enabled, pullHealthy, lastNotificationAt, pullErrorCount, lastPullError } =
+        health.gmailPubSub
+      const state = enabled
+        ? pullHealthy
+          ? 'pulling'
+          : 'waiting for a successful pull'
+        : 'disabled'
+      const lastNotification =
+        lastNotificationAt === null ? 'none yet' : new Date(lastNotificationAt).toISOString()
+      console.log(
+        `Gmail Pub/Sub ${state} · last notification ${lastNotification} · ${pullErrorCount} pull errors`,
+      )
+      if (lastPullError) {
+        console.log(
+          `  Last pull error ${new Date(lastPullError.at).toISOString()} · ${lastPullError.message}`,
+        )
+      }
+    }
     for (const account of health.accounts ?? []) {
       const lag = account.syncLagSeconds
       console.log(
         `Account ${account.address} · ${account.status} · ${lag === null ? 'never synced' : `sync lag ${formatDuration(Math.floor(lag))}`}`,
       )
       if (account.lastError) console.log(`  ${account.lastError}`)
+      if (account.gmailPush) {
+        const { watchExpiresAt, lastNotificationAt, pollIntervalMs } = account.gmailPush
+        const expiry =
+          watchExpiresAt === null ? 'unavailable' : new Date(watchExpiresAt).toISOString()
+        const lastNotification =
+          lastNotificationAt === null ? 'none yet' : new Date(lastNotificationAt).toISOString()
+        const poll = pollIntervalMs === null ? 'inactive' : `every ${pollIntervalMs / 1000}s`
+        console.log(
+          `  Gmail watch expiry ${expiry} · last notification ${lastNotification} · poll ${poll}`,
+        )
+      }
     }
     if (health.outboxDepth !== undefined) {
       console.log(`Outbox ${health.outboxDepth} pending`)

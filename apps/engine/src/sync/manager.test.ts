@@ -50,6 +50,7 @@ function setup(push = true) {
     ).run(id, gmail.address, sealer.seal({ refreshToken: 'test', scope: 'test' }), createdAt)
   }
   return {
+    sync,
     owner,
     other,
     store,
@@ -83,11 +84,17 @@ describe('Gmail Pub/Sub sync', () => {
 
   it('starts a watch per Gmail account and renews both daily', async () => {
     fixture = setup()
+    const startedAt = Date.now()
     const ownerWatch = vi.spyOn(fixture.owner, 'watch')
     const otherWatch = vi.spyOn(fixture.other, 'watch')
     await fixture.start()
     expect(ownerWatch).toHaveBeenCalledExactlyOnceWith(topic, expect.any(AbortSignal))
     expect(otherWatch).toHaveBeenCalledExactlyOnceWith(topic, expect.any(AbortSignal))
+    expect(fixture.sync.gmailPushHealth('owner')).toMatchObject({
+      watchExpiresAt: startedAt + 7 * 24 * 60 * 60_000,
+      lastNotificationAt: null,
+      pollIntervalMs: 60_000,
+    })
 
     await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 - 251)
     expect(ownerWatch).toHaveBeenCalledTimes(1)
@@ -95,11 +102,14 @@ describe('Gmail Pub/Sub sync', () => {
     await vi.advanceTimersByTimeAsync(1)
     expect(ownerWatch).toHaveBeenCalledTimes(2)
     expect(otherWatch).toHaveBeenCalledTimes(2)
+    expect(fixture.sync.gmailPushHealth('owner').watchExpiresAt).toBe(
+      startedAt + 8 * 24 * 60 * 60_000,
+    )
   })
 
   it('coalesces notifications into an incremental sync for the matching account', async () => {
     fixture = setup()
-    const { owner, other, store, pubSub, deliver } = fixture
+    const { sync, owner, other, store, pubSub, deliver } = fixture
     const ownerHistory = vi.spyOn(owner, 'history')
     const otherHistory = vi.spyOn(other, 'history')
     await fixture.start()
@@ -113,19 +123,23 @@ describe('Gmail Pub/Sub sync', () => {
     ])
     await vi.advanceTimersByTimeAsync(249)
     expect(ownerHistory).not.toHaveBeenCalled()
+    const lastNotificationAt = Date.now()
     deliver([{ ackId: '3', address: owner.address }, { ackId: '4' }])
     await vi.advanceTimersByTimeAsync(1)
 
     expect(ownerHistory).toHaveBeenCalledTimes(1)
     expect(otherHistory).not.toHaveBeenCalled()
     expect(store.hasMessage('owner', 'new')).toBe(true)
+    expect(sync.gmailPubSubHealth().lastNotificationAt).toBe(lastNotificationAt)
+    expect(sync.gmailPushHealth('owner').lastNotificationAt).toBe(lastNotificationAt)
+    expect(sync.gmailPushHealth('other').lastNotificationAt).toBeNull()
     expect(pubSub.acknowledge).toHaveBeenNthCalledWith(1, ['1', '2'], expect.any(AbortSignal))
     expect(pubSub.acknowledge).toHaveBeenNthCalledWith(2, ['3', '4'], expect.any(AbortSignal))
   })
 
   it('polls at 60 seconds with healthy push and returns to 15 seconds on pull failure', async () => {
     fixture = setup()
-    const { owner, store, deliver } = fixture
+    const { sync, owner, store, deliver } = fixture
     await fixture.start()
     owner.add('missed', { subject: 'Dropped notification' })
     await vi.advanceTimersByTimeAsync(60_000 - 251)
@@ -133,11 +147,24 @@ describe('Gmail Pub/Sub sync', () => {
     await vi.advanceTimersByTimeAsync(1)
     expect(store.hasMessage('owner', 'missed')).toBe(true)
 
-    deliver(new Error('Pub/Sub unavailable'))
+    const errorAt = Date.now()
+    deliver(new Error('private response payload'))
     await vi.advanceTimersByTimeAsync(0)
+    expect(sync.gmailPubSubHealth()).toEqual({
+      enabled: true,
+      pullHealthy: false,
+      lastNotificationAt: null,
+      pullErrorCount: 1,
+      lastPullError: { at: errorAt, message: 'pull: Request failed' },
+    })
+    expect(sync.gmailPushHealth('owner').pollIntervalMs).toBe(15_000)
     owner.add('outage', { subject: 'Pub/Sub outage' })
     await vi.advanceTimersByTimeAsync(15_000)
     expect(store.hasMessage('owner', 'outage')).toBe(true)
+    deliver([{ ackId: 'recovered', address: owner.address }])
+    await vi.advanceTimersByTimeAsync(250)
+    expect(sync.gmailPubSubHealth()).toMatchObject({ pullHealthy: true, pullErrorCount: 1 })
+    expect(sync.gmailPushHealth('owner').pollIntervalMs).toBe(60_000)
   })
 
   it('polls after reauthorization while the old history request is still pending', async () => {

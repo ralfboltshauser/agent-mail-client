@@ -122,8 +122,12 @@ export function createApp({
     const dbPath = databasePath(config)
     const now = Date.now()
     const accounts = db
-      .prepare('SELECT address, status, last_sync_at, last_error FROM account ORDER BY address')
+      .prepare(
+        'SELECT id, kind, address, status, last_sync_at, last_error FROM account ORDER BY address',
+      )
       .all() as {
+      id: string
+      kind: 'gmail' | 'imap'
       address: string
       status: NonNullable<Health['accounts']>[number]['status']
       last_sync_at: number | null
@@ -144,11 +148,13 @@ export function createApp({
       schemaVersion: schemaVersion(db),
       database: { path: dbPath, bytes: fileSize(dbPath) + fileSize(`${dbPath}-wal`) },
       lastBackup: latestBackup(config.backupDir),
-      accounts: accounts.map(({ address, status, last_sync_at, last_error }) => ({
+      gmailPubSub: mail?.sync.gmailPubSubHealth(),
+      accounts: accounts.map(({ id, kind, address, status, last_sync_at, last_error }) => ({
         address,
         status,
         syncLagSeconds: last_sync_at === null ? null : Math.max(0, (now - last_sync_at) / 1000),
         lastError: last_error,
+        gmailPush: kind === 'gmail' ? mail?.sync.gmailPushHealth(id) : undefined,
       })),
       outboxDepth: Number(unsent?.depth),
       mutationQueueDepth: Number(pending?.depth),

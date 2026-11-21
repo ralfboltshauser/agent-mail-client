@@ -13,6 +13,8 @@ export interface GmailPubSub {
   acknowledge(ackIds: string[], signal: AbortSignal): Promise<void>
 }
 
+export class GmailPubSubError extends Error {}
+
 interface PullResponse {
   receivedMessages?: { ackId: string; message?: { data?: string } }[]
 }
@@ -55,9 +57,9 @@ export function gmailPubSub(project: string, secretsDir: string): GmailPubSub {
       token = (await auth.getAccessToken()).token
     } catch {
       auth = undefined
-      throw new Error(`Cannot authenticate Gmail Pub/Sub using ${keyFile}`)
+      throw new GmailPubSubError('Cannot authenticate Gmail Pub/Sub subscriber')
     }
-    if (!token) throw new Error('No Gmail Pub/Sub access token')
+    if (!token) throw new GmailPubSubError('No Gmail Pub/Sub access token')
     const response = await fetch(`https://pubsub.googleapis.com/v1/${subscription}:${action}`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -65,7 +67,7 @@ export function gmailPubSub(project: string, secretsDir: string): GmailPubSub {
       signal: AbortSignal.any([signal, AbortSignal.timeout(timeout)]),
     })
     if (response.status === 401) auth = undefined
-    if (!response.ok) throw new Error(`Pub/Sub ${action}: HTTP ${response.status}`)
+    if (!response.ok) throw new GmailPubSubError(`HTTP ${response.status}`)
     return response
   }
 
