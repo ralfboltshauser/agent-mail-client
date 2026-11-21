@@ -14,7 +14,7 @@ type LoadedPairing =
   | { engineUrl: string; token: string }
   | { engineUrl: string | null; token: null }
 
-export function loadPairing(): LoadedPairing | null {
+export async function loadPairing(): Promise<LoadedPairing | null> {
   let data: string
   try {
     data = readFileSync(file(), 'utf8')
@@ -27,7 +27,10 @@ export function loadPairing(): LoadedPairing | null {
   try {
     const stored = JSON.parse(data) as Stored
     engineUrl = new URL(stored.engineUrl).origin
-    const token = safeStorage.decryptString(Buffer.from(stored.token, 'base64'))
+    // The Keychain may wait on a macOS prompt. Keep the main process responsive.
+    const { result: token } = await safeStorage.decryptStringAsync(
+      Buffer.from(stored.token, 'base64'),
+    )
     if (token) return { engineUrl, token }
     return { engineUrl, token: null }
   } catch {

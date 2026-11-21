@@ -110,12 +110,15 @@ function setStartupStatus(status: SyncStatus) {
 
 async function restoreSavedPairing() {
   setStartupStatus({ ...startupStatus, phase: 'restoring-pairing', error: null })
-  let pairing = loadPairing()
+  startupLog('reading saved pairing')
+  let pairing = await loadPairing()
+  if (quittingTriage.signal.aborted) return
   if (pairing && !pairing.token) {
     startupLog('saved pairing unreadable; retrying')
     await new Promise((resolve) => setTimeout(resolve, 500))
     if (quittingTriage.signal.aborted) return
-    pairing = loadPairing()
+    pairing = await loadPairing()
+    if (quittingTriage.signal.aborted) return
   }
   if (pairing?.token) {
     startupLog('saved pairing decrypted')
