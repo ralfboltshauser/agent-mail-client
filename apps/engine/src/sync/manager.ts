@@ -69,6 +69,8 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
   readonly #o: Required<Omit<SyncManagerOptions, 'gmailApi' | 'imapClient'>> &
     Pick<SyncManagerOptions, 'gmailApi' | 'imapClient'>
   readonly #runners = new Map<string, Runner>()
+  readonly #paused = new Map<string, Promise<void>>()
+  #stopping = false
 
   constructor(options: SyncManagerOptions) {
     super()
@@ -76,6 +78,7 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
   }
 
   start(): void {
+    this.#stopping = false
     for (const row of listAccountRows(this.#o.db)) {
       if (row.status !== 'auth_expired') this.startAccount(row.id)
     }
@@ -86,11 +89,98 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
     return this.#runners.get(accountId)?.api ?? null
   }
 
+  async withImapPaused<T>(address: string, run: () => Promise<T>): Promise<T> {
+    const key = address.toLowerCase()
+    const previous = this.#paused.get(key)
+    let finish: () => void = () => {}
+    const ready = new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    this.#paused.set(key, ready)
+    const account = () =>
+      this.#o.db
+        .prepare(
+          "SELECT id, status FROM account WHERE address = ? COLLATE NOCASE AND kind = 'imap'",
+        )
+        .get(address) as { id: string; status: string } | undefined
+    try {
+      await previous
+      const current = account()
+      const runner = current && this.#runners.get(current.id)
+      runner?.stop()
+      await runner?.done
+      if (current) this.#runners.delete(current.id)
+      return await run()
+    } finally {
+      finish()
+      if (this.#paused.get(key) === ready) {
+        this.#paused.delete(key)
+        const current = account()
+        if (current && current.status !== 'auth_expired') this.startAccount(current.id)
+      }
+    }
+  }
+
+  async imapAttachment(accountId: string, attachmentId: string): Promise<string | null> {
+    const { db, store, sealer } = this.#o
+    const account = getAccountRow(db, accountId)
+    if (account?.kind !== 'imap' || account.status === 'auth_expired') return null
+    return this.withImapPaused(account.address, async () => {
+      const current = getAccountRow(db, accountId)
+      if (current?.kind !== 'imap' || current.status === 'auth_expired') return null
+      const row = db
+        .prepare(
+          `SELECT a.blob, a.provider_attachment AS part, l.path_key, l.validity, l.uid
+         FROM attachment a JOIN imap_location l ON l.message_id = a.message_id
+         WHERE a.id = ? AND l.account_id = ? LIMIT 1`,
+        )
+        .get(attachmentId, accountId) as
+        | {
+            blob: string | null
+            part: string | null
+            path_key: string
+            validity: string
+            uid: number
+          }
+        | undefined
+      if (!row?.part) return null
+      if (row.blob) return row.blob
+      const credentials = sealer.open<ImapCredentials>(current.credentials)
+      const client = (this.#o.imapClient ?? createImapClient)(credentials.imap)
+      try {
+        await connectImap(client)
+        const box = await client.mailboxOpen(decodeURIComponent(row.path_key), { readOnly: true })
+        if (String(box.uidValidity) !== row.validity) return null
+        const { content } = await client.download(String(row.uid), row.part, {
+          uid: true,
+          decodeText: false,
+        })
+        if (!content) return null
+        const { hash, size } = await store.blobs.putStream(content)
+        db.prepare('UPDATE attachment SET blob = ?, size = ? WHERE id = ?').run(
+          hash,
+          size,
+          attachmentId,
+        )
+        return hash
+      } catch {
+        return null
+      } finally {
+        client.close()
+      }
+    })
+  }
+
   startAccount(accountId: string): void {
+    const row = getAccountRow(this.#o.db, accountId)
+    if (
+      !row ||
+      this.#stopping ||
+      (row.kind === 'imap' && this.#paused.has(row.address.toLowerCase()))
+    )
+      return
     const previous = this.#runners.get(accountId)
     previous?.stop()
-    const row = getAccountRow(this.#o.db, accountId)
-    if (!row) return
     if (row.kind === 'imap') {
       this.#startImap(row, previous)
       return
@@ -207,23 +297,39 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
             await connectImap(client)
             if (signal.aborted) return
             const sync = new ImapAccountSync(client, store, row.id, row.address)
+            let idleTime = 0
             let nextPoll = 0
             let backfilled = false
-            while (client.usable && !signal.aborted) {
-              const mode = Date.now() >= nextPoll ? 'all' : sync.inboxChanged ? 'inbox' : 'backfill'
-              if (mode !== 'backfill' || !backfilled) {
-                backfilled = await sync.step(mode)
-                if (signal.aborted) return
-                if (mode === 'all') nextPoll = Date.now() + imapPollMs
-                touchAccountSync(db, row.id)
-                setAccountStatus(db, store, row.id, backfilled ? 'ready' : 'backfilling')
-                this.emit('change')
-                retryMs = 5_000
-              }
-              if (backfilled) await sync.waitForInbox(Math.max(0, nextPoll - Date.now()), signal)
+            const wait = async (ms: number) => {
+              idleTime += await sync.waitForInbox(ms, signal)
+              if (idleTime >= 60_000) retryMs = 5_000
             }
-            if (signal.aborted) return
-            throw new Error('IMAP connection closed')
+            const inboxWindow = async () => {
+              await wait(200)
+              if (signal.aborted || !client.usable) throw new Error('IMAP connection closed')
+              if (sync.inboxChanged) await sync.step('inbox')
+            }
+            try {
+              await wait(200)
+              while (client.usable && !signal.aborted) {
+                const mode =
+                  Date.now() >= nextPoll ? 'all' : sync.inboxChanged ? 'inbox' : 'backfill'
+                if (mode !== 'backfill' || !backfilled) {
+                  backfilled = await sync.step(mode, inboxWindow)
+                  if (signal.aborted) return
+                  if (mode === 'all') nextPoll = Date.now() + imapPollMs
+                  touchAccountSync(db, row.id)
+                  setAccountStatus(db, store, row.id, backfilled ? 'ready' : 'backfilling')
+                  this.emit('change')
+                }
+                const remaining = Math.max(0, nextPoll - Date.now())
+                await wait(Math.min(backfilled ? 60_000 : 200, remaining))
+              }
+              if (signal.aborted) return
+              throw new Error('IMAP connection closed')
+            } finally {
+              sync.dispose()
+            }
           } finally {
             signal.removeEventListener('abort', close)
             close()
@@ -247,6 +353,7 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
   }
 
   async stop(): Promise<void> {
+    this.#stopping = true
     for (const runner of this.#runners.values()) runner.stop()
     await Promise.all([...this.#runners.values()].map((r) => r.done))
     this.#runners.clear()

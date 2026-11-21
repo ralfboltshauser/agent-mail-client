@@ -1,3 +1,5 @@
+import { createReadStream, statSync } from 'node:fs'
+import { Readable } from 'node:stream'
 import {
   GmailAuthComplete,
   GmailAuthStart,
@@ -65,34 +67,35 @@ export function mailRoutes(deps: MailDeps) {
       )
     }
     const { address, ...credentials } = parsed.data
-    try {
-      await (deps.verifyImap ?? verifyImapAccount)(credentials)
-    } catch {
-      return c.json(
-        {
-          error: 'imap_signin_failed',
-          message: 'Could not verify the IMAP and SMTP logins over TLS',
-        },
-        400,
-      )
-    }
-    try {
-      const { id, created } = upsertImapAccount(db, deps.store, deps.sealer, {
-        address,
-        credentials,
-      })
-      deps.sync.startAccount(id)
-      return c.json({ accountId: id, address, created } satisfies ImapAccountAdded)
-    } catch (error) {
-      if (error instanceof AccountConflict) {
-        return c.json({ error: 'account_conflict', message: error.message }, 409)
+    return deps.sync.withImapPaused(address, async () => {
+      try {
+        await (deps.verifyImap ?? verifyImapAccount)(credentials)
+      } catch {
+        return c.json(
+          {
+            error: 'imap_signin_failed',
+            message: 'Could not verify the IMAP and SMTP logins over TLS',
+          },
+          400,
+        )
       }
-      log.error('could not save IMAP Account')
-      return c.json(
-        { error: 'account_save_failed', message: 'Could not save the IMAP Account' },
-        500,
-      )
-    }
+      try {
+        const { id, created } = upsertImapAccount(db, deps.store, deps.sealer, {
+          address,
+          credentials,
+        })
+        return c.json({ accountId: id, address, created } satisfies ImapAccountAdded)
+      } catch (error) {
+        if (error instanceof AccountConflict) {
+          return c.json({ error: 'account_conflict', message: error.message }, 409)
+        }
+        log.error('could not save IMAP Account')
+        return c.json(
+          { error: 'account_save_failed', message: 'Could not save the IMAP Account' },
+          500,
+        )
+      }
+    })
   })
 
   // Adding a Gmail Account: the Client opens authUrl in a browser with a loopback redirect on
@@ -244,11 +247,13 @@ export function mailRoutes(deps: MailDeps) {
   r.get('/attachments/:id', requireScope('read'), async (c) => {
     const row = db
       .prepare(
-        `SELECT a.filename, a.mime_type, a.blob, a.provider_attachment, m.provider_id, m.account_id
-         FROM attachment a JOIN message m ON m.id = a.message_id WHERE a.id = ?`,
+        `SELECT a.filename, a.mime_type, a.blob, a.provider_attachment, m.provider_id, m.account_id, acc.kind
+         FROM attachment a JOIN message m ON m.id = a.message_id
+         JOIN account acc ON acc.id = m.account_id WHERE a.id = ?`,
       )
       .get(c.req.param('id')) as
       | {
+          kind: 'gmail' | 'imap'
           filename: string
           mime_type: string
           blob: string | null
@@ -259,21 +264,27 @@ export function mailRoutes(deps: MailDeps) {
       | undefined
     if (!row) return c.json({ error: 'not_found', message: 'No such attachment' }, 404)
     let hash = row.blob
-    if (!hash) {
+    if (!hash && row.kind === 'imap') {
+      hash = await deps.sync.imapAttachment(row.account_id, c.req.param('id'))
+    } else if (!hash) {
       const api = deps.sync.gmailApi(row.account_id)
-      if (!api || !row.provider_attachment) {
-        return c.json(
-          { error: 'unavailable', message: 'The Account is not syncing right now' },
-          503,
-        )
+      if (api && row.provider_attachment) {
+        const data = await api.attachment(row.provider_id, row.provider_attachment)
+        hash = deps.blobs.put(data)
+        db.prepare('UPDATE attachment SET blob = ? WHERE id = ?').run(hash, c.req.param('id'))
       }
-      const data = await api.attachment(row.provider_id, row.provider_attachment)
-      hash = deps.blobs.put(data)
-      db.prepare('UPDATE attachment SET blob = ? WHERE id = ?').run(hash, c.req.param('id'))
     }
-    const data = deps.blobs.get(hash)
-    if (!data) return c.json({ error: 'not_found', message: 'Attachment data is missing' }, 404)
-    return c.body(new Uint8Array(data), 200, {
+    if (!hash) {
+      return c.json(
+        { error: 'unavailable', message: 'Attachment is unavailable from the Account' },
+        503,
+      )
+    }
+    const path = deps.blobs.path(hash)
+    const stats = statSync(path, { throwIfNoEntry: false })
+    if (!stats) return c.json({ error: 'not_found', message: 'Attachment data is missing' }, 404)
+    return c.body(Readable.toWeb(createReadStream(path)) as ReadableStream<Uint8Array>, 200, {
+      'Content-Length': String(stats.size),
       'Content-Type': row.mime_type,
       'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(row.filename || 'attachment')}`,
       'X-Content-Type-Options': 'nosniff',

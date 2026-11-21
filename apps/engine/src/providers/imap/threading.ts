@@ -1,4 +1,4 @@
-import type { IncomingMessage, MailStore } from '../../mail/store.ts'
+import { type IncomingMessage, type MailStore, threadId } from '../../mail/store.ts'
 
 type ThreadHeaders = Pick<
   IncomingMessage,
@@ -17,90 +17,99 @@ function ids(header: string | null): string[] {
     .filter((id) => /^[^<>\s]+@[^<>\s]+$/.test(id))
 }
 
-/** Reference containers include missing ancestors. Finding a new link can join existing Threads. */
-export class ImapThreads {
-  readonly #store: MailStore
-  readonly #accountId: string
-  readonly #aliases = new Map<string, string>()
-  readonly #parents = new Map<string, string>()
-  readonly #subjects = new Map<
-    string,
-    { thread: string; sentAt: number; reply: boolean; hasParent: boolean }[]
-  >()
-
-  constructor(store: MailStore, accountId: string) {
-    this.#store = store
-    this.#accountId = accountId
-    const rows = store.db
-      .prepare(
-        `SELECT m.provider_id AS providerId, m.rfc_message_id AS rfcMessageId, m.refs AS "references",
-                m.in_reply_to AS inReplyTo, m.subject, m.sent_at AS sentAt,
-                t.provider_thread_id AS providerThreadId
-         FROM message m JOIN thread t ON t.id = m.thread_id WHERE m.account_id = ?`,
-      )
-      .iterate(accountId) as unknown as Iterable<ThreadHeaders & { providerThreadId: string }>
-    // Materialize the query before slotting rows into a graph that can merge existing Threads.
-    for (const row of [...rows]) this.#assign(row, row.providerThreadId)
-  }
-
-  assign(message: ThreadHeaders): string {
-    return this.#assign(message)
-  }
-
-  #root(thread: string): string {
-    let root = thread
-    let parent = this.#parents.get(root)
-    while (parent !== undefined) {
-      root = parent
-      parent = this.#parents.get(root)
-    }
-    if (root !== thread) this.#parents.set(thread, root)
-    return root
-  }
-
-  #assign(message: ThreadHeaders, persisted?: string): string {
-    const own = ids(message.rfcMessageId)[0]
-    const references = ids(message.references)
-    const parent = references.length ? references : ids(message.inReplyTo).slice(0, 1)
-    const keys = [...new Set([...parent, ...(own ? [own] : [])])]
-    const known = keys.flatMap((key) => {
-      const thread = this.#aliases.get(key)
-      return thread ? [this.#root(thread)] : []
-    })
-    const reply = /^\s*re\s*:/i.test(message.subject)
-    const subject = message.subject
+function hints(message: ThreadHeaders) {
+  const own = ids(message.rfcMessageId)[0]
+  const references = ids(message.references)
+  const parents = references.length ? references : ids(message.inReplyTo).slice(0, 1)
+  return {
+    keys: [...new Set([...parents, ...(own ? [own] : [])])],
+    hasParent: parents.some((key) => key !== own),
+    reply: /^\s*re\s*:/i.test(message.subject),
+    subject: message.subject
       .replace(/^(\s*re\s*:\s*)+/i, '')
       .trim()
-      .toLowerCase()
-    const peers = subject ? (this.#subjects.get(subject) ?? []) : []
-    const hasParent = parent.some((key) => key !== own)
-    let nearby: string | undefined
-    if (!persisted && !known.length && !hasParent && message.sentAt > 0) {
-      let closest = SUBJECT_WINDOW_MS
-      for (const peer of peers) {
-        if ((!reply && (!peer.reply || peer.hasParent)) || !peer.sentAt) continue
-        const distance = Math.abs(message.sentAt - peer.sentAt)
-        if (distance >= closest) continue
-        closest = distance
-        nearby = this.#root(peer.thread)
-      }
-    }
+      .toLowerCase(),
+  }
+}
 
-    const canonical = persisted ? this.#root(persisted) : nearby
+/** SQLite keeps reference containers (including missing ancestors) and nearby-subject lookups. */
+export class ImapThreads {
+  readonly store: MailStore
+  readonly accountId: string
+
+  constructor(store: MailStore, accountId: string) {
+    this.store = store
+    this.accountId = accountId
+  }
+
+  assign(message: ThreadHeaders, mid: string): string {
+    const { db } = this.store
+    const { keys, subject, reply, hasParent } = hints(message)
+    const lookup = db.prepare(
+      `SELECT t.provider_thread_id AS id FROM imap_thread_alias a JOIN thread t ON t.id = a.thread_id
+       WHERE a.account_id = ? AND a.rfc_id = ?`,
+    )
+    const known = keys.flatMap((key) => {
+      const row = lookup.get(this.accountId, key) as { id: string } | undefined
+      return row ? [row.id] : []
+    })
+    const persisted = db
+      .prepare(
+        'SELECT t.provider_thread_id AS id FROM message m JOIN thread t ON t.id = m.thread_id WHERE m.id = ?',
+      )
+      .get(mid) as { id: string } | undefined
+    let canonical = persisted?.id
+    if (!canonical && !known.length && !hasParent && subject && message.sentAt > 0) {
+      const nearby = db
+        .prepare(
+          `SELECT t.provider_thread_id AS id FROM imap_thread_subject s
+         JOIN message m ON m.id = s.message_id JOIN thread t ON t.id = m.thread_id
+         WHERE s.account_id = ? AND s.subject = ? AND s.sent_at > ? AND s.sent_at < ?
+           AND s.sent_at > 0 AND (? OR (s.reply AND NOT s.has_parent))
+         ORDER BY abs(s.sent_at - ?), m.rowid LIMIT 1`,
+        )
+        .get(
+          this.accountId,
+          subject,
+          message.sentAt - SUBJECT_WINDOW_MS,
+          message.sentAt + SUBJECT_WINDOW_MS,
+          +reply,
+          message.sentAt,
+        ) as { id: string } | undefined
+      canonical = nearby?.id
+    }
     const thread =
       known[0] ??
       canonical ??
       (keys[0] ? `imap:${encodeURIComponent(keys[0])}` : `imap:local:${message.providerId}`)
     for (const candidate of new Set([...known, ...(canonical ? [canonical] : [])])) {
       if (candidate === thread) continue
-      this.#store.mergeThreads(this.#accountId, candidate, thread)
-      this.#parents.set(candidate, thread)
-    }
-    for (const key of keys) this.#aliases.set(key, thread)
-    if (subject) {
-      peers.push({ thread, sentAt: message.sentAt, reply, hasParent })
-      this.#subjects.set(subject, peers)
+      // Make the destination available before moving aliases off the source Thread.
+      db.prepare(
+        'INSERT OR IGNORE INTO thread (id, account_id, provider_thread_id) VALUES (?, ?, ?)',
+      ).run(threadId(this.accountId, thread), this.accountId, thread)
+      db.prepare('UPDATE imap_thread_alias SET thread_id = ? WHERE thread_id = ?').run(
+        threadId(this.accountId, thread),
+        threadId(this.accountId, candidate),
+      )
+      this.store.mergeThreads(this.accountId, candidate, thread)
     }
     return thread
+  }
+
+  remember(message: IncomingMessage, mid: string): void {
+    const { keys, subject, reply, hasParent } = hints(message)
+    const { db } = this.store
+    const alias = db.prepare(
+      `INSERT INTO imap_thread_alias (account_id, rfc_id, thread_id) VALUES (?, ?, ?)
+       ON CONFLICT (account_id, rfc_id) DO UPDATE SET thread_id = excluded.thread_id`,
+    )
+    for (const key of keys)
+      alias.run(this.accountId, key, threadId(this.accountId, message.providerThreadId))
+    if (subject)
+      db.prepare(
+        `INSERT OR REPLACE INTO imap_thread_subject (message_id, account_id, subject, sent_at, reply, has_parent)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(mid, this.accountId, subject, message.sentAt, +reply, +hasParent)
   }
 }

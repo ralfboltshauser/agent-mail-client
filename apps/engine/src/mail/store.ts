@@ -39,6 +39,7 @@ export interface IncomingAttachment {
   inline: boolean
   /** Small attachments arrive inline with the message; larger ones are fetched on first open. */
   data?: Uint8Array
+  blob?: string
 }
 
 export interface IncomingLabel {
@@ -227,11 +228,9 @@ export class MailStore extends EventEmitter<{ change: [] }> {
       const id = `${mid}:${index}`
       // Gmail attachment ids change between fetches; keep a fetched blob when the file is the same.
       const old = known.get(id)
-      const blob = a.data
-        ? this.blobs.put(a.data)
-        : old && old.filename === a.filename
-          ? old.blob
-          : null
+      const blob =
+        a.blob ??
+        (a.data ? this.blobs.put(a.data) : old && old.filename === a.filename ? old.blob : null)
       insert.run(
         id,
         mid,

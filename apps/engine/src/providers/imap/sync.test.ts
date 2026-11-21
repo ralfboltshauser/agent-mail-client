@@ -1,5 +1,7 @@
 import { expect, it } from 'vitest'
 import { BlobStore } from '../../blobs.ts'
+import { migrate, openDatabase } from '../../db/database.ts'
+import { MIGRATIONS } from '../../db/migrations.ts'
 import { MailQueries } from '../../mail/queries.ts'
 import { MailStore } from '../../mail/store.ts'
 import { tempDir, testDb } from '../../test-support.ts'
@@ -72,6 +74,7 @@ it.each([
   await sync.step('all')
 
   imap.requests.length = 0
+  imap.downloads.length = 0
   imap.expunge('INBOX', removed)
   imap.flag('INBOX', kept, ['\\Seen', '\\Flagged'])
   const added = imap.add('INBOX', 'Subject: Arrived')
@@ -82,9 +85,7 @@ it.each([
     .threads({ inbox: true })
     .threads.find((thread) => thread.subject === 'Keep')
   expect(keptThread).toMatchObject({ unreadCount: 0, starred: true, labelIds: ['a:INBOX'] })
-  expect(
-    imap.requests.filter((request) => request.source).flatMap((request) => request.uids),
-  ).toEqual([added])
+  expect(imap.downloads.map(({ uid }) => uid)).toEqual([added])
   expect(imap.requests.some((request) => request.changedSince !== undefined)).toBe(
     extensions.includes('CONDSTORE'),
   )
@@ -158,4 +159,145 @@ it('uses a nearby reply subject when References and In-Reply-To are absent', asy
   imap.add('INBOX', 'Subject: Re: Test subject\r\nMessage-ID: <child@example.com>')
   await makeSync().step('all')
   expect(queries.threads({}).threads.map((thread) => thread.messageCount)).toEqual([2])
+})
+
+it('removes the highest expunged UID after reconnecting with QRESYNC', async () => {
+  const { db, imap, makeSync, queries } = fixture(['CONDSTORE', 'QRESYNC'])
+  imap.add('INBOX', 'Subject: Keep')
+  const highest = imap.add('INBOX', 'Subject: Expunge')
+  await makeSync().step('all')
+  imap.close()
+  imap.expunge('INBOX', highest)
+  await imap.connect()
+  await makeSync().step('all')
+  expect(queries.threads({}).threads.map(({ subject }) => subject)).toEqual(['Keep'])
+  expect(
+    JSON.parse(String(db.prepare('SELECT cursor FROM account').get()?.cursor)).folders[0],
+  ).toMatchObject({ modseq: String(imap.folder('INBOX').modseq) })
+})
+
+it('counts identical copies once and preserves the surviving folder after one copy is expunged', async () => {
+  const { imap, makeSync, queries } = fixture()
+  imap.addFolder('Archive', '\\Archive')
+  const headers = 'Subject: Shared\r\nMessage-ID: <shared@example.com>'
+  const inbox = imap.add('INBOX', headers, 'Same bytes')
+  const archive = imap.add('Archive', headers, 'Same bytes', ['\\Seen'])
+  imap.add('Archive', headers, 'Different bytes')
+  await makeSync().step('all')
+  const tid = 'a:imap:shared%40example.com'
+  const thread = () => queries.thread(tid)
+  expect(queries.threads({}).threads[0]?.messageCount).toBe(2)
+  const shared = thread()?.messages.find(({ labelIds }) => labelIds.includes('a:INBOX'))
+  expect(shared).toMatchObject({ labelIds: ['a:ARCHIVE', 'a:INBOX'], unread: true })
+
+  imap.expunge('INBOX', inbox)
+  await makeSync().step('all')
+  expect(thread()?.messages.find(({ id }) => id === shared?.id)).toMatchObject({
+    labelIds: ['a:ARCHIVE'],
+    unread: false,
+  })
+  imap.expunge('Archive', archive)
+  await makeSync().step('all')
+  expect(queries.threads({}).threads[0]?.messageCount).toBe(1)
+  expect(thread()?.messages[0]?.id).not.toBe(shared?.id)
+})
+
+it('pages both backfill and UID reconciliation without requesting full sources with FETCH', async () => {
+  const { imap, makeSync, queries, db } = fixture()
+  for (let i = 1; i <= 97; i++) imap.add('INBOX', `Subject: Paged ${i}`)
+  expect(await makeSync().step('all')).toBe(false)
+  expect(imap.searches.map(({ uids }) => uids.length)).toEqual([32])
+  expect(imap.downloads.map(({ uid }) => uid)).toEqual(Array.from({ length: 32 }, (_, i) => 97 - i))
+  const { source_blob } =
+    db.prepare('SELECT source_blob FROM imap_location WHERE uid = 97').get() ?? {}
+  expect(typeof source_blob).toBe('string')
+  imap.expunge('INBOX', 90)
+  imap.expunge('INBOX', 30)
+  const resumed = makeSync()
+  while (!(await resumed.step('all'))) {
+    // Resume until the oldest page.
+  }
+  expect(imap.searches.every(({ uids }) => uids.length <= 32)).toBe(true)
+  expect(imap.requests.every(({ source }) => !source)).toBe(true)
+  expect(queries.accounts()[0]?.messageCount).toBe(95)
+})
+
+it.each([false, true])(
+  'moves cached locations during role change and rename (OBJECTID: %s)',
+  async (objectId) => {
+    const { db, imap, makeSync, queries } = fixture()
+    const folder = imap.addFolder('Filed')
+    if (objectId) folder.mailboxId = 'mailbox-filed'
+    for (let i = 1; i <= 40; i++) imap.add('Filed', `Subject: Filed ${i}`)
+    const sync = makeSync()
+    expect(await sync.step('all')).toBe(false)
+    const cached = db.prepare('SELECT id FROM message ORDER BY rowid LIMIT 1').get()?.id
+    folder.specialUse = '\\Archive'
+    await makeSync().step('all')
+    expect(
+      db.prepare('SELECT label_ids FROM message WHERE id = ?').get(cached ?? '')?.label_ids,
+    ).toBe('["a:ARCHIVE"]')
+    expect(queries.threads({ labelId: 'a:ARCHIVE' }).threads).toHaveLength(40)
+
+    imap.renameFolder('Filed', 'Renamed')
+    folder.specialUse = undefined
+    imap.downloads.length = 0
+    await makeSync().step('all')
+    expect(
+      db.prepare('SELECT label_ids FROM message WHERE id = ?').get(cached ?? '')?.label_ids,
+    ).toBe('["a:folder:Renamed"]')
+    expect(queries.threads({ labelId: 'a:folder:Renamed' }).threads).toHaveLength(40)
+    if (objectId) expect(imap.downloads).toHaveLength(0)
+  },
+)
+
+it('jumps over sparsely allocated UIDs using bounded sequence searches', async () => {
+  const { imap, makeSync, queries } = fixture()
+  imap.add('INBOX', 'Subject: Old UID')
+  imap.folder('INBOX').nextUid = 4_000_000_000
+  imap.add('INBOX', 'Subject: High UID')
+  const sync = makeSync()
+  expect(await sync.step('all')).toBe(false)
+  expect(await sync.step('backfill')).toBe(true)
+  expect(imap.searches.length).toBeLessThan(8)
+  expect(imap.downloads.map(({ uid }) => uid)).toEqual([4_000_000_000, 1])
+  expect(queries.accounts()[0]?.messageCount).toBe(2)
+})
+
+it('upgrades cached folder-specific copies without first deleting the legacy messages', async () => {
+  const db = openDatabase(':memory:')
+  migrate(db, { migrations: MIGRATIONS.filter(({ version }) => version <= 3) })
+  const imap = new FakeImap()
+  imap.addFolder('Archive', '\\Archive')
+  for (const path of ['INBOX', 'Archive']) {
+    imap.add(path, 'Subject: Legacy copy\r\nMessage-ID: <legacy@example.com>')
+  }
+  db.prepare(
+    "INSERT INTO account (id, kind, address, credentials, cursor, created_at) VALUES ('a', 'imap', 'owner@example.com', x'00', ?, 0)",
+  ).run(
+    JSON.stringify({
+      folders: ['INBOX', 'Archive'].map((path) => ({
+        path,
+        validity: '1',
+        highUid: 1,
+        before: 0,
+        modseq: null,
+      })),
+    }),
+  )
+  db.exec(`
+    INSERT INTO thread (id, account_id, provider_thread_id) VALUES ('a:legacy', 'a', 'legacy');
+    INSERT INTO message (id, account_id, thread_id, provider_id, rfc_message_id, label_ids, sent_at)
+      VALUES ('a:INBOX:1:1', 'a', 'a:legacy', 'INBOX:1:1', '<legacy@example.com>', '["a:INBOX"]', 0),
+             ('a:Archive:1:1', 'a', 'a:legacy', 'Archive:1:1', '<legacy@example.com>', '["a:ARCHIVE"]', 0);
+  `)
+  migrate(db)
+  expect(db.prepare('SELECT count(*) AS count FROM message').get()?.count).toBe(2)
+  const store = new MailStore(db, new BlobStore(tempDir()))
+  await new ImapAccountSync(imap.client, store, 'a', 'owner@example.com').step('all')
+  expect(new MailQueries(db).thread('a:legacy')?.messages).toMatchObject([
+    { id: 'a:INBOX:1:1', labelIds: ['a:ARCHIVE', 'a:INBOX'] },
+  ])
+  expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([])
+  db.close()
 })

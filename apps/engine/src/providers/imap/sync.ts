@@ -1,96 +1,112 @@
-import type { FetchMessageObject, MailboxObject } from 'imapflow'
+import type { FetchMessageObject, MailboxObject, SearchObject } from 'imapflow'
+import { transaction } from '../../db/database.ts'
 import type { MailStore } from '../../mail/store.ts'
 import type { ImapClient } from './client.ts'
+import { ImapLocations, PAGE } from './locations.ts'
 import {
   type Folder,
+  largePreview,
+  MESSAGE_LIMIT,
   mapFolders,
   messageFlags,
-  messagePrefix,
   parseMessage,
-  providerMessageId,
 } from './mapping.ts'
-import { ImapThreads } from './threading.ts'
+
+interface FolderRename {
+  folder: Folder
+  identified: boolean
+}
 
 interface FolderCursor {
   path: string
   validity: string
+  mailboxId?: string | undefined
   highUid: number
   modseq: string | null
   before: number
 }
 
-interface PendingPage {
-  validity: string
-  uids: number[]
-}
-
-const PAGE = 32
-const SOURCE_BATCH = 8
-
-/** Owns a single connection. All IMAP commands are serialized, including SELECT and FETCH. */
+/** Owns a single connection. Inbox IDLE and other folders alternate at page boundaries. */
 export class ImapAccountSync {
-  readonly #client: ImapClient
-  readonly #store: MailStore
-  readonly #accountId: string
-  readonly #address: string
-  readonly #threads: ImapThreads
+  readonly #locations: ImapLocations
   readonly #cursor: Map<string, FolderCursor>
-  readonly #pending = new Map<string, PendingPage>()
   #folders: Folder[] = []
   #inboxSnapshot: { exists: number; uidNext: number; highestModseq: bigint | undefined } | undefined
   #inboxChanged = false
+  #sequenceEpoch = 0
   #wake: (() => void) | undefined
 
+  readonly client: ImapClient
+  readonly store: MailStore
+  readonly accountId: string
+
   constructor(client: ImapClient, store: MailStore, accountId: string, address: string) {
-    this.#client = client
-    this.#store = store
-    this.#accountId = accountId
-    this.#address = address
-    this.#threads = new ImapThreads(store, accountId)
+    this.client = client
+    this.store = store
+    this.accountId = accountId
+    this.#locations = new ImapLocations(store, accountId, address)
     const row = store.db.prepare('SELECT cursor FROM account WHERE id = ?').get(accountId) as {
       cursor: string
     }
     const saved = JSON.parse(row.cursor) as { folders?: FolderCursor[] }
     this.#cursor = new Map(saved.folders?.map((folder) => [folder.path, folder]))
-    const changed = ({ path, earlier }: { path: string; earlier?: boolean | undefined }) => {
-      if (path !== 'INBOX' || earlier) return
-      this.#inboxChanged = true
-      this.#wake?.()
-    }
-    client.on('exists', changed).on('flags', changed).on('expunge', changed)
-    client.on('close', () => this.#wake?.())
+    client.on('exists', this.#changed).on('flags', this.#changed).on('expunge', this.#changed)
+    client.on('close', this.#closed)
+  }
+
+  #changed = ({ path, earlier }: { path: string; earlier?: boolean | undefined }) => {
+    if (earlier) return
+    this.#sequenceEpoch++
+    if (path !== 'INBOX') return
+    this.#inboxChanged = true
+    this.#wake?.()
+  }
+
+  #closed = () => this.#wake?.()
+
+  dispose(): void {
+    this.client
+      .off('exists', this.#changed)
+      .off('flags', this.#changed)
+      .off('expunge', this.#changed)
+    this.client.off('close', this.#closed)
   }
 
   get inboxChanged(): boolean {
     return this.#inboxChanged
   }
 
-  async step(mode: 'all' | 'inbox' | 'backfill'): Promise<boolean> {
+  async step(
+    mode: 'all' | 'inbox' | 'backfill',
+    betweenFolders?: () => Promise<void>,
+  ): Promise<boolean> {
     if (mode !== 'backfill') this.#inboxChanged = false
     if (mode === 'all') await this.#listFolders()
+    let processed = false
     for (const folder of this.#folders) {
       if (mode === 'inbox' && folder.path !== 'INBOX') continue
       if (mode === 'backfill' && !this.#cursor.get(folder.path)?.before) continue
+      if (processed || (mode === 'backfill' && folder.path !== 'INBOX')) await betweenFolders?.()
       await this.#syncFolder(folder, mode !== 'backfill')
+      processed = true
     }
     const done = !this.#folders.some((folder) => this.#cursor.get(folder.path)?.before)
-    const { count } = this.#store.db
+    const { count } = this.store.db
       .prepare('SELECT count(*) AS count FROM message WHERE account_id = ?')
-      .get(this.#accountId) as { count: number }
+      .get(this.accountId) as { count: number }
     const progress = JSON.stringify({ phase: done ? 'done' : 'all', fetched: count })
-    const updated = this.#store.db
+    const updated = this.store.db
       .prepare('UPDATE account SET backfill = ? WHERE id = ? AND backfill != ?')
-      .run(progress, this.#accountId, progress)
-    if (updated.changes) this.#store.recordChange('account', this.#accountId, 'upsert')
+      .run(progress, this.accountId, progress)
+    if (updated.changes) this.store.recordChange('account', this.accountId, 'upsert')
     return done
   }
 
-  async waitForInbox(ms: number, signal: AbortSignal): Promise<void> {
-    if (signal.aborted || this.#inboxChanged || !this.#client.usable) return
-    const selected = this.#client.mailbox
+  async waitForInbox(ms: number, signal: AbortSignal): Promise<number> {
+    if (signal.aborted || this.#inboxChanged || !this.client.usable) return 0
+    const selected = this.client.mailbox
     if (!selected || selected.path !== 'INBOX') {
-      // ImapFlow enters IDLE automatically after SELECT when the connection is quiet.
-      const box = await this.#client.mailboxOpen('INBOX', { readOnly: true })
+      const box = await this.client.mailboxOpen('INBOX', { readOnly: true })
       const previous = this.#inboxSnapshot
       if (
         previous &&
@@ -98,11 +114,14 @@ export class ImapAccountSync {
           box.uidNext !== previous.uidNext ||
           box.highestModseq !== previous.highestModseq ||
           String(box.uidValidity) !== this.#cursor.get('INBOX')?.validity)
-      )
+      ) {
         this.#inboxChanged = true
+      }
     }
-    if (signal.aborted || this.#inboxChanged || !this.#client.usable) return
-    await new Promise<void>((resolve) => {
+    if (signal.aborted || this.#inboxChanged || !this.client.usable) return 0
+
+    const start = Date.now()
+    await new Promise<void>((resolve, reject) => {
       const wake = () => {
         clearTimeout(timer)
         signal.removeEventListener('abort', wake)
@@ -112,54 +131,122 @@ export class ImapAccountSync {
       const timer = setTimeout(wake, ms)
       signal.addEventListener('abort', wake, { once: true })
       this.#wake = wake
+      // IDLE stays active until the next command. Attach a rejection handler even when the
+      // timer or an Inbox event wakes the runner before that command ends the IDLE.
+      void this.client.idle({ whenFree: true }).then(
+        (result) => {
+          if (result === false && this.#wake === wake) {
+            reject(new Error('IMAP IDLE failed'))
+            wake()
+          }
+        },
+        (error: Error) => {
+          if (this.#wake === wake) {
+            reject(error)
+            wake()
+          }
+        },
+      )
     })
+    return Date.now() - start
   }
 
   async #listFolders(): Promise<void> {
-    this.#folders = mapFolders(await this.#client.list())
-    if (!this.#folders.some((folder) => folder.path === 'INBOX')) {
+    const folders = mapFolders(await this.client.list())
+    if (!folders.some((folder) => folder.path === 'INBOX')) {
       throw new Error('The IMAP server did not list INBOX')
     }
-    const paths = new Set(this.#folders.map((folder) => folder.path))
-    for (const path of this.#cursor.keys()) {
-      if (paths.has(path)) continue
-      this.#clearFolder(path)
-      this.#cursor.delete(path)
-      this.#pending.delete(path)
+    const paths = new Set(folders.map((folder) => folder.path))
+    const missing = [...this.#cursor.values()].filter(({ path }) => !paths.has(path))
+    const renames = new Map<string, FolderRename>()
+    if (missing.length) {
+      const candidates = new Map<string, FolderRename[]>()
+      for (const folder of folders) {
+        if (this.#cursor.has(folder.path)) continue
+        const box = await this.client.mailboxOpen(folder.path, { readOnly: true })
+        const matches: FolderCursor[] = []
+        for (const old of missing) {
+          if (old.validity !== String(box.uidValidity)) continue
+          const same =
+            old.mailboxId && box.mailboxId
+              ? old.mailboxId === box.mailboxId
+              : await this.#matchesCachedFolder(old, box)
+          if (same) matches.push(old)
+        }
+        const match = matches.length === 1 ? matches[0] : undefined
+        if (match) {
+          candidates.set(match.path, [
+            ...(candidates.get(match.path) ?? []),
+            { folder, identified: Boolean(match.mailboxId && box.mailboxId) },
+          ])
+        }
+      }
+      for (const [path, matches] of candidates) {
+        if (matches.length === 1 && matches[0]) renames.set(path, matches[0])
+      }
     }
-    this.#saveCursor()
-    this.#store.syncLabels(
-      this.#accountId,
-      this.#folders.map((folder) => folder.label),
-    )
+
+    transaction(this.store.db, () => {
+      this.store.syncLabels(
+        this.accountId,
+        folders.map(({ label }) => label),
+      )
+      for (const old of missing) {
+        const renamed = renames.get(old.path)
+        if (renamed) {
+          const { folder, identified } = renamed
+          this.#locations.relabel(old.path, folder)
+          this.#cursor.set(folder.path, {
+            ...old,
+            path: folder.path,
+            // Matching bytes protect cached messages. Only a stable server mailbox ID
+            // also proves that the previous folder's UID and MODSEQ checkpoints apply.
+            before: identified ? old.before : old.highUid + 1,
+            modseq: identified ? old.modseq : null,
+          })
+        } else {
+          this.#locations.clear(old.path)
+        }
+        this.#cursor.delete(old.path)
+      }
+      for (const folder of folders) this.#locations.relabel(folder.path, folder)
+      this.#saveCursor()
+    })
+    this.#folders = folders
+  }
+
+  // Base IMAP has no stable mailbox identifier. Require byte-for-byte evidence for
+  // every cached UID still present at the candidate path before transferring its cursor.
+  async #matchesCachedFolder(old: FolderCursor, box: MailboxObject): Promise<boolean> {
+    if (!box.exists || box.uidNext <= old.highUid) return false
+    let after = 0
+    let matched = false
+    for (;;) {
+      const rows = this.#locations.page(old.path, old.validity, after)
+      if (!rows.length) return matched
+      const remote = new Set(await this.#search({ uid: rows.map(({ uid }) => uid).join(',') }))
+      for (const { uid, source_blob } of rows) {
+        if (!remote.has(uid)) continue
+        if (!source_blob) return false
+        const item = await this.#metadata(uid)
+        if (!item || item.size === undefined || item.size > MESSAGE_LIMIT) return false
+        if ((await this.#downloadSource(uid)) !== source_blob) return false
+        matched = true
+      }
+      after = rows[rows.length - 1]?.uid ?? after
+    }
   }
 
   #saveCursor(): void {
     const json = JSON.stringify({ folders: [...this.#cursor.values()] })
-    this.#store.db
+    this.store.db
       .prepare('UPDATE account SET cursor = ? WHERE id = ? AND cursor != ?')
-      .run(json, this.#accountId, json)
-  }
-
-  #storedIds(prefix: string): { provider_id: string }[] {
-    // The ASCII separator terminates the escaped path, and the range can use the compound index.
-    const end = `${prefix.slice(0, -1)};`
-    return this.#store.db
-      .prepare(
-        'SELECT provider_id FROM message WHERE account_id = ? AND provider_id >= ? AND provider_id < ?',
-      )
-      .all(this.#accountId, prefix, end) as { provider_id: string }[]
-  }
-
-  #clearFolder(path: string): void {
-    for (const { provider_id } of this.#storedIds(messagePrefix(path))) {
-      this.#store.deleteMessage(this.#accountId, provider_id)
-    }
+      .run(json, this.accountId, json)
   }
 
   async #syncFolder(folder: Folder, reconcile: boolean): Promise<void> {
     const { path } = folder
-    const box = await this.#client.mailboxOpen(path, { readOnly: true })
+    const box = await this.client.mailboxOpen(path, { readOnly: true })
     if (!box.uidValidity || !Number.isSafeInteger(box.uidNext) || box.uidNext < 1) {
       throw new Error('IMAP SELECT lacks UIDVALIDITY or UIDNEXT')
     }
@@ -172,80 +259,141 @@ export class ImapAccountSync {
     }
     const validity = String(box.uidValidity)
     const highUid = box.uidNext - 1
-    const modseq = this.#modseq(box)
-    const old = this.#cursor.get(path)
-    let cursor = old
-    if (!cursor || cursor.validity !== validity) {
-      this.#clearFolder(path)
-      this.#pending.delete(path)
-      cursor = { path, validity, highUid, modseq, before: box.exists ? box.uidNext : 0 }
-      // Persist the reset before fetching so an interrupted first page can retry idempotently.
+    const modseq =
+      !box.noModseq && this.client.enabled.has('CONDSTORE') && box.highestModseq
+        ? String(box.highestModseq)
+        : null
+    let cursor = this.#cursor.get(path)
+    if (
+      !cursor ||
+      cursor.validity !== validity ||
+      (cursor.mailboxId && box.mailboxId && cursor.mailboxId !== box.mailboxId)
+    ) {
+      this.#locations.clear(path)
+      cursor = {
+        path,
+        validity,
+        mailboxId: box.mailboxId,
+        highUid,
+        modseq,
+        before: box.exists ? box.uidNext : 0,
+      }
       this.#cursor.set(path, cursor)
       this.#saveCursor()
     } else if (reconcile) {
       await this.#reconcile(folder, cursor, box, modseq)
     }
 
-    if (cursor.highUid < highUid) {
-      const uids = await this.#search(`${cursor.highUid + 1}:${highUid}`)
-      for (let i = 0; i < uids.length; i += PAGE) {
-        await this.#fetchMessages(folder, validity, uids.slice(i, i + PAGE))
-      }
+    for (let before = highUid + 1; before > cursor.highUid + 1 && box.exists; ) {
+      const page = await this.#pageBefore(cursor.highUid + 1, before)
+      await this.#fetchMessages(folder, validity, page.uids)
+      before = page.before
     }
-    if (cursor.before) await this.#backfill(folder, cursor)
-    this.#cursor.set(path, { ...cursor, highUid, modseq: reconcile ? modseq : cursor.modseq })
+    let before = cursor.before
+    if (before > 1 && box.exists) {
+      const page = await this.#pageBefore(1, before)
+      await this.#fetchMessages(folder, validity, page.uids.reverse())
+      before = page.before
+    }
+    this.#cursor.set(path, {
+      ...cursor,
+      mailboxId: box.mailboxId ?? cursor.mailboxId,
+      highUid,
+      before: box.exists && before > 1 ? before : 0,
+      modseq: reconcile ? modseq : cursor.modseq,
+    })
     this.#saveCursor()
   }
 
-  #modseq(box: MailboxObject): string | null {
-    return !box.noModseq && this.#client.enabled.has('CONDSTORE') && box.highestModseq
-      ? String(box.highestModseq)
-      : null
-  }
-
-  async #search(range?: string): Promise<number[]> {
-    const uids = await this.#client.search(range ? { uid: range } : { all: true }, { uid: true })
+  async #search(query: SearchObject): Promise<number[]> {
+    const uids = await this.client.search(query, { uid: true })
     if (!uids) throw new Error('IMAP UID SEARCH failed')
     return uids.sort((a, b) => a - b)
   }
 
-  async #backfill(folder: Folder, cursor: FolderCursor): Promise<void> {
-    let pending = this.#pending.get(folder.path)
-    if (!pending || pending.validity !== cursor.validity) {
-      const uids = cursor.before > 1 ? await this.#search(`1:${cursor.before - 1}`) : []
-      pending = { validity: cursor.validity, uids }
-      this.#pending.set(folder.path, pending)
+  async #pageBefore(minimum: number, before: number): Promise<{ uids: number[]; before: number }> {
+    let end = before - 1
+    while (end >= minimum) {
+      const start = Math.max(minimum, end - PAGE + 1)
+      const uids = await this.#search({ uid: `${start}:${end}` })
+      if (uids.length || start === minimum) return { uids, before: start }
+
+      // UIDs are sparse after expunges. Search by sequence position to jump across an
+      // empty UID range without ever returning an unbounded list of UIDs.
+      const epoch = this.#sequenceEpoch
+      let low = 1
+      let high = this.client.mailbox ? this.client.mailbox.exists : 0
+      let last = 0
+      while (low <= high) {
+        const middle = Math.floor((low + high) / 2)
+        const [uid] = await this.#search({ seq: String(middle) })
+        if (uid === undefined || uid >= start) high = middle - 1
+        else {
+          last = uid
+          low = middle + 1
+        }
+      }
+      if (this.#sequenceEpoch !== epoch)
+        throw new Error('IMAP sequence numbers changed while paging')
+      end = last
     }
-    const page = pending.uids.slice(-PAGE).reverse()
-    await this.#fetchMessages(folder, cursor.validity, page)
-    pending.uids.splice(-PAGE)
-    cursor.before = pending.uids.length ? (page.at(-1) ?? 0) : 0
-    if (!cursor.before) this.#pending.delete(folder.path)
+    return { uids: [], before: minimum }
+  }
+
+  async #metadata(uid: number) {
+    let item: FetchMessageObject | undefined
+    for await (const row of this.client.fetch(
+      [uid],
+      {
+        size: true,
+        flags: true,
+        internalDate: true,
+        bodyStructure: true,
+        headers: [
+          'From',
+          'To',
+          'Cc',
+          'Bcc',
+          'Reply-To',
+          'Subject',
+          'Date',
+          'Message-ID',
+          'References',
+          'In-Reply-To',
+          'List-Unsubscribe',
+        ],
+        emailId: true,
+      },
+      { uid: true },
+    ))
+      item = row
+    return item
+  }
+
+  async #downloadSource(uid: number): Promise<string> {
+    const { content } = await this.client.download(String(uid), undefined, {
+      uid: true,
+      maxBytes: MESSAGE_LIMIT + 1,
+    })
+    if (!content) throw new Error('IMAP source disappeared during download')
+    return (await this.store.blobs.putStream(content, MESSAGE_LIMIT)).hash
   }
 
   async #fetchMessages(folder: Folder, validity: string, uids: number[]): Promise<void> {
-    const missing = uids.filter(
-      (uid) =>
-        !this.#store.hasMessage(this.#accountId, providerMessageId(folder.path, validity, uid)),
-    )
-    // A UID set is returned in server order. Buffer a small batch to ingest newest first.
-    for (let i = 0; i < missing.length; i += SOURCE_BATCH) {
-      const batch = missing.slice(i, i + SOURCE_BATCH)
-      const messages = new Map<number, FetchMessageObject>()
-      for await (const item of this.#client.fetch(
-        batch,
-        { source: true, flags: true, internalDate: true },
-        { uid: true },
-      )) {
-        messages.set(item.uid, item)
-      }
-      for (const uid of batch) {
-        const item = messages.get(uid)
-        if (!item) continue
-        const message = await parseMessage(folder, validity, item)
-        message.providerThreadId = this.#threads.assign(message)
-        this.#store.putMessage(this.#accountId, [this.#address], message)
-      }
+    for (const uid of uids) {
+      if (this.#locations.get(folder.path, validity, uid)?.verified) continue
+      const item = await this.#metadata(uid)
+      if (!item) continue
+      const source =
+        item.size !== undefined && item.size <= MESSAGE_LIMIT
+          ? await this.#downloadSource(uid)
+          : null
+      const preview = source ? undefined : await largePreview(this.client, item)
+      const message = await parseMessage(folder, validity, item, this.store.blobs, source, preview)
+      // ImapFlow synthesizes its fallback "id" from a folder and UID. Only emailId
+      // from the server can identify an oversized copy without downloading it.
+      const fingerprint = source ?? (item.emailId ? `email-id:${item.emailId}` : null)
+      this.#locations.put(folder, validity, uid, message, fingerprint, source)
     }
   }
 
@@ -255,51 +403,40 @@ export class ImapAccountSync {
     box: MailboxObject,
     modseq: string | null,
   ) {
-    const id = (uid: number) => providerMessageId(folder.path, cursor.validity, uid)
+    const { path } = folder
+    const { validity } = cursor
     const delta =
       modseq && cursor.modseq && BigInt(modseq) >= BigInt(cursor.modseq)
         ? BigInt(cursor.modseq)
         : null
-    const removed = new Set<number>()
-    if (box.exists && delta) {
-      if (modseq !== cursor.modseq) {
-        const expunge = (event: { path: string; uid?: number | undefined }) => {
-          if (event.path === folder.path && event.uid !== undefined) removed.add(event.uid)
+    let after = 0
+    for (;;) {
+      const rows = this.#locations.page(path, validity, after)
+      if (!rows.length) return
+      after = rows[rows.length - 1]?.uid ?? after
+      // SEARCH is authoritative even when QRESYNC's VANISHED is limited to the FETCH
+      // set or an expunged UID is higher than the last extant UID.
+      const remote = new Set(
+        box.exists ? await this.#search({ uid: rows.map(({ uid }) => uid).join(',') }) : [],
+      )
+      const present: number[] = []
+      const legacy: number[] = []
+      for (const { uid, verified } of rows) {
+        if (!remote.has(uid)) this.#locations.remove(path, validity, uid)
+        else if (!verified) legacy.push(uid)
+        else present.push(uid)
+      }
+      if (present.length && (!delta || modseq !== cursor.modseq)) {
+        for await (const item of this.client.fetch(
+          present,
+          { flags: true },
+          delta ? { uid: true, changedSince: delta } : { uid: true },
+        )) {
+          const { unread, starred } = messageFlags(item.flags)
+          this.#locations.flags(path, validity, item.uid, unread, starred)
         }
-        this.#client.on('expunge', expunge)
-        try {
-          // With QRESYNC enabled ImapFlow adds VANISHED to this UID FETCH.
-          for await (const item of this.#client.fetch(
-            '1:*',
-            { flags: true },
-            { uid: true, changedSince: delta },
-          )) {
-            this.#store.setMessageFlags(this.#accountId, id(item.uid), messageFlags(item.flags))
-          }
-        } finally {
-          this.#client.off('expunge', expunge)
-        }
       }
-      if (this.#client.enabled.has('QRESYNC')) {
-        for (const uid of removed) this.#store.deleteMessage(this.#accountId, id(uid))
-        return
-      }
-    }
-
-    const present = new Set(box.exists ? await this.#search() : [])
-    const retained = new Set<number>()
-    for (const { provider_id } of this.#storedIds(
-      `${messagePrefix(folder.path)}${cursor.validity}:`,
-    )) {
-      const uid = Number(provider_id.slice(provider_id.lastIndexOf(':') + 1))
-      if (present.has(uid)) retained.add(uid)
-      else this.#store.deleteMessage(this.#accountId, provider_id)
-    }
-    if (delta || !retained.size) return
-    for await (const item of this.#client.fetch('1:*', { flags: true }, { uid: true })) {
-      if (retained.has(item.uid)) {
-        this.#store.setMessageFlags(this.#accountId, id(item.uid), messageFlags(item.flags))
-      }
+      await this.#fetchMessages(folder, validity, legacy)
     }
   }
 }

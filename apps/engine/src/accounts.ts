@@ -67,8 +67,22 @@ function upsertAccount(
     if (existing && kind === 'imap') {
       const { imap: old } = sealer.open<ImapCredentials>(existing.credentials)
       const { imap } = input.credentials as ImapCredentials
-      if (old.host.toLowerCase() !== imap.host.toLowerCase() || old.username !== imap.username) {
-        throw new AccountConflict('This address already belongs to a different IMAP mailbox')
+      if (
+        old.host.toLowerCase() !== imap.host.toLowerCase() ||
+        old.port !== imap.port ||
+        old.tls !== imap.tls ||
+        old.username !== imap.username
+      ) {
+        const page = db.prepare('SELECT provider_id FROM message WHERE account_id = ? LIMIT 128')
+        for (;;) {
+          const messages = page.all(existing.id) as { provider_id: string }[]
+          if (!messages.length) break
+          for (const { provider_id } of messages) store.deleteMessage(existing.id, provider_id)
+        }
+        store.syncLabels(existing.id, [])
+        db.prepare(
+          "UPDATE account SET cursor = '{}', backfill = '{}', last_sync_at = NULL WHERE id = ?",
+        ).run(existing.id)
       }
     }
     const sealed = sealer.seal(input.credentials)

@@ -12,6 +12,8 @@ export type ImapClient = Pick<
   | 'mailboxOpen'
   | 'search'
   | 'fetch'
+  | 'idle'
+  | 'download'
   | 'capabilities'
   | 'enabled'
   | 'usable'

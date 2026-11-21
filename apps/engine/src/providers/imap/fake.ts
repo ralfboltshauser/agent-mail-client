@@ -1,10 +1,13 @@
 import { EventEmitter } from 'node:events'
+import { Readable } from 'node:stream'
 import type {
+  DownloadOptions,
   FetchMessageObject,
   FetchOptions,
   FetchQueryObject,
   ListResponse,
   MailboxObject,
+  MessageStructureObject,
   SearchObject,
 } from 'imapflow'
 import type { ImapClient } from './client.ts'
@@ -13,6 +16,8 @@ interface FakeMessage {
   source: Buffer
   flags: Set<string>
   modseq: bigint
+  structure?: MessageStructureObject
+  parts?: Map<string, Buffer>
 }
 
 class FakeFolder {
@@ -21,8 +26,9 @@ class FakeFolder {
   validity = 1n
   nextUid = 1
   modseq = 1n
-  readonly path: string
-  readonly specialUse: string | undefined
+  path: string
+  specialUse: string | undefined
+  mailboxId?: string
 
   constructor(path: string, specialUse?: string) {
     this.path = path
@@ -40,6 +46,10 @@ export class FakeImap extends EventEmitter {
     uids: number[]
     changedSince?: bigint | string | number | undefined
   }[] = []
+  readonly searches: { path: string; uids: number[] }[] = []
+  readonly downloads: { path: string; uid: number; part: string | undefined }[] = []
+  readonly idles: string[] = []
+  onIdle?: (path: string) => void
   readonly appended: { folder: string; raw: Buffer; flags: string[] }[] = []
   usable = false
   mailbox: MailboxObject | false = false
@@ -62,6 +72,19 @@ export class FakeImap extends EventEmitter {
     const folder = new FakeFolder(path, specialUse)
     this.folders.set(path, folder)
     return folder
+  }
+
+  renameFolder(old: string, path: string): void {
+    const folder = this.folder(old)
+    this.folders.delete(old)
+    folder.path = path
+    this.folders.set(path, folder)
+  }
+
+  async idle(): Promise<void> {
+    if (!this.mailbox) return
+    this.idles.push(this.mailbox.path)
+    this.onIdle?.(this.mailbox.path)
   }
 
   add(path: string, headers: string, body = 'Test message', flags: string[] = []): number {
@@ -127,6 +150,7 @@ export class FakeImap extends EventEmitter {
       exists: selected.messages.size,
       uidNext: selected.nextUid,
       uidValidity: selected.validity,
+      mailboxId: selected.mailboxId,
       highestModseq: this.enabled.has('CONDSTORE') ? selected.modseq : undefined,
       delimiter: '/',
       flags: new Set(),
@@ -137,7 +161,12 @@ export class FakeImap extends EventEmitter {
   async search(query: SearchObject): Promise<number[]> {
     const selected = this.#selected
     if (!selected) throw new Error('No selected test folder')
-    return this.#uids(selected, typeof query.uid === 'string' ? query.uid : '1:*')
+    const uids =
+      typeof query.seq === 'string'
+        ? [...selected.messages.keys()].slice(Number(query.seq) - 1, Number(query.seq))
+        : this.#uids(selected, typeof query.uid === 'string' ? query.uid : '1:*')
+    this.searches.push({ path: selected.path, uids })
+    return uids
   }
 
   async *fetch(
@@ -158,14 +187,23 @@ export class FakeImap extends EventEmitter {
     if (this.failFetch) throw new Error('Fake FETCH failed')
     if (since && this.enabled.has('QRESYNC')) {
       for (const [uid, modseq] of selected.removed) {
-        if (modseq > since)
+        if (modseq > since && this.#inRange(selected, range, uid))
           this.emit('expunge', { path: selected.path, uid, vanished: true, earlier: true })
       }
     }
     for (const uid of uids) {
       const item = selected.messages.get(uid)
       if (item && item.modseq > since) {
-        yield { uid, seq: uid, flags: item.flags, source: query.source ? item.source : undefined }
+        const headerEnd = item.source.indexOf('\r\n\r\n')
+        yield {
+          uid,
+          seq: uid,
+          flags: item.flags,
+          size: query.size ? item.source.length : undefined,
+          headers: query.headers ? item.source.subarray(0, headerEnd + 4) : undefined,
+          bodyStructure: query.bodyStructure ? item.structure : undefined,
+          source: query.source ? item.source : undefined,
+        }
       }
     }
   }
@@ -176,13 +214,39 @@ export class FakeImap extends EventEmitter {
     return { path: folder }
   }
 
+  async download(range: string, part: string | undefined, options: DownloadOptions) {
+    if (this.failFetch) throw new Error('Fake FETCH failed')
+    if (!this.#selected || !options.uid) throw new Error('Expected UID download in selected folder')
+    const uid = Number(range)
+    this.downloads.push({ path: this.#selected.path, uid, part })
+    const item = this.#selected.messages.get(uid)
+    const bytes = part ? item?.parts?.get(part) : item?.source
+    if (!bytes) return {}
+    const size = Math.min(bytes.length, options.maxBytes ?? Infinity)
+    return {
+      content: Readable.from(
+        (function* () {
+          for (let start = 0; start < size; start += 4096)
+            yield bytes.subarray(start, Math.min(start + 4096, size))
+        })(),
+      ),
+    }
+  }
+
+  #inRange(folder: FakeFolder, range: string | number[], uid: number): boolean {
+    if (Array.isArray(range)) return range.includes(uid)
+    const largest = [...folder.messages.keys()].at(-1) ?? 0
+    return range.split(',').some((part) => {
+      const [first, last = first] = part.split(':')
+      const start = first === '*' ? largest : Number(first)
+      const end = last === '*' ? largest : Number(last)
+      return uid >= Math.min(start, end) && uid <= Math.max(start, end)
+    })
+  }
+
   #uids(folder: FakeFolder, range: string | number[]): number[] {
-    const [lo, hi] = typeof range === 'string' ? range.split(':') : []
-    const end = hi === '*' ? Number.POSITIVE_INFINITY : Number(hi ?? lo)
     return [...folder.messages.keys()]
-      .filter((uid) =>
-        Array.isArray(range) ? range.includes(uid) : uid >= Number(lo) && uid <= end,
-      )
+      .filter((uid) => this.#inRange(folder, range, uid))
       .sort((a, b) => a - b)
   }
 }
