@@ -199,12 +199,21 @@ export class FakeImap extends EventEmitter {
       const item = selected.messages.get(uid)
       if (item && item.modseq > since) {
         const headerEnd = item.source.indexOf('\r\n\r\n')
+        const headers = item.source.subarray(0, headerEnd + 4)
+        const envelope = query.envelope ? headers.toString() : undefined
         yield {
           uid,
           seq: uid,
           flags: item.flags,
           size: query.size ? item.source.length : undefined,
-          headers: query.headers ? item.source.subarray(0, headerEnd + 4) : undefined,
+          headers: query.headers ? headers : undefined,
+          envelope:
+            envelope === undefined
+              ? undefined
+              : {
+                  subject: envelope.match(/^Subject: ([^\r\n]*)/im)?.[1],
+                  messageId: envelope.match(/^Message-ID: ([^\r\n]*)/im)?.[1],
+                },
           bodyStructure: query.bodyStructure ? item.structure : undefined,
           emailId: query.emailId ? item.emailId : undefined,
           source: query.source ? item.source : undefined,

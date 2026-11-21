@@ -3,7 +3,7 @@ import { transaction } from '../../db/database.ts'
 import type { MailStore } from '../../mail/store.ts'
 import type { ImapClient } from './client.ts'
 import { ImapLocations, PAGE } from './locations.ts'
-import { type Folder, mapFolders, messageFlags, parseMessage } from './mapping.ts'
+import { type Folder, mapFolders, messageFlags, parseMessage, renameEnvelope } from './mapping.ts'
 
 const RECONCILE_PAGE = 512
 const INBOX_WINDOW_INTERVAL = 1000
@@ -13,7 +13,6 @@ interface FolderCursor {
   validity: string
   mailboxId?: string | undefined
   highUid: number
-  exists?: number
   modseq: string | null
   before: number
 }
@@ -153,25 +152,27 @@ export class ImapAccountSync {
     const renames = new Map<string, Folder>()
     if (missing.length) {
       const candidates = new Map<string, Folder[]>()
+      const matchCounts = new Map<string, number>()
       for (const folder of folders) {
         if (this.#cursor.has(folder.path)) continue
         const box = await this.client.mailboxOpen(folder.path, { readOnly: true })
-        const matches: FolderCursor[] = []
         for (const old of missing) {
           if (old.validity !== String(box.uidValidity)) continue
           const same =
             old.mailboxId && box.mailboxId
               ? old.mailboxId === box.mailboxId
               : await this.#matchesCachedFolder(old, box)
-          if (same) matches.push(old)
-        }
-        const match = matches.length === 1 ? matches[0] : undefined
-        if (match) {
-          candidates.set(match.path, [...(candidates.get(match.path) ?? []), folder])
+          if (same) {
+            candidates.set(old.path, [...(candidates.get(old.path) ?? []), folder])
+            matchCounts.set(folder.path, (matchCounts.get(folder.path) ?? 0) + 1)
+          }
         }
       }
       for (const [path, matches] of candidates) {
-        if (matches.length === 1 && matches[0]) renames.set(path, matches[0])
+        const [folder] = matches
+        if (matches.length === 1 && folder && matchCounts.get(folder.path) === 1) {
+          renames.set(path, folder)
+        }
       }
     }
 
@@ -196,43 +197,37 @@ export class ImapAccountSync {
     this.#folders = folders
   }
 
-  // A unique UIDVALIDITY/UIDNEXT/count match can identify a rename without OBJECTID.
-  // Older checkpoints lack the count. For those and for changed folders, check
-  // overlapping cached UIDs against their content or the legacy Message-ID.
+  // UIDVALIDITY is scoped to a mailbox name. For a different name, require
+  // the same UID set with matching envelope and size for every cached message.
   async #matchesCachedFolder(old: FolderCursor, box: MailboxObject): Promise<boolean> {
-    if (box.uidNext === old.highUid + 1) {
-      const count =
-        old.exists ??
-        (old.before === 0
-          ? this.store.db
-              .prepare(
-                'SELECT count(*) AS count FROM imap_location WHERE account_id = ? AND path_key = ? AND validity = ?',
-              )
-              .get(this.accountId, encodeURIComponent(old.path), old.validity)?.count
-          : undefined)
-      if (box.exists === count) return true
-    }
-    if (!box.exists || box.uidNext <= old.highUid) return false
-    const rows = this.#locations.page(old.path, old.validity)
-    if (!rows.length) return false
-    const remote = new Set(await this.#search({ uid: rows.map(({ uid }) => uid).join(',') }))
-    let matched = false
-    for (const { uid, message_id, source_blob } of rows) {
-      if (!remote.has(uid)) continue
-      if (source_blob) {
-        if ((await this.#downloadSource(uid)) !== source_blob) return false
-      } else {
-        const local = this.store.db
-          .prepare('SELECT rfc_message_id FROM message WHERE id = ?')
-          .get(message_id)?.rfc_message_id
-        if (typeof local !== 'string') continue
-        const headers = (await this.#metadata(uid))?.headers?.toString()
-        if (headers?.match(/^Message-ID:[ \t]*(?:\r?\n[ \t]+)?([^\r\n]+)/im)?.[1]?.trim() !== local)
+    if (!box.exists || box.uidNext !== old.highUid + 1) return false
+    const epoch = this.#sequenceEpoch
+    let after = 0
+    let verified = 0
+    for (;;) {
+      const rows = this.#locations.page(old.path, old.validity, after, RECONCILE_PAGE)
+      if (!rows.length) return verified === box.exists && epoch === this.#sequenceEpoch
+      const expected = new Map(rows.map((row) => [row.uid, row]))
+      for await (const item of this.client.fetch(
+        rows.map(({ uid }) => uid),
+        { envelope: true, size: true },
+        { uid: true },
+      )) {
+        const cached = expected.get(item.uid)
+        if (
+          !cached?.verified ||
+          cached.envelope === null ||
+          cached.envelope !== renameEnvelope(item) ||
+          cached.rfc822_size !== item.size
+        )
           return false
+        expected.delete(item.uid)
       }
-      matched = true
+      if (expected.size) return false
+      verified += rows.length
+      if (verified > box.exists) return false
+      after = rows[rows.length - 1]?.uid ?? after
     }
-    return matched
   }
 
   #saveCursor(): void {
@@ -288,7 +283,6 @@ export class ImapAccountSync {
         validity,
         mailboxId: box.mailboxId,
         highUid,
-        exists: box.exists,
         modseq,
         before: box.exists ? box.uidNext : 0,
       }
@@ -314,7 +308,6 @@ export class ImapAccountSync {
       ...cursor,
       mailboxId: box.mailboxId ?? cursor.mailboxId,
       highUid,
-      exists: box.exists,
       before: box.exists && before > 1 ? before : 0,
       modseq: reconcile ? modseq : cursor.modseq,
     })
@@ -365,19 +358,7 @@ export class ImapAccountSync {
         flags: true,
         internalDate: true,
         bodyStructure: true,
-        headers: [
-          'From',
-          'To',
-          'Cc',
-          'Bcc',
-          'Reply-To',
-          'Subject',
-          'Date',
-          'Message-ID',
-          'References',
-          'In-Reply-To',
-          'List-Unsubscribe',
-        ],
+        envelope: true,
         emailId: true,
       },
       { uid: true },
@@ -399,14 +380,8 @@ export class ImapAccountSync {
       const item = await this.#metadata(uid)
       if (!item) continue
       const source = await this.#downloadSource(uid, item.size)
-      const { message, fingerprint } = await parseMessage(
-        folder,
-        validity,
-        item,
-        this.store.blobs,
-        source,
-      )
-      this.#locations.put(folder, validity, uid, message, fingerprint, source)
+      const message = await parseMessage(folder, validity, item, this.store.blobs, source)
+      this.#locations.put(folder, validity, item, message, source)
     }
   }
 

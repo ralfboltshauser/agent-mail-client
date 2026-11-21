@@ -287,4 +287,17 @@ export const MIGRATIONS: readonly Migration[] = [
       UPDATE imap_location SET verified = 0 WHERE source_blob IS NULL;
     `,
   },
+  {
+    version: 6,
+    name: 'Verify IMAP message and mailbox identity',
+    sql: `
+      ALTER TABLE imap_location ADD COLUMN envelope TEXT;
+      ALTER TABLE imap_location ADD COLUMN rfc822_size INTEGER;
+
+      -- Reprocess each UID independently. A single legacy header fingerprint
+      -- may have combined locations that refer to different raw sources.
+      UPDATE imap_location SET verified = 0 WHERE message_id IN
+        (SELECT id FROM message WHERE imap_fingerprint GLOB 'headers:*');
+    `,
+  },
 ]

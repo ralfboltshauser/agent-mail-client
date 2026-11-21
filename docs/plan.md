@@ -100,6 +100,7 @@ The root NVMe disk is at **97%** (7.5 GB free), and `/srv` is a 1.8 TB spinning 
 - **Backfill:** the entire history, newest first, resumable, rate-limited, using Gmail batch requests (about 30–60 minutes per 100k messages). The inbox and the last 90 days come first so the app is usable within minutes, and older mail streams in behind.
 - **Gmail incremental:** `history.list` from the last `historyId`, polled every 15 seconds per Account. A Pub/Sub watch for instant delivery is an optional switch (it needs billing on the Cloud project). On a `historyId` too old, fall back to a full resync.
 - **IMAP incremental:** IDLE on INBOX, and CONDSTORE/QRESYNC on every folder every few minutes. Without those extensions, UID-range diffs (see the IMAP extensions ticket).
+- **IMAP parser memory follow-up.** Raw MIME and attachments stream to disk. MailParser retains decoded plain text and HTML in memory. Bound memory for very large bodies while preserving complete message display.
 - **Label mapping:** Gmail labels map 1:1. IMAP folders map to Labels, so a message carries at most one. Special-use folders (`\Archive`, `\Sent`, `\Trash`, `\Drafts`) map to the system Labels.
 
 ### 4.4 Mutations and writeback

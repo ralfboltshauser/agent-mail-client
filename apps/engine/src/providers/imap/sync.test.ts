@@ -235,7 +235,7 @@ it('stores oversized raw and displayed bodies completely and marks the FTS prefi
   expect(imap.downloads).toEqual([{ path: 'INBOX', uid, part: undefined }])
 })
 
-it.each(['message-id', 'email-id', 'header fingerprint'])(
+it.each(['message-id', 'email-id', 'full source hash'])(
   'deduplicates oversized copies using %s',
   async (identity) => {
     const { imap, db, makeSync, queries } = fixture()
@@ -253,6 +253,89 @@ it.each(['message-id', 'email-id', 'header fingerprint'])(
     expect(queries.accounts()[0]?.messageCount).toBe(1)
     expect(db.prepare('SELECT count(*) AS n FROM imap_location').get()?.n).toBe(2)
     expect(queries.threads({}).threads[0]?.labelIds).toEqual(['a:ARCHIVE', 'a:INBOX'])
+  },
+)
+
+it('keeps same-size oversized messages with identical headers and different bodies separate', async () => {
+  const { db, imap, makeSync, queries } = fixture()
+  imap.addFolder('Archive', '\\Archive')
+  const common = longBody.repeat(Math.ceil(LAZY_ATTACHMENT_THRESHOLD / longBody.length))
+  const headers = 'Subject: No optional identifiers'
+  const inbox = imap.add('INBOX', headers, `${common}body A`)
+  const archive = imap.add('Archive', headers, `${common}body B`)
+  expect(imap.folder('INBOX').messages.get(inbox)?.source.length).toBe(
+    imap.folder('Archive').messages.get(archive)?.source.length,
+  )
+  await makeSync().step('all')
+
+  const locations = db.prepare('SELECT path_key, message_id, source_blob FROM imap_location').all()
+  expect(new Set(locations.map(({ source_blob }) => source_blob)).size).toBe(2)
+  expect(queries.accounts()[0]?.messageCount).toBe(2)
+  const inboxId = String(locations.find(({ path_key }) => path_key === 'INBOX')?.message_id)
+  const archiveId = String(locations.find(({ path_key }) => path_key === 'Archive')?.message_id)
+  expect(queries.message(inboxId)?.bodyText.endsWith('body A')).toBe(true)
+  expect(queries.message(archiveId)?.bodyText.endsWith('body B')).toBe(true)
+
+  imap.expunge('INBOX', inbox)
+  await makeSync().step('all')
+  expect(queries.message(inboxId)).toBeNull()
+  expect(queries.message(archiveId)?.bodyText.endsWith('body B')).toBe(true)
+  expect(queries.message(archiveId)?.labelIds).toEqual(['a:ARCHIVE'])
+})
+
+it.each([
+  {
+    oldHeaders: 'Subject: Old mail\r\nMessage-ID: <old@example.com>',
+    newHeaders: 'Subject: Old mail\r\nMessage-ID: <new@example.com>',
+    evidence: 'a different Message-ID',
+    newBody: 'new content',
+  },
+  {
+    oldHeaders: 'Subject: Old mail\r\nMessage-ID: <old@example.com>',
+    newHeaders: 'Subject: Old mail\r\nMessage-ID: <old@example.com>',
+    newBody: 'different size body',
+    evidence: 'a different RFC822.SIZE',
+  },
+  {
+    oldHeaders: 'Subject: Old mail\r\nMessage-ID: <old@example.com>',
+    newHeaders: 'Subject: New mail\r\nMessage-ID: <old@example.com>',
+    newBody: 'new content',
+    evidence: 'a different ENVELOPE subject',
+  },
+  {
+    oldHeaders: 'Subject: Old mail',
+    newHeaders: 'Subject: Old mail',
+    newBody: 'new content',
+    evidence: 'no Message-ID',
+  },
+])(
+  'downloads a replacement folder with matching counters and $evidence',
+  async ({ oldHeaders, newHeaders, newBody }) => {
+    const { db, imap, makeSync, queries } = fixture()
+    imap.addFolder('Old')
+    imap.add('INBOX', oldHeaders, 'old content')
+    imap.add('Old', oldHeaders, 'old content')
+    const sync = makeSync()
+    await sync.step('all')
+    const oldId = String(
+      db.prepare("SELECT message_id FROM imap_location WHERE path_key = 'Old'").get()?.message_id,
+    )
+
+    imap.folders.delete('Old')
+    imap.addFolder('New')
+    const uid = imap.add('New', newHeaders, newBody)
+    imap.downloads.length = 0
+    expect(await sync.step('all')).toBe(true)
+    expect(await makeSync().step('all')).toBe(true)
+
+    expect(imap.downloads).toEqual([{ path: 'New', uid, part: undefined }])
+    expect(queries.message(oldId)?.labelIds).toEqual(['a:INBOX'])
+    const newId = String(
+      db.prepare("SELECT message_id FROM imap_location WHERE path_key = 'New'").get()?.message_id,
+    )
+    expect(queries.message(newId)?.bodyText).toBe(newBody)
+    expect(queries.message(newId)?.labelIds).toEqual(['a:folder:New'])
+    expect(db.prepare("SELECT uid FROM imap_location WHERE path_key = 'Old'").all()).toEqual([])
   },
 )
 
@@ -296,7 +379,9 @@ it.each([false, true])(
     const { db, imap, makeSync, queries } = fixture()
     const folder = imap.addFolder('Filed')
     if (objectId) folder.mailboxId = 'mailbox-filed'
-    for (let i = 1; i <= 40; i++) imap.add('Filed', `Subject: Filed ${i}`)
+    for (let i = 1; i <= 40; i++) {
+      imap.add('Filed', `Subject: Filed ${i}\r\nMessage-ID: <filed${i}@example.com>`)
+    }
     const sync = makeSync()
     expect(await sync.step('all')).toBe(false)
     const cached = db.prepare('SELECT id FROM message ORDER BY rowid LIMIT 1').get()?.id
@@ -315,36 +400,32 @@ it.each([false, true])(
       db.prepare('SELECT label_ids FROM message WHERE id = ?').get(cached ?? '')?.label_ids,
     ).toBe('["a:folder:Renamed"]')
     expect(queries.threads({ labelId: 'a:folder:Renamed' }).threads).toHaveLength(40)
-    if (objectId) expect(imap.downloads).toHaveLength(0)
-  },
-)
-
-it.each([false, true])(
-  'relabels the entire renamed folder with an oversized source (legacy cursor: %s)',
-  async (legacyCursor) => {
-    const { db, imap, makeSync, queries } = fixture()
-    imap.addFolder('Filed')
-    for (let i = 1; i <= 39; i++) imap.add('Filed', `Subject: Filed ${i}`)
-    imap.add(
-      'Filed',
-      'Subject: Large filed message',
-      longBody.repeat(Math.ceil(LAZY_ATTACHMENT_THRESHOLD / longBody.length)),
-    )
-    const sync = makeSync()
-    expect(await sync.step('all')).toBe(false)
-    expect(await sync.step('backfill')).toBe(true)
-    const ids = db.prepare('SELECT id FROM message ORDER BY id').all()
-    if (legacyCursor) {
-      db.exec(`UPDATE account SET cursor = json_remove(cursor, '$.folders[1].exists')`)
-    }
-    imap.renameFolder('Filed', 'Renamed')
-    imap.downloads.length = 0
-    expect(await makeSync().step('all')).toBe(true)
-    expect(queries.threads({ labelId: 'a:folder:Renamed' }).threads).toHaveLength(40)
-    expect(db.prepare('SELECT id FROM message ORDER BY id').all()).toEqual(ids)
     expect(imap.downloads).toHaveLength(0)
   },
 )
+
+it('relabels the entire renamed folder with an oversized source', async () => {
+  const { db, imap, makeSync, queries } = fixture()
+  imap.addFolder('Filed')
+  for (let i = 1; i <= 39; i++) {
+    imap.add('Filed', `Subject: Filed ${i}\r\nMessage-ID: <filed${i}@example.com>`)
+  }
+  imap.add(
+    'Filed',
+    'Subject: Large filed message\r\nMessage-ID: <large@example.com>',
+    longBody.repeat(Math.ceil(LAZY_ATTACHMENT_THRESHOLD / longBody.length)),
+  )
+  const sync = makeSync()
+  expect(await sync.step('all')).toBe(false)
+  expect(await sync.step('backfill')).toBe(true)
+  const ids = db.prepare('SELECT id FROM message ORDER BY id').all()
+  imap.renameFolder('Filed', 'Renamed')
+  imap.downloads.length = 0
+  expect(await makeSync().step('all')).toBe(true)
+  expect(queries.threads({ labelId: 'a:folder:Renamed' }).threads).toHaveLength(40)
+  expect(db.prepare('SELECT id FROM message ORDER BY id').all()).toEqual(ids)
+  expect(imap.downloads).toHaveLength(0)
+})
 
 it('keeps chronological summary fields and flags when all thread messages share a timestamp', async () => {
   const { imap, makeSync, queries } = fixture()
@@ -490,4 +571,44 @@ it('replaces a v4 preview with the full source under the cached message ID', asy
     verified: 1,
     source_blob: expect.any(String),
   })
+})
+
+it('splits distinct sources previously combined by a v5 header fingerprint', async () => {
+  const db = openDatabase(':memory:')
+  migrate(db, { migrations: MIGRATIONS.filter(({ version }) => version <= 5) })
+  const imap = new FakeImap()
+  const blobs = new BlobStore(tempDir())
+  imap.addFolder('Archive', '\\Archive')
+  const sources = ['INBOX', 'Archive'].map((path, i) => {
+    const uid = imap.add(path, 'Subject: Legacy collision', `body ${i}`)
+    const source = imap.folder(path).messages.get(uid)
+    if (!source) throw new Error('Missing fake message')
+    return [path, blobs.put(source.source)] as const
+  })
+  db.exec(`
+    INSERT INTO account (id, kind, address, credentials, cursor, created_at)
+      VALUES ('a', 'imap', 'owner@example.com', x'00',
+        '{"folders":[{"path":"INBOX","validity":"1","highUid":1,"before":0,"modseq":null},
+        {"path":"Archive","validity":"1","highUid":1,"before":0,"modseq":null}]}', 0);
+    INSERT INTO thread (id, account_id, provider_thread_id) VALUES ('a:legacy', 'a', 'legacy');
+    INSERT INTO message (id, account_id, thread_id, provider_id, imap_fingerprint, body_text, sent_at)
+      VALUES ('a:INBOX:1:1', 'a', 'a:legacy', 'INBOX:1:1', 'headers:legacy', 'body 0', 0);
+  `)
+  for (const [path, source] of sources) {
+    db.prepare(`
+      INSERT INTO imap_location (account_id, path_key, validity, uid, message_id, label_id, unread, starred, source_blob)
+      VALUES ('a', ?, '1', 1, 'a:INBOX:1:1', ?, 1, 0, ?)
+    `).run(path, `a:${path.toUpperCase()}`, source)
+  }
+
+  migrate(db)
+  const store = new MailStore(db, blobs)
+  await new ImapAccountSync(imap.client, store, 'a', 'owner@example.com').step('all')
+  expect(db.prepare('SELECT body_text FROM message ORDER BY body_text').all()).toEqual([
+    { body_text: 'body 0' },
+    { body_text: 'body 1' },
+  ])
+  expect(db.prepare('SELECT count(*) AS n FROM imap_location WHERE verified = 1').get()?.n).toBe(2)
+  expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([])
+  db.close()
 })

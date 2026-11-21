@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { pipeline } from 'node:stream/promises'
 import type { Address } from '@amc/protocol'
@@ -75,6 +74,10 @@ function addresses(input: AddressObject | AddressObject[] | undefined): Address[
   )
 }
 
+export function renameEnvelope(item: FetchMessageObject): string | null {
+  return item.envelope?.messageId?.trim() ? JSON.stringify(item.envelope) : null
+}
+
 export const LAZY_ATTACHMENT_THRESHOLD = 16 * 1024 * 1024
 
 export async function parseMessage(
@@ -83,7 +86,7 @@ export async function parseMessage(
   item: FetchMessageObject,
   blobs: BlobStore,
   sourceBlob: string,
-): Promise<{ message: IncomingMessage; fingerprint: string }> {
+): Promise<IncomingMessage> {
   let headers: Headers = new Map()
   let lines: HeaderLines = []
   let text: MessageText = { type: 'text' }
@@ -145,7 +148,7 @@ export async function parseMessage(
   const reply = headers.get('in-reply-to')
   const references = headers.get('references')
   const subject = headers.get('subject')
-  const message: IncomingMessage = {
+  return {
     providerId: providerMessageId(folder.path, uidValidity, item.uid),
     providerThreadId: '',
     rfcMessageId: typeof rfcId === 'string' ? rfcId : null,
@@ -172,15 +175,6 @@ export async function parseMessage(
     listUnsubscribe: unsubscribe?.line.replace(/^list-unsubscribe:\s*/i, '') ?? null,
     attachments,
   }
-  // A reused Message-ID can refer to different mail. The full source hash disambiguates it.
-  const fingerprint = message.rfcMessageId
-    ? sourceBlob
-    : item.emailId
-      ? `email-id:${item.emailId}`
-      : `headers:${createHash('sha256')
-          .update(JSON.stringify([headers.get('date'), message.from, subject, item.size, lines]))
-          .digest('hex')}`
-  return { message, fingerprint }
 }
 
 function largeAttachments(structure: MessageStructureObject): IncomingAttachment[] {
