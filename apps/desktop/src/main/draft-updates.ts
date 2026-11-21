@@ -28,6 +28,10 @@ export class LocalDraftUpdates {
     this.#db.prepare('DELETE FROM draft_update WHERE id = ? AND body = ?').run(id, update)
   }
 
+  discard(id: string): void {
+    this.#db.prepare('DELETE FROM draft_update WHERE id = ?').run(id)
+  }
+
   clear(): void {
     this.#db.exec('DELETE FROM draft_update')
   }

@@ -4,9 +4,10 @@ import {
   SEND_ACCOUNT_UNAVAILABLE,
   SEND_NEEDS_SIGN_IN,
 } from '@amc/protocol'
-import { Settings2 } from 'lucide-react'
+import { Settings2, Trash2 } from 'lucide-react'
 import { useEffect, useId, useState } from 'react'
 import { toast } from 'sonner'
+import { DiscardDraftDialog } from './discard-draft-dialog'
 import { Button } from './ui/button'
 import { Dialog, DialogContent, DialogTitle } from './ui/dialog'
 import { Input } from './ui/input'
@@ -66,12 +67,18 @@ function MailboxHeader({ title, children }: { title: string; children?: React.Re
 export function DraftsView({
   accountId,
   onOpen,
+  onDiscarded,
 }: {
   accountId: string | null
   onOpen: (id: string) => void
+  onDiscarded: (id: string) => void
 }) {
   const { data, error } = usePolling<Draft[]>(loadDrafts, 1500)
-  const drafts = data?.filter((draft) => !accountId || draft.accountId === accountId)
+  const [discardId, setDiscardId] = useState<string | null>(null)
+  const [discarded, setDiscarded] = useState<string[]>([])
+  const drafts = data?.filter(
+    (draft) => (!accountId || draft.accountId === accountId) && !discarded.includes(draft.id),
+  )
   return (
     <section className="flex h-full flex-col">
       <MailboxHeader title="Drafts" />
@@ -85,26 +92,47 @@ export function DraftsView({
           <p className="p-4 text-sm text-muted-foreground">No saved drafts.</p>
         )}
         {drafts?.map((draft) => (
-          <button
-            type="button"
-            key={draft.id}
-            onClick={() => onOpen(draft.id)}
-            className="flex w-full items-center justify-between gap-4 border-b px-4 py-3 text-left hover:bg-accent focus-visible:outline-ring"
-          >
-            <span className="min-w-0">
-              <span className="block truncate text-sm font-medium">
-                {draft.subject || '(No subject)'}
+          <div key={draft.id} className="flex items-center border-b pr-3 hover:bg-accent">
+            <button
+              type="button"
+              onClick={() => onOpen(draft.id)}
+              className="flex min-w-0 flex-1 items-center justify-between gap-4 px-4 py-3 text-left focus-visible:outline-ring"
+            >
+              <span className="min-w-0">
+                <span className="block truncate text-sm font-medium">
+                  {draft.subject || '(No subject)'}
+                </span>
+                <span className="block truncate text-xs text-muted-foreground">
+                  {draft.to.map((r) => r.name || r.address).join(', ') || draft.from}
+                </span>
               </span>
-              <span className="block truncate text-xs text-muted-foreground">
-                {draft.to.map((r) => r.name || r.address).join(', ') || draft.from}
-              </span>
-            </span>
-            <time className="shrink-0 text-xs text-muted-foreground">
-              {new Date(draft.updatedAt).toLocaleDateString()}
-            </time>
-          </button>
+              <time className="shrink-0 text-xs text-muted-foreground">
+                {new Date(draft.updatedAt).toLocaleDateString()}
+              </time>
+            </button>
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              aria-label={`Discard draft: ${draft.subject || '(No subject)'}`}
+              title="Discard draft"
+              onClick={() => setDiscardId(draft.id)}
+            >
+              <Trash2 />
+            </Button>
+          </div>
         ))}
       </div>
+      {discardId && (
+        <DiscardDraftDialog
+          onClose={() => setDiscardId(null)}
+          onConfirm={async () => {
+            const { warning } = await window.amc.discardDraft(discardId)
+            setDiscarded((ids) => [...ids, discardId])
+            onDiscarded(discardId)
+            if (warning) toast.warning(warning)
+          }}
+        />
+      )}
     </section>
   )
 }

@@ -36,3 +36,21 @@ it('persists a pending body change through an offline flush and replays it on re
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+it('clears staged updates for a discarded draft while keeping other drafts', async () => {
+  const replica = new Replica(':memory:')
+  try {
+    const patch = { baseRevision: 3, update: 'AAA=' }
+    replica.draftUpdates.stage('discarded', patch)
+    replica.draftUpdates.stage('kept', patch)
+    replica.draftUpdates.discard('discarded')
+    const request = vi.fn().mockResolvedValue(undefined)
+    await replica.draftUpdates.flush({ request })
+    expect(request).toHaveBeenCalledExactlyOnceWith(
+      '/v1/compose/drafts/kept',
+      expect.objectContaining({ method: 'PUT', body: patch }),
+    )
+  } finally {
+    replica.db.close()
+  }
+})

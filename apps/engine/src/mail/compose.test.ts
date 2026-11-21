@@ -1,5 +1,7 @@
 import { COMPOSER_FIELD } from '@amc/composer'
 import { type ComposeDraft, DRAFT_CHANGED, MIRROR_CHANGED, type OutboxItem } from '@amc/protocol'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { simpleParser } from 'mailparser'
 import { expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
@@ -74,6 +76,8 @@ function setup() {
     store,
     queries,
     call,
+    app,
+    token,
     outbox,
     advance: (ms: number) => {
       now += ms
@@ -276,6 +280,68 @@ it('imports a Gmail draft and accepts deletion of the unchanged provider copy', 
   expect(drafts.list()).toEqual([])
   db.close()
 })
+
+it.each([false, true])(
+  'discards an undone send and keeps an externally edited mirror (%s)',
+  async (edited) => {
+    const { account, app, call, db, drafts, gmail, token } = setup()
+    const client = new Client({ name: 'AMC Desktop test', version: '1.0.0' })
+    try {
+      const draft = await drafts.create({ accountId: account, to: reader, body: 'Body' }, 'owner')
+      const version = drafts.compose(draft.id) as ComposeDraft
+      expect(
+        (
+          await call('/outbox', 'POST', {
+            id: 'undo-discard',
+            draftId: draft.id,
+            revision: version.revision,
+          })
+        ).status,
+      ).toBe(202)
+      expect((await call('/outbox/undo-discard/cancel', 'POST')).ok).toBe(true)
+      expect((await call(`/drafts/${draft.id}`)).ok).toBe(true)
+
+      // The mirror may be recreated when the owner makes another edit after undoing.
+      await drafts.update(draft.id, { body: 'Edited after undo' }, 'owner')
+      const [mirror] = gmail.drafts.keys()
+      if (!mirror) throw new Error('Draft was not mirrored')
+      if (edited) {
+        await gmail.saveDraft({
+          draftId: mirror,
+          raw: await buildMessage({
+            from: { address: gmail.address, name: null },
+            to: reader,
+            cc: [],
+            bcc: [],
+            subject: 'Changed in Gmail',
+            text: 'Keep this version',
+          }),
+        })
+      }
+
+      await client.connect(
+        new StreamableHTTPClientTransport(new URL('http://localhost/mcp'), {
+          requestInit: { headers: { Authorization: `Bearer ${token}` } },
+          fetch: (input, init) => Promise.resolve(app.fetch(new Request(input, init))),
+        }),
+      )
+      const result = await client.callTool({
+        name: 'delete_draft',
+        arguments: { draft_id: draft.id },
+      })
+      expect(result.isError).toBeFalsy()
+      const text = Array.isArray(result.content)
+        ? result.content.find((entry) => entry.type === 'text')?.text
+        : undefined
+      expect(JSON.parse(text ?? 'null')).toMatchObject({ deleted: draft.id })
+      expect(await call(`/drafts/${draft.id}`)).toMatchObject({ status: 404 })
+      expect(gmail.drafts.has(mirror)).toBe(edited)
+    } finally {
+      await client.close()
+      db.close()
+    }
+  },
+)
 
 it('rejects send with a stale displayed revision even when the click includes a body-only update', async () => {
   const { account, call, drafts, db, outbox } = setup()

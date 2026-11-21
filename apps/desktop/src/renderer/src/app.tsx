@@ -37,7 +37,12 @@ const NO_COUNTS: Counts = { inbox: 0, inboxUnread: 0, starred: 0, drafts: 0, buc
 export function App() {
   const status = useSyncStatus()
   useTheme()
-  if (!status) return null
+  if (!status)
+    return (
+      <main className="grid min-h-dvh place-items-center text-sm text-muted-foreground">
+        <output>Starting AMC…</output>
+      </main>
+    )
   return (
     <TooltipProvider delayDuration={400}>
       {status.phase === 'unpaired' ? (
@@ -403,7 +408,11 @@ function MailApp() {
       />
       <SidebarInset className="overflow-hidden">
         {view.kind === 'drafts' && !search ? (
-          <DraftsView accountId={accountId} onOpen={(id) => void openDraft(id)} />
+          <DraftsView
+            accountId={accountId}
+            onOpen={(id) => void openDraft(id)}
+            onDiscarded={(id) => setMinimised((current) => (current?.id === id ? null : current))}
+          />
         ) : view.kind === 'outbox' && !search ? (
           <OutboxView
             accountId={accountId}
@@ -597,6 +606,7 @@ function MailApp() {
             draft={draft}
             accounts={accounts}
             onQueued={queued}
+            onDiscarded={() => setDraft(null)}
             onMinimise={(subject) => {
               setMinimised({ id: draft.id, subject })
               setDraft(null)
