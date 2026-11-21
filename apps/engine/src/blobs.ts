@@ -58,8 +58,10 @@ export class BlobStore {
       }
       const digest = hash.digest('hex')
       const path = this.path(digest)
-      await mkdir(dirname(path), { recursive: true })
-      await rename(tmp, path)
+      if (!existsSync(path)) {
+        await mkdir(dirname(path), { recursive: true })
+        await rename(tmp, path)
+      }
       return { hash: digest, size }
     } finally {
       await rm(tmp, { force: true })

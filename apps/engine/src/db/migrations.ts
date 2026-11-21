@@ -300,4 +300,17 @@ export const MIGRATIONS: readonly Migration[] = [
         (SELECT id FROM message WHERE imap_fingerprint GLOB 'headers:*');
     `,
   },
+  {
+    version: 7,
+    name: 'Retire IMAP metadata fingerprints',
+    sql: `
+      ALTER TABLE imap_location DROP COLUMN envelope;
+      ALTER TABLE imap_location DROP COLUMN rfc822_size;
+
+      -- Download each UID again because an older EMAILID match may have joined
+      -- locations with different sources into the same cached message.
+      UPDATE imap_location SET verified = 0 WHERE message_id IN
+        (SELECT id FROM message WHERE imap_fingerprint GLOB 'email-id:*');
+    `,
+  },
 ]

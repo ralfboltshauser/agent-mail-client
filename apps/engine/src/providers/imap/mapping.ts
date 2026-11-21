@@ -74,10 +74,6 @@ function addresses(input: AddressObject | AddressObject[] | undefined): Address[
   )
 }
 
-export function renameEnvelope(item: FetchMessageObject): string | null {
-  return item.envelope?.messageId?.trim() ? JSON.stringify(item.envelope) : null
-}
-
 export const LAZY_ATTACHMENT_THRESHOLD = 16 * 1024 * 1024
 
 export async function parseMessage(

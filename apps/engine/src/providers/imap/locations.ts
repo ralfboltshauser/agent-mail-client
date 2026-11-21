@@ -2,7 +2,7 @@ import type { FetchMessageObject } from 'imapflow'
 import { newId } from '../../auth/secrets.ts'
 import { transaction } from '../../db/database.ts'
 import { type IncomingMessage, labelId, type MailStore, messageId } from '../../mail/store.ts'
-import { type Folder, renameEnvelope } from './mapping.ts'
+import type { Folder } from './mapping.ts'
 import { ImapThreads } from './threading.ts'
 
 export interface Location {
@@ -13,8 +13,6 @@ export interface Location {
   starred: number
   verified: number
   source_blob: string | null
-  envelope: string | null
-  rfc822_size: number | null
 }
 
 export const PAGE = 32
@@ -36,7 +34,7 @@ export class ImapLocations {
   page(path: string, validity: string, after = 0, limit = PAGE): Location[] {
     return this.store.db
       .prepare(
-        `SELECT uid, message_id, label_id, unread, starred, verified, source_blob, envelope, rfc822_size FROM imap_location
+        `SELECT uid, message_id, label_id, unread, starred, verified, source_blob FROM imap_location
        WHERE account_id = ? AND path_key = ? AND validity = ? AND uid > ? ORDER BY uid LIMIT ?`,
       )
       .all(
@@ -51,7 +49,7 @@ export class ImapLocations {
   get(path: string, validity: string, uid: number): Location | undefined {
     return this.store.db
       .prepare(
-        `SELECT uid, message_id, label_id, unread, starred, verified, source_blob, envelope, rfc822_size FROM imap_location
+        `SELECT uid, message_id, label_id, unread, starred, verified, source_blob FROM imap_location
        WHERE account_id = ? AND path_key = ? AND validity = ? AND uid = ?`,
       )
       .get(this.accountId, encodeURIComponent(path), validity, uid) as unknown as
@@ -68,19 +66,13 @@ export class ImapLocations {
   ): void {
     const { db } = this.store
     const { uid } = item
-    // A reused Message-ID can refer to different mail. The raw blob hash
-    // identifies the bytes, including when both optional IDs are absent.
-    const fingerprint =
-      !message.rfcMessageId && item.emailId ? `email-id:${item.emailId}` : sourceBlob
     transaction(db, () => {
       const old = this.get(folder.path, validity, uid)
       const duplicate = db
         .prepare(
-          'SELECT id FROM message WHERE account_id = ? AND rfc_message_id IS ? AND imap_fingerprint IN (?, ?) ORDER BY CASE WHEN imap_fingerprint = ? THEN 0 ELSE 1 END, rowid LIMIT 1',
+          'SELECT id FROM message WHERE account_id = ? AND rfc_message_id IS ? AND imap_fingerprint = ? ORDER BY rowid LIMIT 1',
         )
-        .get(this.accountId, message.rfcMessageId, fingerprint, sourceBlob, fingerprint) as
-        | { id: string }
-        | undefined
+        .get(this.accountId, message.rfcMessageId, sourceBlob) as { id: string } | undefined
       let mid: string
       if (duplicate) {
         mid = duplicate.id
@@ -95,16 +87,15 @@ export class ImapLocations {
         mid = messageId(this.accountId, message.providerId)
         message.providerThreadId = this.#threads.assign(message, mid)
         this.store.putMessage(this.accountId, [this.address], message)
-        db.prepare('UPDATE message SET imap_fingerprint = ? WHERE id = ?').run(fingerprint, mid)
+        db.prepare('UPDATE message SET imap_fingerprint = ? WHERE id = ?').run(sourceBlob, mid)
         this.#threads.remember(message, mid)
       }
       db.prepare(
-        `INSERT INTO imap_location (account_id, path_key, validity, uid, message_id, label_id, unread, starred, source_blob, envelope, rfc822_size)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO imap_location (account_id, path_key, validity, uid, message_id, label_id, unread, starred, source_blob)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (account_id, path_key, validity, uid) DO UPDATE SET
            message_id = excluded.message_id, label_id = excluded.label_id, unread = excluded.unread,
-           starred = excluded.starred, verified = 1, source_blob = excluded.source_blob,
-           envelope = excluded.envelope, rfc822_size = excluded.rfc822_size`,
+           starred = excluded.starred, verified = 1, source_blob = excluded.source_blob`,
       ).run(
         this.accountId,
         encodeURIComponent(folder.path),
@@ -115,8 +106,6 @@ export class ImapLocations {
         Number(message.unread),
         Number(message.starred),
         sourceBlob,
-        renameEnvelope(item),
-        item.size ?? null,
       )
       this.#refresh(mid)
       if (old && old.message_id !== mid) this.#refresh(old.message_id)

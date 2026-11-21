@@ -3,7 +3,7 @@ import { transaction } from '../../db/database.ts'
 import type { MailStore } from '../../mail/store.ts'
 import type { ImapClient } from './client.ts'
 import { ImapLocations, PAGE } from './locations.ts'
-import { type Folder, mapFolders, messageFlags, parseMessage, renameEnvelope } from './mapping.ts'
+import { type Folder, mapFolders, messageFlags, parseMessage } from './mapping.ts'
 
 const RECONCILE_PAGE = 512
 const INBOX_WINDOW_INTERVAL = 1000
@@ -150,19 +150,16 @@ export class ImapAccountSync {
     const paths = new Set(folders.map((folder) => folder.path))
     const missing = [...this.#cursor.values()].filter(({ path }) => !paths.has(path))
     const renames = new Map<string, Folder>()
-    if (missing.length) {
+    const identifiable = missing.filter(({ mailboxId }) => mailboxId)
+    if (identifiable.length) {
       const candidates = new Map<string, Folder[]>()
       const matchCounts = new Map<string, number>()
       for (const folder of folders) {
         if (this.#cursor.has(folder.path)) continue
         const box = await this.client.mailboxOpen(folder.path, { readOnly: true })
-        for (const old of missing) {
-          if (old.validity !== String(box.uidValidity)) continue
-          const same =
-            old.mailboxId && box.mailboxId
-              ? old.mailboxId === box.mailboxId
-              : await this.#matchesCachedFolder(old, box)
-          if (same) {
+        if (!box.mailboxId) continue
+        for (const old of identifiable) {
+          if (old.mailboxId === box.mailboxId && old.validity === String(box.uidValidity)) {
             candidates.set(old.path, [...(candidates.get(old.path) ?? []), folder])
             matchCounts.set(folder.path, (matchCounts.get(folder.path) ?? 0) + 1)
           }
@@ -195,39 +192,6 @@ export class ImapAccountSync {
       this.#saveCursor()
     })
     this.#folders = folders
-  }
-
-  // UIDVALIDITY is scoped to a mailbox name. For a different name, require
-  // the same UID set with matching envelope and size for every cached message.
-  async #matchesCachedFolder(old: FolderCursor, box: MailboxObject): Promise<boolean> {
-    if (!box.exists || box.uidNext !== old.highUid + 1) return false
-    const epoch = this.#sequenceEpoch
-    let after = 0
-    let verified = 0
-    for (;;) {
-      const rows = this.#locations.page(old.path, old.validity, after, RECONCILE_PAGE)
-      if (!rows.length) return verified === box.exists && epoch === this.#sequenceEpoch
-      const expected = new Map(rows.map((row) => [row.uid, row]))
-      for await (const item of this.client.fetch(
-        rows.map(({ uid }) => uid),
-        { envelope: true, size: true },
-        { uid: true },
-      )) {
-        const cached = expected.get(item.uid)
-        if (
-          !cached?.verified ||
-          cached.envelope === null ||
-          cached.envelope !== renameEnvelope(item) ||
-          cached.rfc822_size !== item.size
-        )
-          return false
-        expected.delete(item.uid)
-      }
-      if (expected.size) return false
-      verified += rows.length
-      if (verified > box.exists) return false
-      after = rows[rows.length - 1]?.uid ?? after
-    }
   }
 
   #saveCursor(): void {
@@ -358,8 +322,6 @@ export class ImapAccountSync {
         flags: true,
         internalDate: true,
         bodyStructure: true,
-        envelope: true,
-        emailId: true,
       },
       { uid: true },
     ))
