@@ -240,6 +240,33 @@ describe('MCP tools', () => {
     expect(JSON.stringify(actions)).not.toContain('Friday at 7?')
   })
 
+  it('shows a local draft save and clears its mirror error after a successful retry', async () => {
+    const { client, db, drafts, gmail, mutations } = await connect(['draft'])
+    vi.spyOn(gmail, 'saveDraft').mockRejectedValueOnce(new Error('Provider unavailable'))
+    try {
+      const response = await client.callTool({
+        name: 'create_draft',
+        arguments: { thread_id: 'a:t-m1', body: 'Saved locally' },
+      })
+      expect(response.isError).toBeFalsy()
+      const { id } = JSON.parse(text(response))
+      const activity = () => listAgentActions(db, mutations).actions[0]
+      expect(activity()).toMatchObject({
+        draftId: id,
+        status: 'applied',
+        error: 'Draft saved locally. Mirroring to the provider failed and will retry.',
+      })
+      expect(gmail.drafts.size).toBe(0)
+
+      await drafts.mirrorPending()
+      expect(gmail.drafts.size).toBe(1)
+      expect(activity()).toMatchObject({ draftId: id, status: 'applied', error: null })
+    } finally {
+      await client.close()
+      db.close()
+    }
+  })
+
   it('uses the draft’s current From Account even when it is still linked to the original Thread', async () => {
     const deps = setup()
     const { db, drafts } = deps

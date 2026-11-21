@@ -18,6 +18,7 @@ import { Outbox } from './mail/outbox.ts'
 import { MailQueries } from './mail/queries.ts'
 import { MailStore } from './mail/store.ts'
 import { loadOAuthClient, type OAuthClient } from './providers/gmail/oauth.ts'
+import { gmailPubSub } from './providers/gmail/pubsub.ts'
 import { SyncManager } from './sync/manager.ts'
 import { VERSION } from './version.ts'
 
@@ -115,7 +116,17 @@ async function main(argv: string[]) {
         oauth ??= loadOAuthClient(config.secretsDir)
         return oauth
       }
-      const sync = new SyncManager({ db, store, sealer, log, oauthClient, snoozeEnabled })
+      const sync = new SyncManager({
+        db,
+        store,
+        sealer,
+        log,
+        oauthClient,
+        snoozeEnabled,
+        gmailPubSub: config.gmailPubSubProject
+          ? gmailPubSub(config.gmailPubSubProject, config.secretsDir)
+          : undefined,
+      })
       const drafts = new Drafts(db, store, (accountId) => {
         const gmail = sync.gmailApi(accountId)
         if (gmail) return gmail

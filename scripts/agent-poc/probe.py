@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mac proof with a loopback MCP fixture and an optional fake Codex model endpoint."""
+"""Headless proof with a loopback MCP fixture and an optional fake Codex model endpoint."""
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -217,9 +217,15 @@ def probe(client, offline=False):
                 env.update(HOME=str(synthetic_home), CODEX_HOME=str(synthetic_home),
                            AMC_POC_MODEL_KEY=FAKE_BEARER)
             if client == "claude":
+                guard = os.getenv("AMC_POC_CLAUDE_GUARD")
+                if guard:
+                    command = [guard]
                 auth = json.loads(run([*command, "auth", "status", "--json"], scratch, env, 10))
-                if (auth.get("authMethod"), auth.get("apiProvider")) != ("claude.ai", "firstParty"):
+                if (auth.get("loggedIn"), auth.get("authMethod"), auth.get("apiProvider")) != (
+                    True, "claude.ai", "firstParty",
+                ):
                     raise RuntimeError("The installed Claude CLI must use Claude.ai login")
+                print("Claude auth: logged in via claude.ai (firstParty)", flush=True)
                 config = Path(scratch) / "mcp.json"
                 config.write_text(json.dumps({"mcpServers": {"fixture": {
                     "type": "http", "url": url,
