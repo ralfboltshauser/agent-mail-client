@@ -80,8 +80,16 @@ function MailApp() {
   const threads: ThreadSummary[] = searchThreads ?? filtered ?? viewThreads
   const selected = threads.find((item) => item.id === selectedId)
   const activeThread = selected && thread?.thread.id === selectedId ? thread : null
-  const canOrganise = activeThread?.messages.length === activeThread?.thread.messageCount
+  const organiseAccountId = selected?.accountId ?? accountId
+  const canUndoOrganise = accounts.some(
+    (account) =>
+      account.kind === 'gmail' && (!organiseAccountId || account.id === organiseAccountId),
+  )
+  const canOrganise =
+    canUndoOrganise && activeThread?.messages.length === activeThread?.thread.messageCount
   const organise = useOrganise(canOrganise ? (activeThread?.thread ?? null) : null)
+  const organisePicker =
+    canOrganise && organise.picker?.thread.id === activeThread?.thread.id ? organise.picker : null
   const matchSnippets = useMemo(
     () => (search?.hits ? new Map(search.hits.map((h) => [h.id, h.matchSnippet])) : undefined),
     [search],
@@ -145,7 +153,7 @@ function MailApp() {
   useHotkeys(
     {
       ...Object.fromEntries(
-        Object.entries(organise.shortcuts).map(([key, run]) => [
+        Object.entries(canUndoOrganise ? organise.shortcuts : {}).map(([key, run]) => [
           key,
           (event: KeyboardEvent) => {
             if (!event.repeat) run()
@@ -182,7 +190,7 @@ function MailApp() {
         accounts.slice(0, 9).map((a, i) => [`mod+${i + 1}`, () => setAccountId(a.id)]),
       ),
     },
-    !paletteOpen && !organise.picker,
+    !paletteOpen && !organisePicker,
   )
 
   return (
@@ -275,7 +283,7 @@ function MailApp() {
           <ResizablePanel defaultSize="60%" minSize="35%">
             <div className="flex h-full flex-col">
               <div className="app-drag flex h-12 shrink-0 items-center border-b px-3">
-                <OrganiseToolbar controls={organise.controls} />
+                {organise.controls.length > 0 && <OrganiseToolbar controls={organise.controls} />}
               </div>
               <div className="min-h-0 flex-1">
                 <ThreadView data={activeThread} labelNames={labelNames} scrollRef={readerScroll} />
@@ -284,9 +292,9 @@ function MailApp() {
           </ResizablePanel>
         </ResizablePanelGroup>
       </SidebarInset>
-      {organise.picker && (
+      {organisePicker && (
         <OrganisePicker
-          picker={organise.picker}
+          picker={organisePicker}
           labels={labels}
           onClose={() => organise.setPicker(null)}
           focusFallback={() => searchInput.current?.focus()}
@@ -309,7 +317,7 @@ function MailApp() {
           ...control,
           run: () => control.run(paletteInvoker.current ?? undefined),
         }))}
-        undo={organise.undo}
+        undo={canUndoOrganise ? organise.undo : undefined}
       />
     </SidebarProvider>
   )

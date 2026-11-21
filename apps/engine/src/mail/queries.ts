@@ -42,6 +42,7 @@ interface MessageRow {
   subject: string
   snippet: string
   body_text: string
+  body_search_truncated: number
   html_blob: string | null
   sent_at: number
   unread: number
@@ -274,6 +275,7 @@ export class MailQueries {
       .prepare(
         `SELECT m.id, m.thread_id, m.account_id, m.rfc_message_id, m.in_reply_to, m.from_json, m.to_json,
                 m.cc_json, m.bcc_json, m.reply_to_json, m.subject, m.snippet, m.body_text, m.html_blob,
+                coalesce(length(m.body_text) > m.body_search_limit, 0) AS body_search_truncated,
                 m.sent_at, m.unread, m.starred, m.label_ids, m.list_unsubscribe
          FROM message m WHERE ${where}`,
       )
@@ -296,6 +298,7 @@ export class MailQueries {
         subject: m.subject,
         snippet: m.snippet,
         bodyText: m.body_text,
+        bodySearchTruncated: Boolean(m.body_search_truncated),
         hasHtml: m.html_blob !== null,
         sentAt: m.sent_at,
         unread: m.unread === 1,

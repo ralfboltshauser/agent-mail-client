@@ -22,15 +22,19 @@ export function schemaVersion(db: Db): number {
   return row.user_version
 }
 
-/** Runs `fn` in an IMMEDIATE transaction and commits, or rolls back on any error. */
+/** Runs `fn` in an IMMEDIATE transaction (or a nested savepoint) and commits, or rolls back on any error. */
 export function transaction<T>(db: Db, fn: () => T): T {
-  db.exec('BEGIN IMMEDIATE')
+  const nested = db.isTransaction
+  db.exec(nested ? 'SAVEPOINT mail_transaction' : 'BEGIN IMMEDIATE')
   try {
     const result = fn()
-    db.exec('COMMIT')
+    db.exec(nested ? 'RELEASE mail_transaction' : 'COMMIT')
     return result
   } catch (error) {
-    db.exec('ROLLBACK')
+    if (nested) {
+      db.exec('ROLLBACK TO mail_transaction')
+      db.exec('RELEASE mail_transaction')
+    } else db.exec('ROLLBACK')
     throw error
   }
 }

@@ -142,6 +142,11 @@ function Message({ message: m, defaultOpen }: { message: MessageDetail; defaultO
           ) : (
             <TextBody text={m.bodyText} />
           )}
+          {m.bodySearchTruncated && (
+            <p className="mt-2 text-xs text-muted-foreground">
+              Search indexes only the start of this message.
+            </p>
+          )}
           {files.length > 0 && (
             <div className="mt-4 flex flex-wrap gap-2">
               {files.map((a) => (

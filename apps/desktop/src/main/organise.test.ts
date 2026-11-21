@@ -49,7 +49,18 @@ function message(id: string, labelIds: string[]): MessageDetail {
   }
 }
 
-function seed(replica: Replica) {
+function seed(replica: Replica, kind: 'gmail' | 'imap' = 'gmail') {
+  replica.put('account', {
+    id: THREAD.accountId,
+    kind,
+    address: 'owner@example.com',
+    displayName: null,
+    status: 'ready',
+    lastSyncAt: null,
+    lastError: null,
+    messageCount: 2,
+    backfill: { phase: 'done', fetched: 2, estimatedTotal: 2 },
+  })
   replica.put('thread', THREAD)
   replica.put('message', message('1', THREAD.labelIds))
   replica.put('message', message('2', []))
@@ -59,6 +70,20 @@ function seed(replica: Replica) {
 const inbox = { view: { kind: 'inbox' }, accountId: null } as const
 
 describe('desktop Organise outbox', () => {
+  it('leaves IMAP threads out of the Gmail writeback queue', () => {
+    const replica = new Replica(':memory:')
+    try {
+      seed(replica, 'imap')
+      expect(() => replica.organise.enqueue({ kind: 'archive', threadId: THREAD.id })).toThrow(
+        'Organise is available for Gmail Accounts',
+      )
+      expect(replica.organise.unsent()).toBeNull()
+      expect(replica.threads(inbox)).toHaveLength(1)
+    } finally {
+      replica.db.close()
+    }
+  })
+
   it('keeps optimistic state after reopening and removes it only when the replica has the acknowledgment', () => {
     const dir = mkdtempSync(join(tmpdir(), 'amc-replica-'))
     const path = join(dir, 'replica.db')

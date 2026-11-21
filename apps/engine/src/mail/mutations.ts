@@ -759,7 +759,8 @@ export class Mutations {
              lower(COALESCE(json_extract(m.from_json, '$.address'), a.address)) != lower(a.address)
          )) AS replied
          FROM thread t JOIN account a ON a.id = t.account_id
-         WHERE (t.snoozed_until IS NOT NULL OR t.muted = 1) AND a.status != 'auth_expired'
+         WHERE a.kind = 'gmail' AND a.status != 'auth_expired'
+           AND (t.snoozed_until IS NOT NULL OR t.muted = 1)
          AND NOT EXISTS (
            SELECT 1 FROM mutation p WHERE p.thread_id = t.id AND p.status = 'pending'
          )`,

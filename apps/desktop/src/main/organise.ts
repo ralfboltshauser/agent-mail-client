@@ -199,6 +199,14 @@ export class LocalOrganise {
       patch = projected.patch
       inverse = projected.inverse
     }
+    if (threadId) {
+      const account = this.#db
+        .prepare(
+          "SELECT json_extract(a.data, '$.kind') AS kind FROM thread t JOIN account a ON a.id = t.account_id WHERE t.id = ?",
+        )
+        .get(threadId)
+      if (account?.kind !== 'gmail') throw new Error('Organise is available for Gmail Accounts')
+    }
     const id = randomUUID()
     const request: MutationRequest = { id, action }
     this.replica.transaction(() => {
