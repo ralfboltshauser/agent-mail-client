@@ -51,12 +51,12 @@ outside the M6 v1 external grant contract.
 | Scope | Capabilities |
 | --- | --- |
 | `read` | List and search allowed Accounts, Threads, Labels, contacts, attachments and drafts. Reading a draft requires `read`, preserving the current behavior. |
-| `organize` | Archive, Label, Snooze, Mute, mark read and set triage fields. |
+| `organize` | Archive, Label, Mute, mark read and set triage fields. |
 | `draft` | Create, update and comment on Agent Drafts. Keep existing discard only once it has a recoverable snapshot. Composer Links, when shipped, are edit-only for one draft and expire after two hours. |
 | `send` | Explicitly granted `send_draft` for one owner-approved draft version and envelope while **Dangerously Allow Send** is on. |
 | `admin` | Reserved for authorized owner Clients. Agents cannot issue or revoke tokens or change settings. |
 
-Hard delete and unsubscribe stay outside Agent scopes. Unsubscribe can send mail or trigger an external request. Trash stays owner-only in M6.
+Hard delete and unsubscribe stay outside Agent scopes. Unsubscribe can send mail or trigger an external request. Trash and Snooze are owner-only.
 
 - The owner approves a scope ceiling and Account set per workflow or external Client. At dispatch, the Engine stores an immutable job ID, mode, operation allow-list and per-operation target IDs derived from the approved workflow and Engine-selected inputs. Triage gets read and organize operations on its input Thread IDs within the approved Accounts. It cannot draft or expand its target set. Mail, attachments and Harness output cannot add operations or targets. External Clients use an owner-approved job with explicit Accounts, operations and target constraints. A new T3 Code grant starts with read.
 - Mint a random bearer, store its hash and bind it to the job, run or external Client, Account set, operation and target constraints, and expiry. Start with a two-minute run deadline and a five-minute maximum token lifetime including startup. Keep internal bearers in the trusted forwarder. Revoke on completion, cancellation, timeout or owner action. External grants expire after 30 minutes and require a fresh grant. Pairing tokens and Composer Links have separate principal kinds.

@@ -568,7 +568,7 @@ async function main() {
         .command('snooze')
         .argument('<thread>', 'Thread id')
         .argument('<until>', 'ISO date and time')
-        .option('--if-no-reply', 'cancel the Snooze if a reply arrives first')
+        .option('--if-no-reply', 'wake early if a reply arrives')
         .action((threadId: string, until: string, opts: { ifNoReply?: boolean }) => {
           const timestamp = Date.parse(until)
           if (!Number.isFinite(timestamp) || timestamp <= Date.now())

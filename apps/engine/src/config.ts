@@ -38,7 +38,7 @@ export const Config = z.object({
     .string()
     .regex(/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/)
     .optional(),
-  features: z.object({ snooze: z.boolean().default(false) }).prefault({}),
+  features: z.object({ snooze: z.boolean().default(true) }).prefault({}),
   logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 })
 export type Config = z.infer<typeof Config>

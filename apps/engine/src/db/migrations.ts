@@ -564,4 +564,89 @@ export const MIGRATIONS: readonly Migration[] = [
       ) STRICT;
     `,
   },
+  {
+    version: 17,
+    name: 'Retire Gmail marker-based Snooze',
+    sql: `
+      CREATE TEMP TABLE legacy_snooze_mutation AS
+        SELECT id, thread_id FROM mutation
+        WHERE json_extract(request, '$.kind') = 'snooze'
+          OR json_extract(request, '$.snooze') = 1;
+
+      INSERT INTO legacy_snooze_mutation
+        SELECT id, thread_id FROM mutation WHERE undo_of IN (SELECT id FROM legacy_snooze_mutation);
+
+      CREATE TEMP TABLE legacy_snooze_thread AS
+        SELECT id FROM thread WHERE snoozed_until IS NOT NULL
+        UNION SELECT thread_id FROM legacy_snooze_mutation;
+
+      UPDATE mutation
+        SET status = 'failed', error = 'Discarded legacy Gmail Snooze', next_attempt = 0,
+            state_patch = '{}'
+        WHERE id IN (SELECT id FROM legacy_snooze_mutation);
+
+      UPDATE mutation
+        SET state_patch = json_remove(state_patch, '$.snoozedUntil', '$.noReply', '$.startedAt', '$.snoozeIntent')
+        WHERE thread_id IN (SELECT id FROM legacy_snooze_thread)
+          AND json_type(state_patch, '$.snoozeIntent') IS NOT NULL;
+
+      UPDATE organise_intent SET status = 'done'
+        WHERE id IN (SELECT id FROM legacy_snooze_mutation);
+      DELETE FROM organise_intent_message
+        WHERE intent_id IN (SELECT id FROM legacy_snooze_mutation);
+
+      -- Restore the provider values for Snooze's two former optimistic labels,
+      -- including any later write still pending for the same message.
+      UPDATE message AS msg SET label_ids = (
+        SELECT json_group_array(id) FROM (
+          SELECT value AS id FROM json_each(msg.label_ids)
+            WHERE value NOT IN (msg.account_id || ':INBOX', msg.account_id || ':AMC/Snoozed')
+          UNION ALL
+          SELECT label.id FROM (
+            SELECT msg.account_id || ':INBOX' AS id
+            UNION ALL SELECT msg.account_id || ':AMC/Snoozed'
+          ) AS label
+          WHERE COALESCE((
+            SELECT j.value FROM mutation_message AS mm
+            JOIN mutation m ON m.id = mm.mutation_id, json_each(mm.patch) j
+            WHERE mm.message_id = msg.id AND m.status = 'pending' AND j.key = label.id
+              AND label.id != msg.account_id || ':AMC/Snoozed'
+            ORDER BY m.seq DESC LIMIT 1
+          ), label.id IN (SELECT value FROM json_each(msg.provider_label_ids)))
+          ORDER BY id
+        )
+      )
+      WHERE msg.provider_label_ids IS NOT NULL
+        AND msg.thread_id IN (SELECT id FROM legacy_snooze_thread);
+
+      UPDATE thread AS t
+        SET snoozed_until = NULL, snooze_no_reply = 0, snooze_started_at = NULL,
+            organise_state = json_remove(organise_state, '$.snoozedUntil', '$.noReply', '$.startedAt', '$.snoozeIntent'),
+            in_inbox = muted = 0 AND EXISTS (
+              SELECT 1 FROM message m WHERE m.thread_id = t.id
+                AND t.account_id || ':INBOX' IN (SELECT value FROM json_each(m.label_ids))
+                AND NOT EXISTS (
+                  SELECT 1 FROM json_each(m.label_ids)
+                  WHERE value IN (t.account_id || ':TRASH', t.account_id || ':SPAM')
+                )
+            ),
+            label_ids = (
+              SELECT json_group_array(id) FROM (
+                SELECT DISTINCT j.value AS id FROM message m, json_each(m.label_ids) j
+                WHERE m.thread_id = t.id ORDER BY id
+              )
+            )
+        WHERE t.id IN (SELECT id FROM legacy_snooze_thread);
+
+      INSERT INTO change_log (entity, entity_id, op, at)
+        SELECT 'message', id, 'upsert', unixepoch() * 1000 FROM message
+        WHERE thread_id IN (SELECT id FROM legacy_snooze_thread);
+      INSERT INTO change_log (entity, entity_id, op, at)
+        SELECT 'thread', id, 'upsert', unixepoch() * 1000 FROM thread
+        WHERE id IN (SELECT id FROM legacy_snooze_thread);
+
+      DROP TABLE legacy_snooze_thread;
+      DROP TABLE legacy_snooze_mutation;
+    `,
+  },
 ]

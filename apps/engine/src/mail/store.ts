@@ -82,19 +82,13 @@ export class MailStore extends EventEmitter<{ change: [] }> {
   readonly db: Db
   readonly blobs: BlobStore
   readonly #now: () => number
-  readonly #snoozeEnabled: boolean
 
-  constructor(
-    db: Db,
-    blobs: BlobStore,
-    { now = Date.now, snoozeEnabled = false }: { now?: () => number; snoozeEnabled?: boolean } = {},
-  ) {
+  constructor(db: Db, blobs: BlobStore, { now = Date.now }: { now?: () => number } = {}) {
     super()
     this.setMaxListeners(100)
     this.db = db
     this.blobs = blobs
     this.#now = now
-    this.#snoozeEnabled = snoozeEnabled
   }
 
   recordChange(entity: Entity, id: string, op: 'upsert' | 'delete'): number {
@@ -612,7 +606,7 @@ export class MailStore extends EventEmitter<{ change: [] }> {
     this.db
       .prepare(
         `UPDATE thread SET subject = ?, snippet = ?, participants = ?, message_count = ?,
-           unread_count = ?, starred = ?, in_inbox = (? AND (NOT ? OR snoozed_until IS NULL) AND muted = 0),
+           unread_count = ?, starred = ?, in_inbox = (? AND muted = 0),
            has_attachments = ?, label_ids = ?,
            last_message_at = ?
          WHERE id = ?`,
@@ -625,7 +619,6 @@ export class MailStore extends EventEmitter<{ change: [] }> {
         unread,
         starred,
         Number(inInbox),
-        Number(this.#snoozeEnabled),
         hasAttachments,
         JSON.stringify([...labels].sort()),
         lastSentAt,
