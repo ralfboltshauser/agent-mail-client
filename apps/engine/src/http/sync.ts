@@ -8,6 +8,7 @@ import type {
 import { hasScope, SYNC_ENTITIES } from '@amc/protocol'
 import { Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
+import { agentGrantActive } from '../auth/tokens.ts'
 import type { Db } from '../db/database.ts'
 import type { Drafts } from '../mail/drafts.ts'
 import type { Mutations } from '../mail/mutations.ts'
@@ -142,31 +143,49 @@ export function syncRoutes(deps: SyncDeps, queue?: Mutations) {
     return c.json(body)
   })
 
-  r.get('/sync/events', requireScope('read'), (c) =>
-    streamSSE(c, async (stream) => {
-      let pending = false
+  r.get('/sync/events', requireScope('read'), (c) => {
+    const principal = c.get('principal')
+    return streamSSE(c, async (stream) => {
+      const authorized = () => {
+        if (
+          principal.kind === 'agent' &&
+          !agentGrantActive(db, principal.tokenId, 'read', Date.now())
+        ) {
+          stream.abort()
+        }
+        return !stream.aborted
+      }
+      let pending: ReturnType<typeof setTimeout> | undefined
       const notify = () => {
         if (pending) return
-        pending = true
-        setTimeout(() => {
-          pending = false
-          void stream.writeSSE({
-            event: 'change',
-            data: JSON.stringify({ modseq: syncState(db).modseq }),
-          })
+        pending = setTimeout(() => {
+          pending = undefined
+          if (authorized()) {
+            void stream.writeSSE({
+              event: 'change',
+              data: JSON.stringify({ modseq: syncState(db).modseq }),
+            })
+          }
         }, 150)
       }
+      const done = new Promise<void>((resolve) => stream.onAbort(resolve))
+      const grantTimer = principal.kind === 'agent' ? setInterval(authorized, 1000) : undefined
+      const heartbeat = setInterval(() => {
+        if (authorized()) void stream.writeSSE({ event: 'ping', data: '' })
+      }, 25_000)
       deps.store.on('change', notify)
-      stream.onAbort(() => {
+      try {
+        if (authorized())
+          await stream.writeSSE({ event: 'hello', data: JSON.stringify(syncState(db)) })
+        await done
+      } finally {
         deps.store.off('change', notify)
-      })
-      await stream.writeSSE({ event: 'hello', data: JSON.stringify(syncState(db)) })
-      while (!stream.aborted) {
-        await stream.sleep(25_000)
-        await stream.writeSSE({ event: 'ping', data: '' })
+        clearTimeout(pending)
+        clearInterval(grantTimer)
+        clearInterval(heartbeat)
       }
-    }),
-  )
+    })
+  })
 
   return r
 }

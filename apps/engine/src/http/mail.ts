@@ -9,6 +9,7 @@ import {
 import { Hono } from 'hono'
 import { AccountConflict, upsertGmailAccount, upsertImapAccount } from '../accounts.ts'
 import { newSecret } from '../auth/secrets.ts'
+import { withinAccount } from '../auth/tokens.ts'
 import type { BlobStore } from '../blobs.ts'
 import type { Sealer } from '../crypto.ts'
 import type { Db } from '../db/database.ts'
@@ -215,7 +216,7 @@ export function mailRoutes(deps: MailDeps) {
         const target = threadId
           ? threadAccount(db, threadId)
           : (body.accountId ?? principal.accountId)
-        if (principal.accountId && target !== principal.accountId)
+        if (!withinAccount(principal, target))
           throw new DraftError('Account unavailable to this Agent')
         return deps.drafts.create(
           { ...body, ...(target ? { accountId: target } : {}) },

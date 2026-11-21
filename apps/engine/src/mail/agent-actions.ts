@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import type { AgentAction, OrganiseAction } from '@amc/protocol'
-import { canAgentOrganize, type Principal } from '../auth/tokens.ts'
+import { type AgentAction, type Draft, hasScope, type OrganiseAction } from '@amc/protocol'
+import { agentGrantActive, type Principal, withinAccount } from '../auth/tokens.ts'
 import { type Db, transaction } from '../db/database.ts'
 import { DraftError } from './drafts.ts'
 import { MutationError, type Mutations } from './mutations.ts'
@@ -76,7 +76,7 @@ export function organizeAsAgent(
     try {
       for (const action of actions) {
         const account = threadAccount(db, action.threadId)
-        if (!account || !canAgentOrganize(db, agent.tokenId, account, Date.now()))
+        if (!account || !agentGrantActive(db, agent.tokenId, 'organize', Date.now(), account))
           throw new MutationError('One or more Threads are unavailable to this Agent')
       }
       const mutations = queue.submit(
@@ -102,22 +102,18 @@ export function organizeAsAgent(
   })
 }
 
-export async function draftAsAgent<T extends { id: string }>(
+export async function draftAsAgent(
   db: Db,
   agent: Principal,
   tool: string,
   threadId: string | null,
-  write: () => Promise<T>,
-): Promise<T> {
+  write: () => Promise<Draft>,
+) {
   const entry = transaction(db, () => start(db, agent, tool, threadId ? [threadId] : [], 1))
   if (entry.error) throw new DraftError(entry.error)
+  let draft: Draft
   try {
-    const draft = await write()
-    db.prepare("UPDATE agent_action SET status = 'applied', draft_id = ? WHERE id = ?").run(
-      draft.id,
-      entry.id,
-    )
-    return draft
+    draft = await write()
   } catch (error) {
     db.prepare("UPDATE agent_action SET status = 'failed', error = ? WHERE id = ?").run(
       'Draft write failed',
@@ -125,6 +121,36 @@ export async function draftAsAgent<T extends { id: string }>(
     )
     throw error
   }
+  db.prepare("UPDATE agent_action SET status = 'applied', draft_id = ? WHERE id = ?").run(
+    draft.id,
+    entry.id,
+  )
+  return agentDraftResult(db, agent, draft)
+}
+
+export function agentCreatedDraft(db: Db, agent: Principal, draftId: string): boolean {
+  return Boolean(
+    db
+      .prepare(
+        "SELECT 1 FROM agent_action WHERE token_id = ? AND draft_id = ? AND tool = 'create_draft' AND status = 'applied'",
+      )
+      .get(agent.tokenId, draftId),
+  )
+}
+
+function agentDraftResult(db: Db, agent: Principal, draft: Draft) {
+  const current = db.prepare('SELECT account_id, modseq FROM draft WHERE id = ?').get(draft.id) as
+    | { account_id: string; modseq: number }
+    | undefined
+  if (
+    !current ||
+    !withinAccount(agent, current.account_id) ||
+    !withinAccount(agent, draft.accountId)
+  )
+    throw new DraftError('Draft unavailable to this Agent')
+  return hasScope(agent.scopes, 'read')
+    ? draft
+    : { id: draft.id, revision: current.modseq, status: 'applied' as const }
 }
 
 function actionResult(queue: Mutations, row: ActionRow): AgentAction {

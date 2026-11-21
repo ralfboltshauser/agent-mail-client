@@ -9,7 +9,7 @@ import {
   type OrganiseAction,
   SNOOZED_LABEL,
 } from '@amc/protocol'
-import { canAgentOrganize } from '../auth/tokens.ts'
+import { agentGrantActive } from '../auth/tokens.ts'
 import { transaction } from '../db/database.ts'
 import type { Logger } from '../log.ts'
 import { GmailHttpError } from '../providers/gmail/http.ts'
@@ -260,6 +260,8 @@ function inverse(changes: Change[]): Change[] {
 }
 
 export const SNOOZE_DISABLED = 'Snooze is disabled on this Engine'
+
+const GRANT_EXPIRED = 'Agent grant expired'
 
 export class MutationError extends Error {}
 export class MutationPermissionError extends MutationError {}
@@ -994,11 +996,11 @@ export class Mutations {
       delete entry.pending
     }
     this.#failRemaining(row, journal, this.#writePlan(row).steps)
-    this.#finishWrite(row, journal, 'The Agent grant is expired or revoked')
+    this.#finishWrite(row, journal, GRANT_EXPIRED)
   }
 
   #agentGrantActive(row: MutationRow): boolean {
-    return canAgentOrganize(this.#db, row.principal, row.account_id, this.#now())
+    return agentGrantActive(this.#db, row.principal, 'organize', this.#now(), row.account_id)
   }
 
   #snoozedLabel(account: string): string | undefined {
@@ -1395,8 +1397,12 @@ export class Mutations {
         return true
       }
 
-      if (row.agent_action_id && !this.#agentGrantActive(row))
-        throw new MutationPermissionError('The Agent grant is expired or revoked')
+      const beforeDispatch = row.agent_action_id
+        ? () => {
+            if (!this.#agentGrantActive(row)) throw new MutationPermissionError(GRANT_EXPIRED)
+          }
+        : undefined
+      beforeDispatch?.()
       const { message_id, after } = candidate
       const historyId = current.get(message_id)?.historyId
       entry.pending = { change: candidate, historyId }
@@ -1428,9 +1434,18 @@ export class Mutations {
             const label = key === snoozed ? snoozedId : rawId(key)
             if (label) (present ? add : remove).push(label)
           }
-          acknowledge(await api.modifyMessage(rawId(message_id), add, remove))
+          acknowledge(
+            beforeDispatch
+              ? await api.modifyMessage(rawId(message_id), add, remove, beforeDispatch)
+              : await api.modifyMessage(rawId(message_id), add, remove),
+          )
         }
       } catch (error) {
+        if (error instanceof MutationPermissionError) {
+          // The request never started. Clear the journal marker before stopping the grant.
+          delete entry.pending
+          throw error
+        }
         const ambiguous =
           !(error instanceof GmailHttpError || error instanceof OAuthError) ||
           (error instanceof GmailHttpError && (error.status === 408 || error.status >= 500))

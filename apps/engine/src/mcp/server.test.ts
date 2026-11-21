@@ -145,6 +145,100 @@ describe('MCP tools', () => {
     expect(JSON.stringify(actions)).not.toContain('Friday at 7?')
   })
 
+  it('uses the draft’s current From Account even when it is still linked to the original Thread', async () => {
+    const deps = setup()
+    const { db, drafts } = deps
+    db.prepare(
+      "INSERT INTO account (id, kind, address, credentials, created_at) VALUES ('b', 'gmail', 'other@example.com', x'00', 0)",
+    ).run()
+    const draft = await drafts.create({ threadId: 'a:t-m1', body: 'Private draft' }, 'owner')
+    const a = await connect(['read', 'draft'], deps, 'a')
+    const b = await connect(['read', 'draft'], deps, 'b')
+    const thread = () =>
+      a.client.callTool({ name: 'get_thread', arguments: { thread_id: 'a:t-m1' } })
+    expect(JSON.parse(text(await thread())).drafts).toMatchObject([{ id: draft.id }])
+
+    const compose = drafts.compose(draft.id)
+    if (!compose) throw new Error('Missing draft')
+    drafts.saveCompose(draft.id, {
+      baseRevision: compose.revision,
+      update: compose.update,
+      fields: {
+        accountId: 'b',
+        to: compose.to,
+        cc: compose.cc,
+        bcc: compose.bcc,
+        subject: compose.subject,
+        attachmentIds: [],
+      },
+    })
+    expect(JSON.parse(text(await thread())).drafts).toEqual([])
+    const list = (client: Client) =>
+      client.callTool({ name: 'list_drafts', arguments: { thread_id: 'a:t-m1' } })
+    expect(JSON.parse(text(await list(a.client)))).toEqual([])
+    expect(JSON.parse(text(await list(b.client)))).toMatchObject([{ id: draft.id }])
+    const read = (client: Client) =>
+      client.callTool({ name: 'read_draft', arguments: { draft_id: draft.id } })
+    expect(await read(a.client)).toMatchObject({ isError: true })
+    expect(JSON.parse(text(await read(b.client)))).toMatchObject({
+      accountId: 'b',
+      threadId: 'a:t-m1',
+      body: 'Private draft',
+    })
+    expect(
+      await a.client.callTool({
+        name: 'update_draft',
+        arguments: { draft_id: draft.id, body: 'Out of bounds' },
+      }),
+    ).toMatchObject({ isError: true })
+    expect(drafts.get(draft.id)?.body).toBe('Private draft')
+  })
+
+  it('returns receipts for draft-only writes and limits edits to drafts created by that grant', async () => {
+    const deps = setup()
+    const { db, drafts, client, token } = await connect(['draft'], deps, 'a')
+    const other = await connect(['draft'], deps, 'a')
+    const ownerDraft = await drafts.create({ threadId: 'a:t-m1', body: 'Owner content' }, 'owner')
+    const app = createApp({ db, config: testConfig(), log: silentLog, mail: deps as never })
+    const receipt = (id: string) => ({
+      id,
+      revision: drafts.compose(id)?.revision,
+      status: 'applied',
+    })
+    const create = await client.callTool({
+      name: 'create_draft',
+      arguments: { thread_id: 'a:t-m1', body: 'Agent content' },
+    })
+    const draft = JSON.parse(text(create))
+    expect(draft).toEqual(receipt(draft.id))
+    expect(drafts.get(draft.id)).toMatchObject({
+      subject: 'Re: Dinner?',
+      to: [{ address: 'alice@example.com' }],
+    })
+    await drafts.update(draft.id, { body: 'Owner edit', subject: 'Owner subject' }, 'owner')
+    const edit = (client: Client, id: string) =>
+      client.callTool({ name: 'update_draft', arguments: { draft_id: id, cc: [] } })
+    expect(await edit(client, ownerDraft.id)).toMatchObject({ isError: true })
+    expect(await edit(other.client, draft.id)).toMatchObject({ isError: true })
+    expect(
+      await client.callTool({ name: 'read_draft', arguments: { draft_id: draft.id } }),
+    ).toMatchObject({
+      isError: true,
+    })
+    expect(JSON.parse(text(await edit(client, draft.id)))).toEqual(receipt(draft.id))
+    expect(drafts.get(draft.id)?.body).toBe('Owner edit')
+
+    const response = await app.request('/v1/drafts', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token.secret}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ threadId: 'a:t-m1', body: 'HTTP reply' }),
+    })
+    expect(response.status).toBe(200)
+    const httpDraft = (await response.json()) as { id: string }
+    expect(httpDraft).toEqual(receipt(httpDraft.id))
+    expect(JSON.parse(text(await edit(client, httpDraft.id)))).toEqual(receipt(httpDraft.id))
+  })
+
   it('searches mail and contacts', async () => {
     const { client } = await connect(['read'])
     expect(

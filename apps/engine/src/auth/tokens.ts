@@ -119,16 +119,26 @@ export function invalidTokenMessage(db: Db, secret: string): string {
     : 'Missing, expired or revoked token'
 }
 
-// Check the current grant before dispatching queued Agent work.
-export function canAgentOrganize(db: Db, tokenId: string, accountId: string, now: number): boolean {
+export function withinAccount(principal: Principal, accountId: string | null | undefined): boolean {
+  return principal.kind !== 'agent' || !principal.accountId || principal.accountId === accountId
+}
+
+// An omitted Account means the operation needs access across all Accounts.
+export function agentGrantActive(
+  db: Db,
+  tokenId: string,
+  scope: Scope,
+  now: number,
+  accountId?: string,
+): boolean {
   return Boolean(
     db
       .prepare(`
     SELECT 1 FROM token WHERE id = ? AND kind = 'agent' AND revoked_at IS NULL AND expires_at > ?
       AND (account_id IS NULL OR account_id = ?)
-      AND 'organize' IN (SELECT value FROM json_each(token.scopes))
+      AND ? IN (SELECT value FROM json_each(token.scopes))
   `)
-      .get(tokenId, now, accountId),
+      .get(tokenId, now, accountId ?? null, scope),
   )
 }
 

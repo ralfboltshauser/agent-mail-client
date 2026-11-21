@@ -1,9 +1,15 @@
 import { hasScope, type OrganiseAction, type Scope } from '@amc/protocol'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
-import type { Principal } from '../auth/tokens.ts'
+import { type Principal, withinAccount } from '../auth/tokens.ts'
 import type { Db } from '../db/database.ts'
-import { agentAction, draftAsAgent, organizeAsAgent, threadAccount } from '../mail/agent-actions.ts'
+import {
+  agentAction,
+  agentCreatedDraft,
+  draftAsAgent,
+  organizeAsAgent,
+  threadAccount,
+} from '../mail/agent-actions.ts'
 import { DraftError, type Drafts, searchContacts } from '../mail/drafts.ts'
 import type { Mutations } from '../mail/mutations.ts'
 import type { MailQueries } from '../mail/queries.ts'
@@ -52,7 +58,6 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
   const { queries, drafts, db, mutations } = deps
   const agent = principal.kind === 'agent' ? principal : undefined
   const accountId = agent?.accountId
-  const withinAccount = (id: string | null | undefined) => !accountId || id === accountId
   const draftOptions = accountId ? { accountId } : {}
 
   server.registerTool(
@@ -128,7 +133,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
         annotations: { readOnlyHint: true },
       },
       async ({ thread_id }) => {
-        const thread = withinAccount(threadAccount(db, thread_id))
+        const thread = withinAccount(principal, threadAccount(db, thread_id))
           ? queries.thread(thread_id)
           : null
         if (!thread) return failure(`No Thread ${thread_id}`)
@@ -141,7 +146,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
                 ? `${m.bodyText.slice(0, MAX_BODY)}\n[…truncated]`
                 : m.bodyText,
           })),
-          drafts: drafts.list({ threadId: thread_id }),
+          drafts: drafts.list({ ...draftOptions, threadId: thread_id }),
         })
       },
     )
@@ -212,7 +217,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
       },
       async ({ draft_id }) => {
         const draft = drafts.get(draft_id)
-        return draft && withinAccount(draft.accountId)
+        return draft && withinAccount(principal, draft.accountId)
           ? json(draft)
           : failure(`No draft ${draft_id}`)
       },
@@ -305,7 +310,8 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
             const target = a.thread_id
               ? threadAccount(db, a.thread_id)
               : (a.account_id ?? accountId)
-            if (!withinAccount(target)) throw new DraftError('Account unavailable to this Agent')
+            if (!withinAccount(principal, target))
+              throw new DraftError('Account unavailable to this Agent')
             return drafts.create(
               {
                 ...(a.thread_id ? { threadId: a.thread_id } : {}),
@@ -335,8 +341,9 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
     server.registerTool(
       'update_draft',
       {
-        description:
-          'Change a draft. Only the fields you pass change. Read it first: the owner may have edited it.',
+        description: can('read')
+          ? 'Change a draft. Only the fields you pass change. Read it first: the owner may have edited it.'
+          : 'Change a draft created by this grant. Only the fields you pass change.',
         inputSchema: {
           draft_id: z.string(),
           to: z.array(AddressInput).optional(),
@@ -349,10 +356,16 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
       },
       async (a) => {
         try {
-          const draft = drafts.get(a.draft_id)
+          const draft = db
+            .prepare('SELECT account_id, thread_id FROM draft WHERE id = ?')
+            .get(a.draft_id) as { account_id: string; thread_id: string | null } | undefined
+          const allowed =
+            !agent ||
+            (draft &&
+              withinAccount(agent, draft.account_id) &&
+              (can('read') || agentCreatedDraft(db, agent, a.draft_id)))
           const write = () => {
-            if (!withinAccount(draft?.accountId))
-              throw new DraftError('Draft unavailable to this Agent')
+            if (!allowed) throw new DraftError('Draft unavailable to this Agent')
             return drafts.update(
               a.draft_id,
               {
@@ -371,7 +384,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
                   db,
                   agent,
                   'update_draft',
-                  withinAccount(draft?.accountId) ? (draft?.threadId ?? null) : null,
+                  allowed ? (draft?.thread_id ?? null) : null,
                   write,
                 )
               : await write(),
