@@ -1,9 +1,19 @@
 import { spawnSync } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
+import { once } from 'node:events'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { fileURLToPath } from 'node:url'
+import { COMPOSER_FIELD } from '@amc/composer'
 import { MessageDetail, SCOPES, ThreadDetail } from '@amc/protocol'
+import { HocuspocusProvider, HocuspocusProviderWebsocket } from '@hocuspocus/provider'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { describe, expect, it, vi } from 'vitest'
-import { DAY_MS, issueToken } from '../auth/tokens.ts'
+import WebSocket from 'ws'
+import * as Y from 'yjs'
+import { HANDOFF_TTL_MS } from '../auth/handoff.ts'
+import { authenticate, COMPOSER_TTL_MS, DAY_MS, issueToken, revokeToken } from '../auth/tokens.ts'
 import { BlobStore } from '../blobs.ts'
 import { Sealer } from '../crypto.ts'
 import { gmailDelivery, publishSent } from '../mail/delivery.ts'
@@ -21,10 +31,13 @@ import { setSetting } from '../settings.ts'
 import { SyncManager } from '../sync/manager.ts'
 import { silentLog, tempDir, testConfig, testDb } from '../test-support.ts'
 import { createApp } from './app.ts'
+import { serveComposerSocket } from './composer-socket.ts'
 
 function setup(
   options: Pick<ConstructorParameters<typeof SyncManager>[0], 'imapClient' | 'imapPollMs'> = {},
+  configOverrides: Partial<ReturnType<typeof testConfig>> = {},
 ) {
+  const config = { ...testConfig(), composerOrigin: 'http://127.0.0.1:4410', ...configOverrides }
   const db = testDb()
   const blobs = new BlobStore(tempDir())
   const store = new MailStore(db, blobs)
@@ -55,7 +68,7 @@ function setup(
   )
   const app = createApp({
     db,
-    config: testConfig(),
+    config,
     outbox,
     log: silentLog,
     mail: {
@@ -84,7 +97,22 @@ function setup(
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     })
-  return { app, db, sealer, store, sync, gmail, imap, verifyImap, call, admin, reader, outbox }
+  return {
+    app,
+    db,
+    config,
+    store,
+    drafts,
+    sealer,
+    sync,
+    gmail,
+    imap,
+    verifyImap,
+    call,
+    admin,
+    reader,
+    outbox,
+  }
 }
 
 const login = {
@@ -618,5 +646,412 @@ it('processes an Inbox delivery from IDLE before the first Archive backfill page
     expect(imap.idles[0]).toBe('INBOX')
   } finally {
     await sync.stop()
+  }
+})
+
+async function setupHandoff() {
+  const fixture = setup()
+  const { db, store, gmail, app, call } = fixture
+  db.prepare(`INSERT INTO account (id, kind, address, credentials, created_at)
+    VALUES ('handoff', 'gmail', 'owner@example.test', x'00', 0)`).run()
+  for (const [id, body] of [
+    ['synthetic', 'Can we meet Friday?'],
+    ['other', 'Unrelated mail'],
+  ] as const) {
+    store.putMessage(
+      'handoff',
+      ['owner@example.test'],
+      fromGmail(
+        gmail.add(id, {
+          subject: 'Synthetic',
+          from: 'reader@example.test',
+          body,
+        }),
+      ),
+    )
+  }
+  const threadId = 'handoff:t-synthetic'
+  const otherThread = 'handoff:t-other'
+  const owner = issueToken(db, {
+    kind: 'desktop',
+    name: 'AMC',
+    scopes: ['read', 'draft', 'send'],
+  }).secret
+  const start = async (target = threadId) => {
+    const result = await call('/v1/compose/handoff', owner, {
+      threadId: target,
+      requestId: randomUUID(),
+    })
+    expect(result.status).toBe(201)
+    const { draftId, composerUrl, agentToken } = (await result.json()) as {
+      draftId: string
+      composerUrl: string
+      agentToken: string
+    }
+    const token = new URLSearchParams(new URL(composerUrl).hash.slice(1)).get('token') as string
+    return { draftId, token, agentToken }
+  }
+  const handoff = await start()
+  const session = (id: string, secret?: string, origin = fixture.config.composerOrigin) =>
+    app.request(`/compose/${id}/session`, {
+      method: 'POST',
+      headers: { Origin: origin, ...(secret ? { Authorization: `Bearer ${secret}` } : {}) },
+    })
+  return { ...fixture, ...handoff, session, threadId, otherThread, owner, start }
+}
+
+it('authenticates the Composer Link for exactly one editable draft and denies all handoff send paths', async () => {
+  const { db, app, call, draftId, token, agentToken, session, drafts, otherThread, owner, outbox } =
+    await setupHandoff()
+  try {
+    setSetting(db, 'dangerouslyAllowSend', true)
+    const otherDraft = await drafts.startCompose(
+      { mode: 'reply', threadId: otherThread },
+      async () => null,
+    )
+    const shell = await app.request(`/compose/${draftId}`)
+    expect(shell.headers.get('Content-Security-Policy')).toContain("default-src 'none'")
+    expect(shell.headers.get('Content-Security-Policy')).toContain("frame-ancestors 'none'")
+    expect(shell.headers.get('Referrer-Policy')).toBe('no-referrer')
+    expect(await shell.text()).not.toContain('Can we meet Friday?')
+    expect((await session(draftId)).status).toBe(403)
+    expect((await session(draftId, token, 'https://wrong.example.test')).status).toBe(403)
+    expect((await session(otherDraft.id, token)).status).toBe(403)
+    expect((await session(draftId, agentToken)).status).toBe(403)
+    expect((await session(draftId, token)).status).toBe(204)
+    expect(authenticate(db, token)?.scopes).toEqual(['draft'])
+
+    for (const secret of [token, agentToken]) {
+      for (const path of ['/v1/threads', `/v1/compose/drafts/${draftId}`, '/v1/compose/outbox']) {
+        expect((await call(path, secret)).status).toBe(403)
+      }
+      for (const [path, input] of [
+        [
+          '/v1/compose/outbox',
+          { id: 'send-request', draftId, revision: drafts.compose(draftId)?.revision },
+        ],
+        ['/v1/compose/outbox/send-request/cancel', {}],
+        ['/v1/compose/outbox/send-request/resolve', { action: 'check' }],
+        ['/v1/compose/handoff', { threadId: otherThread, requestId: randomUUID() }],
+      ] as const)
+        expect((await call(path, secret, input)).status).toBe(403)
+    }
+    expect(
+      (await call('/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list' })).status,
+    ).toBe(403)
+    await outbox.runDue()
+    expect((await (await call('/v1/compose/outbox', owner)).json()).items).toEqual([])
+
+    const expired = issueToken(
+      db,
+      {
+        kind: 'composer',
+        name: 'expired',
+        scopes: ['draft'],
+        subject: draftId,
+        expiresAt: Date.now() - 1,
+      },
+      Date.now() - COMPOSER_TTL_MS,
+    )
+    expect((await session(draftId, expired.secret)).status).toBe(403)
+    const principal = authenticate(db, token)
+    if (!principal) throw new Error('Composer Link missing')
+    revokeToken(db, principal.tokenId)
+    expect((await session(draftId, token)).status).toBe(403)
+  } finally {
+    db.close()
+  }
+})
+
+it('mints a separate four-hour Agent grant per handoff and revokes the previous grant for that Thread', async () => {
+  const { db, app, agentToken, draftId, otherThread, threadId, start } = await setupHandoff()
+  try {
+    const grant = authenticate(db, agentToken)
+    expect(grant).toMatchObject({
+      kind: 'agent',
+      scopes: ['read', 'draft'],
+      accountId: 'handoff',
+      threadId,
+      subject: draftId,
+    })
+    const row = db
+      .prepare('SELECT expires_at, created_at FROM token WHERE id = ?')
+      .get(grant?.tokenId ?? '')
+    const expiry = Number(row?.created_at) + HANDOFF_TTL_MS
+    expect(row?.expires_at).toBe(expiry)
+    expect(authenticate(db, agentToken, expiry)).toBeNull()
+
+    const other = await start(otherThread)
+    expect(authenticate(db, agentToken)).not.toBeNull()
+    const renewed = await start()
+    expect(renewed.draftId).toBe(draftId)
+    expect(renewed.agentToken).not.toBe(agentToken)
+    expect(authenticate(db, agentToken)).toBeNull()
+    expect(authenticate(db, other.agentToken)?.threadId).toBe(otherThread)
+    expect(authenticate(db, renewed.agentToken)?.threadId).toBe(threadId)
+    const direct = await app.request('/mcp', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${renewed.agentToken}`,
+        Accept: 'application/json, text/event-stream',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'get_thread', arguments: { thread_id: threadId } },
+      }),
+    })
+    expect(direct.status).toBe(200)
+    expect(await direct.text()).toContain('Can we meet Friday?')
+    expect(
+      (await app.request('/mcp', { headers: { Authorization: `Bearer ${agentToken}` } })).status,
+    ).toBe(401)
+  } finally {
+    db.close()
+  }
+})
+
+it('revokes Composer Links on replacement, deletion and send completion', async () => {
+  const { db, drafts, store, draftId, token, session, start } = await setupHandoff()
+  try {
+    const row = db
+      .prepare('SELECT expires_at, created_at FROM token WHERE id = ?')
+      .get(authenticate(db, token)?.tokenId ?? '')
+    expect(row?.expires_at).toBe(Number(row?.created_at) + COMPOSER_TTL_MS)
+    expect(authenticate(db, token, Number(row?.expires_at))).toBeNull()
+
+    const replacement = await start()
+    expect(authenticate(db, token)).toBeNull()
+    expect((await session(draftId, replacement.token)).status).toBe(204)
+    await drafts.delete(draftId)
+    expect(authenticate(db, replacement.token)).toBeNull()
+    expect((await session(draftId, replacement.token)).status).toBe(403)
+
+    const send = await start()
+    const revision = drafts.compose(send.draftId)?.revision
+    if (revision === undefined) throw new Error('Draft missing')
+    expect((await session(send.draftId, send.token)).status).toBe(204)
+    publishSent(store, drafts, drafts.freeze(send.draftId, revision), 'sent@example.test', {
+      providerId: 'sent',
+      providerThreadId: 't-synthetic',
+    })
+    expect(drafts.get(send.draftId)).toBeNull()
+    expect(authenticate(db, send.token)).toBeNull()
+    expect((await session(send.draftId, send.token)).status).toBe(403)
+  } finally {
+    db.close()
+  }
+})
+
+it('ignores forged login headers on a non-loopback listener and disables Composer Links there', async () => {
+  const { app, config, db, drafts } = setup(
+    {},
+    {
+      listen: { host: '0.0.0.0', port: 4410 },
+      allowedTailscaleLogins: ['owner@example.test'],
+    },
+  )
+  const server = createServer().listen(0, config.listen.host)
+  const stop = serveComposerSocket(server, config, db, drafts)
+  try {
+    const headers = { 'Tailscale-User-Login': 'owner@example.test' }
+    expect(
+      (await app.request('/health', { headers: { 'Tailscale-User-Login': 'other@example.test' } }))
+        .status,
+    ).toBe(200)
+    expect((await app.request('/compose/draft', { headers })).status).toBe(403)
+    await once(server, 'listening')
+    const ws = new WebSocket(
+      `ws://127.0.0.1:${(server.address() as AddressInfo).port}/compose/ws`,
+      {
+        headers,
+        origin: config.composerOrigin,
+      },
+    )
+    expect(String((await once(ws, 'error'))[0])).toContain('403')
+    config.allowedTailscaleLogins = []
+    expect((await app.request('/compose/draft')).status).toBe(403)
+  } finally {
+    stop()
+    server.close()
+    db.close()
+  }
+})
+
+it('shares committed Yjs changes between scoped MCP, Composer Link and desktop, and closes a revoked socket', async () => {
+  const {
+    db,
+    app,
+    config,
+    drafts,
+    draftId,
+    token,
+    agentToken,
+    threadId,
+    otherThread,
+    store,
+    gmail,
+  } = await setupHandoff()
+  const server = createServer().listen(0, '127.0.0.1')
+  const stopSocket = serveComposerSocket(server, config, db, drafts)
+  await once(server, 'listening')
+  const host = `127.0.0.1:${(server.address() as AddressInfo).port}`
+  class ComposerWebSocket extends WebSocket {
+    constructor(url: string) {
+      super(url, { origin: config.composerOrigin })
+    }
+  }
+  const websocket = new HocuspocusProviderWebsocket({
+    url: `ws://${host}/compose/ws`,
+    WebSocketPolyfill: ComposerWebSocket,
+    autoConnect: false,
+  })
+  const doc = new Y.Doc()
+  const provider = new HocuspocusProvider({
+    websocketProvider: websocket,
+    name: draftId,
+    token,
+    document: doc,
+    awareness: null,
+  })
+  provider.attach()
+  const client = new Client({ name: 'handoff-test', version: '0' })
+  try {
+    const refused = new WebSocket(`ws://${host}/compose/ws`, {
+      origin: 'https://wrong.example.test',
+    })
+    expect(String((await once(refused, 'error'))[0])).toContain('403')
+
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL('http://localhost/mcp'), {
+        requestInit: { headers: { Authorization: `Bearer ${agentToken}` } },
+        fetch: (input, init) => Promise.resolve(app.fetch(new Request(input, init))),
+      }),
+    )
+    const callTool = (name: string, args: Record<string, unknown>) =>
+      client.callTool({ name, arguments: args })
+    expect((await client.listTools()).tools.map(({ name }) => name)).toEqual([
+      'get_thread',
+      'read_draft',
+      'update_draft',
+    ])
+    expect(await callTool('get_thread', { thread_id: otherThread })).toMatchObject({
+      isError: true,
+    })
+    const otherDraft = await drafts.create({ threadId, body: 'Private local draft body' }, 'owner')
+    store.putMessage(
+      'handoff',
+      ['owner@example.test'],
+      fromGmail(
+        gmail.add('cached-draft', {
+          threadId: 't-synthetic',
+          labels: ['DRAFT'],
+          date: 2000,
+          body: 'Private cached draft snippet',
+        }),
+      ),
+    )
+    expect(new MailQueries(db).threadSummary(threadId)?.snippet).toBe(
+      'Private cached draft snippet',
+    )
+    const scopedThread = JSON.stringify(await callTool('get_thread', { thread_id: threadId }))
+    expect(scopedThread).toContain('Can we meet Friday?')
+    expect(scopedThread).not.toContain('Private')
+    expect(await callTool('read_draft', { draft_id: otherDraft.id })).toMatchObject({
+      isError: true,
+    })
+    expect(await callTool('get_message', { messageId: 'handoff:cached-draft' })).toMatchObject({
+      isError: true,
+    })
+    expect(await callTool('send_draft', { draft_id: draftId })).toMatchObject({ isError: true })
+
+    await websocket.connect()
+    await vi.waitFor(() => expect(provider.synced).toBe(true))
+    const before = drafts.compose(draftId)
+    if (!before) throw new Error('Draft missing')
+    expect(
+      await callTool('update_draft', {
+        draft_id: draftId,
+        body: 'Friday works.',
+        revision: before.revision,
+      }),
+    ).not.toMatchObject({ isError: true })
+    const body = doc.getXmlFragment(COMPOSER_FIELD)
+    await vi.waitFor(() => expect(body.toString()).toContain('Friday works.'))
+    expect(drafts.compose(draftId)).toMatchObject({
+      body: 'Friday works.',
+      lastAuthor: 'T3 Handoff',
+    })
+    const stale = await callTool('update_draft', {
+      draft_id: draftId,
+      body: 'stale',
+      revision: before.revision,
+    })
+    expect(stale.isError).toBe(true)
+    expect(JSON.stringify(stale.content)).toContain('Friday works.')
+    expect(
+      db.prepare('SELECT tool, status, draft_id FROM agent_action ORDER BY seq').all(),
+    ).toEqual([
+      { tool: 'update_draft', status: 'applied', draft_id: draftId },
+      { tool: 'update_draft', status: 'failed', draft_id: null },
+    ])
+
+    const last = drafts.compose(draftId)
+    if (!last) throw new Error('Draft missing')
+    const text = (body.get(0) as Y.XmlElement).get(0) as Y.XmlText
+    text.insert(text.length, ' At noon?')
+    await vi.waitFor(() => expect(drafts.compose(draftId)?.body).toBe('Friday works. At noon?'))
+    expect(drafts.compose(draftId)?.revision).toBeGreaterThan(last.revision)
+
+    const desktop = new Y.Doc()
+    const after = drafts.compose(draftId)
+    if (!after) throw new Error('Draft missing')
+    Y.applyUpdate(desktop, Buffer.from(after.update, 'base64'))
+    const vector = Y.encodeStateVector(desktop)
+    const desktopText = (desktop.getXmlFragment(COMPOSER_FIELD).get(0) as Y.XmlElement).get(
+      0,
+    ) as Y.XmlText
+    desktopText.insert(desktopText.length, ' Thanks!')
+    expect(
+      await callTool('update_draft', {
+        draft_id: draftId,
+        body: 'Saturday works. At noon?',
+        revision: after.revision,
+      }),
+    ).not.toMatchObject({ isError: true })
+    drafts.saveCompose(draftId, {
+      update: Buffer.from(Y.encodeStateAsUpdate(desktop, vector)).toString('base64'),
+      baseRevision: after.revision,
+    })
+    expect(drafts.compose(draftId)?.body).toBe('Saturday works. At noon? Thanks!')
+    await vi.waitFor(() => expect(body.toString()).toContain('Saturday works. At noon? Thanks!'))
+
+    db.prepare('UPDATE token SET expires_at = 0 WHERE id = ?').run(
+      authenticate(db, agentToken)?.tokenId ?? '',
+    )
+    await expect(client.listTools()).rejects.toThrow(/expired or revoked token/)
+    await expect(
+      callTool('update_draft', {
+        draft_id: draftId,
+        body: 'expired',
+        revision: after.revision,
+      }),
+    ).rejects.toThrow(/expired or revoked token/)
+    const principal = authenticate(db, token)
+    if (!principal) throw new Error('Composer Link missing')
+    const closed = new Promise<number>((resolve) =>
+      websocket.on('close', ({ event }: { event: CloseEvent }) => resolve(event.code)),
+    )
+    revokeToken(db, principal.tokenId)
+    expect(await closed).toBe(4403)
+  } finally {
+    await client.close()
+    provider.destroy()
+    websocket.destroy()
+    stopSocket()
+    server.close()
+    db.close()
   }
 })

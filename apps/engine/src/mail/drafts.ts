@@ -20,10 +20,18 @@ import { fromGmail } from '../providers/gmail/mapping.ts'
 import type { GmailApi, GmailDraft } from '../providers/gmail/types.ts'
 import { parseMessage } from '../providers/imap/mapping.ts'
 import { draftSourceHash, type ImapProvider } from '../providers/imap/provider.ts'
-import { draftDocument, renderDraft, replaceDraftContent } from './draft-document.ts'
+import {
+  applyDraftUpdate,
+  draftDocument,
+  editDraftText,
+  renderDraft,
+  replaceDraftContent,
+} from './draft-document.ts'
 import { buildMessage, replySubject } from './mime.ts'
 import type { FrozenMessage, Outbox } from './outbox.ts'
 import type { IncomingMessage, MailStore } from './store.ts'
+
+export type VersionedDraft = Draft & { revision: number }
 
 export interface DraftInput {
   /** Reply in this Thread (recipients, subject and threading headers default from it). */
@@ -192,6 +200,17 @@ export class DraftError extends Error {
   }
 }
 
+export class DraftRevisionConflict extends DraftError {
+  readonly body: string
+  readonly revision: number
+
+  constructor(body: string, revision: number) {
+    super('The draft changed. Incorporate the current text before retrying.', 409)
+    this.body = body
+    this.revision = revision
+  }
+}
+
 /**
  * Drafts written by the owner or by Agents. Each one is mirrored to the provider's drafts, so
  * it is visible (and sendable by the owner) in Gmail. Nothing here can send (ADR 0001).
@@ -208,7 +227,7 @@ export class Drafts {
     this.#api = api
   }
 
-  get(id: string): Draft | null {
+  get(id: string): VersionedDraft | null {
     const row = this.#row(id)
     return row ? this.#toDraft(row) : null
   }
@@ -242,7 +261,6 @@ export class Drafts {
     return {
       ...this.#toDraft(row),
       update: Buffer.from(row.yjs).toString('base64'),
-      revision: row.modseq,
       quote: row.quote,
       signature: row.signature,
       attachments: this.#attachments(id).map(({ id, filename, mimeType, size, contentId }) => ({
@@ -350,7 +368,27 @@ export class Drafts {
     return this.compose(id)
   }
 
-  saveCompose(id: string, patch: ComposePatch): ComposeDraft {
+  replaceComposeBody(id: string, text: string, revision: number, author: string): ComposeDraft {
+    const current = this.openCompose(id)
+    if (!current) throw new DraftError('Draft does not exist')
+    if (revision !== current.revision)
+      throw new DraftRevisionConflict(current.body, current.revision)
+    if (text === current.body) return current
+
+    const doc = draftDocument(Buffer.from(current.update, 'base64'), current.body)
+    const before = Y.encodeStateVector(doc)
+    editDraftText(doc, text)
+    return this.saveCompose(
+      id,
+      {
+        baseRevision: revision,
+        update: Buffer.from(Y.encodeStateAsUpdate(doc, before)).toString('base64'),
+      },
+      author,
+    )
+  }
+
+  saveCompose(id: string, patch: ComposePatch, author = 'owner'): ComposeDraft {
     const current = this.compose(id)
     if (!current) throw new DraftError('Draft does not exist')
     this.#checkEditable(id)
@@ -364,15 +402,24 @@ export class Drafts {
     this.#ownAddress(accountId)
     const row = this.#row(id) as DraftRow
     const doc = draftDocument(row.yjs, row.body_text)
+    let changed = false
+    doc.on('update', () => {
+      changed = true
+    })
     let text: string
     try {
-      Y.applyUpdate(doc, Buffer.from(patch.update, 'base64'))
-      if (doc.store.pendingStructs || doc.store.pendingDs)
-        throw new Error('Missing Yjs dependencies')
+      if (!applyDraftUpdate(doc, Buffer.from(patch.update, 'base64')))
+        throw new DraftError(
+          'A paragraph changed while you edited it. Copy your unsaved text before reopening the draft.',
+          409,
+        )
+      if (doc.share.size !== 1) throw new Error('Unexpected Yjs fields')
       text = this.#body(row, doc).text
-    } catch {
+    } catch (error) {
+      if (error instanceof DraftError) throw error
       throw new DraftError('Could not apply the document update')
     }
+    if (!fields && !changed) return current
     const attachmentIds = fields?.attachmentIds ?? current.attachments.map((part) => part.id)
     const attachments = new Set(attachmentIds)
     const known = this.#attachments(id, false)
@@ -393,7 +440,7 @@ export class Drafts {
       this.#db
         .prepare(
           `UPDATE draft SET signature = ?, account_id = ?, to_json = ?, cc_json = ?, bcc_json = ?, subject = ?,
-          body_text = ?, yjs = ?, updated_at = ?, last_author = 'owner', mirror_dirty = 1,
+          body_text = ?, yjs = ?, updated_at = ?, last_author = ?, mirror_dirty = 1,
           provider_draft_id = CASE WHEN account_id = ? THEN provider_draft_id ELSE NULL END,
           provider_message_id = CASE WHEN account_id = ? THEN provider_message_id ELSE NULL END,
           mirror_hash = CASE WHEN account_id = ? THEN mirror_hash ELSE NULL END
@@ -409,6 +456,7 @@ export class Drafts {
           text,
           Y.encodeStateAsUpdate(doc),
           Date.now(),
+          author,
           accountId,
           accountId,
           accountId,
@@ -1007,7 +1055,7 @@ export class Drafts {
         blob: string
       }[]
     },
-  ): Promise<Draft> {
+  ): Promise<VersionedDraft> {
     const now = Date.now()
     let accountId = input.accountId
     let to = input.to ?? []
@@ -1116,19 +1164,26 @@ export class Drafts {
       this.#store.recordChange('draft', id, 'upsert')
     })
     if (!compose) await this.#push(id)
-    return this.get(id) as Draft
+    return this.get(id) as VersionedDraft
   }
 
   async update(
     id: string,
     patch: Omit<DraftInput, 'threadId' | 'accountId' | 'replyAll'>,
     author: string,
-  ): Promise<Draft> {
+    agentRevision?: number,
+  ): Promise<VersionedDraft> {
     const row = this.#row(id)
     if (!row) throw new DraftError(`No draft ${id}`)
     this.#checkEditable(id)
     const doc = draftDocument(row.yjs, row.body_text)
-    if (patch.body !== undefined) replaceDraftContent(doc, patch.body)
+    if (patch.body !== undefined) {
+      if (agentRevision === undefined) replaceDraftContent(doc, patch.body)
+      else {
+        if (agentRevision !== row.modseq) throw new DraftRevisionConflict(row.body_text, row.modseq)
+        if (patch.body !== row.body_text) editDraftText(doc, patch.body)
+      }
+    }
     transaction(this.#db, () => {
       this.#db
         .prepare(
@@ -1149,7 +1204,7 @@ export class Drafts {
       this.#store.recordChange('draft', id, 'upsert')
     })
     await this.#push(id)
-    return this.get(id) as Draft
+    return this.get(id) as VersionedDraft
   }
 
   async delete(id: string): Promise<boolean> {
@@ -1258,7 +1313,7 @@ export class Drafts {
     return row.address
   }
 
-  #toDraft(r: DraftRow): Draft {
+  #toDraft(r: DraftRow): VersionedDraft {
     return {
       id: r.id,
       accountId: r.account_id,
@@ -1271,6 +1326,7 @@ export class Drafts {
       body: r.body_text,
       lastAuthor: r.last_author,
       updatedAt: r.updated_at,
+      revision: r.modseq,
     }
   }
 }

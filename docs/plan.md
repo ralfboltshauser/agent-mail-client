@@ -140,7 +140,7 @@ JMAP-style "changes since state X" over one global `modseq`. This was the top pi
 - **Principals and tokens:**
   - **Owner device:** the desktop app, paired once with a code shown by `amc pair`. Its token lives in the macOS Keychain. It can do everything, including sending.
   - **Agent token:** in M6, bound to an owner-approved job with explicit operations, Accounts, targets and expiry. [M6 permissions](agents/permissions.md)
-  - **Composer link:** a capability token for one draft, edit only, expiring after 24 hours. It cannot send, list or read other mail.
+  - **Composer link:** a capability token for one draft, edit only, expiring after two hours. It cannot send, list or read other mail.
 - **Dangerously Allow Send:** toggled only in the desktop app, behind a confirmation. Every send by an Agent is logged, and turning the setting on is announced in a notification.
 - **Provider credentials** (OAuth refresh tokens, IMAP passwords) are encrypted at rest with a key in `~/.config/amc/key` (mode 600). The Google OAuth client is already at `~/.config/amc/google-oauth-client.json`.
 - **Tests:** a test suite proves ADR 0001 by listing MCP tools for every scope combination with the setting off and asserting there is no send tool and no send route.

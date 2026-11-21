@@ -1,4 +1,6 @@
 import { mkdirSync } from 'node:fs'
+import { createServer } from 'node:http'
+import { fileURLToPath } from 'node:url'
 import { serve } from '@hono/node-server'
 import { createPairingCode } from './auth/tokens.ts'
 import { BlobStore } from './blobs.ts'
@@ -7,6 +9,7 @@ import { Sealer } from './crypto.ts'
 import { backupDatabase, lockDatabaseFiles, restoreDatabase } from './db/backups.ts'
 import { migrate, openDatabase } from './db/database.ts'
 import { createApp } from './http/app.ts'
+import { serveComposerSocket } from './http/composer-socket.ts'
 import { createLogger } from './log.ts'
 import { gmailDelivery, imapDelivery, imapDraftMirror, publishSent } from './mail/delivery.ts'
 import { Drafts } from './mail/drafts.ts'
@@ -17,6 +20,22 @@ import { MailStore } from './mail/store.ts'
 import { loadOAuthClient, type OAuthClient } from './providers/gmail/oauth.ts'
 import { SyncManager } from './sync/manager.ts'
 import { VERSION } from './version.ts'
+
+declare const AMC_COMPOSER_SCRIPT: string
+
+async function composerScript(): Promise<string> {
+  if (typeof AMC_COMPOSER_SCRIPT !== 'undefined') return AMC_COMPOSER_SCRIPT
+  // Source-mode development uses the same browser build as the self-contained release.
+  const packageName = 'esbuild'
+  const { build } = (await import(packageName)) as typeof import('esbuild')
+  const result = await build({
+    entryPoints: [fileURLToPath(new URL('./http/composer-editor.ts', import.meta.url))],
+    bundle: true,
+    format: 'esm',
+    write: false,
+  })
+  return result.outputFiles[0]?.text ?? ''
+}
 
 const USAGE = `amc-engine ${VERSION}
 
@@ -120,19 +139,31 @@ async function main(argv: string[]) {
       const mutations = new Mutations(store, (accountId) => sync.gmailApi(accountId), log, {
         snoozeEnabled,
       })
+      let editorScript: Promise<string> | undefined
       const app = createApp({
         db,
         config,
         log,
         mutations,
         outbox,
+        composerScript: () => {
+          editorScript ??= composerScript()
+          return editorScript
+        },
         mail: { db, store, queries, blobs, sealer, sync, oauthClient, drafts, log },
       })
       const server = serve({
+        createServer,
         fetch: app.fetch,
         hostname: config.listen.host,
         port: config.listen.port,
       })
+      const closeComposer = serveComposerSocket(
+        server as ReturnType<typeof createServer>,
+        config,
+        db,
+        drafts,
+      )
       log.info({ version: VERSION, schemaVersion: version, ...config.listen }, 'engine listening')
       sync.start()
       mutations.start()
@@ -168,6 +199,7 @@ async function main(argv: string[]) {
         clearInterval(sends)
         clearInterval(mirrors)
         clearInterval(imports)
+        closeComposer()
         server.close(async () => {
           await Promise.all([outbox.waitForIdle(), mirroring, pullingDrafts])
           await Promise.all([mutations.stop(), sync.stop()])

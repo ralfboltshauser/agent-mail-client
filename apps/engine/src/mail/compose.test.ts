@@ -724,3 +724,35 @@ it('leaves unsupported MIME on IMAP and flags it on edit and send', async () => 
   expect(folder.messages.has(uid)).toBe(true)
   db.close()
 })
+
+it('refuses to acknowledge owner typing that targets a paragraph removed by an Agent', async () => {
+  const { account, db, drafts, call } = setup()
+  try {
+    const draft = await drafts.create(
+      { accountId: account, body: 'Keep this\nRemove this' },
+      'owner',
+    )
+    const base = drafts.compose(draft.id)
+    if (!base) throw new Error('Draft missing')
+    const owner = new Y.Doc()
+    Y.applyUpdate(owner, Buffer.from(base.update, 'base64'))
+    const paragraph = owner.getXmlFragment(COMPOSER_FIELD).get(1) as Y.XmlElement
+    const text = paragraph.get(0) as Y.XmlText
+    text.insert(text.length, ' Owner typing')
+
+    const agent = drafts.replaceComposeBody(draft.id, 'Keep this', base.revision, 'Agent')
+    const response = await call(`/drafts/${draft.id}`, 'PUT', {
+      baseRevision: base.revision,
+      update: Buffer.from(Y.encodeStateAsUpdate(owner)).toString('base64'),
+    })
+    expect(response.status).toBe(409)
+    expect(await response.text()).toContain('Copy your unsaved text')
+    expect(text.toString()).toContain('Owner typing')
+    expect(drafts.compose(draft.id)).toMatchObject({
+      body: 'Keep this',
+      revision: agent.revision,
+    })
+  } finally {
+    db.close()
+  }
+})

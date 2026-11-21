@@ -5,7 +5,7 @@ import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin({ exclude: ['@amc/protocol'] })],
+    plugins: [externalizeDepsPlugin({ exclude: ['@amc/protocol', '@modelcontextprotocol/sdk'] })],
   },
   preload: {
     plugins: [externalizeDepsPlugin()],

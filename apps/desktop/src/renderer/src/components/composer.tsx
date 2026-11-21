@@ -211,7 +211,13 @@ export function Composer({
       void window.amc
         .composeDraft(draft.id)
         .then((next) => {
-          if (!mounted || next.revision < baseline.current.revision || submitting.current) return
+          if (
+            !mounted ||
+            next.revision < baseline.current.revision ||
+            submitting.current ||
+            versionRef.current !== savedRef.current
+          )
+            return
           apply(doc, next.update)
           setOriginalDraftLeft(next.originalDraftLeft)
           setMirrorError(next.mirrorError)

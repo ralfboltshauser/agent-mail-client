@@ -10,7 +10,7 @@ import {
   type Principal,
   redeemPairingCode,
 } from '../auth/tokens.ts'
-import { type Config, databasePath } from '../config.ts'
+import { type Config, databasePath, listensOnLoopback } from '../config.ts'
 import { latestBackup } from '../db/backups.ts'
 import { type Db, fileSize, schemaVersion } from '../db/database.ts'
 import type { Logger } from '../log.ts'
@@ -22,6 +22,7 @@ import { VERSION } from '../version.ts'
 import { agentActionRoutes } from './agent-actions.ts'
 import { bucketRoutes } from './buckets.ts'
 import { composeRoutes } from './compose.ts'
+import { composerLinkRoutes } from './composer-link.ts'
 import { type MailDeps, mailRoutes } from './mail.ts'
 import { mutationRoutes } from './mutations.ts'
 import { syncRoutes } from './sync.ts'
@@ -39,6 +40,7 @@ export interface AppDeps {
   mail?: MailDeps
   mutations?: Mutations
   outbox?: Outbox
+  composerScript?: () => Promise<string>
 }
 
 export function createApp({
@@ -49,6 +51,7 @@ export function createApp({
   mail,
   mutations,
   outbox,
+  composerScript,
 }: AppDeps) {
   const app = new Hono<AppEnv>()
 
@@ -64,7 +67,7 @@ export function createApp({
 
   // Requests through `tailscale serve` carry the tailnet login; refuse anyone not allowed.
   app.use('*', async (c, next) => {
-    const login = c.req.header('Tailscale-User-Login')
+    const login = listensOnLoopback(config) ? c.req.header('Tailscale-User-Login') : undefined
     if (login !== undefined && config.allowedTailscaleLogins.length > 0) {
       if (!config.allowedTailscaleLogins.includes(login)) {
         log.warn({ login, path: c.req.path }, 'refused tailnet login')
@@ -94,6 +97,12 @@ export function createApp({
 
   const v1 = new Hono<AppEnv>()
   v1.use('*', requireAuth(db))
+  v1.use('*', async (c, next) => {
+    const principal = c.get('principal')
+    if (principal.kind === 'composer' || principal.threadId)
+      return c.json({ error: 'forbidden', message: 'This token cannot use the mail API' }, 403)
+    await next()
+  })
 
   v1.get('/me', (c) => {
     const p = c.get('principal')
@@ -154,13 +163,19 @@ export function createApp({
     v1.route('/', agentActionRoutes(db, mutations))
   }
   if (mail) {
-    if (outbox) v1.route('/compose', composeRoutes(mail, outbox))
+    app.route('/compose', composerLinkRoutes(db, mail.drafts, config, composerScript))
+    if (outbox)
+      v1.route(
+        '/compose',
+        composeRoutes(mail, outbox, listensOnLoopback(config) ? config.composerOrigin : undefined),
+      )
     v1.route('/', mailRoutes(mail))
     v1.route('/', bucketRoutes(mail.store))
     v1.route('/', syncRoutes(mail, mutations))
 
     // MCP over Streamable HTTP, stateless: one server per request, built from the token's scopes.
     app.all('/mcp', requireAuth(db), async (c) => {
+      if (c.get('principal').kind === 'composer') return c.json({ error: 'forbidden' }, 403)
       const server = buildMcpServer(c.get('principal'), {
         db,
         store: mail.store,

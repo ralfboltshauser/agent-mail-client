@@ -3,6 +3,7 @@ import { type Context, Hono } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
 import { HTTPException } from 'hono/http-exception'
 import { z } from 'zod'
+import { startHandoff } from '../auth/handoff.ts'
 import { MAX_ATTACHMENT_BYTES } from '../mail/drafts.ts'
 import { type Outbox, requireDesktopSend } from '../mail/outbox.ts'
 import { getSetting, setSetting } from '../settings.ts'
@@ -60,13 +61,40 @@ async function body<T>(c: Context<AppEnv>, schema: z.ZodType<T>): Promise<T> {
   return result.data
 }
 
-export function composeRoutes(deps: MailDeps, outbox: Outbox) {
+export function composeRoutes(deps: MailDeps, outbox: Outbox, composerOrigin?: string) {
   const r = new Hono<AppEnv>()
   r.use('*', async (c, next) => {
     requireDesktopSend(c.get('principal'))
     await next()
   })
   r.use('*', bodyLimit({ maxSize: Math.ceil((MAX_ATTACHMENT_BYTES * 4) / 3) + 4096 }))
+  r.post('/handoff', async (c) => {
+    if (!composerOrigin)
+      throw new HTTPException(503, { message: 'Configure the Engine Composer Link origin first' })
+    const input = await body(c, z.object({ threadId: id, requestId: z.uuid() }))
+    const handoff = await startHandoff(deps.db, deps.drafts, input.threadId, input.requestId)
+    const link = new URL(`/compose/${encodeURIComponent(handoff.draftId)}`, composerOrigin)
+    link.hash = new URLSearchParams({ token: handoff.composerToken }).toString()
+    return c.json(
+      { draftId: handoff.draftId, composerUrl: link.href, agentToken: handoff.agentToken },
+      201,
+      {
+        'Cache-Control': 'no-store',
+      },
+    )
+  })
+  r.put('/handoff/:id', async (c) => {
+    const input = await body(c, z.object({ t3ThreadId: id }))
+    const saved = deps.db
+      .prepare('UPDATE handoff SET t3_thread_id = ? WHERE id = ?')
+      .run(input.t3ThreadId, c.req.param('id'))
+    if (!saved.changes) throw new HTTPException(404, { message: 'Handoff does not exist' })
+    return c.json({ saved: true })
+  })
+  r.delete('/handoff/:id', (c) => {
+    deps.db.prepare('DELETE FROM handoff WHERE id = ?').run(c.req.param('id'))
+    return c.json({ cancelled: true })
+  })
   r.post('/drafts', async (c) =>
     c.json(
       await deps.drafts.startCompose(

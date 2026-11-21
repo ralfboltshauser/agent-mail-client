@@ -1,14 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import {
-  type AgentAction,
-  type BucketInput,
-  type Draft,
-  hasScope,
-  type OrganiseAction,
-} from '@amc/protocol'
+import { type AgentAction, type BucketInput, hasScope, type OrganiseAction } from '@amc/protocol'
 import { agentGrantActive, type Principal, withinAccount } from '../auth/tokens.ts'
 import { type Db, transaction } from '../db/database.ts'
-import { DraftError } from './drafts.ts'
+import { DraftError, type VersionedDraft } from './drafts.ts'
 import { MutationError, type Mutations } from './mutations.ts'
 import type { MailStore } from './store.ts'
 
@@ -143,11 +137,11 @@ export async function draftAsAgent(
   agent: Principal,
   tool: string,
   threadId: string | null,
-  write: () => Promise<Draft>,
+  write: () => VersionedDraft | Promise<VersionedDraft>,
 ) {
   const entry = transaction(db, () => start(db, agent, tool, threadId ? [threadId] : [], 1))
   if (entry.error) throw new DraftError(entry.error)
-  let draft: Draft
+  let draft: VersionedDraft
   try {
     draft = await write()
   } catch (error) {
@@ -174,9 +168,9 @@ export function agentCreatedDraft(db: Db, agent: Principal, draftId: string): bo
   )
 }
 
-function agentDraftResult(db: Db, agent: Principal, draft: Draft) {
-  const current = db.prepare('SELECT account_id, modseq FROM draft WHERE id = ?').get(draft.id) as
-    | { account_id: string; modseq: number }
+function agentDraftResult(db: Db, agent: Principal, draft: VersionedDraft) {
+  const current = db.prepare('SELECT account_id FROM draft WHERE id = ?').get(draft.id) as
+    | { account_id: string }
     | undefined
   if (
     !current ||
@@ -186,7 +180,7 @@ function agentDraftResult(db: Db, agent: Principal, draft: Draft) {
     throw new DraftError('Draft unavailable to this Agent')
   return hasScope(agent.scopes, 'read')
     ? draft
-    : { id: draft.id, revision: current.modseq, status: 'applied' as const }
+    : { id: draft.id, revision: draft.revision, status: 'applied' as const }
 }
 
 function actionResult(queue: Mutations, row: ActionRow): AgentAction {

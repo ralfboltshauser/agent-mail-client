@@ -511,4 +511,28 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE outbox ADD COLUMN original_draft_left INTEGER NOT NULL DEFAULT 0;
     `,
   },
+  {
+    version: 14,
+    name: 'T3 handoff and Composer Links',
+    sql: `
+      ALTER TABLE token ADD COLUMN thread_id TEXT;
+      CREATE TABLE handoff (
+        id TEXT PRIMARY KEY,
+        draft_id TEXT NOT NULL REFERENCES draft(id) ON DELETE CASCADE,
+        thread_id TEXT NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
+        agent_id TEXT NOT NULL REFERENCES token(id),
+        composer_id TEXT NOT NULL REFERENCES token(id),
+        t3_thread_id TEXT
+      ) STRICT;
+      CREATE INDEX handoff_thread ON handoff (thread_id);
+      CREATE TRIGGER revoke_removed_handoff BEFORE DELETE ON handoff BEGIN
+        UPDATE token SET revoked_at = unixepoch() * 1000
+        WHERE id IN (OLD.agent_id, OLD.composer_id) AND revoked_at IS NULL;
+      END;
+      CREATE TRIGGER revoke_deleted_draft_links BEFORE DELETE ON draft BEGIN
+        UPDATE token SET revoked_at = unixepoch() * 1000
+        WHERE kind = 'composer' AND subject = OLD.id AND revoked_at IS NULL;
+      END;
+    `,
+  },
 ]

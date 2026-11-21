@@ -22,6 +22,17 @@ export const Config = z.object({
    * Requests carrying a different `Tailscale-User-Login` are refused even with a valid token.
    */
   allowedTailscaleLogins: z.array(z.string()).default([]),
+  composerOrigin: z
+    .url()
+    .refine((value) => {
+      const url = new URL(value)
+      return (
+        value === url.origin &&
+        (url.protocol === 'https:' ||
+          (url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)))
+      )
+    }, 'Use an HTTPS origin or local HTTP origin with no trailing slash')
+    .optional(),
   features: z.object({ snooze: z.boolean().default(false) }).prefault({}),
   logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 })
@@ -41,6 +52,10 @@ export function loadConfig(path = process.env.AMC_CONFIG ?? DEFAULT_CONFIG_PATH)
     throw new Error(`Invalid Engine config at ${path}:\n${z.prettifyError(parsed.error)}`)
   }
   return parsed.data
+}
+
+export function listensOnLoopback(config: Config): boolean {
+  return ['127.0.0.1', '::1', 'localhost'].includes(config.listen.host)
 }
 
 export function databasePath(config: Config): string {
