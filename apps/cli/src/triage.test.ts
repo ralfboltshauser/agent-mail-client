@@ -118,6 +118,14 @@ const harness: TriageHarness = async ({ url, bearer, allowReads }) => {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('amc triage', () => {
+  it('passes Claude a schema without the Draft 2020-12 meta-schema', async () => {
+    fixture({ dryRun: true })
+    await runTriage(config, 'a', true, signal(), async ({ schema }) => {
+      expect(schema).not.toHaveProperty('$schema', 'https://json-schema.org/draft/2020-12/schema')
+      return { decisions: [decision] }
+    })
+  })
+
   it.each([true, false])(
     'applies only validated decisions and revokes the token (dry-run %s)',
     async (dryRun) => {
