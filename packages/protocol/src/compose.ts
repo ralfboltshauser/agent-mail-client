@@ -65,6 +65,8 @@ export interface OutboxItem {
   status: OutboxStatus
   sendAt: number
   undoUntil: number
+  /** Time remaining on the Engine clock when it produced this item. */
+  undoRemainingMs?: number
   detail: string | null
   canResolve: boolean
   threadId: string | null

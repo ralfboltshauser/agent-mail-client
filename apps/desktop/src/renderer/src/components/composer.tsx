@@ -645,7 +645,7 @@ export function Composer({
         )}
         {mirrorConflict && (
           <output className="border-t px-4 py-2 text-xs text-muted-foreground">
-            Draft edited in two places. Both versions were kept.
+            The Account’s draft changed. Your local copy was kept.
           </output>
         )}
         {mirrorError && !error && (

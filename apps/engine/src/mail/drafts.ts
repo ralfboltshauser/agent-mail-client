@@ -17,10 +17,12 @@ import type { Principal } from '../auth/tokens.ts'
 import { type Db, transaction } from '../db/database.ts'
 import { fromGmail } from '../providers/gmail/mapping.ts'
 import type { GmailApi, GmailDraft } from '../providers/gmail/types.ts'
+import { parseMessage } from '../providers/imap/mapping.ts'
+import type { ImapProvider } from '../providers/imap/provider.ts'
 import { draftDocument, renderDraft, replaceDraftContent } from './draft-document.ts'
 import { buildMessage, replySubject } from './mime.ts'
 import type { FrozenMessage, Outbox } from './outbox.ts'
-import type { MailStore } from './store.ts'
+import type { IncomingMessage, MailStore } from './store.ts'
 
 export interface DraftInput {
   /** Reply in this Thread (recipients, subject and threading headers default from it). */
@@ -79,6 +81,10 @@ interface MirrorRemoval {
 
 interface AttachmentRow extends ComposeAttachment {
   blob: string
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[ch] as string)
 }
 
 export const MAX_ATTACHMENT_BYTES = 18 * 1024 * 1024
@@ -161,7 +167,7 @@ export class Drafts {
     const thread = input.threadId
       ? (this.#db
           .prepare(
-            `SELECT t.account_id, t.subject, m.id, m.from_json, m.sent_at, m.body_text FROM thread t
+            `SELECT t.account_id, t.subject, m.id, m.from_json, m.sent_at, m.body_text, m.html_blob FROM thread t
         LEFT JOIN message m ON m.id = (
           SELECT id FROM message WHERE thread_id = t.id AND NOT EXISTS (
             SELECT 1 FROM json_each(label_ids) WHERE value = t.account_id || ':DRAFT'
@@ -176,6 +182,7 @@ export class Drafts {
               from_json: string | null
               sent_at: number | null
               body_text: string | null
+              html_blob: string | null
             }
           | undefined)
       : undefined
@@ -190,19 +197,19 @@ export class Drafts {
             (
               this.#db
                 .prepare(
-                  'SELECT id, filename, mime_type, size FROM attachment WHERE message_id = ?',
+                  'SELECT id, filename, mime_type, content_id FROM attachment WHERE message_id = ?',
                 )
                 .all(thread.id) as {
                 id: string
                 filename: string
                 mime_type: string
-                size: number
+                content_id: string | null
               }[]
             ).map(async (part) => {
               const blob = await fetchAttachment(part.id)
-              if (!blob || !this.#store.blobs.get(blob))
-                throw new DraftError(`Could not fetch ${part.filename}`)
-              return { ...part, blob }
+              const bytes = blob && this.#store.blobs.get(blob)
+              if (!blob || !bytes) throw new DraftError(`Could not fetch ${part.filename}`)
+              return { ...part, blob, size: bytes.length }
             }),
           )
         : []
@@ -210,14 +217,18 @@ export class Drafts {
       throw new DraftError('Forwarded attachments exceed the 18 MB limit')
     }
     const from = thread?.from_json ? (JSON.parse(thread.from_json) as Address | null) : null
+    const attribution =
+      thread?.sent_at == null
+        ? ''
+        : `On ${new Date(thread.sent_at).toISOString().slice(0, 10)}, ${from?.name ?? from?.address ?? 'the sender'} wrote:`
+    const originalHtml =
+      forward && thread?.html_blob && this.#store.blobs.get(thread.html_blob)?.toString('utf8')
+    const forwardHtml = originalHtml
+      ? `<p></p><p>${escapeHtml(attribution)}</p><blockquote>${originalHtml}</blockquote>`
+      : undefined
     const quote =
-      thread?.body_text && thread.sent_at !== null
-        ? `On ${new Date(thread.sent_at).toISOString().slice(0, 10)}, ${from?.name ?? from?.address ?? 'the sender'} wrote:
-` +
-          thread.body_text
-            .split('\n')
-            .map((line) => `> ${line}`)
-            .join('\n')
+      !forwardHtml && thread?.body_text && attribution
+        ? [attribution, ...thread.body_text.split('\n').map((line) => `> ${line}`)].join('\n')
         : ''
     const draft = await this.create(
       {
@@ -231,7 +242,7 @@ export class Drafts {
           : undefined,
       },
       'owner',
-      { quote, forwardParts },
+      { quote, forwardParts, forwardHtml },
     )
     return this.compose(draft.id) as ComposeDraft
   }
@@ -519,20 +530,75 @@ export class Drafts {
     }
   }
 
-  async #pullGmailDraft(accountId: string, item: GmailDraft, api: GmailApi): Promise<void> {
-    const lookup = () =>
-      this.#db
-        .prepare('SELECT * FROM draft WHERE account_id = ? AND provider_draft_id = ?')
-        .get(accountId, item.id) as unknown as DraftRow | undefined
-    if (
+  async pullImap(accountId: string, api: ImapProvider): Promise<void> {
+    const known = this.#db
+      .prepare('SELECT * FROM draft WHERE account_id = ? AND provider_draft_id IS NOT NULL')
+      .all(accountId) as unknown as DraftRow[]
+    const knownIds = new Set(known.map((row) => row.provider_draft_id))
+    const remote = await api.listDrafts()
+    const seen = new Set(remote.map((location) => location.id))
+    for (const location of remote) {
+      if (
+        knownIds.has(location.id) ||
+        this.#providerDraft(accountId, location.id) ||
+        this.#awaitingRemoval(accountId, location.id) ||
+        this.#mirror.size > 0 ||
+        location.size > MAX_ATTACHMENT_BYTES * 2
+      )
+        continue
+      const raw = await api.readDraft(location)
+      if (!raw || raw.byteLength > MAX_ATTACHMENT_BYTES * 2) continue
+      const incoming = await parseMessage(
+        location.folder,
+        location.uidValidity,
+        { uid: location.uid, seq: 0, size: raw.byteLength },
+        this.#store.blobs,
+        this.#store.blobs.put(raw),
+      )
+      const parts = incoming.attachments.flatMap((part) =>
+        part.blob ? [{ ...part, blob: part.blob }] : [],
+      )
+      this.#importDraft(accountId, location.id, location.id, incoming, parts)
+    }
+    // A new UID can be a replacement or a separate draft. Keep the original local
+    // copy bound to its old UID so it cannot be sent as if its mirror still existed.
+    for (const local of known) {
+      if (!local.provider_draft_id || seen.has(local.provider_draft_id) || local.mirror_conflict)
+        continue
+      const current = this.#row(local.id)
+      if (
+        current?.modseq !== local.modseq ||
+        current.provider_draft_id !== local.provider_draft_id ||
+        this.#mirror.has(local.id) ||
+        this.#hasActiveSend(local.id)
+      )
+        continue
+      transaction(this.#db, () => {
+        this.#db.prepare('UPDATE draft SET mirror_conflict = 1 WHERE id = ?').run(local.id)
+        this.#store.recordChange('draft', local.id, 'upsert')
+      })
+    }
+  }
+
+  #providerDraft(accountId: string, providerId: string): DraftRow | undefined {
+    return this.#db
+      .prepare('SELECT * FROM draft WHERE account_id = ? AND provider_draft_id = ?')
+      .get(accountId, providerId) as unknown as DraftRow | undefined
+  }
+
+  #awaitingRemoval(accountId: string, providerId: string): boolean {
+    return Boolean(
       this.#db
         .prepare(
           'SELECT 1 FROM draft_mirror_removal WHERE account_id = ? AND provider_draft_id = ?',
         )
-        .get(accountId, item.id)
+        .get(accountId, providerId),
     )
-      return
-    const previous = lookup()
+  }
+
+  async #pullGmailDraft(accountId: string, item: GmailDraft, api: GmailApi): Promise<void> {
+    if (this.#awaitingRemoval(accountId, item.id)) return
+    const previous = this.#providerDraft(accountId, item.id)
     if (
       previous &&
       (previous.provider_message_id === item.message.id || !this.#canImport(previous))
@@ -556,25 +622,33 @@ export class Drafts {
         return { ...part, size: bytes.byteLength, blob: this.#store.blobs.put(bytes) }
       }),
     )
-    if (parts.reduce((total, part) => total + part.size, 0) > MAX_ATTACHMENT_BYTES) return
+    this.#importDraft(accountId, item.id, resource.id, incoming, parts, previous)
+  }
 
+  #importDraft(
+    accountId: string,
+    providerId: string,
+    messageId: string,
+    incoming: IncomingMessage,
+    parts: {
+      filename: string
+      mimeType: string
+      size: number
+      blob: string
+      contentId: string | null
+    }[],
+    previous?: DraftRow,
+  ): void {
+    if (parts.reduce((total, part) => total + part.size, 0) > MAX_ATTACHMENT_BYTES) return
     transaction(this.#db, () => {
-      const current = lookup()
+      const current = this.#providerDraft(accountId, providerId)
       if (
         previous?.id !== current?.id ||
         previous?.modseq !== current?.modseq ||
         (current && !this.#canImport(current))
       )
         return
-      if (
-        !current &&
-        (this.#mirror.size > 0 ||
-          this.#db
-            .prepare(
-              'SELECT 1 FROM draft_mirror_removal WHERE account_id = ? AND provider_draft_id = ?',
-            )
-            .get(accountId, item.id))
-      )
+      if (!current && (this.#mirror.size > 0 || this.#awaitingRemoval(accountId, providerId)))
         return
       const id = current?.id ?? newId('drf')
       const doc = draftDocument(current?.yjs ?? null, current?.body_text ?? '')
@@ -600,8 +674,8 @@ export class Drafts {
           id,
           accountId,
           threadId,
-          item.id,
-          resource.id,
+          providerId,
+          messageId,
           JSON.stringify(incoming.to),
           JSON.stringify(incoming.cc),
           JSON.stringify(incoming.bcc),
@@ -612,7 +686,7 @@ export class Drafts {
           now,
           incoming.inReplyTo,
           incoming.references,
-          mirrorHash(resource.id),
+          mirrorHash(messageId),
         )
       this.#db.prepare('UPDATE draft_attachment SET active = 0 WHERE draft_id = ?').run(id)
       for (const part of parts) {
@@ -682,8 +756,6 @@ export class Drafts {
 
   #message(row: DraftRow): FrozenMessage {
     const { text, html } = renderDraft(draftDocument(row.yjs, row.body_text))
-    const escapeHtml = (value: string) =>
-      value.replace(/[&<>]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[ch] as string)
     const signature = row.signature
       ? `<div style="white-space:pre-wrap">${escapeHtml(row.signature)}</div>`
       : ''
@@ -725,7 +797,14 @@ export class Drafts {
     author: string,
     compose?: {
       quote: string
-      forwardParts: { filename: string; mime_type: string; size: number; blob: string }[]
+      forwardHtml?: string
+      forwardParts: {
+        filename: string
+        mime_type: string
+        content_id: string | null
+        size: number
+        blob: string
+      }[]
     },
   ): Promise<Draft> {
     const now = Date.now()
@@ -782,9 +861,13 @@ export class Drafts {
       subject = input.subject ?? replySubject(thread.subject)
     }
     if (!accountId) throw new DraftError('accountId is required for a new message')
-    const body = input.body ?? ''
+    const doc = draftDocument(null, input.body ?? '')
+    if (compose?.forwardHtml) replaceDraftContent(doc, '', compose.forwardHtml)
+    const { text: body, html } = compose?.forwardHtml
+      ? renderDraft(doc)
+      : { text: input.body ?? '', html: '' }
     const signature = compose ? this.signature(accountId) : ''
-    const state = Y.encodeStateAsUpdate(draftDocument(null, body))
+    const state = Y.encodeStateAsUpdate(doc)
 
     const id = newId('drf')
     transaction(this.#db, () => {
@@ -817,7 +900,17 @@ export class Drafts {
           .prepare(
             'INSERT INTO draft_attachment (id, draft_id, filename, mime_type, size, blob, content_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
           )
-          .run(newId('att'), id, part.filename, part.mime_type, part.size, part.blob, null)
+          .run(
+            newId('att'),
+            id,
+            part.filename,
+            part.mime_type,
+            part.size,
+            part.blob,
+            part.content_id && html.includes(`src="cid:${part.content_id}"`)
+              ? part.content_id
+              : null,
+          )
       }
       this.#store.recordChange('draft', id, 'upsert')
     })

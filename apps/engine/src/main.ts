@@ -123,6 +123,10 @@ async function main(argv: string[]) {
           queries.accounts().map(async ({ id }) => {
             const api = sync.gmailApi(id)
             if (api) await drafts.pullGmail(id, api)
+            else {
+              const imap = sync.imapProvider(id)
+              if (imap) await drafts.pullImap(id, imap)
+            }
           }),
         ).finally(() => {
           pullingDrafts = undefined

@@ -8,8 +8,12 @@ import { BlobStore } from '../blobs.ts'
 import { createApp } from '../http/app.ts'
 import type { MailDeps } from '../http/mail.ts'
 import { FakeGmail } from '../providers/gmail/fake.ts'
+import { fromGmail } from '../providers/gmail/mapping.ts'
+import type { GmailPart } from '../providers/gmail/types.ts'
+import { FakeImap } from '../providers/imap/fake.ts'
+import { ImapProvider } from '../providers/imap/provider.ts'
 import { silentLog, tempDir, testConfig, testDb } from '../test-support.ts'
-import { gmailDelivery, publishSent } from './delivery.ts'
+import { gmailDelivery, imapDraftMirror, publishSent } from './delivery.ts'
 import { Drafts } from './drafts.ts'
 import { buildMessage } from './mime.ts'
 import { Outbox } from './outbox.ts'
@@ -44,7 +48,15 @@ function setup() {
     log: silentLog,
     config: testConfig(),
     outbox,
-    mail: { db, blobs, store, queries, drafts, log: silentLog } as MailDeps,
+    mail: {
+      db,
+      blobs,
+      store,
+      queries,
+      drafts,
+      log: silentLog,
+      sync: { gmailApi: () => gmail },
+    } as unknown as MailDeps,
   })
   const call = (path: string, method = 'GET', body?: unknown) =>
     app.request(`/v1/compose${path}`, {
@@ -344,3 +356,153 @@ it('cancels a due send when a rollback writer deleted the queued draft', async (
   expect(outbox.get('rollback')?.status).toBe('cancelled')
   db.close()
 })
+
+it('imports IMAP drafts without UIDPLUS and retains both versions across a replacement and UIDVALIDITY reset', async () => {
+  const { db, store } = setup()
+  const account = 'imap'
+  db.prepare(
+    "INSERT INTO account (id, kind, address, credentials, created_at) VALUES (?, 'imap', ?, X'00', 0)",
+  ).run(account, 'owner@example.test')
+  const fake = new FakeImap()
+  const folder = fake.addFolder('Drafts', '\\Drafts')
+  const provider = new ImapProvider(
+    {
+      imap: { host: 'localhost', port: 993, tls: 'implicit', username: 'u', password: 'fake' },
+      smtp: { host: 'localhost', port: 587, tls: 'starttls', username: 'u', password: 'fake' },
+      smtpSavesSent: true,
+    },
+    () => fake.client,
+  )
+  const drafts = new Drafts(db, store, () => imapDraftMirror(provider))
+  const add = (text: string) =>
+    fake.add('Drafts', 'Subject: Draft\r\nMessage-ID: <draft@example.test>', text, ['\\Draft'])
+
+  const originalUid = add('Original')
+  await drafts.pullImap(account, provider)
+  const [original] = drafts.list()
+  if (!original) throw new Error('Draft not imported')
+  const displayed = drafts.compose(original.id) as ComposeDraft
+  const { providerDraftId } = drafts.freeze(original.id, displayed.revision)
+  if (!providerDraftId) throw new Error('Missing draft UID')
+  drafts.saveCompose(original.id, {
+    baseRevision: displayed.revision,
+    update: edit(displayed, 'Local edit'),
+  })
+  fake.expunge('Drafts', originalUid)
+  const replacementUid = add('Replaced elsewhere')
+  await drafts.pullImap(account, provider)
+  await drafts.pullImap(account, provider)
+  expect(drafts.list()).toHaveLength(2)
+  expect(drafts.compose(original.id)).toMatchObject({
+    mirrorConflict: true,
+    body: 'OriginalLocal edit',
+  })
+  expect(drafts.list()).toEqual(
+    expect.arrayContaining([expect.objectContaining({ body: 'Replaced elsewhere' })]),
+  )
+
+  fake.expunge('Drafts', replacementUid)
+  folder.validity += 1n
+  folder.nextUid = originalUid
+  expect(add('Different draft at reused UID')).toBe(originalUid)
+  fake.capabilities.set('UIDPLUS', true)
+  expect(await provider.deleteDraft(providerDraftId)).toBe(false)
+  await drafts.pullImap(account, provider)
+  expect(drafts.list()).toHaveLength(3)
+  expect(drafts.list()).toEqual(
+    expect.arrayContaining([expect.objectContaining({ body: 'Different draft at reused UID' })]),
+  )
+  expect([...folder.messages.keys()]).toEqual([originalUid])
+  db.close()
+})
+
+it('forwards a non-ASCII multipart message with formatting, CID placement and its file attachment', async () => {
+  const { account, call, drafts, db, gmail, store } = setup()
+  gmail.add('original', { threadId: 'thread', subject: 'Résumé' })
+  const resource = gmail.messages.get('original')
+  if (!resource?.payload) throw new Error('Missing fixture')
+  const encode = (text: string): string => Buffer.from(text).toString('base64url')
+  const html =
+    '<p>Bonjour <strong>Élodie</strong></p><ul><li>Réponse</li></ul><p><img src="cid:image@example.test"></p>'
+  const parts: GmailPart[] = [
+    {
+      mimeType: 'multipart/related',
+      parts: [
+        {
+          mimeType: 'multipart/alternative',
+          parts: [
+            { mimeType: 'text/plain', body: { data: encode('Bonjour Élodie'), size: 15 } },
+            { mimeType: 'text/html', body: { data: encode(html), size: html.length } },
+          ],
+        },
+        {
+          mimeType: 'image/png',
+          filename: 'image.png',
+          headers: [{ name: 'Content-ID', value: '<image@example.test>' }],
+          body: { attachmentId: 'image', size: 3 },
+        },
+      ],
+    },
+    { mimeType: 'text/plain', filename: 'pièce.txt', body: { data: encode('Voilà'), size: 6 } },
+  ]
+  resource.payload = { ...resource.payload, mimeType: 'multipart/mixed', parts }
+  store.putMessage(account, [gmail.address], fromGmail(resource))
+  const fetched = vi.spyOn(gmail, 'attachment')
+  const response = await call('/drafts', 'POST', { mode: 'forward', threadId: 'gmail:thread' })
+  expect(response.status).toBe(201)
+  const draft = (await response.json()) as ComposeDraft
+  expect(draft.subject).toBe('Fwd: Résumé')
+  expect(draft.attachments).toEqual([
+    expect.objectContaining({ filename: 'image.png', contentId: 'image@example.test' }),
+    expect.objectContaining({ filename: 'pièce.txt', contentId: null }),
+  ])
+  expect(fetched).toHaveBeenCalledWith('original', 'image')
+  const parsed = await simpleParser(await buildMessage(drafts.freeze(draft.id, draft.revision)), {
+    skipImageLinks: true,
+  })
+  expect(parsed.html).toContain('<blockquote>')
+  expect(parsed.html).toContain('<strong>Élodie</strong>')
+  expect(parsed.html).toContain('<li><p>Réponse</p></li>')
+  expect(parsed.html).toContain('src="cid:image@example.test"')
+  expect(parsed.attachments[0]).toMatchObject({
+    cid: 'image@example.test',
+    related: true,
+    content: Buffer.from([1, 2, 3]),
+  })
+  expect(parsed.attachments[1]).toMatchObject({
+    filename: 'pièce.txt',
+    content: Buffer.from('Voilà'),
+  })
+  db.close()
+})
+
+it.each([-60_000, 60_000])(
+  'uses the Engine undo window with %i ms clock skew and reports a lost cancellation race',
+  async (skew) => {
+    const { account, call, drafts, db, gmail, outbox, advance } = setup()
+    const draft = await drafts.create({ accountId: account, to: reader, body: 'Test' }, 'owner')
+    const shown = drafts.compose(draft.id) as ComposeDraft
+    const response = await call('/outbox', 'POST', {
+      id: 'clock-skew',
+      draftId: draft.id,
+      revision: shown.revision,
+    })
+    const item = (await response.json()) as OutboxItem
+    const desktopNow = 50_000 + skew
+    expect(item.undoRemainingMs).toBe(10_000)
+    expect(item.undoUntil - desktopNow).not.toBe(item.undoRemainingMs)
+    advance(5000)
+    const { items } = (await (await call('/outbox')).json()) as { items: OutboxItem[] }
+    expect(items[0]?.undoRemainingMs).toBe(5000)
+
+    advance(5000)
+    const send = vi.spyOn(gmail, 'sendMessage')
+    const dispatch = outbox.runDue()
+    const result = await call('/outbox/clock-skew/cancel', 'POST')
+    expect(result.status).toBe(409)
+    expect(await result.json()).toMatchObject({ message: 'This send can no longer be cancelled' })
+    await dispatch
+    expect(send).toHaveBeenCalledOnce()
+    db.close()
+  },
+)

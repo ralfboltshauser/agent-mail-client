@@ -222,7 +222,7 @@ function MailApp() {
 
   const queued = (item: OutboxItem) => {
     setDraft(null)
-    const remaining = Math.max(0, item.undoUntil - Date.now())
+    const remaining = item.undoRemainingMs ?? 0
     const scheduled = item.sendAt > item.undoUntil
     if (item.status !== 'queued') {
       toast.info(item.status === 'sent' ? 'Message sent' : 'Check the Outbox for delivery status')

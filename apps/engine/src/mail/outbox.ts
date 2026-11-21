@@ -62,7 +62,8 @@ export function requireDesktopSend(principal: Principal): void {
 }
 
 export class Outbox {
-  #running: Promise<void> | null = null
+  #sending: Promise<void> | null = null
+  #reconciling: Promise<void> | null = null
 
   constructor(
     privateDb: Db,
@@ -175,24 +176,31 @@ export class Outbox {
     return row ? this.#item(row) : null
   }
 
-  waitForIdle(): Promise<void> | null {
-    return this.#running
+  async waitForIdle(): Promise<void> {
+    await Promise.allSettled([this.#sending, this.#reconciling])
   }
 
-  runDue(): Promise<void> {
-    this.#running ??= this.#step().finally(() => {
-      this.#running = null
-    })
-    return this.#running
+  async runDue(): Promise<void> {
+    // Start lookups before claiming new sends so this worker never reconciles its own
+    // in-flight submissions. A slow lookup cannot hold up the submission lane.
+    if (!this.#sending) {
+      this.#reconciling ??= this.#step('dispatching').finally(() => {
+        this.#reconciling = null
+      })
+      this.#sending = this.#step('queued').finally(() => {
+        this.#sending = null
+      })
+    }
+    await Promise.all([this.#sending, this.#reconciling])
   }
 
-  async #step(): Promise<void> {
+  async #step(status: 'queued' | 'dispatching'): Promise<void> {
     const rows = this.#db
       .prepare(
-        `SELECT * FROM outbox WHERE status IN ('queued','dispatching') AND next_at <= ?
+        `SELECT * FROM outbox WHERE status = ? AND next_at <= ?
        ORDER BY next_at, id LIMIT 32`,
       )
-      .all(this.#now()) as unknown as Row[]
+      .all(status, this.#now()) as unknown as Row[]
     for (const row of rows) await this.#process(row)
   }
 
@@ -315,6 +323,7 @@ export class Outbox {
       status: row.status,
       sendAt: row.send_at,
       undoUntil: row.undo_until,
+      undoRemainingMs: row.status === 'queued' ? Math.max(0, row.undo_until - this.#now()) : 0,
       detail: row.detail,
       threadId: row.thread_id,
       canResolve: row.status === 'uncertain' && row.released_at === null,
