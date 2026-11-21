@@ -26,6 +26,7 @@ import { readConfig, writeConfig } from './config.ts'
 import { addImapAccount } from './imap-signin.ts'
 import { loopbackSignIn } from './signin.ts'
 import { runTriage } from './triage.ts'
+import { ClaudeAuthError } from './triage-claude.ts'
 
 declare const AMC_VERSION: string | undefined
 const VERSION = typeof AMC_VERSION === 'string' ? AMC_VERSION : 'dev'
@@ -569,7 +570,8 @@ async function main() {
 }
 
 main().catch((error: unknown) => {
-  if (error instanceof EngineError) console.error(`Error: ${error.message}`)
+  if (error instanceof EngineError || error instanceof ClaudeAuthError)
+    console.error(`Error: ${error.message}`)
   else console.error(error)
   process.exit(1)
 })
