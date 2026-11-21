@@ -73,7 +73,9 @@ export function gmailPubSub(project: string, secretsDir: string): GmailPubSub {
     topic: `projects/${project}/topics/amc-gmail`,
     async pull(signal) {
       const response = await post('pull', { maxMessages: 100 }, 120_000, signal)
-      const { receivedMessages }: PullResponse = await response.json()
+      const body = await response.text()
+      if (!body) return []
+      const { receivedMessages }: PullResponse = JSON.parse(body)
       return (receivedMessages ?? []).map(({ ackId, message }) => ({
         ackId,
         address: notificationAddress(message?.data),

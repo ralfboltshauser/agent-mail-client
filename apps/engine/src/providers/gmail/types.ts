@@ -70,16 +70,23 @@ export interface GmailHistoryList {
 /** Everything the sync needs from Gmail; the HTTP client and the test fake both implement it. */
 export interface GmailApi {
   watch(topicName: string, signal: AbortSignal): Promise<number>
-  profile(): Promise<GmailProfile>
-  labels(): Promise<GmailLabel[]>
-  listMessages(options: {
-    pageToken?: string
-    q?: string
-    maxResults?: number
-  }): Promise<GmailListMessages>
+  profile(signal?: AbortSignal): Promise<GmailProfile>
+  labels(signal?: AbortSignal): Promise<GmailLabel[]>
+  listMessages(
+    options: {
+      pageToken?: string
+      q?: string
+      maxResults?: number
+    },
+    signal?: AbortSignal,
+  ): Promise<GmailListMessages>
   /** `urgent` = live sync: served before backfill under the quota. */
-  getMessage(id: string, urgent?: boolean): Promise<GmailMessage | null>
-  getMessageState(id: string, writeback?: boolean): Promise<GmailMessageState | null>
+  getMessage(id: string, urgent?: boolean, signal?: AbortSignal): Promise<GmailMessage | null>
+  getMessageState(
+    id: string,
+    writeback?: boolean,
+    signal?: AbortSignal,
+  ): Promise<GmailMessageState | null>
   getThreadMessages(id: string): Promise<GmailMessage[]>
   modifyMessage(
     id: string,
@@ -88,11 +95,12 @@ export interface GmailApi {
     beforeDispatch?: () => void,
   ): Promise<GmailMessageState>
   setTrashed(id: string, trashed: boolean): Promise<GmailMessageState>
-  createLabel(name: string): Promise<GmailLabel>
+  createLabel(name: string, signal?: AbortSignal): Promise<GmailLabel>
   history(
     startHistoryId: string,
     pageToken?: string,
     writeback?: boolean,
+    signal?: AbortSignal,
   ): Promise<GmailHistoryList | null>
   attachment(messageId: string, attachmentId: string): Promise<Uint8Array>
   /** Creates or replaces a draft from a raw RFC 5322 message; returns the draft and its message. */

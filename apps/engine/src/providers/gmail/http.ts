@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from 'node:timers/promises'
 import { type AccessTokens, GMAIL_TIMEOUT_MS, OAuthError } from './oauth.ts'
 import { QUOTA_COST, QuotaLimiter } from './ratelimit.ts'
 import type {
@@ -34,8 +35,6 @@ export interface RetryInfo {
   rate: number
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
-
 type Cost = keyof typeof QUOTA_COST
 
 interface CallOptions {
@@ -48,7 +47,7 @@ interface CallOptions {
   /** The caller handles retries for these calls. */
   writeback?: boolean
   submission?: boolean
-  signal?: AbortSignal
+  signal?: AbortSignal | undefined
   beforeDispatch?: (() => void) | undefined
 }
 
@@ -87,8 +86,10 @@ export class GmailHttpApi implements GmailApi {
       }
     }
 
+    const { signal } = options
     let refreshed = false
     for (let attempt = 0; ; attempt++) {
+      signal?.throwIfAborted()
       await this.#limiter.take(
         QUOTA_COST[options.cost ?? 'get'] ?? 5,
         options.urgent ?? (options.cost !== 'get' && options.cost !== 'list'),
@@ -96,12 +97,14 @@ export class GmailHttpApi implements GmailApi {
       let res: Response
       let text: string
       try {
+        signal?.throwIfAborted()
         const token = await this.#tokens.get()
+        signal?.throwIfAborted()
         options.beforeDispatch?.()
         const timeout = AbortSignal.timeout(options.submission ? 60_000 : this.#timeoutMs)
         res = await this.#fetch(url, {
           method: options.method ?? 'GET',
-          signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
+          signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
           ...(options.submission ? { redirect: 'error' } : {}),
           headers: {
             Authorization: `Bearer ${token}`,
@@ -110,10 +113,12 @@ export class GmailHttpApi implements GmailApi {
           ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
         })
         text = await res.text()
+        signal?.throwIfAborted()
       } catch (error) {
+        signal?.throwIfAborted()
         if (options.writeback || options.method || attempt >= 8 || error instanceof OAuthError)
           throw error
-        await this.#delay(path, 0, attempt)
+        await this.#delay(path, 0, attempt, signal)
         continue
       }
       if (res.ok) {
@@ -154,7 +159,7 @@ export class GmailHttpApi implements GmailApi {
         (res.status === 403 && reason === 'backendError')
       if (retryable && attempt < 8 && !options.writeback && !options.submission) {
         if (quota) this.#limiter.penalize()
-        await this.#delay(path, res.status, attempt, quota, retryAfterMs)
+        await this.#delay(path, res.status, attempt, signal, quota, retryAfterMs)
         continue
       }
       if (quota) this.#limiter.penalize()
@@ -167,11 +172,18 @@ export class GmailHttpApi implements GmailApi {
     }
   }
 
-  async #delay(path: string, status: number, attempt: number, quota = false, retryAfterMs = 0) {
+  async #delay(
+    path: string,
+    status: number,
+    attempt: number,
+    signal: AbortSignal | undefined,
+    quota = false,
+    retryAfterMs = 0,
+  ) {
     const base = quota ? Math.min(5_000 * (attempt + 1), 60_000) : 2 ** attempt * 500
     const delayMs = (retryAfterMs || base) + Math.random() * 250
     this.#onRetry?.({ path, status, delayMs, rate: this.#limiter.rate })
-    await sleep(delayMs)
+    await sleep(delayMs, undefined, signal ? { signal } : undefined)
   }
 
   async watch(topicName: string, signal: AbortSignal): Promise<number> {
@@ -185,15 +197,21 @@ export class GmailHttpApi implements GmailApi {
     return Number(expiration)
   }
 
-  profile() {
-    return this.#call<GmailProfile>('/profile', { cost: 'profile' })
+  profile(signal?: AbortSignal) {
+    return this.#call<GmailProfile>('/profile', { cost: 'profile', signal })
   }
 
-  async labels() {
-    return (await this.#call<{ labels?: GmailLabel[] }>('/labels', { cost: 'labels' })).labels ?? []
+  async labels(signal?: AbortSignal) {
+    return (
+      (await this.#call<{ labels?: GmailLabel[] }>('/labels', { cost: 'labels', signal })).labels ??
+      []
+    )
   }
 
-  listMessages(options: { pageToken?: string; q?: string; maxResults?: number }) {
+  listMessages(
+    options: { pageToken?: string; q?: string; maxResults?: number },
+    signal?: AbortSignal,
+  ) {
     return this.#call<GmailListMessages>('/messages', {
       params: {
         pageToken: options.pageToken,
@@ -202,15 +220,17 @@ export class GmailHttpApi implements GmailApi {
         maxResults: String(options.maxResults ?? 500),
       },
       cost: 'list',
+      signal,
     })
   }
 
-  async getMessage(id: string, urgent = false) {
+  async getMessage(id: string, urgent = false, signal?: AbortSignal) {
     try {
       return await this.#call<GmailMessage>(`/messages/${encodeURIComponent(id)}`, {
         params: { format: 'full' },
         cost: 'get',
         urgent,
+        signal,
       })
     } catch (error) {
       if (error instanceof GmailHttpError && error.status === 404) return null
@@ -218,7 +238,12 @@ export class GmailHttpApi implements GmailApi {
     }
   }
 
-  async history(startHistoryId: string, pageToken?: string, writeback = false) {
+  async history(
+    startHistoryId: string,
+    pageToken?: string,
+    writeback = false,
+    signal?: AbortSignal,
+  ) {
     try {
       return await this.#call<GmailHistoryList>('/history', {
         params: {
@@ -231,6 +256,7 @@ export class GmailHttpApi implements GmailApi {
         },
         writeback,
         cost: 'history',
+        signal,
       })
     } catch (error) {
       // 404: the start point is too old; the caller must resync.
@@ -239,13 +265,14 @@ export class GmailHttpApi implements GmailApi {
     }
   }
 
-  async getMessageState(id: string, writeback = false) {
+  async getMessageState(id: string, writeback = false, signal?: AbortSignal) {
     try {
       return await this.#call<GmailMessageState>(`/messages/${encodeURIComponent(id)}`, {
         params: { format: 'full', fields: 'labelIds,historyId' },
         cost: 'get',
         urgent: true,
         writeback,
+        signal,
       })
     } catch (error) {
       if (error instanceof GmailHttpError && error.status === 404) return null
@@ -302,11 +329,12 @@ export class GmailHttpApi implements GmailApi {
     })
   }
 
-  createLabel(name: string): Promise<GmailLabel> {
+  createLabel(name: string, signal?: AbortSignal): Promise<GmailLabel> {
     return this.#call('/labels', {
       method: 'POST',
       body: { name, labelListVisibility: 'labelShow', messageListVisibility: 'show' },
       cost: 'labelCreate',
+      signal,
       urgent: true,
       writeback: true,
     })

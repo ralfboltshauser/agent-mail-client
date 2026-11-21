@@ -5,6 +5,7 @@ import { Sealer } from '../crypto.ts'
 import { MailStore } from '../mail/store.ts'
 import { FakeGmail } from '../providers/gmail/fake.ts'
 import type { GmailPubSub } from '../providers/gmail/pubsub.ts'
+import type { GmailApi, GmailHistoryList } from '../providers/gmail/types.ts'
 import { silentLog, tempDir, testDb } from '../test-support.ts'
 import { SyncManager } from './manager.ts'
 
@@ -52,6 +53,11 @@ function setup(push = true) {
     owner,
     other,
     store,
+    db,
+    restartOwner: (replacement: FakeGmail) => {
+      gmailApis.push(replacement)
+      sync.startAccount('owner')
+    },
     start: async () => {
       sync.start()
       await vi.advanceTimersByTimeAsync(250)
@@ -132,6 +138,45 @@ describe('Gmail Pub/Sub sync', () => {
     owner.add('outage', { subject: 'Pub/Sub outage' })
     await vi.advanceTimersByTimeAsync(15_000)
     expect(store.hasMessage('owner', 'outage')).toBe(true)
+  })
+
+  it('polls after reauthorization while the old history request is still pending', async () => {
+    fixture = setup(false)
+    const { owner, store, db, restartOwner } = fixture
+    const replacement = new FakeGmail()
+    const replacementHistory = vi.spyOn(replacement, 'history')
+    let finishHistory!: (page: GmailHistoryList) => void
+    const pending = new Promise<GmailHistoryList>((resolve) => {
+      finishHistory = resolve
+    })
+    const oldHistory = vi.spyOn<GmailApi, 'history'>(owner, 'history').mockReturnValueOnce(pending)
+    try {
+      await fixture.start()
+      expect(oldHistory).toHaveBeenCalledTimes(1)
+
+      restartOwner(replacement)
+      const oldSignal = oldHistory.mock.calls[0]?.[3]
+      expect(oldSignal?.aborted).toBe(true)
+      await vi.advanceTimersByTimeAsync(5_000)
+      await vi.advanceTimersByTimeAsync(15_000)
+      expect(replacementHistory).toHaveBeenCalledTimes(2)
+
+      replacement.add('new', { subject: 'New mail' })
+      await vi.advanceTimersByTimeAsync(15_000)
+      expect(store.hasMessage('owner', 'new')).toBe(true)
+
+      const cursor = () => db.prepare("SELECT cursor FROM account WHERE id = 'owner'").get()
+      const current = cursor()
+      finishHistory({
+        historyId: '999',
+        history: [{ id: '999', messagesDeleted: [{ message: { id: 'new', threadId: 'new' } }] }],
+      })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(store.hasMessage('owner', 'new')).toBe(true)
+      expect(cursor()).toEqual(current)
+    } finally {
+      finishHistory({ historyId: '999' })
+    }
   })
 
   it.each([false, true])(
