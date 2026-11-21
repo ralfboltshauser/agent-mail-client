@@ -6,6 +6,7 @@ import type {
   GmailHistoryRecord,
   GmailLabel,
   GmailMessage,
+  GmailMessageState,
   GmailProfile,
 } from './types.ts'
 
@@ -166,13 +167,20 @@ export class FakeGmail implements GmailApi {
   }
 
   async getMessageLabels(id: string): Promise<string[] | null> {
+    const state = await this.getMessageState(id)
+    return state ? (state.labelIds ?? []) : null
+  }
+
+  async getMessageState(id: string): Promise<GmailMessageState | null> {
     const message = this.messages.get(id)
-    const labels = message ? [...(message.labelIds ?? [])] : null
-    this.onRead?.(new Map(labels ? [[id, labels]] : []))
+    const state = message
+      ? { labelIds: [...(message.labelIds ?? [])], historyId: message.historyId }
+      : null
+    this.onRead?.(new Map(state ? [[id, state.labelIds]] : []))
     const pause = this.afterLabelRead
     this.afterLabelRead = undefined
     await pause?.()
-    return labels
+    return state
   }
 
   async getThreadMessages(id: string) {
@@ -202,7 +210,7 @@ export class FakeGmail implements GmailApi {
     if (failure) throw failure.error
   }
 
-  async setTrashed(id: string, trashed: boolean): Promise<string[]> {
+  async setTrashed(id: string, trashed: boolean): Promise<GmailMessageState> {
     this.beforeWrite?.({ kind: 'trash', ids: [id], trashed })
     const failure = this.trashFailure
     this.trashFailure = undefined
@@ -213,7 +221,7 @@ export class FakeGmail implements GmailApi {
     const next = trashed ? [...new Set([...labels, 'TRASH'])] : labels.filter((l) => l !== 'TRASH')
     this.#setLabels(id, next, 'amc')
     if (failure) throw failure.error
-    return next
+    return { labelIds: next, historyId: message.historyId }
   }
 
   async createLabel(name: string): Promise<GmailLabel> {

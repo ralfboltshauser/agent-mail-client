@@ -90,6 +90,7 @@ export function fromGmail(message: GmailMessage): IncomingMessage {
 
   return {
     providerId: message.id,
+    providerHistoryId: message.historyId,
     providerThreadId: message.threadId,
     rfcMessageId: cleanMessageId(header(headers, 'Message-ID')),
     inReplyTo: cleanMessageId(header(headers, 'In-Reply-To')),

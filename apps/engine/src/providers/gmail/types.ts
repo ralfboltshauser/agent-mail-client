@@ -39,6 +39,8 @@ export interface GmailMessage {
   payload?: GmailPart
 }
 
+export type GmailMessageState = Pick<GmailMessage, 'labelIds' | 'historyId'>
+
 export interface GmailMessageRef {
   id: string
   threadId: string
@@ -76,10 +78,10 @@ export interface GmailApi {
   }): Promise<GmailListMessages>
   /** `urgent` = live sync: served before backfill under the quota. */
   getMessage(id: string, urgent?: boolean): Promise<GmailMessage | null>
-  getMessageLabels(id: string, writeback?: boolean): Promise<string[] | null>
+  getMessageState(id: string, writeback?: boolean): Promise<GmailMessageState | null>
   getThreadMessages(id: string): Promise<GmailMessage[]>
   batchModify(ids: string[], addLabelIds: string[], removeLabelIds: string[]): Promise<void>
-  setTrashed(id: string, trashed: boolean): Promise<string[]>
+  setTrashed(id: string, trashed: boolean): Promise<GmailMessageState>
   createLabel(name: string): Promise<GmailLabel>
   history(startHistoryId: string, pageToken?: string): Promise<GmailHistoryList | null>
   attachment(messageId: string, attachmentId: string): Promise<Uint8Array>

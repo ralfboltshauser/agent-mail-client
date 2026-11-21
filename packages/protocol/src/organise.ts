@@ -36,10 +36,11 @@ export const MutationLookup = z.object({ ids: z.array(id).min(1).max(100) })
 
 const MutationMessageResult = z.object({
   messageId: z.string().min(1),
-  status: z.enum(['applied', 'superseded', 'failed']),
+  status: z.enum(['applied', 'superseded', 'failed', 'uncertain']),
   appliedLabels: z.array(z.string()),
   supersededLabels: z.array(z.string()),
   failedLabels: z.array(z.string()),
+  uncertainLabels: z.array(z.string()).optional(),
 })
 export type MutationMessageResult = z.infer<typeof MutationMessageResult>
 

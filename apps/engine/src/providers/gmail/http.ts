@@ -7,6 +7,7 @@ import type {
   GmailLabel,
   GmailListMessages,
   GmailMessage,
+  GmailMessageState,
   GmailProfile,
 } from './types.ts'
 
@@ -182,15 +183,14 @@ export class GmailHttpApi implements GmailApi {
     }
   }
 
-  async getMessageLabels(id: string, writeback = false): Promise<string[] | null> {
+  async getMessageState(id: string, writeback = false) {
     try {
-      const message = await this.#call<GmailMessage>(`/messages/${encodeURIComponent(id)}`, {
-        params: { format: 'minimal', fields: 'id,labelIds' },
+      return await this.#call<GmailMessageState>(`/messages/${encodeURIComponent(id)}`, {
+        params: { format: 'full', fields: 'labelIds,historyId' },
         cost: 'get',
         urgent: true,
         writeback,
       })
-      return message.labelIds ?? []
     } catch (error) {
       if (error instanceof GmailHttpError && error.status === 404) return null
       throw error
@@ -228,18 +228,14 @@ export class GmailHttpApi implements GmailApi {
     })
   }
 
-  async setTrashed(id: string, trashed: boolean): Promise<string[]> {
+  setTrashed(id: string, trashed: boolean): Promise<GmailMessageState> {
     const action = trashed ? 'trash' : 'untrash'
-    const message = await this.#call<GmailMessage>(
-      `/messages/${encodeURIComponent(id)}/${action}`,
-      {
-        method: 'POST',
-        cost: action,
-        urgent: true,
-        writeback: true,
-      },
-    )
-    return message.labelIds ?? []
+    return this.#call<GmailMessageState>(`/messages/${encodeURIComponent(id)}/${action}`, {
+      method: 'POST',
+      cost: action,
+      urgent: true,
+      writeback: true,
+    })
   }
 
   createLabel(name: string): Promise<GmailLabel> {

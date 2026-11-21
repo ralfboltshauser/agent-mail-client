@@ -275,3 +275,91 @@ describe('desktop Organise outbox', () => {
     }
   })
 })
+
+it('describes Trash that succeeded for both messages even when one marker cleanup failed', () => {
+  const replica = new Replica(':memory:')
+  try {
+    seed(replica)
+    const id = replica.organise.enqueue({ kind: 'trash', value: true, threadId: THREAD.id })
+    replica.organise.resolve([
+      {
+        id,
+        threadId: THREAD.id,
+        status: 'partial',
+        modseq: 20,
+        error: 'Gmail refused (HTTP 403)',
+        messages: [
+          {
+            messageId: 'account:1',
+            status: 'applied',
+            appliedLabels: ['account:TRASH'],
+            supersededLabels: ['account:AMC/Snoozed'],
+            failedLabels: [],
+          },
+          {
+            messageId: 'account:2',
+            status: 'failed',
+            appliedLabels: ['account:TRASH'],
+            supersededLabels: [],
+            failedLabels: ['account:AMC/Snoozed'],
+          },
+        ],
+      },
+    ])
+    expect(replica.organise.errors()).toEqual([])
+    replica.modseq = 20
+    replica.organise.rebuild()
+    const [notice] = replica.organise.errors()
+    expect(notice?.undo).toMatchObject({ kind: 'undo', mutationId: id })
+    expect(notice?.message).toMatch(/^Changed 2 of 2[.]/)
+  } finally {
+    replica.db.close()
+  }
+})
+
+it('reports an uncertain Trash without an Undo or a Changed elsewhere notice', () => {
+  const replica = new Replica(':memory:')
+  try {
+    seed(replica)
+    const id = replica.organise.enqueue({ kind: 'trash', value: true, threadId: THREAD.id })
+    replica.organise.resolve(
+      MutationResponse.parse({
+        mutations: [
+          {
+            id,
+            threadId: THREAD.id,
+            status: 'failed',
+            modseq: 10,
+            error: 'A change to Trash may have been applied. Gmail refused the change (HTTP 403)',
+            superseded: [],
+            messages: [
+              {
+                messageId: 'account:1',
+                status: 'uncertain',
+                appliedLabels: [],
+                uncertainLabels: ['account:TRASH'],
+                supersededLabels: [],
+                failedLabels: [],
+              },
+              {
+                messageId: 'account:2',
+                status: 'failed',
+                appliedLabels: [],
+                supersededLabels: [],
+                failedLabels: ['account:TRASH'],
+              },
+            ],
+          },
+        ],
+      }).mutations,
+    )
+    expect(replica.organise.errors()).toEqual([
+      {
+        id,
+        message: 'A change to Trash may have been applied. Gmail refused the change (HTTP 403)',
+      },
+    ])
+  } finally {
+    replica.db.close()
+  }
+})

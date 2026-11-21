@@ -152,8 +152,12 @@ describe('Gmail Organise writeback', () => {
     await new Mutations(store, () => gmail, silentLog, now).tick()
     expect(lookup(trash.id)).toMatchObject({
       status: 'failed',
-      error: 'Gmail refused the change (HTTP 403)',
-      superseded: ['a:m1'],
+      error: 'A change to Trash may have been applied. Gmail refused the change (HTTP 403)',
+      superseded: [],
+      messages: [
+        { messageId: 'a:m1', status: 'uncertain', uncertainLabels: ['a:TRASH'] },
+        { messageId: 'a:m2', status: 'failed', failedLabels: ['a:TRASH'] },
+      ],
     })
     expect(await gmail.getMessageLabels('m1')).toEqual(['INBOX', 'UNREAD', 'TRASH'])
     expect(thread()?.labelIds).toContain('a:TRASH')
@@ -363,8 +367,8 @@ describe('Gmail Organise writeback', () => {
     const wait = new Promise<void>((resolve) => {
       release = resolve
     })
-    const get = gmail.getMessageLabels.bind(gmail)
-    vi.spyOn(gmail, 'getMessageLabels').mockImplementationOnce(async (id) => {
+    const get = gmail.getMessageState.bind(gmail)
+    vi.spyOn(gmail, 'getMessageState').mockImplementationOnce(async (id) => {
       const stale = await get(id)
       started()
       await wait
@@ -485,58 +489,7 @@ describe('Gmail Organise writeback', () => {
   })
 
   it('keeps acknowledged Trash independently of a Snoozed-label conflict and refusal', async () => {
-    const { gmail, queue, submit, lookup, now } = await setup()
-    submit({ kind: 'snooze', threadId: THREAD, until: now() + 60000 })
-    await queue.tick()
-    const marker = gmail.labelList.find((label) => label.name === SNOOZED_LABEL)?.id
-    const setTrashed = gmail.setTrashed.bind(gmail)
-    const trash = vi.spyOn(gmail, 'setTrashed').mockImplementation(async (id, trashed) => {
-      const labels = await setTrashed(id, trashed)
-      if (id === 'm2' && trashed)
-        gmail.setLabels(
-          'm1',
-          (gmail.messages.get('m1')?.labelIds ?? []).filter((label) => label !== marker),
-        )
-      return labels
-    })
-    vi.spyOn(gmail, 'batchModify').mockRejectedValueOnce(
-      new GmailHttpError(403, 'forbidden', 'refused'),
-    )
-    const action = submit({ kind: 'trash', threadId: THREAD, value: true })
-    await queue.tick()
-    expect(lookup(action.id)).toMatchObject({
-      status: 'partial',
-      messages: [
-        {
-          messageId: 'a:m1',
-          status: 'applied',
-          appliedLabels: ['a:TRASH'],
-          supersededLabels: ['a:AMC/Snoozed'],
-          failedLabels: [],
-        },
-        {
-          messageId: 'a:m2',
-          status: 'failed',
-          appliedLabels: ['a:TRASH'],
-          supersededLabels: [],
-          failedLabels: ['a:AMC/Snoozed'],
-        },
-      ],
-    })
-    expect(trash.mock.calls).toEqual([
-      ['m1', true],
-      ['m2', true],
-    ])
-    submit({ kind: 'undo', mutationId: action.id })
-    await queue.tick()
-    expect(trash.mock.calls).toEqual([
-      ['m1', true],
-      ['m2', true],
-      ['m1', false],
-      ['m2', false],
-    ])
-    expect(await gmail.getMessageLabels('m1')).not.toContain(marker)
-    expect(await gmail.getMessageLabels('m2')).toContain(marker)
+    await withFixture((fixture) => checkTrashCleanup(fixture, 'm1'))
   })
 
   it('does not record an Inbox inverse for an archive superseded after preparation', async () => {
@@ -639,7 +592,7 @@ describe('Gmail Organise writeback', () => {
         trace.push('write')
         if (trace.filter((event) => event === 'write').length === 1)
           return Response.json({}, { status: 401 })
-        return Response.json({ labelIds: await gmail.setTrashed('m1', true) })
+        return Response.json(await gmail.setTrashed('m1', true))
       },
       { limiter: new QuotaLimiter({ rate: 10_000, maxRate: 10_000 }) },
     )
@@ -772,8 +725,9 @@ describe.each([
         ['m1', false],
       ])
       expect(restarted.lookup(REQUESTOR, [undo.id])[0]).toMatchObject({
-        status: 'applied',
-        messages: [{ messageId: 'a:m1', status: 'superseded', supersededLabels: ['a:TRASH'] }],
+        status: 'failed',
+        error: 'A change to Trash may have been applied',
+        messages: [{ messageId: 'a:m1', status: 'uncertain', uncertainLabels: ['a:TRASH'] }],
       })
       expect(await gmail.getMessageLabels('m1')).toEqual(['INBOX', 'UNREAD', 'TRASH'])
       expect(new MailQueries(db).thread(THREAD)?.inInbox).toBe(false)
@@ -893,7 +847,9 @@ describe('seeded Gmail writeback interleavings', () => {
           (_, i) => i + Number(process.env.AMC_FUZZ_START ?? 1),
         )
     try {
-      for (const seed of seeds) {
+      for (const [index, seed] of seeds.entries()) {
+        // Large shards must let Vitest's worker process messages between scenarios.
+        if (index % 32 === 0) await new Promise<void>((resolve) => setImmediate(resolve))
         const {
           db,
           gmail,
@@ -905,6 +861,7 @@ describe('seeded Gmail writeback interleavings', () => {
           sync: initialSync,
         } = await setup(directory)
         const pick = seededRandom(seed)
+        const targeted = seededRandom(seed ^ 0x6fa97c03)
         const trace: string[] = []
         let queue = initialQueue
         let sync = initialSync
@@ -1113,6 +1070,33 @@ describe('seeded Gmail writeback interleavings', () => {
               label_ids: (JSON.parse(String(row.label_ids)) as string[]).sort(),
             })),
           ).toEqual(truth)
+          const scenarios = [
+            (fixture: OrganiseFixture) => checkWake(fixture, Boolean(targeted(2))),
+            (fixture: OrganiseFixture) =>
+              checkMuteSuppression(
+                fixture,
+                [undefined, lostResponse(), committed503()][targeted(3)],
+                Boolean(targeted(2)),
+              ),
+            (fixture: OrganiseFixture) =>
+              checkStaleReconciliation(
+                fixture,
+                targeted(2) ? 'STARRED' : 'Label_work',
+                Boolean(targeted(2)),
+              ),
+            (fixture: OrganiseFixture) => checkExpiredTrash(fixture, targeted(2) ? 401 : 503),
+            (fixture: OrganiseFixture) =>
+              checkAmbiguousTrash(
+                fixture,
+                targeted(2) ? lostResponse() : committed503(),
+                Boolean(targeted(2)),
+              ),
+          ]
+          scenarios.push((fixture) => checkTrashCleanup(fixture, targeted(2) ? 'm1' : 'm2'))
+          const scenario = targeted(scenarios.length)
+          trace.push(`targeted interleaving ${scenario}`)
+          const runScenario = scenarios[scenario]
+          if (runScenario) await withFixture(runScenario, directory)
         } catch (error) {
           console.error(
             `Gmail interleaving failed for seed ${seed}. Replay with AMC_FUZZ_SEED=${seed}\n${trace.join('\n')}`,
@@ -1126,4 +1110,295 @@ describe('seeded Gmail writeback interleavings', () => {
       rmSync(directory, { recursive: true, force: true })
     }
   }, 300_000)
+})
+
+type OrganiseFixture = Awaited<ReturnType<typeof setup>>
+
+async function checkMuteSuppression(
+  { db, gmail, queue, sync, submit, advance, now, store }: OrganiseFixture,
+  failure: Error | undefined,
+  syncRestore: boolean,
+) {
+  submit({ kind: 'mute', value: true, threadId: THREAD })
+  await queue.tick()
+  gmail.add('m3', { threadId: 'thread' })
+  await sync.incremental()
+  const writes: string[] = []
+  gmail.beforeWrite = (write) => {
+    if (write.kind === 'batch' && write.remove.includes('INBOX')) writes.push(...write.ids)
+  }
+  if (failure) gmail.batchFailure = { applied: 1, error: failure }
+  await queue.tick()
+  expect(await gmail.getMessageLabels('m3')).not.toContain('INBOX')
+  gmail.setLabels('m3', ['INBOX', 'UNREAD'])
+  if (syncRestore) await sync.incremental()
+  advance(2000)
+  const restarted = new Mutations(store, () => gmail, silentLog, now)
+  await restarted.tick()
+  await restarted.tick()
+  expect(await gmail.getMessageLabels('m3')).toContain('INBOX')
+  expect(writes).toEqual(['m3'])
+  expect(
+    db.prepare("SELECT mute_suppression_handled AS handled FROM message WHERE id = 'a:m3'").get(),
+  ).toEqual({ handled: 1 })
+
+  // Apply history since the last sync, with a freshly restored older reply and a fresh delivery.
+  gmail.add('m4', { threadId: 'thread', labels: ['UNREAD'] })
+  gmail.setLabels('m4', ['INBOX', 'UNREAD'])
+  gmail.add('m5', { threadId: 'thread' })
+  await sync.incremental()
+  await restarted.tick()
+  expect(writes).toEqual(['m3', 'm5'])
+  expect(await gmail.getMessageLabels('m4')).toContain('INBOX')
+  expect(await gmail.getMessageLabels('m5')).not.toContain('INBOX')
+}
+
+async function checkStaleReconciliation(
+  { db, gmail, queue, sync, submit, lookup }: OrganiseFixture,
+  edit: 'STARRED' | 'Label_work',
+  viaMessageGet: boolean,
+) {
+  const get = gmail.getThreadMessages.bind(gmail)
+  let acknowledged = false
+  const batch = gmail.batchModify.bind(gmail)
+  vi.spyOn(gmail, 'batchModify').mockImplementation(async (...args) => {
+    await batch(...args)
+    acknowledged = true
+  })
+  const ownerEdit = async () => {
+    acknowledged = false
+    gmail.setLabels('m1', ['INBOX', 'UNREAD', edit])
+    await sync.incremental()
+  }
+  vi.spyOn(gmail, 'getThreadMessages').mockImplementation(async (id) => {
+    const snapshot = await get(id)
+    if (!acknowledged) return snapshot
+    if (viaMessageGet) {
+      gmail.afterLabelRead = ownerEdit
+      return snapshot.filter((message) => message.id !== 'm1')
+    }
+    await ownerEdit()
+    return snapshot
+  })
+  const action = submit({ kind: 'read', value: true, threadId: THREAD })
+  await queue.tick()
+  expect(acknowledged).toBe(false)
+  expect(lookup(action.id)?.status).toBe('applied')
+  expect(await sync.incremental()).toBe(0)
+  const provider = db
+    .prepare("SELECT provider_label_ids, provider_history_id FROM message WHERE id = 'a:m1'")
+    .get()
+  expect(provider).toEqual({
+    provider_label_ids: JSON.stringify(['INBOX', 'UNREAD', edit].map((id) => `a:${id}`)),
+    provider_history_id: gmail.messages.get('m1')?.historyId,
+  })
+}
+
+async function checkExpiredTrash(
+  { db, gmail, queue, store, submit, advance, now }: OrganiseFixture,
+  expiry: 401 | 503,
+) {
+  const write = gmail.setTrashed.bind(gmail)
+  const spy = vi.spyOn(gmail, 'setTrashed').mockImplementation(async (id, value) => {
+    if (id === 'm2') throw new GmailHttpError(expiry, '', 'interrupted')
+    return write(id, value)
+  })
+  const action = submit({ kind: 'trash', value: true, threadId: THREAD })
+  await queue.tick()
+  expect(await gmail.getMessageLabels('m1')).toContain('TRASH')
+  db.exec("UPDATE account SET status = 'auth_expired' WHERE id = 'a'")
+  advance(2000)
+  await new Mutations(store, () => null, silentLog, now).tick()
+  expect(spy.mock.calls).toEqual([
+    ['m1', true],
+    ['m2', true],
+  ])
+  const restarted = new Mutations(store, () => gmail, silentLog, now)
+  const result = restarted.lookup(REQUESTOR, [action.id])[0]
+  expect(result).toMatchObject({
+    status: 'partial',
+    messages: [
+      { messageId: 'a:m1', appliedLabels: ['a:TRASH'] },
+      expiry === 401
+        ? { messageId: 'a:m2', failedLabels: ['a:TRASH'] }
+        : { messageId: 'a:m2', uncertainLabels: ['a:TRASH'] },
+    ],
+  })
+  db.exec("UPDATE account SET status = 'ready' WHERE id = 'a'")
+  const undo = restarted.submit(REQUESTOR, [
+    {
+      id: randomUUID(),
+      action: { kind: 'undo', mutationId: action.id },
+    },
+  ])[0]
+  await restarted.tick()
+  expect(restarted.lookup(REQUESTOR, [undo?.id ?? ''])[0]?.status).toBe('applied')
+  expect(spy.mock.calls).toEqual([
+    ['m1', true],
+    ['m2', true],
+    ['m1', false],
+  ])
+}
+
+async function checkAmbiguousTrash(
+  { db, gmail, queue, store, submit, advance, now, lookup }: OrganiseFixture,
+  failure: Error,
+  ownerRestores: boolean,
+) {
+  gmail.trashFailure = { afterWrite: true, error: failure }
+  const action = submit({ kind: 'trash', value: true, threadId: THREAD })
+  await queue.tick()
+  expect(lookup(action.id)?.status).toBe('pending')
+  if (ownerRestores) gmail.setLabels('m1', ['INBOX', 'UNREAD'])
+  gmail.trashFailure = { afterWrite: false, error: new GmailHttpError(403, '', 'refused') }
+  advance(2000)
+  await new Mutations(store, () => gmail, silentLog, now).tick()
+  const result = lookup(action.id)
+  expect(result).toMatchObject({
+    status: 'failed',
+    error: expect.stringContaining('may have been applied'),
+    superseded: [],
+    messages: [
+      { messageId: 'a:m1', status: 'uncertain', appliedLabels: [], uncertainLabels: ['a:TRASH'] },
+      { messageId: 'a:m2', status: 'failed', failedLabels: ['a:TRASH'] },
+    ],
+  })
+  const replica = db.prepare("SELECT provider_label_ids FROM message WHERE id = 'a:m1'").get()
+  expect(JSON.parse(String(replica?.provider_label_ids)).includes('a:TRASH')).toBe(!ownerRestores)
+  expect(() => submit({ kind: 'undo', mutationId: action.id })).toThrow(
+    'There is no matching action',
+  )
+}
+
+async function checkTrashCleanup(
+  { gmail, queue, submit, lookup, now }: OrganiseFixture,
+  ownerClears: 'm1' | 'm2',
+) {
+  submit({ kind: 'snooze', threadId: THREAD, until: now() + 60_000 })
+  await queue.tick()
+  const marker = gmail.labelList.find((label) => label.name === SNOOZED_LABEL)?.id
+  const setTrashed = gmail.setTrashed.bind(gmail)
+  const trash = vi.spyOn(gmail, 'setTrashed').mockImplementation(async (id, trashed) => {
+    const response = await setTrashed(id, trashed)
+    if (id === 'm2' && trashed)
+      gmail.setLabels(
+        ownerClears,
+        (gmail.messages.get(ownerClears)?.labelIds ?? []).filter((label) => label !== marker),
+      )
+    return response
+  })
+  vi.spyOn(gmail, 'batchModify').mockRejectedValueOnce(
+    new GmailHttpError(403, 'forbidden', 'refused'),
+  )
+  const action = submit({ kind: 'trash', threadId: THREAD, value: true })
+  await queue.tick()
+  expect(lookup(action.id)).toMatchObject({
+    status: 'partial',
+    messages: ['m1', 'm2'].map((id) => ({
+      messageId: `a:${id}`,
+      status: id === ownerClears ? 'applied' : 'failed',
+      appliedLabels: ['a:TRASH'],
+      supersededLabels: id === ownerClears ? ['a:AMC/Snoozed'] : [],
+      failedLabels: id === ownerClears ? [] : ['a:AMC/Snoozed'],
+    })),
+  })
+  expect(trash.mock.calls).toEqual([
+    ['m1', true],
+    ['m2', true],
+  ])
+  submit({ kind: 'undo', mutationId: action.id })
+  await queue.tick()
+  expect(trash.mock.calls).toEqual([
+    ['m1', true],
+    ['m2', true],
+    ['m1', false],
+    ['m2', false],
+  ])
+  expect(await gmail.getMessageLabels(ownerClears)).not.toContain(marker)
+  expect(await gmail.getMessageLabels(ownerClears === 'm1' ? 'm2' : 'm1')).toContain(marker)
+}
+
+async function checkWake(
+  { gmail, queue, submit, now, advance, thread }: OrganiseFixture,
+  ownerDeletes: boolean,
+) {
+  submit({ kind: 'snooze', threadId: THREAD, until: now() + 1000 })
+  await queue.tick()
+  const getThread = gmail.getThreadMessages.bind(gmail)
+  const batch = gmail.batchModify.bind(gmail)
+  const wakeTargets: string[] = []
+  let ownerEdited = false
+  vi.spyOn(gmail, 'batchModify').mockImplementation(async (ids, add, remove) => {
+    await batch(ids, add, remove)
+    if (add.includes('INBOX')) wakeTargets.push(...ids)
+  })
+  vi.spyOn(gmail, 'getThreadMessages').mockImplementation(async (id) => {
+    if (!ownerEdited && wakeTargets.length > 0) {
+      const labels = (await gmail.getMessageLabels('m2')) ?? []
+      expect(labels).toContain('INBOX')
+      if (ownerDeletes) gmail.remove('m2')
+      else gmail.setLabels('m2', [...labels, 'TRASH'])
+      ownerEdited = true
+    }
+    return getThread(id)
+  })
+  advance(1000)
+  await queue.tick()
+  await queue.tick()
+  expect(ownerEdited).toBe(true)
+  expect(wakeTargets).toEqual(['m2'])
+  expect(await gmail.getMessageLabels('m1')).not.toContain('INBOX')
+  expect(thread()?.snoozedUntil).toBeNull()
+}
+
+async function withFixture(
+  run: (fixture: OrganiseFixture) => Promise<void>,
+  directory?: string,
+): Promise<void> {
+  const fixture = await setup(directory)
+  try {
+    await run(fixture)
+  } finally {
+    fixture.db.close()
+  }
+}
+
+const lostResponse = () => new Error('connection lost')
+const committed503 = () => new GmailHttpError(503, 'backendError', 'response failed')
+
+describe('Gmail scheduler and reconciliation regressions', () => {
+  it.each([false, true])(
+    'consumes an acknowledged wake even when the owner deletes=%s',
+    async (deletes) => {
+      await withFixture((fixture) => checkWake(fixture, deletes))
+    },
+  )
+
+  it.each([lostResponse, committed503, () => undefined])(
+    'suppresses each muted reply at most once (%#)',
+    async (failure) => {
+      await withFixture((fixture) => checkMuteSuppression(fixture, failure(), false))
+    },
+  )
+
+  it.each([false, true])(
+    'keeps newer history when final reconciliation uses messages.get=%s',
+    async (viaMessageGet) => {
+      await withFixture((fixture) => checkStaleReconciliation(fixture, 'STARRED', viaMessageGet))
+    },
+  )
+
+  it.each([401, 503] as const)(
+    'keeps acknowledged Trash Undo-able after losing OAuth following HTTP %s',
+    async (expiry) => {
+      await withFixture((fixture) => checkExpiredTrash(fixture, expiry))
+    },
+  )
+
+  it.each([lostResponse, committed503])(
+    're-reads a lost Trash response and reports uncertainty after a refusal (%#)',
+    async (failure) => {
+      await withFixture((fixture) => checkAmbiguousTrash(fixture, failure(), false))
+    },
+  )
 })

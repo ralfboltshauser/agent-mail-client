@@ -1,5 +1,5 @@
 import type { Logger } from '../../log.ts'
-import type { MailStore } from '../../mail/store.ts'
+import { type MailStore, messageId } from '../../mail/store.ts'
 import { fromGmail } from './mapping.ts'
 import type { GmailApi, GmailLabel, GmailMessageRef } from './types.ts'
 
@@ -116,6 +116,7 @@ export class GmailAccountSync {
 
     const added = new Map<string, GmailMessageRef>()
     const labelUpdates = new Set<string>()
+    const inboxRestored = new Set<string>()
     const deleted = new Set<string>()
     let pageToken: string | undefined
     let latest = startId
@@ -136,6 +137,11 @@ export class GmailAccountSync {
           added.delete(message.id)
           labelUpdates.delete(message.id)
         }
+        const delivered = new Set(record.messagesAdded?.map(({ message }) => message.id))
+        for (const { message, labelIds } of record.labelsAdded ?? []) {
+          if (labelIds.includes('INBOX') && !delivered.has(message.id))
+            inboxRestored.add(message.id)
+        }
         for (const change of [...(record.labelsAdded ?? []), ...(record.labelsRemoved ?? [])]) {
           if (!deleted.has(change.message.id)) labelUpdates.add(change.message.id)
         }
@@ -152,7 +158,7 @@ export class GmailAccountSync {
       added.set(id, { id, threadId: '' })
       return false
     })
-    const current = await mapLimit(known, FETCH_CONCURRENCY, (id) => this.#api.getMessageLabels(id))
+    const current = await mapLimit(known, FETCH_CONCURRENCY, (id) => this.#api.getMessageState(id))
     if (this.#store.writeEpoch(account) !== epoch) return 0
     let changes = 0
     for (const id of deleted) {
@@ -162,12 +168,14 @@ export class GmailAccountSync {
     }
     for (const [index, id] of known.entries()) {
       this.#backfillChanges?.add(id)
-      const labels = current[index]
-      if (labels) this.#store.setMessageLabels(account, id, labels)
+      const message = current[index]
+      if (inboxRestored.has(id)) this.#store.markMuteSuppressionHandled(messageId(account, id))
+      if (message)
+        this.#store.setMessageLabels(account, id, message.labelIds ?? [], message.historyId)
       else this.#store.deleteMessage(account, id)
       changes++
     }
-    changes += await this.#fetchAndStore([...added.keys()], true)
+    changes += await this.#fetchAndStore([...added.keys()], true, undefined, inboxRestored)
 
     if (this.#store.writeEpoch(account) !== epoch) return changes
     this.#state.saveCursor({ historyId: latest })
@@ -204,14 +212,13 @@ export class GmailAccountSync {
       const epoch = this.#store.writeEpoch(account)
       const missingSet = new Set(missing)
       const known = ids.filter((id) => !missingSet.has(id))
-      const labels = await mapLimit(known, FETCH_CONCURRENCY, (id) =>
-        this.#api.getMessageLabels(id),
-      )
+      const labels = await mapLimit(known, FETCH_CONCURRENCY, (id) => this.#api.getMessageState(id))
       if (this.#store.writeEpoch(account) !== epoch || generation !== this.#scanGeneration)
         return true
       for (const [index, id] of known.entries()) {
         const current = labels[index]
-        if (current && !changed.has(id)) this.#store.setMessageLabels(account, id, current)
+        if (current && !changed.has(id))
+          this.#store.setMessageLabels(account, id, current.labelIds ?? [], current.historyId)
       }
     }
     const stored = await this.#fetchAndStore(missing, false, { generation, changed })
@@ -242,6 +249,7 @@ export class GmailAccountSync {
     ids: string[],
     perMessage: boolean,
     scan?: { generation: number; changed: Set<string> },
+    inboxRestored?: Set<string>,
   ): Promise<number> {
     let stored = 0
     for (let i = 0; i < ids.length; i += STORE_CHUNK) {
@@ -258,7 +266,10 @@ export class GmailAccountSync {
       const incoming = messages
         .filter((m) => m !== null)
         .filter((m) => !scan?.changed.has(m.id))
-        .map(fromGmail)
+        .map((message) => ({
+          ...fromGmail(message),
+          inboxRestored: inboxRestored?.has(message.id),
+        }))
       if (perMessage) {
         for (const msg of incoming) {
           this.#backfillChanges?.add(msg.providerId)
@@ -308,7 +319,7 @@ export class GmailAccountSync {
     const epoch = this.#store.writeEpoch(this.#state.accountId)
     const missing = local.map((row) => row.provider_id).filter((id) => !this.#seen.has(id))
     const current = await mapLimit(missing, FETCH_CONCURRENCY, (id) =>
-      this.#api.getMessageLabels(id),
+      this.#api.getMessageState(id),
     )
     if (
       generation !== this.#scanGeneration ||
@@ -319,9 +330,15 @@ export class GmailAccountSync {
     for (const [index, id] of missing.entries()) {
       // Incremental history already applied a more recent read for these messages.
       if (changed.has(id)) continue
-      const labels = current[index]
-      if (labels) this.#store.setMessageLabels(this.#state.accountId, id, labels)
-      else if (labels === null) {
+      const message = current[index]
+      if (message)
+        this.#store.setMessageLabels(
+          this.#state.accountId,
+          id,
+          message.labelIds ?? [],
+          message.historyId,
+        )
+      else if (message === null) {
         this.#store.deleteMessage(this.#state.accountId, id)
         removed++
       }

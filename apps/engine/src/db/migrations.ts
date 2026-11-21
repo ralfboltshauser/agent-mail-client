@@ -211,6 +211,8 @@ export const MIGRATIONS: readonly Migration[] = [
     name: 'organise',
     sql: `
       ALTER TABLE message ADD COLUMN provider_label_ids TEXT;
+      ALTER TABLE message ADD COLUMN provider_history_id TEXT;
+      ALTER TABLE message ADD COLUMN mute_suppression_handled INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE message ADD COLUMN first_seen_at INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE thread ADD COLUMN snoozed_until INTEGER;
       ALTER TABLE thread ADD COLUMN muted INTEGER NOT NULL DEFAULT 0;

@@ -319,13 +319,35 @@ export class LocalOrganise {
     const failures = rows.map((row): OrganiseNotice => {
       if (row.status !== 'partial' || !row.messages) return { id: row.id, message: row.message }
       const outcomes = JSON.parse(row.messages) as NonNullable<MutationResult['messages']>
-      const applied = outcomes.filter((item) => item.status === 'applied').length
-      const failed = outcomes.filter((item) => item.status === 'failed').length
       const { action } = JSON.parse(row.request) as MutationRequest
+      const trash = action.kind === 'trash' ? `${row.thread_id?.split(':')[0]}:TRASH` : null
+      const hasLabel = (labels: string[]) =>
+        trash === null ? labels.length > 0 : labels.includes(trash)
+      const applied = outcomes.filter((item) =>
+        trash ? hasLabel(item.appliedLabels) : item.status === 'applied',
+      ).length
+      const failed = outcomes.filter((item) =>
+        trash ? hasLabel(item.failedLabels) : item.status === 'failed',
+      ).length
+      const total = trash
+        ? outcomes.filter((item) =>
+            [
+              item.appliedLabels,
+              item.failedLabels,
+              item.supersededLabels,
+              item.uncertainLabels ?? [],
+            ].some(hasLabel),
+          ).length
+        : outcomes.length
+      const uncertain = outcomes.some((item) => item.uncertainLabels?.length)
       const verb = action.kind === 'archive' ? 'Archived' : 'Changed'
-      const message = failed
-        ? `${verb} ${applied} of ${outcomes.length}. ${failed} couldn't be changed`
-        : row.message
+      let message = row.message
+      if (trash && total) {
+        const detail = failed && !uncertain ? `${failed} couldn't be changed` : row.message
+        message = `${verb} ${applied} of ${total}. ${detail}`
+      } else if (failed && !uncertain) {
+        message = `${verb} ${applied} of ${total}. ${failed} couldn't be changed`
+      }
       return {
         id: row.id,
         message,
