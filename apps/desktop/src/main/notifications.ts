@@ -1,9 +1,19 @@
-import type { MessageDetail, SyncChange, ThreadSummary } from '@amc/protocol'
+import type { MessageDetail, SyncChange } from '@amc/protocol'
 import type { NotificationSettings } from '../shared/api'
 import type { Replica } from './replica'
 
 type Message = Omit<MessageDetail, 'bodyText'>
-type Candidate = Pick<Message, 'id' | 'threadId'>
+type Candidate = Pick<Message, 'id' | 'threadId'> & { key: string }
+
+const RECENT_ARRIVAL_MS = 10 * 60 * 1000
+
+function arrivalTime(message: Message): number {
+  return message.deliveredAt ?? message.sentAt
+}
+
+function messageIdentity(message: Message): string | undefined {
+  return message.rfcMessageId?.trim().replace(/^<|>$/g, '') || undefined
+}
 
 export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   enabled: true,
@@ -55,38 +65,42 @@ function isInboxUnread(message: Message): boolean {
 export function newInboxMessages(
   replica: Replica,
   changes: SyncChange[],
-  startedAt: number,
+  now = Date.now(),
 ): Candidate[] {
-  // The replica has the provider message timestamp but no separate arrival timestamp.
-  const accounts = replica.accounts()
-  const ready = new Set(
-    accounts.filter(({ backfill }) => backfill.phase === 'done').map(({ id }) => id),
-  )
-  const owners = new Set(accounts.map(({ address }) => address.toLowerCase()))
+  const accounts = new Map(replica.accounts().map(({ id, address }) => [id, address]))
+  for (const change of changes) {
+    if (change.entity !== 'account') continue
+    if (change.op === 'upsert') accounts.set(change.id, change.data.address)
+    else accounts.delete(change.id)
+  }
+  const owners = new Set([...accounts.values()].map((address) => address.toLowerCase()))
   const exists = replica.db.prepare('SELECT 1 FROM message WHERE id = ?')
+  const notified = replica.db.prepare(
+    'SELECT 1 FROM notified_message WHERE account_id = ? AND message_id = ?',
+  )
   return changes.flatMap((change) => {
     if (change.entity !== 'message' || change.op !== 'upsert') return []
     const message = change.data
+    const age = now - arrivalTime(message)
+    const identity = messageIdentity(message)
     if (
-      message.sentAt <= startedAt ||
-      !ready.has(message.accountId) ||
+      age < 0 ||
+      age > RECENT_ARRIVAL_MS ||
       !isInboxUnread(message) ||
       (message.from && owners.has(message.from.address.toLowerCase())) ||
-      exists.get(message.id)
+      exists.get(message.id) ||
+      (identity && notified.get(message.accountId, identity))
     ) {
       return []
     }
-    return [{ id: message.id, threadId: message.threadId }]
+    const key = identity ? JSON.stringify([message.accountId, identity]) : message.id
+    return [{ id: message.id, threadId: message.threadId, key }]
   })
-}
-
-export function isInterrupt(_thread: ThreadSummary): boolean {
-  return true
 }
 
 export function notificationMessage(replica: Replica, candidate: Candidate): Message | null {
   const [thread] = replica.summaries([candidate.threadId])
-  if (!thread?.inInbox || thread.muted || !thread.unreadCount || !isInterrupt(thread)) return null
+  if (!thread?.inInbox || thread.muted || !thread.unreadCount) return null
   const row = replica.db.prepare('SELECT data FROM message WHERE id = ?').get(candidate.id) as
     | { data: string }
     | undefined
@@ -124,7 +138,7 @@ export class NewMailNotifications {
     if (!settings.enabled || inQuietHours(settings, new Date())) return
     for (const candidate of candidates) {
       const [thread] = this.#replica.summaries([candidate.threadId])
-      if (!thread?.muted) this.#pending.set(candidate.id, candidate)
+      if (!thread?.muted) this.#pending.set(candidate.key, candidate)
     }
     if (this.#pending.size && !this.#timer) this.#timer = setTimeout(() => this.#flush(), 10_000)
   }
@@ -143,18 +157,31 @@ export class NewMailNotifications {
     const messages = candidates
       .map((candidate) => notificationMessage(this.#replica, candidate))
       .filter((message) => message !== null)
-    if (messages.length > 3) {
-      const latest = messages.reduce((a, b) => (a.sentAt > b.sentAt ? a : b))
+    if (messages.length === 0) return
+    const remember = this.#replica.db.prepare(
+      'INSERT OR IGNORE INTO notified_message (account_id, message_id) VALUES (?, ?)',
+    )
+    if (settings.showSnippet && messages.length > 3) {
+      const latest = messages.reduce((a, b) => (arrivalTime(a) > arrivalTime(b) ? a : b))
       this.#show({ title: `${messages.length} new messages`, threadId: latest.threadId })
-      return
+    } else {
+      for (const message of messages) {
+        const sender = message.from?.name || message.from?.address || 'Unknown sender'
+        this.#show(
+          settings.showSnippet
+            ? {
+                title: sender,
+                subtitle: message.subject || '(No subject)',
+                body: message.snippet,
+                threadId: message.threadId,
+              }
+            : { title: `New message from ${sender}`, threadId: message.threadId },
+        )
+      }
     }
     for (const message of messages) {
-      this.#show({
-        title: message.from?.name || message.from?.address || 'Unknown sender',
-        subtitle: message.subject || '(No subject)',
-        body: settings.showSnippet ? message.snippet : undefined,
-        threadId: message.threadId,
-      })
+      const identity = messageIdentity(message)
+      if (identity) remember.run(message.accountId, identity)
     }
   }
 }

@@ -552,4 +552,9 @@ export const MIGRATIONS: readonly Migration[] = [
       DELETE FROM handoff WHERE t3_thread_id IS NULL;
     `,
   },
+  {
+    version: 16,
+    name: 'Provider delivery timestamps',
+    sql: 'ALTER TABLE message ADD COLUMN delivered_at INTEGER;',
+  },
 ]

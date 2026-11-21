@@ -52,6 +52,22 @@ it('backfills newest Inbox mail first, resumes older pages, and keeps only the f
   })
 })
 
+it('publishes INTERNALDATE separately from the message Date', async () => {
+  const { imap, makeSync, queries } = fixture()
+  const uid = imap.add('INBOX', 'Message-ID: <delayed@example.com>')
+  const deliveredAt = new Date('2026-11-21T12:00:00Z')
+  const stored = imap.folder('INBOX').messages.get(uid)
+  if (!stored) throw new Error('Missing fixture message')
+  stored.internalDate = deliveredAt
+
+  await makeSync().step('all')
+
+  expect(queries.message('a:INBOX:1:1')).toMatchObject({
+    sentAt: Date.parse('2026-11-21T10:00:00Z'),
+    deliveredAt: deliveredAt.getTime(),
+  })
+})
+
 it('retries a failed body page without skipping UIDs', async () => {
   const { imap, makeSync, queries } = fixture()
   imap.add('INBOX', 'Subject: Retry')

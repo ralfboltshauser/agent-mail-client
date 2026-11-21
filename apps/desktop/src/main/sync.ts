@@ -39,16 +39,14 @@ export class SyncLoop extends EventEmitter<{
   readonly #engine: EngineClient
   readonly #replica: Replica
   readonly #controller = new AbortController()
-  readonly #startedAt: number
   #status: SyncStatus
   #pulling: Promise<void> | null = null
   #pullAgain = false
 
-  constructor(engine: EngineClient, replica: Replica, startedAt: number) {
+  constructor(engine: EngineClient, replica: Replica) {
     super()
     this.#engine = engine
     this.#replica = replica
-    this.#startedAt = startedAt
     this.#status = {
       phase: 'connecting',
       engineUrl: engine.baseUrl,
@@ -123,7 +121,10 @@ export class SyncLoop extends EventEmitter<{
         if (signal.aborted) return
         this.#set({ snoozeEnabled: me.features?.snooze === true })
         void this.#refreshHealth(signal)
-        if (this.#replica.modseq === null) await this.#bootstrap()
+        if (this.#replica.modseq === null) {
+          await this.#bootstrap()
+          this.#set({ phase: 'live', progress: null })
+        }
         await this.pull()
         if (signal.aborted) return
         this.#set({ phase: 'live', error: null, progress: null })
@@ -146,7 +147,7 @@ export class SyncLoop extends EventEmitter<{
       } catch (error) {
         if (signal.aborted) return
         if (error instanceof EngineError && error.code === 'resync_required') {
-          this.#replica.clear()
+          this.#replica.clear({ keepNotificationHistory: true })
           this.emit('changed')
           continue
         }
@@ -168,7 +169,7 @@ export class SyncLoop extends EventEmitter<{
     this.#set({ phase: 'bootstrapping', progress: 0 })
     const state = await this.#engine.get<SyncState>('/v1/sync/state', { signal })
     signal.throwIfAborted()
-    this.#replica.clear()
+    this.#replica.clear({ keepNotificationHistory: true })
     let done = 0
     for (const entity of SNAPSHOT_ORDER) {
       let cursor: string | null = null
@@ -207,7 +208,7 @@ export class SyncLoop extends EventEmitter<{
       if (res.changes.length > 0 || res.modseq !== since) {
         const arrivals =
           cursor !== null && this.#status.phase !== 'bootstrapping' && this.listenerCount('newMail')
-            ? newInboxMessages(this.#replica, res.changes, this.#startedAt)
+            ? newInboxMessages(this.#replica, res.changes)
             : []
         this.#replica.transaction(() => {
           this.#replica.apply(res.changes)

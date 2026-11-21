@@ -9,7 +9,8 @@ import {
 } from './notifications'
 import { Replica } from './replica'
 
-const startedAt = 1000
+const now = new Date(2026, 10, 21, 12).getTime()
+const old = now - 11 * 60_000
 const account: AccountSummary = {
   id: 'a',
   kind: 'gmail',
@@ -35,7 +36,7 @@ const thread: ThreadSummary = {
   starred: false,
   hasAttachments: false,
   labelIds: ['a:INBOX'],
-  lastMessageAt: startedAt + 1,
+  lastMessageAt: now,
 }
 
 function message(id: string, overrides: Partial<MessageDetail> = {}): MessageDetail {
@@ -54,7 +55,7 @@ function message(id: string, overrides: Partial<MessageDetail> = {}): MessageDet
     snippet: 'Snippet',
     bodyText: '',
     hasHtml: false,
-    sentAt: startedAt + 1,
+    sentAt: now,
     unread: true,
     starred: false,
     labelIds: ['a:INBOX'],
@@ -80,12 +81,14 @@ afterEach(() => {
 })
 
 describe('new Inbox mail', () => {
-  it('requires a new unread Inbox message after startup from someone other than an owner', () => {
-    replica.put('account', { ...account, id: 'b', address: 'other@example.com' })
+  it('requires a new unread Inbox message with a recent arrival from someone other than an owner', () => {
+    const other = { ...account, id: 'b', address: 'other@example.com' }
     replica.put('message', message('existing', { unread: false }))
-    const changes = [
+    const changes: SyncChange[] = [
       message('existing'),
-      message('old', { sentAt: startedAt }),
+      message('old', { sentAt: old }),
+      message('old-delivery', { deliveredAt: old }),
+      message('future', { deliveredAt: now + 1 }),
       message('read', { unread: false }),
       message('archived', { labelIds: [] }),
       message('spam', { labelIds: ['a:INBOX', 'a:SPAM'] }),
@@ -95,22 +98,12 @@ describe('new Inbox mail', () => {
       message('other-self', { from: { address: 'other@example.com', name: null } }),
       message('new'),
     ].map(change)
-    expect(newInboxMessages(replica, changes, startedAt)).toEqual([{ id: 'new', threadId: 't' }])
+    changes.push({ modseq: 2, entity: 'account', op: 'upsert', id: other.id, data: other })
+    expect(newInboxMessages(replica, changes, now)).toEqual([
+      { id: 'new', threadId: 't', key: 'new' },
+    ])
     replica.apply(changes)
-    expect(newInboxMessages(replica, changes, startedAt)).toEqual([])
-  })
-
-  it('skips mail from an Account whose initial backfill is in progress', () => {
-    replica.put('account', {
-      ...account,
-      status: 'backfilling',
-      backfill: { ...account.backfill, phase: 'all' },
-    })
-    const changes = [change(message('new'))]
-    expect(newInboxMessages(replica, changes, startedAt)).toEqual([])
-    replica.apply(changes)
-    replica.put('account', account)
-    expect(newInboxMessages(replica, changes, startedAt)).toEqual([])
+    expect(newInboxMessages(replica, changes, now)).toEqual([])
   })
 })
 
@@ -142,13 +135,13 @@ describe('quiet hours', () => {
 describe('notification batching', () => {
   const setup = () => {
     vi.useFakeTimers()
-    vi.setSystemTime(new Date(2026, 10, 21, 12))
+    vi.setSystemTime(now)
     const settings = { ...DEFAULT_NOTIFICATION_SETTINGS }
     const show = vi.fn()
     const batch = new NewMailNotifications(replica, () => settings, show)
     const add = (...messages: MessageDetail[]) => {
       const changes = messages.map(change)
-      const candidates = newInboxMessages(replica, changes, startedAt)
+      const candidates = newInboxMessages(replica, changes)
       replica.apply(changes)
       batch.add(candidates)
     }
@@ -173,18 +166,63 @@ describe('notification batching', () => {
     })
   })
 
-  it('shows three separate notifications and respects the current snippet setting', () => {
-    const { show, settings, add } = setup()
-    add(message('1'), message('2'), message('3'))
-    settings.showSnippet = false
+  it('alerts for live Inbox mail during backfill and skips historical mail', () => {
+    const { show, add } = setup()
+    replica.put('account', {
+      ...account,
+      kind: 'imap',
+      status: 'backfilling',
+      backfill: { ...account.backfill, phase: 'all' },
+    })
+    add(
+      message('history', { deliveredAt: old }),
+      message('live', { sentAt: old, deliveredAt: now, subject: 'Live delivery' }),
+    )
     vi.advanceTimersByTime(10_000)
-    expect(show).toHaveBeenCalledTimes(3)
-    expect(show).toHaveBeenLastCalledWith({
+    expect(show).toHaveBeenCalledExactlyOnceWith({
       title: 'Sender',
-      subtitle: 'Subject',
-      body: undefined,
+      subtitle: 'Live delivery',
+      body: 'Snippet',
       threadId: 't',
     })
+  })
+
+  it('does not notify again after an IMAP reset reimports recent mail with new row IDs', () => {
+    const { show, add } = setup()
+    replica.put('account', { ...account, kind: 'imap' })
+    const messages = Array.from({ length: 5 }, (_, i) =>
+      message(`before-${i}`, { rfcMessageId: `<mail-${i}@example.com>`, deliveredAt: now }),
+    )
+    add(...messages)
+    vi.advanceTimersByTime(10_000)
+    expect(show).toHaveBeenCalledExactlyOnceWith({ title: '5 new messages', threadId: 't' })
+    for (const mail of messages) replica.remove('message', mail.id)
+    add(...messages.map((mail, i) => ({ ...mail, id: `after-${i}` })))
+    vi.advanceTimersByTime(10_000)
+    expect(show).toHaveBeenCalledTimes(1)
+    replica.clear({ keepNotificationHistory: true })
+    replica.put('account', account)
+    replica.put('thread', thread)
+    add(...messages)
+    vi.advanceTimersByTime(10_000)
+    expect(show).toHaveBeenCalledTimes(1)
+
+    const sameMail = message('other-account', {
+      rfcMessageId: 'mail-0@example.com',
+      accountId: 'b',
+      labelIds: ['b:INBOX'],
+    })
+    expect(newInboxMessages(replica, [change(sameMail)])).toHaveLength(1)
+  })
+
+  it('shows only the sender for each notification when snippets are turned off before display', () => {
+    const { show, settings, add } = setup()
+    add(message('1'), message('2'), message('3'), message('4'))
+    settings.showSnippet = false
+    vi.advanceTimersByTime(10_000)
+    expect(show.mock.calls).toEqual(
+      Array.from({ length: 4 }, () => [{ title: 'New message from Sender', threadId: 't' }]),
+    )
   })
 
   it('drops arrivals during quiet hours and batches that reach quiet hours', () => {

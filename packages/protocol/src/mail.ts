@@ -82,6 +82,7 @@ export const MessageDetail = z.object({
   bodySearchTruncated: z.boolean().optional(),
   hasHtml: z.boolean(),
   sentAt: z.number(),
+  deliveredAt: z.number().optional(),
   unread: z.boolean(),
   starred: z.boolean(),
   labelIds: z.array(z.string()),

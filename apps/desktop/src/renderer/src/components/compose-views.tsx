@@ -345,7 +345,7 @@ function NotificationPreferences() {
             checked={settings.showSnippet}
             onChange={(event) => setSettings({ ...settings, showSnippet: event.target.checked })}
           />
-          Show message snippet
+          Show subject and snippet
         </label>
         <fieldset>
           <legend className="mb-2">Quiet hours</legend>

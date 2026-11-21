@@ -74,6 +74,7 @@ function MailApp() {
   const [openingComposer, setOpeningComposer] = useState(false)
   const opening = useRef(false)
   const [minimised, setMinimised] = useState<{ id: string; subject: string } | null>(null)
+  const searchRequest = useRef(0)
   const searchInput = useRef<HTMLInputElement>(null)
   const readerScroll = useRef<HTMLDivElement>(null)
 
@@ -205,6 +206,7 @@ function MailApp() {
         : (systemViews(snoozeEnabled).find((v) => v.view.kind === view.kind)?.title ?? 'Mail')
 
   const goTo = useCallback((next: View) => {
+    searchRequest.current++
     setSearch(null)
     setFilterText('')
     setBucketPickerId(null)
@@ -227,19 +229,22 @@ function MailApp() {
   const runSearch = useCallback(
     async (text: string) => {
       if (!text) return
+      const request = ++searchRequest.current
       setSearch({ text, hits: null, loading: true })
       try {
         const hits = await window.amc.search(text, accountId)
+        if (request !== searchRequest.current) return
         setSearch({ text, hits, loading: false })
         setSelectedId(hits[0]?.id ?? null)
       } catch {
-        setSearch({ text, hits: [], loading: false })
+        if (request === searchRequest.current) setSearch({ text, hits: [], loading: false })
       }
     },
     [accountId],
   )
 
   const clearSearch = () => {
+    searchRequest.current++
     setSearch(null)
     setFilterText('')
     searchInput.current?.blur()
@@ -455,6 +460,7 @@ function MailApp() {
                       ref={searchInput}
                       value={search ? search.text : filterText}
                       onChange={(e) => {
+                        searchRequest.current++
                         setSearch(null)
                         setFilterText(e.target.value)
                       }}
