@@ -13,7 +13,9 @@
     "format": "biome check --write .",
     "test": "vitest run",
     "check": "pnpm typecheck && pnpm lint && pnpm test",
-    "deploy:host": "scripts/deploy-host.sh"
+    "deploy:host": "scripts/deploy-host.sh",
+    "cli:install": "pnpm --filter @amc/cli build && bash scripts/install-cli.sh",
+    "desktop:install": "bash scripts/install-desktop.sh"
   },
   "devDependencies": {
     "@biomejs/biome": "2.2.4",

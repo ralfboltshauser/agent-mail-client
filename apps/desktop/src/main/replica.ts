@@ -230,6 +230,13 @@ export class Replica {
     return { thread: JSON.parse(row.data), messages, drafts }
   }
 
+  unreadInboxCount(): number {
+    const row = this.db
+      .prepare('SELECT count(*) AS n FROM thread WHERE in_inbox = 1 AND unread_count > 0')
+      .get() as { n: number }
+    return row.n
+  }
+
   counts(accountId: string | null): Counts {
     const row = this.db
       .prepare(

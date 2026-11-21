@@ -31,7 +31,10 @@ export function SyncIndicator({
   const broken = accounts.filter((a) => a.status === 'error' || a.status === 'auth_expired')
   let tone: 'ok' | 'busy' | 'bad' = 'ok'
   let text = status.lastSyncAt ? `Up to date · ${ago(status.lastSyncAt, now)}` : 'Connecting…'
-  if (status.phase === 'bootstrapping') {
+  if (status.phase === 'paused') {
+    tone = 'busy'
+    text = 'Sync paused'
+  } else if (status.phase === 'bootstrapping') {
     tone = 'busy'
     text = `Downloading mail${status.progress ? ` · ${Math.round(status.progress * 100)}%` : '…'}`
   } else if (status.phase === 'offline') {

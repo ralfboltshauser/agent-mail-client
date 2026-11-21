@@ -8,11 +8,15 @@ import { clearPairing, loadPairing, savePairing } from './auth'
 import { EngineClient, EngineError } from './engine'
 import { Replica } from './replica'
 import { SyncLoop } from './sync'
+import { createTray } from './tray'
 
 let window: BrowserWindow | null = null
 let replica: Replica | null = null
 let engine: EngineClient | null = null
 let sync: SyncLoop | null = null
+let pausedStatus: SyncStatus | null = null
+let tray: ReturnType<typeof createTray> | null = null
+let changedTimer: NodeJS.Timeout | null = null
 
 const UNPAIRED: SyncStatus = {
   phase: 'unpaired',
@@ -31,21 +35,47 @@ function openReplica(): Replica {
   return replica
 }
 
+function refreshTray() {
+  if (tray) tray.refresh(engine ? openReplica().unreadInboxCount() : 0, !!engine, !!pausedStatus)
+}
+
 function connect(engineUrl: string, token: string) {
-  sync?.stop()
   engine = new EngineClient(engineUrl, token)
-  sync = new SyncLoop(engine, openReplica())
-  let changedTimer: NodeJS.Timeout | null = null
-  sync.on('status', (status) => broadcast('amc:status', status))
-  sync.on('changed', () => {
+  startSync(engine)
+  refreshTray()
+}
+
+function startSync(client: EngineClient) {
+  sync?.stop()
+  pausedStatus = null
+  const loop = new SyncLoop(client, openReplica())
+  sync = loop
+  broadcast('amc:status', loop.status)
+  loop.on('status', (status) => {
+    if (sync === loop) broadcast('amc:status', status)
+  })
+  loop.on('changed', () => {
     // Coalesce bursts (backfill pages) into one UI refresh per 120 ms.
     if (changedTimer) return
     changedTimer = setTimeout(() => {
       changedTimer = null
       broadcast('amc:changed')
+      refreshTray()
     }, 120)
   })
-  sync.start()
+  loop.start()
+}
+
+function toggleSync() {
+  if (sync) {
+    pausedStatus = { ...sync.status, phase: 'paused', progress: null, error: null }
+    sync.stop()
+    sync = null
+    broadcast('amc:status', pausedStatus)
+  } else if (engine) {
+    startSync(engine)
+  }
+  refreshTray()
 }
 
 function requireEngine(): EngineClient {
@@ -58,10 +88,12 @@ function registerIpc() {
   ipcMain.handle('amc:unpair', () => {
     sync?.stop()
     sync = null
+    pausedStatus = null
     engine = null
     clearPairing()
     openReplica().clear()
     broadcast('amc:status', UNPAIRED)
+    refreshTray()
   })
   registerReadIpc()
 }
@@ -87,7 +119,7 @@ async function pair(engineUrl: string, code: string) {
 }
 
 function registerReadIpc() {
-  ipcMain.handle('amc:status', () => sync?.status ?? UNPAIRED)
+  ipcMain.handle('amc:status', () => sync?.status ?? pausedStatus ?? UNPAIRED)
   ipcMain.handle('amc:syncNow', () => sync?.pull())
 
   ipcMain.handle('amc:accounts', () => openReplica().accounts())
@@ -177,6 +209,17 @@ function createWindow() {
   })
 }
 
+function openWindow() {
+  if (process.platform === 'darwin') app.focus({ steal: true })
+  if (!window) {
+    createWindow()
+    return
+  }
+  if (window.isMinimized()) window.restore()
+  window.show()
+  window.focus()
+}
+
 function buildMenu() {
   Menu.setApplicationMenu(
     Menu.buildFromTemplate([
@@ -196,17 +239,26 @@ function buildMenu() {
   )
 }
 
+// Both the packaged app and electron-vite use the original dev profile by default.
+const customProfile = app.commandLine.getSwitchValue('user-data-dir')
+const profile = customProfile || join(app.getPath('appData'), '@amc', 'desktop')
+mkdirSync(profile, { recursive: true })
+app.setPath('userData', profile)
+
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
-  app.on('second-instance', () => {
-    if (window?.isMinimized()) window.restore()
-    window?.focus()
-  })
+  app.on('second-instance', openWindow)
   app.whenReady().then(() => {
+    // Keep the same app name at safeStorage initialization as the dev build.
     app.setName('AMC')
     buildMenu()
     registerIpc()
+    openReplica()
+    const packagedMac = process.platform === 'darwin' && app.isPackaged
+    const loginItem = packagedMac && !customProfile
+    if (process.platform === 'darwin') tray = createTray(openWindow, toggleSync, loginItem)
+    refreshTray()
     const pairing = loadPairing()
     if (pairing) connect(pairing.engineUrl, pairing.token)
     else {
@@ -220,10 +272,12 @@ if (!app.requestSingleInstanceLock()) {
           console.error(`Pairing failed: ${error.message}`),
         )
     }
-    createWindow()
-    app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) createWindow()
-    })
+    if (!loginItem || !app.getLoginItemSettings().wasOpenedAtLogin) createWindow()
+    app.on('activate', openWindow)
+  })
+  app.on('before-quit', () => {
+    sync?.stop()
+    if (changedTimer) clearTimeout(changedTimer)
   })
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit()

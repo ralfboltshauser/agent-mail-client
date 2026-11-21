@@ -37,7 +37,14 @@ export interface Counts {
   drafts: number
 }
 
-export type SyncPhase = 'unpaired' | 'connecting' | 'bootstrapping' | 'live' | 'offline' | 'error'
+export type SyncPhase =
+  | 'unpaired'
+  | 'connecting'
+  | 'bootstrapping'
+  | 'live'
+  | 'paused'
+  | 'offline'
+  | 'error'
 
 export interface SyncStatus {
   phase: SyncPhase
