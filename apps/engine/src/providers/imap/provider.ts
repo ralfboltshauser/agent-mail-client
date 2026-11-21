@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import type { MessageStructureObject } from 'imapflow'
 import { compileMessage, newMessageId, type OutgoingMessage } from '../../mail/mime.ts'
 import {
   connectImap,
@@ -6,9 +8,10 @@ import {
   type ImapClient,
   type ImapClientFactory,
   type ImapCredentials,
+  imapEndpoint,
   imapMoveSupport,
 } from './client.ts'
-import { mapFolders } from './mapping.ts'
+import { type Folder, mapFolders } from './mapping.ts'
 
 export interface Submission {
   sendMail(message: {
@@ -30,6 +33,42 @@ export interface ImapMessageLocation {
   uidValidity: string
   uid: number
 }
+
+interface ImapDraftLocation {
+  folder: Folder
+  uidValidity: string
+  uid: number
+  size: number
+  id: string
+}
+
+export function draftSourceHash(raw: Buffer): string {
+  return createHash('sha256').update(raw).digest('hex')
+}
+
+export class SmtpRejection extends Error {}
+
+function smtpRejection(error: unknown): SmtpRejection | null {
+  if (!error || typeof error !== 'object') return null
+  const { command, responseCode, code } = error as {
+    command?: string
+    responseCode?: number
+    code?: string
+  }
+  const status =
+    typeof responseCode === 'number' && responseCode >= 400 && responseCode < 600
+      ? ` (SMTP ${responseCode})`
+      : ''
+  if (code === 'EAUTH' || command?.startsWith('AUTH ')) {
+    return new SmtpRejection(`SMTP authentication failed${status}. Sign in to this Account again.`)
+  }
+  if (command === 'MAIL FROM') return new SmtpRejection(`SMTP rejected the sender${status}.`)
+  if (command === 'RCPT TO') return new SmtpRejection(`SMTP rejected all recipients${status}.`)
+  if (command === 'DATA' && status) return new SmtpRejection(`SMTP rejected the message${status}.`)
+  return null
+}
+
+const SENT_LOOKUP_MS = 5_000
 
 /** Provider operations for a future owner send pipeline and provider writeback. */
 export class ImapProvider {
@@ -65,13 +104,13 @@ export class ImapProvider {
     let delivery: Awaited<ReturnType<Submission['sendMail']>>
     try {
       delivery = await smtp.sendMail({ raw, envelope: { from: envelope.from, to: envelope.to } })
-    } catch {
-      // Failures around DATA can be ambiguous, so callers must decide whether to retry.
-      throw new Error('SMTP submission failed or could not be confirmed')
+    } catch (error) {
+      // A transport failure can occur after DATA was accepted.
+      throw smtpRejection(error) ?? new Error('SMTP submission failed or could not be confirmed')
     } finally {
       smtp.close()
     }
-    if (!delivery.accepted.length) throw new Error('SMTP did not accept any recipients')
+    if (!delivery.accepted.length) throw new SmtpRejection('SMTP did not accept any recipients')
 
     if (this.#credentials.smtpSavesSent) {
       return { ...delivery, messageId, sentCopy: 'server-managed' }
@@ -104,10 +143,64 @@ export class ImapProvider {
         }
       }
       return null
+    }, SENT_LOOKUP_MS)
+  }
+
+  get draftEndpoint(): string {
+    return imapEndpoint(this.#credentials.imap)
+  }
+
+  #draftId(folder: string, uid: number, uidValidity: bigint): string {
+    return JSON.stringify({
+      folder,
+      uid,
+      uidValidity: String(uidValidity),
+      endpoint: this.draftEndpoint,
     })
   }
 
-  saveDraft(raw: string): Promise<{ id: string; message: { id: string } }> {
+  listDrafts(): Promise<ImapDraftLocation[]> {
+    return this.#withImap(async (client) => {
+      const folder = mapFolders(await client.list()).find(
+        (entry) => entry.label.providerId === 'DRAFT',
+      )
+      if (!folder) return []
+      const box = await client.mailboxOpen(folder.path, { readOnly: true })
+      if (!box.exists) return []
+      const drafts: ImapDraftLocation[] = []
+      for await (const item of client.fetch('1:*', { flags: true, size: true }, { uid: true })) {
+        if (item.flags?.has('\\Deleted')) continue
+        drafts.push({
+          folder,
+          uid: item.uid,
+          uidValidity: String(box.uidValidity),
+          size: item.size ?? 0,
+          id: this.#draftId(folder.path, item.uid, box.uidValidity),
+        })
+      }
+      return drafts
+    })
+  }
+
+  readDraft(
+    location: ImapDraftLocation,
+  ): Promise<{ raw: Buffer; structure?: MessageStructureObject } | null> {
+    return this.#withImap(async (client) => {
+      const box = await client.mailboxOpen(location.folder.path, { readOnly: true })
+      if (String(box.uidValidity) !== location.uidValidity) return null
+      for await (const item of client.fetch(
+        String(location.uid),
+        { flags: true, source: true, bodyStructure: true },
+        { uid: true },
+      )) {
+        if (item.uid === location.uid && item.source && !item.flags?.has('\\Deleted'))
+          return { raw: item.source, structure: item.bodyStructure }
+      }
+      return null
+    })
+  }
+
+  saveDraft(raw: string): Promise<{ id: string; message: { id: string }; sourceHash: string }> {
     return this.#withImap(async (client) => {
       const folder = mapFolders(await client.list()).find(
         (folder) => folder.label.providerId === 'DRAFT',
@@ -115,38 +208,49 @@ export class ImapProvider {
       if (!folder) throw new Error('No IMAP Drafts folder')
       if (!this.#supportsUidExpunge(client))
         throw new Error('IMAP Draft replacement needs UID EXPUNGE')
-      const result = await client.append(folder.path, Buffer.from(raw), ['\\Draft', '\\Seen'])
+      const source = Buffer.from(raw)
+      const result = await client.append(folder.path, source, ['\\Draft', '\\Seen'])
       if (!result || !result.uid || !result.uidValidity)
         throw new Error('No UID for saved IMAP draft')
-      const id = JSON.stringify({
-        folder: folder.path,
-        uid: result.uid,
-        uidValidity: String(result.uidValidity),
-      })
-      return { id, message: { id } }
+      const id = this.#draftId(folder.path, result.uid, result.uidValidity)
+      return { id, message: { id }, sourceHash: draftSourceHash(source) }
     })
   }
 
-  deleteDraft(id: string): Promise<boolean> {
-    return this.#withImap((client) => this.#removeDraft(client, id))
-  }
-
-  async #removeDraft(client: ImapClient, id: string): Promise<boolean> {
-    const location = JSON.parse(id) as ImapMessageLocation
-    const mailbox = await client.mailboxOpen(location.folder)
-    if (String(mailbox.uidValidity) !== location.uidValidity) return false
-    let present = false
-    for await (const draft of client.fetch(String(location.uid), { flags: true }, { uid: true })) {
-      present = draft.uid === location.uid
-    }
-    if (!present) return false
-    // UID EXPUNGE is safe only when the server supports UIDPLUS or IMAP4rev2.
-    if (!this.#supportsUidExpunge(client))
-      throw new Error('IMAP Draft replacement needs UID EXPUNGE')
-    return (
-      (await client.messageFlagsAdd(String(location.uid), ['\\Deleted'], { uid: true })) &&
-      (await client.uidExpunge(location.uid))
+  async deleteDraft(
+    id: string,
+    sourceHash: string | null,
+    currentEndpoint: () => string | undefined = () => this.draftEndpoint,
+  ): Promise<boolean> {
+    const location = JSON.parse(id) as ImapMessageLocation & { endpoint?: string }
+    if (
+      !sourceHash ||
+      location.endpoint !== this.draftEndpoint ||
+      location.endpoint !== currentEndpoint()
     )
+      return false
+    return this.#withImap(async (client) => {
+      if (!this.#supportsUidExpunge(client)) return false
+      const mailbox = await client.mailboxOpen(location.folder)
+      if (String(mailbox.uidValidity) !== location.uidValidity) return false
+      let matches = false
+      for await (const draft of client.fetch(
+        String(location.uid),
+        { flags: true, source: true },
+        { uid: true },
+      )) {
+        matches =
+          draft.uid === location.uid &&
+          !!draft.source &&
+          !draft.flags?.has('\\Deleted') &&
+          draftSourceHash(draft.source) === sourceHash
+      }
+      if (!matches || location.endpoint !== currentEndpoint()) return false
+      return (
+        (await client.messageFlagsAdd(String(location.uid), ['\\Deleted'], { uid: true })) &&
+        (await client.uidExpunge(location.uid))
+      )
+    })
   }
 
   #supportsUidExpunge(client: ImapClient): boolean {
@@ -205,12 +309,21 @@ export class ImapProvider {
     })
   }
 
-  async #withImap<T>(run: (client: ImapClient) => Promise<T>): Promise<T> {
+  async #withImap<T>(run: (client: ImapClient) => Promise<T>, timeoutMs?: number): Promise<T> {
     const client = this.#imap(this.#credentials.imap)
-    try {
+    const operation = async () => {
       await connectImap(client)
-      return await run(client)
+      return run(client)
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      if (timeoutMs === undefined) return await operation()
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('IMAP Sent lookup timed out')), timeoutMs)
+      })
+      return await Promise.race([operation(), timeout])
     } finally {
+      clearTimeout(timer)
       client.close()
     }
   }

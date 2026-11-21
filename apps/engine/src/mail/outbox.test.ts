@@ -211,3 +211,52 @@ it('fails a due send with an unavailable Account and preserves its draft for rev
   expect(db.prepare('SELECT id FROM draft WHERE id = ?').get(message.draftId)).toBeDefined()
   db.close()
 })
+
+it('dispatches newly due mail while a previous Sent lookup is still running', async () => {
+  const db = testDb()
+  seedDraft(db)
+  db.exec(`
+    INSERT INTO draft (id, account_id, modseq, last_author, created_at, updated_at)
+    VALUES ('another', 'account', 1, 'owner', 0, 0)
+  `)
+  let now = 100_000
+  let finishLookup = () => {}
+  const lookup = new Promise<null>((resolve) => {
+    finishLookup = () => resolve(null)
+  })
+  const provider: Delivery = {
+    async send(frozen) {
+      if (frozen.draftId === message.draftId) throw new Error('Lost response')
+      return { kind: 'accepted', receipt: { providerId: 'new', providerThreadId: 'thread' } }
+    },
+    find: () => lookup,
+  }
+  const outbox = new Outbox(
+    db,
+    () => provider,
+    () => {},
+    () => now,
+  )
+  const first = outbox.enqueue(owner, { id: 'first', draftId: 'draft', revision: 1 }, () => message)
+  now = first.sendAt
+  await outbox.runDue()
+
+  now += 15_000
+  const reconciling = outbox.runDue()
+  await Promise.resolve()
+  const second = outbox.enqueue(owner, { id: 'second', draftId: 'another', revision: 1 }, () => ({
+    ...message,
+    draftId: 'another',
+  }))
+  now = second.sendAt
+  const sending = outbox.runDue()
+  try {
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(outbox.get(second.id)?.status).toBe('sent')
+    expect(outbox.get(first.id)?.status).toBe('dispatching')
+  } finally {
+    finishLookup()
+  }
+  await Promise.all([reconciling, sending])
+  db.close()
+})

@@ -1,6 +1,7 @@
 import {
   BucketInput,
   hasScope,
+  ORIGINAL_DRAFT_LEFT,
   type OrganiseAction,
   type Scope,
   UntriagedLimit,
@@ -459,8 +460,8 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
           annotations: { destructiveHint: true },
         },
         async ({ draft_id }) => {
-          await drafts.delete(draft_id)
-          return json({ deleted: draft_id })
+          const left = await drafts.delete(draft_id)
+          return json({ deleted: draft_id, ...(left ? { warning: ORIGINAL_DRAFT_LEFT } : {}) })
         },
       )
   }

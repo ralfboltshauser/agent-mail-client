@@ -501,4 +501,14 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX imap_bucket_reimport_thread ON imap_bucket_reimport (account_id, path_key, thread_key);
     `,
   },
+  {
+    version: 13,
+    name: 'IMAP draft content preservation',
+    sql: `
+      ALTER TABLE draft ADD COLUMN imap_content TEXT;
+      ALTER TABLE draft ADD COLUMN mirror_left INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE draft_attachment ADD COLUMN disposition TEXT;
+      ALTER TABLE outbox ADD COLUMN original_draft_left INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
 ]
