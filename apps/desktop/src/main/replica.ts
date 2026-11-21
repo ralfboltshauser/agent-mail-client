@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import type {
   AccountSummary,
@@ -9,7 +10,8 @@ import type {
   SyncEntity,
   ThreadSummary,
 } from '@amc/protocol'
-import type { Counts, ThreadQuery, ThreadWithMessages } from '../shared/api'
+import { RECENT_THREAD_BODIES } from '@amc/protocol'
+import type { Counts, ReplicaThreadMessage, ThreadQuery, ThreadWithMessages } from '../shared/api'
 import { LocalDraftUpdates } from './draft-updates'
 import { LocalOrganise, ORGANISE_SCHEMA } from './organise'
 
@@ -42,6 +44,11 @@ export class Replica {
       CREATE TABLE IF NOT EXISTS draft (id TEXT PRIMARY KEY, thread_id TEXT, updated_at INTEGER NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS html (message_id TEXT PRIMARY KEY, html TEXT NOT NULL);
     `)
+    // Existing rows keep their embedded body until the next upsert.
+    const messageColumns = this.db.prepare('PRAGMA table_info(message)').all()
+    if (!messageColumns.some((column) => column.name === 'body_text')) {
+      this.db.exec('ALTER TABLE message ADD COLUMN body_text BLOB')
+    }
     this.db.exec(ORGANISE_SCHEMA)
     const columns = this.db.prepare('PRAGMA table_info(organise_queue)').all()
     if (!columns.some((column) => column.name === 'messages')) {
@@ -140,11 +147,14 @@ export class Replica {
       }
       case 'message': {
         const m = row as MessageDetail
+        const { bodyText, ...metadata } = m
+        const body = Buffer.from(bodyText, 'utf8')
+        const bodyRevision = createHash('sha256').update(body).digest('hex')
         this.db
           .prepare(
-            'INSERT OR REPLACE INTO message (id, thread_id, sent_at, data) VALUES (?, ?, ?, ?)',
+            'INSERT OR REPLACE INTO message (id, thread_id, sent_at, data, body_text) VALUES (?, ?, ?, ?, ?)',
           )
-          .run(m.id, m.threadId, m.sentAt, JSON.stringify(m))
+          .run(m.id, m.threadId, m.sentAt, JSON.stringify({ ...metadata, bodyRevision }), body)
         break
       }
       case 'draft': {
@@ -241,7 +251,12 @@ export class Replica {
 
   thread(id: string): ThreadWithMessages | null {
     const base = this.baseThread(id)
-    if (base) this.organise.messages(base.thread, base.messages)
+    if (!base) return null
+    this.organise.messages(base.thread, base.messages)
+    const recent = base.messages.length - RECENT_THREAD_BODIES
+    for (const [index, message] of base.messages.entries()) {
+      if (index >= recent || message.unread) message.bodyText = this.messageText(message.id)
+    }
     return base
   }
 
@@ -251,10 +266,15 @@ export class Replica {
       | undefined
     if (!row) return null
     const messages = (
-      this.db.prepare('SELECT data FROM message WHERE thread_id = ? ORDER BY sent_at').all(id) as {
-        data: string
-      }[]
-    ).map((r) => JSON.parse(r.data) as MessageDetail)
+      this.db
+        .prepare(
+          `SELECT CASE WHEN body_text IS NULL THEN json_remove(data, '$.bodyText') ELSE data END AS data
+           FROM message WHERE thread_id = ? ORDER BY sent_at, id`,
+        )
+        .all(id) as { data: string }[]
+    ).map(
+      (r): ReplicaThreadMessage => ({ bodyRevision: '', ...JSON.parse(r.data), bodyText: null }),
+    )
     const drafts = (
       this.db
         .prepare('SELECT data FROM draft WHERE thread_id = ? ORDER BY updated_at DESC')
@@ -310,6 +330,18 @@ export class Replica {
       )
       .all(accountId, ...words.map((w) => `%${w.replace(/[%_]/g, '')}%`)) as { data: string }[]
     return rows.map((r) => JSON.parse(r.data))
+  }
+
+  messageText(messageId: string): string | null {
+    const row = this.db
+      .prepare(
+        'SELECT CAST(body_text AS BLOB) AS body, CASE WHEN body_text IS NULL THEN data END AS legacy FROM message WHERE id = ?',
+      )
+      .get(messageId) as { body: Uint8Array | null; legacy: string | null } | undefined
+    if (row?.body) return Buffer.from(row.body).toString('utf8')
+    return typeof row?.legacy === 'string'
+      ? (JSON.parse(row.legacy) as MessageDetail).bodyText
+      : null
   }
 
   html(messageId: string): string | null {

@@ -122,13 +122,12 @@ export class ImapBodyParts {
   async finish(text: string | undefined, html: string | false | undefined) {
     const htmlParts = this.#expand(html || '')
     const textParts = this.#expand(text ?? '')
-    const textFromHtml = text === undefined && htmlParts.length > 0
-    const { bodyText, partial } = await this.#prefix(
-      textFromHtml ? htmlParts : textParts,
-      textFromHtml,
-    )
+    const plain = await this.#prefix(textParts, false)
+    // A blank partial sample can still have text past the decoding limit.
+    const textFromHtml = !plain.bodyText && !plain.partial && htmlParts.length > 0
+    const { bodyText, partial } = textFromHtml ? await this.#prefix(htmlParts, true) : plain
     const bodyParts: BodyParts = {}
-    if (textParts.length) bodyParts.text = textParts
+    if (!textFromHtml && textParts.length) bodyParts.text = textParts
     if (partial) {
       bodyParts.searchTruncated = true
       if (textFromHtml) bodyParts.textFromHtml = true

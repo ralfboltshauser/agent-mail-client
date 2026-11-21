@@ -1,6 +1,6 @@
 import type { SyncChanges, SyncSnapshotPage } from '@amc/protocol'
-import { describe, expect, it } from 'vitest'
-import { issueToken } from '../auth/tokens.ts'
+import { describe, expect, it, vi } from 'vitest'
+import { issueToken, revokeToken } from '../auth/tokens.ts'
 import { BlobStore } from '../blobs.ts'
 import { Drafts } from '../mail/drafts.ts'
 import { MailQueries } from '../mail/queries.ts'
@@ -33,7 +33,7 @@ function setup() {
   }
   const add = (id: string, date: number) =>
     store.putMessage('a', ['me@x.com'], fromGmail(gmail.add(id, { date })))
-  return { db, store, get, add, gmail }
+  return { app, db, store, get, add, gmail }
 }
 
 describe('sync protocol', () => {
@@ -66,6 +66,45 @@ describe('sync protocol', () => {
     expect(res.body.changes.filter((c) => c.id === 'a:m2')).toHaveLength(1)
     expect(res.body.more).toBe(false)
   })
+
+  it.each(['idle expiry', 'revocation before an event'])(
+    'closes Agent event streams on %s',
+    async (end) => {
+      const { app, db, store, add } = setup()
+      vi.useFakeTimers()
+      try {
+        const token = issueToken(db, {
+          kind: 'agent',
+          name: 'test',
+          scopes: ['read'],
+          expiresAt: Date.now() + 800,
+        })
+        const response = await app.request('/v1/sync/events', {
+          headers: { Authorization: `Bearer ${token.secret}` },
+        })
+        const reader = response.body?.getReader()
+        if (!reader) throw new Error('Missing event stream')
+        try {
+          const hello = await reader.read()
+          expect(new TextDecoder().decode(hello.value)).toContain('event: hello')
+          expect(store.listenerCount('change')).toBe(1)
+          if (end === 'revocation before an event') {
+            add('m1', 1000)
+            revokeToken(db, token.id)
+            await vi.advanceTimersByTimeAsync(150)
+          } else {
+            await vi.advanceTimersByTimeAsync(1000)
+          }
+          expect(store.listenerCount('change')).toBe(0)
+          expect(await reader.read()).toMatchObject({ done: true })
+        } finally {
+          await reader.cancel()
+        }
+      } finally {
+        vi.useRealTimers()
+      }
+    },
+  )
 
   it('pages changes and asks stale clients to resync', async () => {
     const { db, get, add } = setup()

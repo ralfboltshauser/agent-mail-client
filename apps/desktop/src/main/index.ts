@@ -278,6 +278,20 @@ function registerComposeIpc() {
 }
 
 function registerReadIpc() {
+  ipcMain.handle('amc:agentActivity', (_e, before: unknown) => {
+    if (before === undefined) return requireEngine().get('/v1/agent/log')
+    if (typeof before !== 'number' || !Number.isSafeInteger(before) || before <= 0)
+      throw new Error('Invalid activity cursor')
+    return requireEngine().get(`/v1/agent/log?before=${before}`)
+  })
+  ipcMain.handle('amc:undoAgentAction', async (_e, id: unknown) => {
+    if (typeof id !== 'string') throw new Error('Invalid action ID')
+    await requireEngine().request(`/v1/agent/log/${encodeURIComponent(id)}/undo`, {
+      method: 'POST',
+    })
+    void sync?.pull()
+  })
+
   ipcMain.handle('amc:status', () => sync?.status ?? pausedStatus ?? unpairedStatus)
   ipcMain.handle('amc:syncNow', () => sync?.pull())
 
@@ -305,6 +319,7 @@ function registerReadIpc() {
       )
     ).contacts
   })
+  ipcMain.handle('amc:messageText', (_e, messageId: string) => openReplica().messageText(messageId))
   ipcMain.handle('amc:messageHtml', async (_e, messageId: string) => {
     const cached = openReplica().html(messageId)
     if (cached !== null) return cached

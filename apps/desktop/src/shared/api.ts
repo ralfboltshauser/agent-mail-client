@@ -1,5 +1,6 @@
 import type {
   AccountSummary,
+  AgentAction,
   ComposeAttachment,
   ComposeDraft,
   ComposePatch,
@@ -7,11 +8,11 @@ import type {
   Contact,
   Draft,
   Label,
-  MessageDetail,
   OrganiseAction,
   OutboxItem,
   SearchHit,
   SendRequest,
+  ThreadMessage,
   ThreadSummary,
 } from '@amc/protocol'
 
@@ -34,9 +35,11 @@ export interface ThreadQuery {
   limit?: number
 }
 
+export type ReplicaThreadMessage = ThreadMessage & { bodyRevision: string }
+
 export interface ThreadWithMessages {
   thread: ThreadSummary
-  messages: MessageDetail[]
+  messages: ReplicaThreadMessage[]
   drafts: Draft[]
 }
 
@@ -59,6 +62,7 @@ export type SyncPhase =
 export interface SyncStatus {
   phase: SyncPhase
   snoozeEnabled?: boolean
+  healthWarnings?: string[]
   engineUrl: string | null
   /** Bootstrap progress, 0..1. */
   progress: number | null
@@ -81,6 +85,8 @@ export interface AmcApi {
   syncNow(): Promise<void>
   organise(action: OrganiseAction): Promise<string>
   organiseErrors(): Promise<OrganiseNotice[]>
+  agentActivity(before?: number): Promise<{ actions: AgentAction[]; nextBefore: number | null }>
+  undoAgentAction(id: string): Promise<void>
 
   accounts(): Promise<AccountSummary[]>
   labels(accountId: string | null): Promise<Label[]>
@@ -114,6 +120,7 @@ export interface AmcApi {
   saveSignature(accountId: string, signature: string): Promise<{ signature: string }>
   sendSettings(): Promise<{ undoSendSeconds: number }>
   saveSendSettings(undoSendSeconds: number): Promise<{ undoSendSeconds: number }>
+  messageText(messageId: string): Promise<string | null>
   messageHtml(messageId: string): Promise<string | null>
   inlineAttachment(attachmentId: string): Promise<string>
   openAttachment(attachmentId: string, filename: string): Promise<void>

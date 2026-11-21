@@ -38,6 +38,8 @@ registration. Desktop upgrades move the previous app bundle to the Trash.
 | `/srv/amc/blobs` | raw mail and attachments (a cache) | `amc`, 700 dir |
 | `/srv/amc/backups` | pre-migration and nightly backups | `amc`, 700 dir |
 
+Keep the database, blobs, and backups on the data disk under `/srv/amc`, with systemd unit files and small runtime state allowed on the root disk.
+
 The Engine runs as the `amc` system user so that nothing running as the owner, including coding agents, can read its credentials ([ADR 0003](adr/0003-engine-runs-as-its-own-user.md)).
 
 ## Everyday commands
@@ -71,3 +73,44 @@ sudo ln -sfn /opt/amc/releases/<sha> /opt/amc/current && sudo systemctl restart 
 ```
 
 A migration that already ran is not undone by a rollback. Restore the `pre-migrate-*.db` copy from `/srv/amc/backups` with the Engine stopped.
+
+## Backups and restore
+
+`amc-backup.timer` runs at 03:00 UTC and catches up after downtime. The job
+verifies each SQLite snapshot before publishing it as
+`/srv/amc/backups/amc-YYYYMMDD.db`. It keeps the 14 newest nightly copies and
+the newest remaining copy in each of the eight most recent weeks with a backup
+(weeks start on Monday). Pre-migration backups stay in place.
+
+```sh
+amc doctor
+systemctl list-timers amc-backup.timer
+journalctl -u amc-backup.service -n 30
+sudo systemctl start amc-backup.service  # make a verified copy now
+```
+
+Restore on the Host. Choose the backup by date and wait for any running backup
+to finish after stopping the timer.
+
+```sh
+sudo systemctl stop amc-backup.timer amc-engine.service
+sudo amc-engine restore /srv/amc/backups/amc-YYYYMMDD.db
+sudo systemctl start amc-engine.service amc-backup.timer
+amc status
+```
+
+Restore checks SQLite integrity before replacing the database. It prints the
+path of the previous database in `/srv/amc/db` if one existed. Keep that file
+until you've checked the restored data. If SQLite cannot close a damaged live
+journal, keep the Engine stopped and move `amc.db` and any `amc.db-wal` and
+`amc.db-shm` files together to a recovery directory on `/srv/amc`, then retry.
+After restoring an older copy, unpair and re-pair the desktop to rebuild its
+replica. Unpairing clears pending desktop changes. Pair the CLI again if its
+token was issued after the backup. Restored queued and dispatching sends are
+marked as uncertain for review in the Outbox because they may already have been
+sent or cancelled. Check Sent before retrying them.
+
+Blobs are content-addressed and append-only and stay in `/srv/amc/blobs`. For a
+future offsite copy, rsync `/srv/amc` to protected storage and use a verified
+backup file for recovery. Keep a separate protected copy of the encryption key
+in `/etc/amc/key` so restored credentials can be decrypted.

@@ -203,6 +203,41 @@ it('counts identical copies once and preserves the surviving folder after one co
   expect(thread()?.messages[0]?.id).not.toBe(shared?.id)
 })
 
+it.each([
+  ['BOM only', '//4='],
+  ['whitespace only', '//4gAAkA'],
+])('uses HTML when the decoded plain alternative is %s', async (_label, encodedPlain) => {
+  const { imap, makeSync, queries, blobs } = fixture()
+  imap.add(
+    'INBOX',
+    'Subject: HTML fallback\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=outer',
+    [
+      '--outer',
+      'Content-Type: multipart/alternative; boundary=alt',
+      '',
+      '--alt',
+      'Content-Type: text/plain; charset=utf-16le',
+      'Content-Transfer-Encoding: base64',
+      '',
+      encodedPlain,
+      '--alt',
+      'Content-Type: text/html; charset=utf-8',
+      '',
+      '<p>Actual message</p>',
+      '--alt--',
+      '--outer--',
+    ].join('\r\n'),
+  )
+
+  await makeSync().step('all')
+
+  const [thread] = queries.threads({}).threads
+  const message = queries.thread(thread?.id ?? '')?.messages[0]
+  expect(message).toMatchObject({ bodyText: 'Actual message', snippet: 'Actual message' })
+  expect(queries.messageHtml(message?.id ?? '', blobs)).toBe('<p>Actual message</p>')
+  expect(queries.search('actual', {})).toHaveLength(1)
+})
+
 const longBody = `${'A line in a large message. '.repeat(32)}\r\n`
 
 it('stores oversized raw and displayed bodies completely and marks the FTS prefix', async () => {

@@ -12,7 +12,7 @@ export type TokenKind = (typeof TOKEN_KINDS)[number]
 /**
  * Scopes each kind gets when paired. Only the desktop app can send: the CLI and every
  * Agent run as the owner's Unix user next to coding agents, so they never hold `send`
- * (ADR 0001, ADR 0003). Agent tokens get `send` only while Dangerously Allow Send is on.
+ * (ADR 0001, ADR 0003).
  */
 export const PAIRING_SCOPES: Record<'desktop' | 'cli', readonly Scope[]> = {
   desktop: ['read', 'organize', 'draft', 'send', 'admin'],

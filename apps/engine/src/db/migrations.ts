@@ -448,6 +448,33 @@ export const MIGRATIONS: readonly Migration[] = [
   },
   {
     version: 10,
+    name: 'agent grants and action log',
+    sql: `
+      ALTER TABLE token ADD COLUMN account_id TEXT;
+      ALTER TABLE token ADD COLUMN mutation_minute INTEGER NOT NULL DEFAULT -1;
+      ALTER TABLE token ADD COLUMN mutation_count INTEGER NOT NULL DEFAULT 0;
+      UPDATE token SET revoked_at = unixepoch() * 1000
+        WHERE kind = 'agent' AND revoked_at IS NULL;
+
+      CREATE TABLE agent_action (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        token_id TEXT NOT NULL,
+        token_name TEXT NOT NULL,
+        tool TEXT NOT NULL,
+        threads TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'applied', 'failed', 'rejected')),
+        error TEXT,
+        draft_id TEXT
+      ) STRICT;
+      ALTER TABLE mutation ADD COLUMN agent_action_id TEXT REFERENCES agent_action (id);
+      ALTER TABLE mutation ADD COLUMN agent_message_ids TEXT NOT NULL DEFAULT '[]';
+      CREATE INDEX mutation_agent_action ON mutation (agent_action_id) WHERE agent_action_id IS NOT NULL;
+    `,
+  },
+  {
+    version: 11,
     name: 'IMAP body blobs',
     sql: 'ALTER TABLE message ADD COLUMN body_parts TEXT',
   },
