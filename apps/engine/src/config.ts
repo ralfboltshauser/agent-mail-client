@@ -33,6 +33,11 @@ export const Config = z.object({
       )
     }, 'Use an HTTPS origin or local HTTP origin with no trailing slash')
     .optional(),
+  /** Enable Gmail mailbox notifications from the AMC Pub/Sub subscription in this project. */
+  gmailPubSubProject: z
+    .string()
+    .regex(/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/)
+    .optional(),
   features: z.object({ snooze: z.boolean().default(false) }).prefault({}),
   logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 })

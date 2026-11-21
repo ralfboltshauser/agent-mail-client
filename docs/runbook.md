@@ -47,6 +47,7 @@ registration. Desktop upgrades move the previous app bundle to the Trash.
 | `/opt/amc/node` | the Engine's pinned Node runtime | root |
 | `/etc/amc/config.json` | Engine config | `amc`, 600 |
 | `/etc/amc/google-oauth-client.json` | Google OAuth client | `amc`, 600 |
+| `/etc/amc/gmail-pubsub-subscriber.json` | Optional Pub/Sub subscriber credential | `amc`, 600 |
 | `/srv/amc/db/amc.db` | the database | `amc`, 700 dir |
 | `/srv/amc/blobs` | raw mail and attachments (a cache) | `amc`, 700 dir |
 | `/srv/amc/backups` | pre-migration and nightly backups | `amc`, 700 dir |
@@ -75,6 +76,30 @@ journalctl -u amc-engine -f        # JSON logs; pipe through `npx pino-pretty` t
 The Engine listens on `127.0.0.1:4410`. `tailscale serve` publishes it on the tailnet only at `https://<host>.<tailnet>.ts.net:4443`. It is never on Funnel. Requests through `tailscale serve` must come from a login listed in `allowedTailscaleLogins`.
 
 M3 ships with Snooze disabled. The Engine reads `features.snooze` from its config at startup. The default is `false`.
+
+## Gmail notifications
+
+1. From an authenticated machine with permissions on `amc-mail-x097y3`, run
+   `scripts/setup-gmail-pubsub.sh`. For manual setup in Google Cloud Console,
+   enable the Pub/Sub and IAM APIs, create the `amc-gmail` topic, and grant
+   `roles/pubsub.publisher` on that topic to
+   `gmail-api-push@system.gserviceaccount.com`. Create a pull subscription named
+   `amc-gmail-host` for that topic with expiration set to Never. Create the
+   `amc-gmail-subscriber` service account and grant it `roles/pubsub.subscriber`
+   on that subscription.
+2. The supervisor provisions the subscriber service account's JSON credential
+   through the Host secrets workflow as `/etc/amc/gmail-pubsub-subscriber.json`
+   (owner `amc:amc`, mode `0600`). The setup script creates only Cloud resources
+   and IAM bindings. Gmail's existing mailbox OAuth scope authorizes the watch.
+   The subscriber credential authorizes pull and acknowledge independently, so
+   existing users keep their Gmail sign-in. The Gmail Desktop OAuth client must
+   belong to the Pub/Sub topic's project.
+3. Add `"gmailPubSubProject": "amc-mail-x097y3"` to `/etc/amc/config.json` and
+   restart the Engine. The Host opens outbound HTTPS connections to Pub/Sub.
+   Check Engine logs for watch or pull failures. While both are healthy, incremental
+   sync runs on notifications with a 60-second fallback for missed notifications.
+   On a watch or pull failure, the fallback is 15 seconds. Remove the config
+   entry and restart to return to polling alone.
 
 ## T3 Handoff
 

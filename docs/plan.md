@@ -98,7 +98,7 @@ The root NVMe disk is at **97%** (7.5 GB free), and `/srv` is a 1.8 TB spinning 
 ### 4.3 Provider sync
 
 - **Backfill:** the entire history, newest first, resumable, rate-limited, using Gmail batch requests (about 30–60 minutes per 100k messages). The inbox and the last 90 days come first so the app is usable within minutes, and older mail streams in behind.
-- **Gmail incremental:** `history.list` from the last `historyId`, polled every 15 seconds per Account. A Pub/Sub watch for instant delivery is an optional switch (it needs billing on the Cloud project). On a `historyId` too old, fall back to a full resync.
+- **Gmail incremental:** `history.list` from the last `historyId`, polled every 15 seconds per Account. Optional Pub/Sub delivery triggers incremental sync on notification and uses a 60-second fallback while healthy. On a `historyId` too old, fall back to a full resync.
 - **IMAP incremental:** IDLE on INBOX, and CONDSTORE/QRESYNC on every folder every few minutes. Without those extensions, UID-range diffs (see the IMAP extensions ticket).
 - **IMAP parser memory follow-up.** Raw MIME and attachments stream to disk. MailParser retains decoded plain text and HTML in memory. Bound memory for very large bodies while preserving complete message display.
 - **Label mapping:** Gmail labels map 1:1. IMAP folders map to Labels, so a message carries at most one. Special-use folders (`\Archive`, `\Sent`, `\Trash`, `\Drafts`) map to the system Labels.
@@ -240,7 +240,7 @@ Runs in parallel once M1 lands: M5 alongside M2–M4, and the agent tickets (hea
 ## 11. Decisions (defaults taken 2026-11-20)
 
 1. **Desktop shell:** Electron.
-2. **Instant Gmail:** 15-second polling. Pub/Sub push stays optional; it needs billing on `amc-mail-x097y3`.
+2. **Instant Gmail:** 15-second polling by default. The optional Pub/Sub pull setup for `amc-mail-x097y3` is in the [runbook](runbook.md#gmail-notifications).
 3. **Root disk:** untouched. AMC lives on `/srv` until Ralf frees the root disk.
 4. **Offsite backups:** deferred. `/srv/backups/amc` only for now.
 5. **First Gmail Account:** whichever Ralf signs in with first.
