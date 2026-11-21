@@ -27,8 +27,10 @@ pnpm build        # builds all workspace packages
 
 ## Install the CLI
 
-Run `pnpm cli:install` from the repository root. It builds the bundled CLI and replaces
-`~/.local/bin/amc`, including any hand-made wrapper at that path. The launcher prefers
+Run `pnpm cli:install` from the repository root. It builds the bundled CLI and installs
+`~/.local/bin/amc`. Use `pnpm cli:install --force` to replace an unmarked launcher.
+If the installer finds an unrelated payload at `~/.local/share/amc/amc.mjs`, move
+that file aside before retrying. The launcher prefers
 `/opt/homebrew/bin/node` and otherwise uses the Node on your `PATH`. Add `~/.local/bin`
 to your `PATH` if needed, then run `amc --version` to check the install. Run the same
 install command after updating the checkout.

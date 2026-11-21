@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { PairResponse } from '@amc/protocol'
@@ -26,6 +26,9 @@ const UNPAIRED: SyncStatus = {
   error: null,
 }
 
+let unpairedStatus = UNPAIRED
+const pauseFile = () => join(app.getPath('userData'), 'sync-paused')
+
 function broadcast(channel: string, payload?: unknown) {
   window?.webContents.send(channel, payload)
 }
@@ -41,7 +44,12 @@ function refreshTray() {
 
 function connect(engineUrl: string, token: string) {
   engine = new EngineClient(engineUrl, token)
-  startSync(engine)
+  if (existsSync(pauseFile())) {
+    pausedStatus = { ...UNPAIRED, phase: 'paused', engineUrl }
+    broadcast('amc:status', pausedStatus)
+  } else {
+    startSync(engine)
+  }
   refreshTray()
 }
 
@@ -67,12 +75,20 @@ function startSync(client: EngineClient) {
 }
 
 function toggleSync() {
+  if (!engine) return
+  try {
+    if (sync) writeFileSync(pauseFile(), '')
+    else rmSync(pauseFile(), { force: true })
+  } catch (error) {
+    console.error('Could not save the AMC sync preference', error)
+    return
+  }
   if (sync) {
     pausedStatus = { ...sync.status, phase: 'paused', progress: null, error: null }
     sync.stop()
     sync = null
     broadcast('amc:status', pausedStatus)
-  } else if (engine) {
+  } else {
     startSync(engine)
   }
   refreshTray()
@@ -92,7 +108,8 @@ function registerIpc() {
     engine = null
     clearPairing()
     openReplica().clear()
-    broadcast('amc:status', UNPAIRED)
+    unpairedStatus = UNPAIRED
+    broadcast('amc:status', unpairedStatus)
     refreshTray()
   })
   registerReadIpc()
@@ -113,13 +130,20 @@ async function pair(engineUrl: string, code: string) {
   if (!res.ok || !body.token) throw new Error(body.message ?? 'Pairing failed')
   if (body.kind !== 'desktop')
     throw new Error('That code is for the CLI. Run `sudo amc-engine pair --desktop` on the Host.')
+  const previousUrl = engine?.baseUrl ?? unpairedStatus.engineUrl
   savePairing(url, body.token)
-  openReplica().clear()
+  sync?.stop()
+  sync = null
+  if (previousUrl !== url) {
+    const db = openReplica()
+    db.transaction(() => db.clear())
+    broadcast('amc:changed')
+  }
   connect(url, body.token)
 }
 
 function registerReadIpc() {
-  ipcMain.handle('amc:status', () => sync?.status ?? pausedStatus ?? UNPAIRED)
+  ipcMain.handle('amc:status', () => sync?.status ?? pausedStatus ?? unpairedStatus)
   ipcMain.handle('amc:syncNow', () => sync?.pull())
 
   ipcMain.handle('amc:accounts', () => openReplica().accounts())
@@ -191,6 +215,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       spellcheck: true,
+      devTools: !app.isPackaged,
     },
   })
   window.once('ready-to-show', () => window?.show())
@@ -202,8 +227,9 @@ function createWindow() {
   window.webContents.on('will-navigate', (event, url) => {
     if (url !== window?.webContents.getURL()) event.preventDefault()
   })
-  if (process.env.ELECTRON_RENDERER_URL) void window.loadURL(process.env.ELECTRON_RENDERER_URL)
-  else void window.loadFile(join(import.meta.dirname, '../renderer/index.html'))
+  if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) {
+    void window.loadURL(process.env.ELECTRON_RENDERER_URL)
+  } else void window.loadFile(join(import.meta.dirname, '../renderer/index.html'))
   window.on('closed', () => {
     window = null
   })
@@ -229,7 +255,7 @@ function buildMenu() {
         label: 'View',
         submenu: [
           { role: 'reload' },
-          { role: 'toggleDevTools' },
+          ...(!app.isPackaged ? [{ role: 'toggleDevTools' as const }] : []),
           { type: 'separator' },
           { role: 'togglefullscreen' },
         ],
@@ -260,8 +286,16 @@ if (!app.requestSingleInstanceLock()) {
     if (process.platform === 'darwin') tray = createTray(openWindow, toggleSync, loginItem)
     refreshTray()
     const pairing = loadPairing()
-    if (pairing) connect(pairing.engineUrl, pairing.token)
+    if (pairing?.token) connect(pairing.engineUrl, pairing.token)
     else {
+      if (pairing) {
+        unpairedStatus = {
+          ...UNPAIRED,
+          engineUrl: pairing.engineUrl,
+          error:
+            "AMC couldn't read its saved pairing (the app changed). Pair again with `sudo amc-engine pair --desktop` on the Host.",
+        }
+      }
       // Scriptable first run: --engine-url=… --pairing-code=…
       const arg = (name: string) =>
         process.argv.find((a) => a.startsWith(`--${name}=`))?.split('=')[1]
@@ -274,6 +308,7 @@ if (!app.requestSingleInstanceLock()) {
     }
     if (!loginItem || !app.getLoginItemSettings().wasOpenedAtLogin) createWindow()
     app.on('activate', openWindow)
+    app.on('browser-window-focus', refreshTray)
   })
   app.on('before-quit', () => {
     sync?.stop()

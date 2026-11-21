@@ -1,6 +1,6 @@
 import { existsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { app, Menu, nativeImage, Tray } from 'electron'
+import { app, Menu, type MenuItemConstructorOptions, nativeImage, shell, Tray } from 'electron'
 
 export function createTray(openWindow: () => void, toggleSync: () => void, loginItem: boolean) {
   const resources = app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'build')
@@ -26,24 +26,54 @@ export function createTray(openWindow: () => void, toggleSync: () => void, login
     else setLoginItem(true)
   }
 
+  function loginMenu(refresh: () => void): MenuItemConstructorOptions[] {
+    if (!loginItem) return []
+    const settings = app.getLoginItemSettings()
+    if (settings.status === 'requires-approval') {
+      return [
+        { label: 'Launch at Login Needs Approval', enabled: false },
+        {
+          label: 'Open Login Items Settings',
+          click: () => {
+            void shell
+              .openExternal('x-apple.systempreferences:com.apple.LoginItems-Settings.extension')
+              .catch((error) => console.error('Could not open Login Items settings', error))
+          },
+        },
+        {
+          label: 'Cancel Launch at Login',
+          click: () => {
+            setLoginItem(false)
+            refresh()
+          },
+        },
+      ]
+    }
+    return [
+      {
+        label: 'Launch at Login',
+        type: 'checkbox',
+        checked: settings.openAtLogin,
+        click: (item) => {
+          setLoginItem(item.checked)
+          refresh()
+        },
+      },
+    ]
+  }
+
   function refresh(unread: number, paired: boolean, paused: boolean) {
     tray.setTitle(unread ? unread.toLocaleString() : '')
-    tray.setToolTip(`AMC · ${unread.toLocaleString()} unread in Inbox`)
+    tray.setToolTip(
+      `AMC · ${unread.toLocaleString()} unread in Inbox${paused ? ' · Sync paused' : ''}`,
+    )
     tray.setContextMenu(
       Menu.buildFromTemplate([
         { label: 'Open AMC', click: openWindow },
         { type: 'separator' },
+        ...(paused ? [{ label: 'Sync paused', enabled: false }] : []),
         { label: paused ? 'Resume Sync' : 'Pause Sync', enabled: paired, click: toggleSync },
-        {
-          label: 'Launch at Login',
-          type: 'checkbox',
-          visible: loginItem,
-          checked: loginItem && app.getLoginItemSettings().openAtLogin,
-          click: (item) => {
-            setLoginItem(item.checked)
-            refresh(unread, paired, paused)
-          },
-        },
+        ...loginMenu(() => refresh(unread, paired, paused)),
         { type: 'separator' },
         { role: 'quit', label: 'Quit AMC' },
       ]),

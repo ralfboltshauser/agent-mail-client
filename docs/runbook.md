@@ -16,11 +16,15 @@ if Finder offers the confirmation. On newer macOS versions, try opening AMC,
 then use **Open Anyway** under **System Settings → Privacy & Security**.
 [Apple's Gatekeeper instructions](https://support.apple.com/en-us/102445)
 
-macOS Keychain may ask whether the new build can use the existing AMC Safe Storage
-entry. Allow access to continue using the existing pairing. Closing the window
-keeps sync running in the menu bar. **Launch at Login** is enabled on first run
-and can be toggled from the menu bar. If macOS requests approval, use
-**System Settings → General → Login Items & Extensions**.
+Both builds use the `@amc/desktop Safe Storage` service. macOS Keychain may ask
+whether the new build can use the existing entry. Allow access to carry over the
+pairing. If AMC cannot decrypt the saved token, use the pair screen to pair again.
+Pairing to the same Engine URL keeps the replica.
+
+Closing the window keeps sync running in the menu bar. **Pause Sync** persists
+across restarts. **Launch at Login** is enabled on first run. If macOS requests
+approval, use the AMC menu to open Login Items settings or cancel the pending
+registration. Desktop upgrades move the previous app bundle to the Trash.
 
 ## Layout
 

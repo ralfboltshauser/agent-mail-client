@@ -4,10 +4,16 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 
 /** First run: connect this Mac to the Engine with a one-time code from the Host. */
-export function PairScreen() {
+export function PairScreen({
+  savedEngineUrl,
+  recoveryMessage,
+}: {
+  savedEngineUrl: string | null
+  recoveryMessage: string | null
+}) {
   const urlId = useId()
   const codeId = useId()
-  const [engineUrl, setEngineUrl] = useState('https://')
+  const [engineUrl, setEngineUrl] = useState(savedEngineUrl ?? 'https://')
   const [code, setCode] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -34,13 +40,19 @@ export function PairScreen() {
         <form onSubmit={submit} className="w-full max-w-sm space-y-6">
           <div className="space-y-1.5">
             <h1 className="text-2xl font-semibold tracking-tight">Connect to your Engine</h1>
-            <p className="text-sm text-muted-foreground">
-              On your Host, run{' '}
-              <code className="rounded bg-muted px-1 py-0.5 text-xs">
-                sudo amc-engine pair --desktop
-              </code>{' '}
-              and enter the code here.
-            </p>
+            {recoveryMessage ? (
+              <p role="alert" className="text-sm text-destructive">
+                {recoveryMessage}
+              </p>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                On your Host, run{' '}
+                <code className="rounded bg-muted px-1 py-0.5 text-xs">
+                  sudo amc-engine pair --desktop
+                </code>{' '}
+                and enter the code here.
+              </p>
+            )}
           </div>
           <div className="space-y-3">
             <label htmlFor={urlId} className="block space-y-1.5">
