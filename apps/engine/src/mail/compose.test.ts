@@ -1,5 +1,7 @@
 import { COMPOSER_FIELD } from '@amc/composer'
 import { type ComposeDraft, DRAFT_CHANGED, MIRROR_CHANGED, type OutboxItem } from '@amc/protocol'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { simpleParser } from 'mailparser'
 import { expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
@@ -74,6 +76,8 @@ function setup() {
     store,
     queries,
     call,
+    app,
+    token,
     outbox,
     advance: (ms: number) => {
       now += ms
@@ -277,6 +281,123 @@ it('imports a Gmail draft and accepts deletion of the unchanged provider copy', 
   db.close()
 })
 
+it.each(['unchanged', 'edited remotely', 'edited and synced'])(
+  'discards an undone send with a mirror that was %s',
+  async (state) => {
+    const edited = state !== 'unchanged'
+    const { account, app, call, db, drafts, gmail, token } = setup()
+    const client = new Client({ name: 'AMC Desktop test', version: '1.0.0' })
+    try {
+      const draft = await drafts.create({ accountId: account, to: reader, body: 'Body' }, 'owner')
+      const version = drafts.compose(draft.id) as ComposeDraft
+      expect(
+        (
+          await call('/outbox', 'POST', {
+            id: 'undo-discard',
+            draftId: draft.id,
+            revision: version.revision,
+          })
+        ).status,
+      ).toBe(202)
+      expect((await call('/outbox/undo-discard/cancel', 'POST')).ok).toBe(true)
+      expect((await call(`/drafts/${draft.id}`)).ok).toBe(true)
+
+      // The mirror may be recreated when the owner makes another edit after undoing.
+      await drafts.update(draft.id, { body: 'Edited after undo' }, 'owner')
+      const [mirror] = gmail.drafts.keys()
+      if (!mirror) throw new Error('Draft was not mirrored')
+      if (edited) {
+        await gmail.saveDraft({
+          draftId: mirror,
+          raw: await buildMessage({
+            from: { address: gmail.address, name: null },
+            to: reader,
+            cc: [],
+            bcc: [],
+            subject: 'Changed in Gmail',
+            text: 'Keep this version',
+          }),
+        })
+      }
+
+      if (state === 'edited and synced') {
+        await drafts.pullGmail(account, gmail)
+        expect(drafts.compose(draft.id)?.subject).toBe('Changed in Gmail')
+      }
+
+      await client.connect(
+        new StreamableHTTPClientTransport(new URL('http://localhost/mcp'), {
+          requestInit: { headers: { Authorization: `Bearer ${token}` } },
+          fetch: (input, init) => Promise.resolve(app.fetch(new Request(input, init))),
+        }),
+      )
+      const result = await client.callTool({
+        name: 'delete_draft',
+        arguments: { draft_id: draft.id },
+      })
+      expect(result.isError).toBeFalsy()
+      const text = Array.isArray(result.content)
+        ? result.content.find((entry) => entry.type === 'text')?.text
+        : undefined
+      expect(JSON.parse(text ?? 'null')).toEqual({
+        deleted: draft.id,
+        ...(edited && { warning: 'The copy in Gmail was changed elsewhere and was kept' }),
+      })
+      expect(await call(`/drafts/${draft.id}`)).toMatchObject({ status: 404 })
+      expect(gmail.drafts.has(mirror)).toBe(edited)
+    } finally {
+      await client.close()
+      db.close()
+    }
+  },
+)
+
+it('discards an imported Gmail draft in Desktop without deleting the provider copy', async () => {
+  const { account, call, db, drafts, gmail } = setup()
+  try {
+    const remote = await gmail.saveDraft({
+      raw: await buildMessage({
+        from: { address: gmail.address, name: null },
+        to: reader,
+        cc: [],
+        bcc: [],
+        subject: 'Written in Gmail',
+        text: 'Keep this version',
+      }),
+    })
+    await drafts.pullGmail(account, gmail)
+    const draft = fixture(drafts.list()[0])
+    const response = await call(`/drafts/${draft.id}`, 'DELETE')
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      deleted: draft.id,
+      warning: 'The copy in Gmail was changed elsewhere and was kept',
+    })
+    expect(await call(`/drafts/${draft.id}`)).toMatchObject({ status: 404 })
+    expect(gmail.drafts.has(remote.id)).toBe(true)
+  } finally {
+    db.close()
+  }
+})
+
+it('keeps an active queued send and its draft when Desktop tries to discard', async () => {
+  const { account, call, db, drafts, outbox } = setup()
+  try {
+    const draft = await drafts.create({ accountId: account, to: reader, body: 'Body' }, 'owner')
+    const response = await call('/outbox', 'POST', {
+      id: 'queued-discard',
+      draftId: draft.id,
+      revision: draft.revision,
+    })
+    expect(response.status).toBe(202)
+    expect((await call(`/drafts/${draft.id}`, 'DELETE')).status).toBe(400)
+    expect(drafts.get(draft.id)).not.toBeNull()
+    expect(outbox.get('queued-discard')?.status).toBe('queued')
+  } finally {
+    db.close()
+  }
+})
+
 it('rejects send with a stale displayed revision even when the click includes a body-only update', async () => {
   const { account, call, drafts, db, outbox } = setup()
   const draft = await drafts.create({ accountId: account, to: reader, body: 'Private' }, 'owner')
@@ -418,6 +539,67 @@ it('imports IMAP drafts without UIDPLUS and retains both versions across a repla
   expect([...folder.messages.keys()]).toEqual([originalUid])
   db.close()
 })
+
+it.each(['before discard', 'after STORE', 'still a draft'])(
+  'verifies the IMAP Draft flag when it was removed %s',
+  async (state) => {
+    const db = testDb()
+    try {
+      const account = 'imap'
+      db.prepare(
+        "INSERT INTO account (id, kind, address, credentials, created_at) VALUES (?, 'imap', ?, X'00', 0)",
+      ).run(account, 'owner@example.test')
+      const fake = new FakeImap()
+      fake.capabilities.set('UIDPLUS', true)
+      const folder = fake.addFolder('Drafts', '\\Drafts')
+      const regular = fake.add('Drafts', 'Subject: Regular message')
+      const provider = new ImapProvider(
+        {
+          imap: { host: 'localhost', port: 993, tls: 'implicit', username: 'u', password: 'fake' },
+          smtp: { host: 'localhost', port: 587, tls: 'starttls', username: 'u', password: 'fake' },
+          smtpSavesSent: true,
+        },
+        () => fake.client,
+      )
+      const drafts = new Drafts(db, new MailStore(db, new BlobStore(tempDir())), () =>
+        imapDraftMirror(provider),
+      )
+      await drafts.pullImap(account, provider)
+      expect(drafts.list()).toEqual([])
+
+      const draft = await drafts.create({ accountId: account, body: 'Written in AMC' }, 'owner')
+      const [uid] = [...folder.messages.keys()].filter((key) => key !== regular)
+      if (uid === undefined) throw new Error('Draft was not mirrored')
+      if (state === 'before discard') fake.flag('Drafts', uid, ['\\Seen'])
+      if (state === 'after STORE') {
+        const flagsAdd = fake.messageFlagsAdd.bind(fake)
+        vi.spyOn(fake, 'messageFlagsAdd').mockImplementationOnce(async (...args) => {
+          const added = await flagsAdd(...args)
+          fake.flag('Drafts', uid, ['\\Seen', '\\Deleted'])
+          return added
+        })
+      }
+      const expunge = vi.spyOn(fake, 'uidExpunge')
+      const result = await drafts.delete(draft.id)
+      expect(drafts.get(draft.id)).toBeNull()
+      if (state === 'still a draft') {
+        expect(result).toEqual({ deleted: draft.id })
+        expect(expunge).toHaveBeenCalledExactlyOnceWith(uid)
+        expect(folder.messages.has(uid)).toBe(false)
+      } else {
+        expect(result).toEqual({
+          deleted: draft.id,
+          warning: 'The copy in IMAP was changed elsewhere and was kept',
+        })
+        expect(expunge).not.toHaveBeenCalled()
+        expect(folder.messages.get(uid)?.flags).toEqual(new Set(['\\Seen']))
+      }
+      expect(folder.messages.has(regular)).toBe(true)
+    } finally {
+      db.close()
+    }
+  },
+)
 
 it('forwards a non-ASCII multipart message with formatting, CID placement and its file attachment', async () => {
   const { account, call, drafts, db, gmail, store } = setup()

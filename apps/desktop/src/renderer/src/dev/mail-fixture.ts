@@ -87,6 +87,7 @@ export function createFixture(scenario: string): AmcApi {
     changed.forEach((listener) => {
       listener()
     })
+  let discarded = false
   let draft: ComposeDraft = {
     id: 'draft-1',
     accountId: account.id,
@@ -335,6 +336,7 @@ export function createFixture(scenario: string): AmcApi {
     undoAgentAction: async () => {},
     contacts: async () => [],
     startCompose: async ({ mode, threadId }) => {
+      discarded = false
       const thread = threads.find((item) => item.id === threadId)
       draft = {
         ...draft,
@@ -344,8 +346,12 @@ export function createFixture(scenario: string): AmcApi {
       }
       return draft
     },
-    composeDrafts: async () => [draft],
+    composeDrafts: async () => (discarded ? [] : [draft]),
     composeDraft: async () => draft,
+    discardDraft: async () => {
+      discarded = true
+      return {}
+    },
     stageComposeBody: () => {},
     saveCompose: async (_id, patch) => {
       draft = { ...draft, ...patch.fields, update: patch.update, revision: draft.revision + 1 }

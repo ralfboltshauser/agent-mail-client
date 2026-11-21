@@ -24,10 +24,12 @@ import {
   useEditor,
   useEditorState,
 } from '@tiptap/react'
-import { Bold, Italic, List, Minus, Paperclip, X } from 'lucide-react'
+import { Bold, Italic, List, Minus, Paperclip, Trash2, X } from 'lucide-react'
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { toast } from 'sonner'
 import * as Y from 'yjs'
 import { getAmc } from '@/lib/amc'
+import { DiscardDraftDialog } from './discard-draft-dialog'
 import { RecipientField } from './recipient-field'
 import { Button } from './ui/button'
 import { Dialog, DialogContent, DialogTitle } from './ui/dialog'
@@ -96,11 +98,13 @@ export function Composer({
   accounts,
   onMinimise,
   onQueued,
+  onDiscarded,
 }: {
   draft: ComposeDraft
   accounts: AccountSummary[]
   onMinimise: (subject: string) => void
   onQueued: (item: OutboxItem) => void
+  onDiscarded: () => void
 }) {
   const [doc] = useState(() => {
     const value = new Y.Doc()
@@ -122,6 +126,7 @@ export function Composer({
   const savedRef = useRef(0)
   const [saved, setSaved] = useState(0)
   const [busy, setBusy] = useState(false)
+  const [confirmDiscard, setConfirmDiscard] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [conflict, setConflict] = useState(false)
   const [error, setError] = useState('')
@@ -277,7 +282,7 @@ export function Composer({
   }
 
   useEffect(() => {
-    if (version === saved || busy || request.current || conflict) return
+    if (version === saved || busy || confirmDiscard || request.current || conflict) return
     const timer = window.setTimeout(() => {
       void save().catch(saveError)
     }, 550)
@@ -334,6 +339,20 @@ export function Composer({
       onMinimise(fieldsRef.current.subject)
     } catch (cause) {
       saveError(cause)
+    } finally {
+      submitting.current = false
+      setBusy(false)
+    }
+  }
+
+  const discard = async () => {
+    submitting.current = true
+    setBusy(true)
+    try {
+      await saveChain.current.catch(() => {})
+      const { warning } = await getAmc().discardDraft(draft.id)
+      if (warning) toast.warning(warning)
+      onDiscarded()
     } finally {
       submitting.current = false
       setBusy(false)
@@ -408,7 +427,7 @@ export function Composer({
     <Dialog
       open
       onOpenChange={(open) => {
-        if (!open) void minimise()
+        if (!open && !confirmDiscard) void minimise()
       }}
     >
       <DialogContent
@@ -417,6 +436,29 @@ export function Composer({
         aria-describedby={undefined}
         className="flex max-h-[90dvh] max-w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl"
         onPointerDownOutside={(event) => event.preventDefault()}
+        onKeyDownCapture={(event) => {
+          const target = event.target
+          if (target instanceof Element) {
+            const editingHost = target.closest('[contenteditable]')
+            if (
+              target.closest('input, textarea') ||
+              (editingHost && editingHost.getAttribute('contenteditable') !== 'false')
+            )
+              return
+          }
+          if (
+            !event.nativeEvent.isComposing &&
+            event.metaKey &&
+            !event.ctrlKey &&
+            !event.altKey &&
+            !event.shiftKey &&
+            event.key === 'Backspace'
+          ) {
+            event.preventDefault()
+            event.stopPropagation()
+            if (!event.repeat && !locked && !uploading) setConfirmDiscard(true)
+          }
+        }}
         onKeyDown={(event) => {
           if (!event.nativeEvent.isComposing && event.metaKey && event.key === 'Enter') {
             event.preventDefault()
@@ -692,6 +734,17 @@ export function Composer({
           <div className="ml-auto flex gap-1">
             <Button
               variant="ghost"
+              size="icon-sm"
+              aria-label="Discard draft"
+              aria-keyshortcuts="Meta+Backspace"
+              title="Discard draft (⌘⌫)"
+              disabled={locked || uploading}
+              onClick={() => setConfirmDiscard(true)}
+            >
+              <Trash2 />
+            </Button>
+            <Button
+              variant="ghost"
               size="sm"
               disabled={locked}
               onClick={() => {
@@ -727,6 +780,9 @@ export function Composer({
           </div>
         </footer>
       </DialogContent>
+      {confirmDiscard && (
+        <DiscardDraftDialog onConfirm={discard} onClose={() => setConfirmDiscard(false)} />
+      )}
     </Dialog>
   )
 }
