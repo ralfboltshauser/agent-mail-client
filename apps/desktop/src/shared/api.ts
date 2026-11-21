@@ -58,7 +58,7 @@ export interface AmcApi {
   status(): Promise<SyncStatus>
   syncNow(): Promise<void>
   organise(action: OrganiseAction): Promise<string>
-  organiseErrors(): Promise<{ id: string; message: string }[]>
+  organiseErrors(): Promise<{ id: string; message: string; quiet?: boolean }[]>
 
   accounts(): Promise<AccountSummary[]>
   labels(accountId: string | null): Promise<Label[]>

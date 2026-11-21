@@ -42,7 +42,10 @@ export function useOrganise(thread: ThreadSummary | null) {
       void window.amc
         .organiseErrors()
         .then((errors) => {
-          for (const error of errors) toast.error(error.message, { id: error.id })
+          for (const notice of errors) {
+            if (notice.quiet) toast(notice.message, { id: notice.id, action: undefined })
+            else toast.error(notice.message, { id: notice.id })
+          }
         })
         .catch(() => {})
     }

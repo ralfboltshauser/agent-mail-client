@@ -104,7 +104,7 @@ export class GmailHttpApi implements GmailApi {
       if (res.status === 401 && !refreshed) {
         refreshed = true
         this.#tokens.invalidate()
-        continue
+        if (!options.writeback || options.method === undefined) continue
       }
 
       const quota =

@@ -1,3 +1,4 @@
+import { GmailHttpError } from './http.ts'
 import type {
   GmailApi,
   GmailDraft,
@@ -7,6 +8,10 @@ import type {
   GmailMessage,
   GmailProfile,
 } from './types.ts'
+
+export type FakeGmailWrite =
+  | { kind: 'batch'; ids: string[]; add: string[]; remove: string[] }
+  | { kind: 'trash'; ids: [string]; trashed: boolean }
 
 /** An in-memory Gmail for tests: messages, labels and a history log with expiry. */
 export class FakeGmail implements GmailApi {
@@ -25,6 +30,9 @@ export class FakeGmail implements GmailApi {
   calls = { getMessage: 0, list: 0 }
   trashFailure: { afterWrite: boolean; error: Error } | undefined
   batchFailure: { applied: number; error: Error } | undefined
+  afterThreadRead: (() => void) | undefined
+  onRead: ((snapshot: ReadonlyMap<string, readonly string[]>) => void) | undefined
+  beforeWrite: ((write: FakeGmailWrite) => void) | undefined
   afterLabelRead: (() => Promise<void>) | undefined
 
   add(
@@ -120,6 +128,7 @@ export class FakeGmail implements GmailApi {
   async getMessageLabels(id: string): Promise<string[] | null> {
     const message = this.messages.get(id)
     const labels = message ? [...(message.labelIds ?? [])] : null
+    this.onRead?.(new Map(labels ? [[id, labels]] : []))
     const pause = this.afterLabelRead
     this.afterLabelRead = undefined
     await pause?.()
@@ -127,16 +136,22 @@ export class FakeGmail implements GmailApi {
   }
 
   async getThreadMessages(id: string) {
-    return [...this.messages.values()]
+    const snapshot = [...this.messages.values()]
       .filter((message) => message.threadId === id)
       .map((message) => structuredClone(message))
+    const edit = this.afterThreadRead
+    this.afterThreadRead = undefined
+    this.onRead?.(new Map(snapshot.map((message) => [message.id, message.labelIds ?? []])))
+    edit?.()
+    return snapshot
   }
 
   async batchModify(ids: string[], addLabelIds: string[], removeLabelIds: string[]) {
+    this.beforeWrite?.({ kind: 'batch', ids, add: addLabelIds, remove: removeLabelIds })
     const failure = this.batchFailure
     this.batchFailure = undefined
     for (const id of failure ? ids.slice(0, failure.applied) : ids) {
-      const labels = await this.getMessageLabels(id)
+      const labels = this.messages.get(id)?.labelIds
       if (labels)
         this.setLabels(id, [
           ...new Set([...labels.filter((l) => !removeLabelIds.includes(l)), ...addLabelIds]),
@@ -146,10 +161,13 @@ export class FakeGmail implements GmailApi {
   }
 
   async setTrashed(id: string, trashed: boolean): Promise<string[]> {
+    this.beforeWrite?.({ kind: 'trash', ids: [id], trashed })
     const failure = this.trashFailure
     this.trashFailure = undefined
     if (failure && !failure.afterWrite) throw failure.error
-    const labels = (await this.getMessageLabels(id)) ?? []
+    const message = this.messages.get(id)
+    if (!message) throw new GmailHttpError(404, 'notFound', 'Message no longer exists')
+    const labels = message.labelIds ?? []
     const next = trashed
       ? [...new Set([...labels.filter((l) => l !== 'INBOX'), 'TRASH'])]
       : labels.filter((l) => l !== 'TRASH')

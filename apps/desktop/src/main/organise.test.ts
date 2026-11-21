@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { MessageDetail, ThreadSummary } from '@amc/protocol'
+import { type MessageDetail, MutationResponse, type ThreadSummary } from '@amc/protocol'
 import { describe, expect, it, vi } from 'vitest'
 import { EngineClient, EngineError } from './engine'
 import { OrganiseSync } from './organise'
@@ -93,6 +93,42 @@ describe('desktop Organise outbox', () => {
     } finally {
       replica.db.close()
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts non-UUID superseded message IDs and notices once when Engine truth arrives', () => {
+    const replica = new Replica(':memory:')
+    try {
+      seed(replica)
+      const id = replica.organise.enqueue({ kind: 'archive', threadId: THREAD.id })
+      const result = MutationResponse.parse({
+        mutations: [
+          {
+            id,
+            threadId: THREAD.id,
+            status: 'applied',
+            modseq: 20,
+            error: null,
+            superseded: ['account:1'],
+          },
+        ],
+      })
+      replica.organise.resolve(result.mutations)
+      expect(replica.threads(inbox)).toEqual([])
+      expect(replica.organise.errors()).toEqual([])
+      replica.modseq = 20
+      replica.organise.rebuild()
+      expect(replica.threads(inbox)).toHaveLength(1)
+      expect(replica.organise.errors()).toEqual([
+        { id, message: 'Changed elsewhere, left as is', quiet: true },
+      ])
+      replica.organise.resolve(result.mutations)
+      expect(replica.organise.errors()).toEqual([])
+      expect(replica.db.prepare('SELECT superseded FROM organise_queue').get()).toEqual({
+        superseded: '["account:1"]',
+      })
+    } finally {
+      replica.db.close()
     }
   })
 

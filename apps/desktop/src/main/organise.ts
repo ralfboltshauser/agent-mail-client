@@ -23,6 +23,7 @@ interface QueueRow {
   request: string
   patch: string
   inverse: string
+  superseded: string
   status: 'unsent' | MutationResult['status']
   modseq: number | null
   error: string | null
@@ -144,6 +145,7 @@ export class LocalOrganise {
       if (row) {
         threadId = row.thread_id ?? undefined
         patch = JSON.parse(row.inverse)
+        for (const id of JSON.parse(row.superseded) as string[]) delete patch.labels[id]
         if (patch.snoozedUntil && patch.snoozedUntil <= Date.now()) {
           patch.snoozedUntil = null
           for (const labels of Object.values(patch.labels)) {
@@ -242,8 +244,16 @@ export class LocalOrganise {
     this.replica.transaction(() => {
       for (const result of results) {
         this.#db
-          .prepare('UPDATE organise_queue SET status = ?, modseq = ?, error = ? WHERE id = ?')
-          .run(result.status, result.modseq, result.error, result.id)
+          .prepare(
+            'UPDATE organise_queue SET status = ?, modseq = ?, error = ?, superseded = ? WHERE id = ?',
+          )
+          .run(
+            result.status,
+            result.modseq,
+            result.error,
+            JSON.stringify(result.superseded ?? []),
+            result.id,
+          )
       }
       this.rebuild()
     })
@@ -261,7 +271,7 @@ export class LocalOrganise {
     })
   }
 
-  errors(): { id: string; message: string }[] {
+  errors(): { id: string; message: string; quiet?: boolean }[] {
     const rows = this.#db
       .prepare(
         'SELECT id, error AS message FROM organise_queue WHERE error IS NOT NULL AND notified = 0 ORDER BY seq',
@@ -275,7 +285,23 @@ export class LocalOrganise {
       message: string
     }[]
     this.#db.exec('DELETE FROM organise_notice')
-    return [...rows, ...internal]
+    const conflicts = this.#db
+      .prepare(
+        `UPDATE organise_queue SET supersession_notified = 1
+       WHERE supersession_notified = 0 AND status IN ('applied', 'failed')
+         AND superseded != '[]' AND modseq <= ?
+       RETURNING id, error`,
+      )
+      .all(this.replica.modseq ?? -1) as { id: string; error: string | null }[]
+    return [
+      ...rows,
+      ...internal,
+      ...conflicts.map(({ id, error }) => ({
+        id: error ? `${id}:superseded` : id,
+        message: 'Changed elsewhere, left as is',
+        quiet: true,
+      })),
+    ]
   }
 
   notice(failures: MutationResult[]): void {

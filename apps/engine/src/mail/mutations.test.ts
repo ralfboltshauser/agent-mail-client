@@ -1,12 +1,15 @@
 import { randomUUID } from 'node:crypto'
-import type { MutationRequest, OrganiseAction } from '@amc/protocol'
+import { rmSync } from 'node:fs'
+import { type MutationRequest, type OrganiseAction, SNOOZED_LABEL } from '@amc/protocol'
 import { describe, expect, it, vi } from 'vitest'
 import { DbAccountState } from '../accounts.ts'
 import { issueToken } from '../auth/tokens.ts'
 import { BlobStore } from '../blobs.ts'
 import { createApp } from '../http/app.ts'
 import { FakeGmail } from '../providers/gmail/fake.ts'
-import { GmailHttpError } from '../providers/gmail/http.ts'
+import { GmailHttpApi, GmailHttpError } from '../providers/gmail/http.ts'
+import { AccessTokens } from '../providers/gmail/oauth.ts'
+import { QuotaLimiter } from '../providers/gmail/ratelimit.ts'
 import { GmailAccountSync } from '../providers/gmail/sync.ts'
 import { silentLog, tempDir, testConfig, testDb } from '../test-support.ts'
 import { Mutations } from './mutations.ts'
@@ -16,13 +19,13 @@ import { MailStore } from './store.ts'
 const THREAD = 'a:thread'
 const REQUESTOR = 'test-device'
 
-async function setup() {
+async function setup(blobDir = tempDir()) {
   let now = 100_000
   const db = testDb()
   db.prepare(
     "INSERT INTO account (id, kind, address, credentials, created_at) VALUES ('a', 'gmail', 'owner@example.com', x'00', 0)",
   ).run()
-  const store = new MailStore(db, new BlobStore(tempDir()), () => now)
+  const store = new MailStore(db, new BlobStore(blobDir), () => now)
   const gmail = new FakeGmail()
   gmail.labelList.push({ id: 'Label_work', name: 'Work', type: 'user' })
   gmail.add('m1', { threadId: 'thread', labels: ['INBOX', 'UNREAD'] })
@@ -129,7 +132,7 @@ describe('Gmail Organise writeback', () => {
     expect(await gmail.getMessageLabels('m1')).toContain('TRASH')
   })
 
-  it('compensates a Trash committed before its response was lost and a retry was refused', async () => {
+  it('preserves a Trash whose response was lost when another write is refused', async () => {
     const { gmail, queue, store, submit, lookup, advance, now, thread } = await setup()
     gmail.trashFailure = { afterWrite: true, error: new Error('connection lost') }
     const trash = submit({ kind: 'trash', threadId: THREAD, value: true })
@@ -148,10 +151,11 @@ describe('Gmail Organise writeback', () => {
     await new Mutations(store, () => gmail, silentLog, now).tick()
     expect(lookup(trash.id)).toMatchObject({
       status: 'failed',
-      error: 'Gmail refused the change (HTTP 403)',
+      error: 'Gmail refused the change (HTTP 403). Gmail may have kept part of the change',
+      superseded: ['a:m1'],
     })
-    expect(await gmail.getMessageLabels('m1')).toEqual(expect.arrayContaining(['INBOX', 'UNREAD']))
-    expect(thread()?.labelIds).not.toContain('a:TRASH')
+    expect(await gmail.getMessageLabels('m1')).toEqual(['UNREAD', 'TRASH'])
+    expect(thread()?.labelIds).toContain('a:TRASH')
   })
 
   it('reports and reflects Trash remaining in Gmail if compensation is refused', async () => {
@@ -168,15 +172,15 @@ describe('Gmail Organise writeback', () => {
     expect(thread()?.labelIds).toContain('a:TRASH')
   })
 
-  it('reverses only the applied part of a failed batch', async () => {
+  it('leaves unacknowledged batch changes in Gmail and warns of partial application', async () => {
     const { gmail, queue, submit, lookup } = await setup()
     gmail.setLabels('m2', ['SENT', 'STARRED', 'Label_work'])
     gmail.add('m3', { threadId: 'thread', labels: ['INBOX'] })
     gmail.batchFailure = { applied: 1, error: new GmailHttpError(403, 'forbidden', 'refused') }
     const label = submit({ kind: 'label', threadId: THREAD, labelId: 'a:Label_work', value: true })
     await queue.tick()
-    expect(lookup(label.id)?.status).toBe('failed')
-    expect(await gmail.getMessageLabels('m1')).not.toContain('Label_work')
+    expect(lookup(label.id)?.error).toContain('Gmail may have kept part of the change')
+    expect(await gmail.getMessageLabels('m1')).toContain('Label_work')
     expect(await gmail.getMessageLabels('m2')).toContain('Label_work')
     expect(await gmail.getMessageLabels('m3')).not.toContain('Label_work')
   })
@@ -561,6 +565,107 @@ describe('Gmail Organise writeback', () => {
     expect(await gmail.getMessageLabels('m2')).toEqual(['SENT', 'STARRED'])
   })
 
+  it('archives a reply already visible in the final Gmail read', async () => {
+    const { gmail, queue, submit, lookup } = await setup()
+    gmail.afterThreadRead = () => {
+      gmail.add('m3', { threadId: 'thread' })
+    }
+    const archive = submit({ kind: 'archive', threadId: THREAD })
+    await queue.tick()
+    expect(lookup(archive.id)).toMatchObject({ status: 'applied', superseded: [] })
+    expect(await gmail.getMessageLabels('m3')).toEqual(['UNREAD'])
+  })
+
+  it('never compensates a message independently trashed after a refused write', async () => {
+    const { gmail, queue, store, submit, lookup, advance, now } = await setup()
+    const write = vi
+      .spyOn(gmail, 'setTrashed')
+      .mockRejectedValueOnce(new GmailHttpError(429, 'rateLimitExceeded', 'quota'))
+      .mockRejectedValueOnce(new GmailHttpError(403, 'forbidden', 'refused'))
+    const action = submit({ kind: 'trash', value: true, threadId: THREAD })
+    await queue.tick()
+    gmail.setLabels('m1', ['UNREAD', 'TRASH'])
+    advance(2000)
+    await new Mutations(store, () => gmail, silentLog, now).tick()
+    expect(write.mock.calls).toEqual([
+      ['m1', true],
+      ['m2', true],
+    ])
+    expect(lookup(action.id)).toMatchObject({ status: 'failed', superseded: ['a:m1'] })
+    expect(await gmail.getMessageLabels('m1')).toEqual(['UNREAD', 'TRASH'])
+  })
+
+  it('refreshes OAuth before the next guard read and never replays a stale Trash POST', async () => {
+    const { gmail, store, submit, lookup, advance, now } = await setup()
+    gmail.setLabels('m1', ['UNREAD'])
+    gmail.remove('m2')
+    const trace: string[] = []
+    const tokens = new AccessTokens(
+      { clientId: 'test', clientSecret: 'test' },
+      {
+        refreshToken: 'test',
+        scope: '',
+      },
+      async () => {
+        trace.push('refresh')
+        gmail.setLabels('m1', ['UNREAD', 'INBOX'])
+        return Response.json({ access_token: 'refreshed', expires_in: 3600 })
+      },
+    )
+    tokens.seed('expired-at-provider', Date.now() + 3600_000)
+    const api = new GmailHttpApi(
+      tokens,
+      async (_url, options) => {
+        if (options?.method === 'GET') {
+          trace.push('read')
+          return Response.json({ messages: await gmail.getThreadMessages('thread') })
+        }
+        trace.push('write')
+        if (trace.filter((event) => event === 'write').length === 1)
+          return Response.json({}, { status: 401 })
+        return Response.json({ labelIds: await gmail.setTrashed('m1', true) })
+      },
+      { limiter: new QuotaLimiter({ rate: 10_000, maxRate: 10_000 }) },
+    )
+    const queue = new Mutations(store, () => api, silentLog, now)
+    const action = submit({ kind: 'trash', value: true, threadId: THREAD })
+    await queue.tick()
+    expect(lookup(action.id)?.status).toBe('pending')
+    advance(2000)
+    await queue.tick()
+    expect(trace).toEqual(['read', 'read', 'write', 'refresh', 'read'])
+    expect(lookup(action.id)).toMatchObject({ status: 'applied', superseded: ['a:m1'] })
+    expect(await gmail.getMessageLabels('m1')).toEqual(['UNREAD', 'INBOX'])
+  })
+
+  it.each(['remove marker', 'trash target', 'delete target'] as const)(
+    'replans a wake when the owner can %s before the final read',
+    async (edit) => {
+      const { gmail, queue, submit, advance, now, thread } = await setup()
+      submit({ kind: 'snooze', until: now() + 1000, threadId: THREAD })
+      await queue.tick()
+      advance(1000)
+      gmail.afterThreadRead = () => {
+        if (edit === 'delete target') gmail.remove('m2')
+        else if (edit === 'trash target') {
+          gmail.setLabels('m2', [...(gmail.messages.get('m2')?.labelIds ?? []), 'TRASH'])
+        } else {
+          const marker = gmail.labelList.find((label) => label.name === 'AMC/Snoozed')?.id
+          for (const [id, message] of gmail.messages) {
+            gmail.setLabels(
+              id,
+              (message.labelIds ?? []).filter((label) => label !== marker),
+            )
+          }
+        }
+      }
+      await queue.tick()
+      expect(thread()?.snoozedUntil).toBeNull()
+      expect((await gmail.getMessageLabels('m1'))?.includes('INBOX')).toBe(edit !== 'remove marker')
+      expect((await gmail.getMessageLabels('m2'))?.includes('INBOX') ?? false).toBe(false)
+    },
+  )
+
   it('leaves a reply delivered between the final read and the batch in Gmail Inbox', async () => {
     const { gmail, queue, sync, submit, lookup, thread } = await setup()
     const call = gmail.batchModify.bind(gmail)
@@ -606,4 +711,270 @@ describe('Gmail Organise writeback', () => {
     await queue.tick()
     expect(thread()).toMatchObject({ muted: false, inInbox: true })
   })
+})
+
+function seededRandom(seed: number) {
+  let state = seed
+  return (size: number) => {
+    state ^= state << 13
+    state ^= state >>> 17
+    state ^= state << 5
+    return (state >>> 0) % size
+  }
+}
+
+describe('seeded Gmail writeback interleavings', () => {
+  it('preserves fresh-read and compensation invariants and converges after sync', async () => {
+    const directory = tempDir()
+    const failingSeed = process.env.AMC_FUZZ_SEED
+    const seeds = failingSeed ? [Number(failingSeed)] : Array.from({ length: 512 }, (_, i) => i + 1)
+    try {
+      for (const seed of seeds) {
+        const {
+          db,
+          gmail,
+          store,
+          state,
+          now,
+          advance,
+          queue: initialQueue,
+          sync: initialSync,
+        } = await setup(directory)
+        const pick = seededRandom(seed)
+        const trace: string[] = []
+        let queue = initialQueue
+        let sync = initialSync
+        let reply = 2
+        const guardedEdits = new Map<string, { id: string; labels: Map<string, boolean> }>()
+        const active = () =>
+          db
+            .prepare(
+              "SELECT id, request, prepared, rollback_error, superseded, write_journal FROM mutation WHERE status = 'pending' ORDER BY seq LIMIT 1",
+            )
+            .get()
+        const ownerEdit = (phase: string) => {
+          const ids = [...gmail.messages.keys()]
+          const id = ids[pick(ids.length)] ?? ''
+          const edit = ids.length < 2 ? 8 : pick(9)
+          trace.push(`owner ${phase}: ${edit} ${id}`)
+          if (edit === 8) {
+            gmail.add(`m${++reply}`, { threadId: 'thread', date: now() + reply })
+            return
+          }
+          if (edit === 7) {
+            gmail.remove(id)
+            return
+          }
+          const before = new Set(gmail.messages.get(id)?.labelIds)
+          const labels = new Set(before)
+          switch (edit) {
+            case 0:
+              labels.delete('INBOX')
+              break
+            case 1:
+              labels.delete('TRASH')
+              labels.add('INBOX')
+              break
+            case 2:
+              labels.delete('INBOX')
+              labels.add('TRASH')
+              break
+            case 3:
+              labels.delete('TRASH')
+              break
+            case 4:
+              if (!labels.delete('STARRED')) labels.add('STARRED')
+              break
+            case 5:
+              if (!labels.delete('Label_work')) labels.add('Label_work')
+              break
+            case 6: {
+              const marker = gmail.labelList.find((label) => label.name === SNOOZED_LABEL)
+              if (marker) labels.delete(marker.id)
+              break
+            }
+          }
+          gmail.setLabels(id, [...labels])
+          const row = active()
+          if (
+            row &&
+            phase === 'after planning snapshot' &&
+            !row.prepared &&
+            JSON.parse(String(row.request)).kind !== 'undo'
+          ) {
+            guardedEdits.set(String(row.id), {
+              id,
+              labels: new Map(
+                [...new Set([...before, ...labels])]
+                  .filter((label) => before.has(label) !== labels.has(label))
+                  .map((label) => [label, labels.has(label)]),
+              ),
+            })
+          }
+        }
+        const restart = () => {
+          trace.push('restart')
+          queue = new Mutations(store, () => gmail, silentLog, now)
+          sync = new GmailAccountSync(gmail, store, state, silentLog)
+        }
+
+        // The fake publishes exactly the snapshot it returns. Owner edits in the
+        // beforeWrite hook happen after that snapshot and are the accepted race.
+        const snapshots = new Map<string, readonly string[]>()
+        let reads = 0
+        let lastDispatch = 0
+        let inject = true
+        let violation: unknown
+        gmail.onRead = (snapshot) => {
+          reads++
+          for (const [id, labels] of snapshot) snapshots.set(id, labels)
+        }
+        gmail.beforeWrite = (write) => {
+          trace.push(`dispatch ${JSON.stringify(write)}`)
+          try {
+            expect(reads).toBeGreaterThan(lastDispatch)
+            const row = active()
+            if (!row) throw new Error('Gmail write has no pending mutation')
+            const owner = guardedEdits.get(String(row.id))
+            for (const id of write.ids) {
+              const labels = snapshots.get(id)
+              expect(labels).toBeDefined()
+              if (write.kind === 'trash') {
+                expect(labels?.includes('TRASH')).toBe(!write.trashed)
+              } else {
+                for (const label of write.add) expect(labels).not.toContain(label)
+                for (const label of write.remove) expect(labels).toContain(label)
+              }
+              if (owner?.id === id && !row.rollback_error) {
+                const touched =
+                  write.kind === 'trash'
+                    ? write.trashed
+                      ? ['TRASH', 'INBOX']
+                      : ['TRASH']
+                    : [...write.add, ...write.remove]
+                for (const label of touched) {
+                  // Ignore idempotent endpoint side effects such as removing
+                  // Inbox from mail already archived by the owner.
+                  if (write.kind === 'trash' && label === 'INBOX' && !labels?.includes(label))
+                    continue
+                  if (
+                    owner.labels.has(label) &&
+                    labels?.includes(label) === owner.labels.get(label)
+                  )
+                    throw new Error(`write over visible owner edit to ${id} ${label}`)
+                }
+              }
+              if (row.rollback_error) {
+                expect(JSON.parse(String(row.superseded))).not.toContain(`a:${id}`)
+                const journal = JSON.parse(String(row.write_journal)) as {
+                  applied: { message_id: string }[]
+                }[]
+                expect(
+                  journal.some((entry) =>
+                    entry.applied.some((change) => change.message_id === `a:${id}`),
+                  ),
+                ).toBe(true)
+              }
+            }
+          } catch (error) {
+            // The executor intentionally handles provider exceptions. Report
+            // assertion failures outside it so it cannot classify them as 5xx.
+            violation ??= error
+          }
+          lastDispatch = reads
+          snapshots.clear()
+          if (!inject) return
+          if (pick(5) === 0) ownerEdit('after final read')
+          const status = [0, 0, 0, 0, 0, 401, 429, 403, 503, -1][pick(10)] ?? 0
+          if (!status) return
+          trace.push(`failure ${status}`)
+          const error =
+            status === -1 ? new Error('response lost') : new GmailHttpError(status, '', 'injected')
+          if (write.kind === 'trash') gmail.trashFailure = { afterWrite: status === -1, error }
+          else
+            gmail.batchFailure = { applied: status === -1 ? 1 + pick(write.ids.length) : 0, error }
+        }
+
+        try {
+          for (let round = 0; round < 8; round++) {
+            const actions: OrganiseAction[] = [
+              { kind: 'archive', threadId: THREAD },
+              { kind: 'trash', value: true, threadId: THREAD },
+              { kind: 'trash', value: false, threadId: THREAD },
+              { kind: 'star', value: Boolean(pick(2)), threadId: THREAD },
+              { kind: 'label', labelId: 'a:Label_work', value: Boolean(pick(2)), threadId: THREAD },
+              { kind: 'snooze', until: now() + 1000, noReply: Boolean(pick(2)), threadId: THREAD },
+              { kind: 'mute', value: Boolean(pick(2)), threadId: THREAD },
+              { kind: 'undo', threadId: THREAD },
+            ]
+            const action = actions[pick(actions.length)] as OrganiseAction
+            const request = { id: `${seed}-${round}`, action }
+            if (db.prepare('SELECT 1 FROM thread WHERE id = ?').get(THREAD)) {
+              trace.push(`submit ${JSON.stringify(action)}`)
+              try {
+                queue.submit(REQUESTOR, [request])
+              } catch (error) {
+                if (
+                  action.kind !== 'undo' ||
+                  !(error instanceof Error) ||
+                  error.message !== 'There is no matching action to undo'
+                )
+                  throw error
+              }
+            }
+            if (pick(2) === 0) ownerEdit('before planning')
+            if (pick(2) === 0) gmail.afterThreadRead = () => ownerEdit('after planning snapshot')
+            if (pick(3) === 0) restart()
+            await sync.incremental()
+            await queue.tick()
+            if (pick(2) === 0) {
+              ownerEdit('during backoff')
+              restart()
+              advance(4000)
+              await queue.tick()
+            }
+            advance(1100)
+          }
+          inject = false
+          gmail.afterThreadRead = undefined
+          for (let tick = 0; tick < 24; tick++) {
+            advance(301_000)
+            await sync.incremental()
+            await queue.tick()
+            if (!db.prepare("SELECT 1 FROM mutation WHERE status = 'pending'").get()) break
+          }
+          await sync.incremental()
+          if (violation) throw violation
+          expect(
+            db.prepare("SELECT 1 FROM mutation WHERE status = 'pending'").get(),
+          ).toBeUndefined()
+          const replica = db
+            .prepare('SELECT id, provider_label_ids, label_ids FROM message ORDER BY id')
+            .all()
+          const truth = [...gmail.messages.values()]
+            .map(({ id, labelIds }) => {
+              const labels = store.providerLabels('a', labelIds ?? []).sort()
+              return { id: `a:${id}`, provider_label_ids: labels, label_ids: labels }
+            })
+            .sort((a, b) => a.id.localeCompare(b.id))
+          expect(
+            replica.map((row) => ({
+              id: row.id,
+              provider_label_ids: (JSON.parse(String(row.provider_label_ids)) as string[]).sort(),
+              label_ids: (JSON.parse(String(row.label_ids)) as string[]).sort(),
+            })),
+          ).toEqual(truth)
+        } catch (error) {
+          console.error(
+            `Gmail interleaving failed for seed ${seed}. Replay with AMC_FUZZ_SEED=${seed}\n${trace.join('\n')}`,
+          )
+          throw error
+        } finally {
+          db.close()
+        }
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  }, 20_000)
 })

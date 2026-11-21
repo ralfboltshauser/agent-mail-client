@@ -75,6 +75,7 @@ interface Change {
 }
 
 interface JournalEntry {
+  dynamic?: true
   attempted: Change[]
   applied: Change[]
 }
@@ -565,6 +566,9 @@ export class Mutations {
       const stateBefore = Object.fromEntries(
         Object.keys(statePatch).map((key) => [key, state[key as keyof ThreadState]]),
       )
+      const retainBaseline =
+        (row.principal === INTERNAL && statePatch.snoozedUntil === null) ||
+        (!original && JSON.parse(row.request).kind === 'archive')
       const projected = this.#patches(row.id)
       this.#db.prepare('DELETE FROM mutation_message WHERE mutation_id = ?').run(row.id)
       const insert = this.#db.prepare('INSERT INTO mutation_message VALUES (?, ?, ?, ?)')
@@ -586,8 +590,11 @@ export class Mutations {
               (changesTrash && key === inbox),
           ),
         )
-        if (Object.keys(patch).length) {
-          const before = { ...this.#before(account, patch, labels), ...undo.get(id)?.before }
+        if (Object.keys(patch).length || retainBaseline) {
+          const baseline = retainBaseline
+            ? { [inbox]: false, [labelId(account, SNOOZED_LABEL)]: false, ...patch }
+            : patch
+          const before = { ...this.#before(account, baseline, labels), ...undo.get(id)?.before }
           insert.run(row.id, id, JSON.stringify(patch), JSON.stringify(before))
         }
         this.#store.putProviderLabels(account, message.id, raw)
@@ -747,13 +754,18 @@ export class Mutations {
     this.#db.prepare('UPDATE account SET write_epoch = write_epoch + 1 WHERE id = ?').run(accountId)
   }
 
-  async #observe(api: GmailApi, row: MutationRow, ids: string[]) {
+  async #observe(api: GmailApi, row: MutationRow, ids: string[], thread?: GmailMessage[]) {
     const account = row.account_id
-    if (!ids.length) return new Map<string, string[]>()
+    if (!ids.length && !thread?.length) return new Map<string, string[]>()
     const messages = new Map(
-      (await this.#gmailThread(api, row)).map((message) => [message.id, message.labelIds ?? []]),
+      (thread ?? (await this.#gmailThread(api, row))).map((message) => [
+        message.id,
+        message.labelIds ?? [],
+      ]),
     )
-    const observed = new Map<string, string[]>()
+    const observed = new Map<string, string[]>(
+      thread?.map((message) => [messageId(account, message.id), message.labelIds ?? []]),
+    )
     for (const id of ids) {
       const rawId = id.slice(account.length + 1)
       const labels = messages.get(rawId) ?? (await api.getMessageLabels(rawId, true))
@@ -792,6 +804,7 @@ export class Mutations {
     step: Step,
     attempting: (changes: Change[]) => void,
     completed: (changes: Change[]) => void,
+    options: { compensating?: boolean; replan?: (messages: GmailMessage[]) => Change[] } = {},
   ) {
     const account = row.account_id
     const inbox = labelId(account, 'INBOX')
@@ -805,28 +818,39 @@ export class Mutations {
         : null
 
     // Recheck each actual request, including subgroups created by per-message conflicts.
-    // Keep the candidate list fixed so replies delivered after preparation stay in Gmail Inbox.
     let remaining = step.changes
-    while (remaining.length) {
+    while (remaining.length || options.replan) {
+      const thread = options.replan ? await this.#gmailThread(api, row) : undefined
+      if (thread && options.replan) remaining = options.replan(thread)
       const current = await this.#observe(
         api,
         row,
         remaining.map((change) => change.message_id),
+        thread,
       )
       const candidates: Change[] = []
       let signature: string | undefined
       const deferred: Change[] = []
       for (const change of remaining) {
+        if (
+          options.compensating &&
+          (JSON.parse(row.superseded) as string[]).includes(change.message_id)
+        )
+          continue
         const labels = current.get(change.message_id)
         const before = { ...change.before }
         const after = this.#delta(row, change, labels)
         if (!labels) continue
+        if (
+          options.compensating &&
+          (JSON.parse(row.superseded) as string[]).includes(change.message_id)
+        )
+          continue
         if (step.trash !== undefined) {
           if (!(trash in after)) continue
           // Gmail can change Inbox implicitly. Never send Trash over an Inbox
           // value the mutation did not authorize the endpoint to remove.
-          before[inbox] = labels.includes(inbox)
-          if (step.trash && labels.includes(inbox) && !(inbox in after)) {
+          if (labels.includes(inbox) !== before[inbox]) {
             this.#recordSuperseded(row, change.message_id)
             continue
           }
@@ -843,7 +867,9 @@ export class Mutations {
       }
       remaining = deferred
       const first = candidates[0]
-      if (!first) continue
+      if (!first) break
+      const hasMore = deferred.length > 0 || candidates.length > 1000
+      candidates.splice(1000)
       attempting(candidates)
       if (step.trash !== undefined) {
         const labels = await api.setTrashed(rawId(first.message_id), step.trash)
@@ -885,7 +911,104 @@ export class Mutations {
         }
         completed(candidates)
       })
+      if (!hasMore) break
     }
+  }
+
+  #replan(
+    row: MutationRow,
+    messages: GmailMessage[],
+    baseline: Map<string, Change>,
+    entry: JournalEntry,
+  ): Change[] {
+    const account = row.account_id
+    const inbox = labelId(account, 'INBOX')
+    const marker = labelId(account, SNOOZED_LABEL)
+    const archive = row.principal !== INTERNAL
+    const applied = new Map(entry.applied.map((change) => [change.message_id, change]))
+    const live = new Map(
+      messages
+        .filter((message) => !message.labelIds?.includes('DRAFT'))
+        .map((message) => [
+          messageId(account, message.id),
+          this.#store.providerLabels(account, message.labelIds ?? []),
+        ]),
+    )
+    const attempted = new Map(entry.attempted.map((change) => [change.message_id, change]))
+    for (const [id, change] of attempted) {
+      if (!baseline.has(id)) baseline.set(id, change)
+    }
+    const clearingSnooze = JSON.parse(row.state_patch).snoozedUntil === null
+    const changes: Change[] = []
+    let wake: string | undefined
+    if (!archive) {
+      const { replied } = JSON.parse(row.request) as { replied?: boolean }
+      const thread = this.#db
+        .prepare('SELECT organise_state FROM thread WHERE id = ?')
+        .get(row.thread_id) as { organise_state: string } | undefined
+      const state = JSON.parse(thread?.organise_state ?? '{}') as Partial<ThreadState>
+      const eligible = (labels: string[]) =>
+        !labels.includes(labelId(account, 'TRASH')) && !labels.includes(labelId(account, 'SPAM'))
+      // A confirmed wake is complete. An ambiguous response also needs no replay
+      // while the target is already in Inbox. A vanished target can be replaced.
+      const alreadyWoke = entry.attempted.some(({ message_id, after }) => {
+        const labels = live.get(message_id)
+        return (
+          after[inbox] &&
+          labels &&
+          eligible(labels) &&
+          (applied.get(message_id)?.after[inbox] || labels.includes(inbox))
+        )
+      })
+      const markerRemoved = [...live].some(
+        ([id, labels]) =>
+          eligible(labels) &&
+          !labels.includes(marker) &&
+          baseline.get(id)?.before[marker] &&
+          applied.get(id)?.after[marker] !== false,
+      )
+      if (
+        !markerRemoved &&
+        !state.muted &&
+        !(state.noReply && replied) &&
+        !alreadyWoke &&
+        [...live.values()].some((labels) => labels.includes(marker))
+      ) {
+        wake = [...messages]
+          .sort(
+            (a, b) =>
+              Number(b.internalDate ?? 0) - Number(a.internalDate ?? 0) || b.id.localeCompare(a.id),
+          )
+          .map((message) => messageId(account, message.id))
+          .find((id) => {
+            const labels = live.get(id)
+            return labels && eligible(labels)
+          })
+      }
+    }
+    for (const [id, labels] of live) {
+      const original = baseline.get(id)
+      const after: LabelPatch = {}
+      if (archive) {
+        after[inbox] = false
+        if (clearingSnooze) after[marker] = false
+      } else {
+        if (labels.includes(marker) || original?.before[marker]) after[marker] = false
+        if (id === wake) after[inbox] = true
+      }
+      for (const key of Object.keys(applied.get(id)?.after ?? {})) {
+        // A prior acknowledged write is complete, even if the owner edited it again.
+        delete after[key]
+      }
+      const before = { ...this.#before(account, after, labels), ...original?.before }
+      changes.push({ message_id: id, before, after })
+    }
+    for (const [id, change] of baseline) {
+      if (!live.has(id) && Object.keys(change.after).length) this.#recordSuperseded(row, id)
+    }
+    // Dispatch the wake before removing markers from the other messages.
+    if (wake) changes.sort((a, b) => Number(b.message_id === wake) - Number(a.message_id === wake))
+    return changes
   }
 
   #afterPrior(step: Step, prior: Change[]): Step {
@@ -935,7 +1058,16 @@ export class Mutations {
       await this.#rollback(api, row, journal)
       return
     }
-    const steps = stepsFor(row.account_id, this.#patches(row.id).map(fromPatch))
+    const changes = this.#patches(row.id).map(fromPatch)
+    const dynamic =
+      (journal[0]?.dynamic || (!row.progress && !journal.length)) &&
+      (row.principal === INTERNAL
+        ? JSON.parse(row.state_patch).snoozedUntil === null
+        : JSON.parse(row.request).kind === 'archive')
+    const steps: Step[] = dynamic
+      ? [{ patch: { [labelId(row.account_id, SNOOZED_LABEL)]: false }, changes }]
+      : stepsFor(row.account_id, changes)
+    const baseline = new Map(changes.map((change) => [change.message_id, change]))
     let progress = row.progress
     try {
       for (; progress < steps.length; progress++) {
@@ -943,6 +1075,7 @@ export class Mutations {
         if (!step) break
         const prior = journal.slice(0, progress).flatMap((entry) => entry.applied)
         const entry = journal[progress] ?? { attempted: [], applied: [] }
+        if (dynamic) entry.dynamic = true
         journal[progress] = entry
         const completedIds = new Set(entry.applied.map((change) => change.message_id))
         const remaining = {
@@ -961,6 +1094,7 @@ export class Mutations {
             entry.applied = combine([...entry.applied, ...changes])
             this.#saveJournal(row, journal)
           },
+          dynamic ? { replan: (messages) => this.#replan(row, messages, baseline, entry) } : {},
         )
         transaction(this.#db, () => {
           this.#saveJournal(row, journal)
@@ -996,7 +1130,9 @@ export class Mutations {
       !(error instanceof GmailHttpError || error instanceof OAuthError) ||
       (error instanceof OAuthError && !error.needsReauth) ||
       (error instanceof GmailHttpError &&
-        (error.status === 408 ||
+        (error.status === 401 ||
+          error.status === 404 ||
+          error.status === 408 ||
           error.status === 429 ||
           error.status >= 500 ||
           /rateLimitExceeded|quotaExceeded|backendError/i.test(error.reason)))
@@ -1010,42 +1146,41 @@ export class Mutations {
   }
 
   async #rollback(api: GmailApi, row: MutationRow, journal: JournalEntry[]) {
-    const trash = labelId(row.account_id, 'TRASH')
-    const inbox = labelId(row.account_id, 'INBOX')
     let message = row.rollback_error ?? 'Gmail writeback failed'
+    const trash = labelId(row.account_id, 'TRASH')
+    const acknowledged = inverse(
+      row.account_id,
+      journal.flatMap((entry) => entry.applied),
+    )
+    const allowed = new Map(acknowledged.map((change) => [change.message_id, change.after]))
     try {
       let rollback: Change[]
       if (row.rollback_plan === null) {
-        const attempted = journal.flatMap((entry) => entry.attempted)
-        const current = await this.#observe(api, row, [
-          ...new Set(attempted.map((change) => change.message_id)),
-        ])
-        const applied = journal.flatMap((entry) => {
-          const acknowledged = new Map(entry.applied.map((change) => [change.message_id, change]))
-          return entry.attempted.flatMap((change) => {
-            const known = acknowledged.get(change.message_id)
-            if (known) return [known]
-            const labels = current.get(change.message_id)
-            if (!labels) {
-              this.#recordSuperseded(row, change.message_id)
-              return []
-            }
-            // A lost response may hide a successful write. Infer only the sent
-            // delta and require the primary Trash transition before inferring Inbox.
-            const after: LabelPatch = {}
-            for (const [key, value] of Object.entries(change.after)) {
-              if (labels.includes(key) === change.before[key]) continue
-              if (key === inbox && trash in change.after && !labels.includes(trash)) {
-                this.#recordSuperseded(row, change.message_id)
-                continue
-              }
-              if (labels.includes(key) === value) after[key] = value
-            }
-            if (after[trash] && !labels.includes(inbox)) after[inbox] = false
-            return [{ ...change, after }]
-          })
+        const uncertain = journal.flatMap((entry) => {
+          const applied = new Set(entry.applied.map((change) => change.message_id))
+          return entry.attempted.filter((change) => !applied.has(change.message_id))
         })
-        rollback = inverse(row.account_id, applied)
+        const current = await this.#observe(api, row, [
+          ...new Set(uncertain.map((change) => change.message_id)),
+        ])
+        for (const change of uncertain) {
+          const labels = current.get(change.message_id)
+          if (
+            !labels ||
+            Object.entries(change.before).some(([key, value]) => labels.includes(key) !== value)
+          ) {
+            this.#recordSuperseded(row, change.message_id)
+          }
+          const touched =
+            trash in change.after
+              ? [[trash, change.after[trash]] as const]
+              : Object.entries(change.after)
+          if (labels && touched.some(([key, value]) => labels.includes(key) === value)) {
+            if (!message.includes(PARTIAL_WARNING)) message += `. ${PARTIAL_WARNING}`
+          }
+        }
+        this.#db.prepare('UPDATE mutation SET rollback_error = ? WHERE id = ?').run(message, row.id)
+        rollback = acknowledged
         row.rollback_plan = JSON.stringify(rollback)
         this.#db
           .prepare('UPDATE mutation SET rollback_plan = ? WHERE id = ?')
@@ -1060,7 +1195,14 @@ export class Mutations {
         await this.#step(
           api,
           row,
-          step,
+          {
+            ...step,
+            changes: step.changes.filter((change) =>
+              Object.entries(change.after).every(
+                ([key, value]) => allowed.get(change.message_id)?.[key] === value,
+              ),
+            ),
+          },
           () => {},
           (changes) => {
             // Persist provider side effects as the expectations for subsequent steps.
@@ -1072,6 +1214,7 @@ export class Mutations {
               .prepare('UPDATE mutation SET rollback_plan = ? WHERE id = ?')
               .run(JSON.stringify(rollback), row.id)
           },
+          { compensating: true },
         )
         // Keep the step layout stable. The guards neutralize completed subgroups
         // if the process stops between their response and the step checkpoint.
@@ -1089,7 +1232,7 @@ export class Mutations {
       }
     } catch (error) {
       if (this.#retry(row, error)) return
-      message += `. ${PARTIAL_WARNING}`
+      if (!message.includes(PARTIAL_WARNING)) message += `. ${PARTIAL_WARNING}`
       const ids = journal.flatMap((entry) => entry.attempted.map((change) => change.message_id))
       await this.#observe(api, row, [...new Set(ids)]).catch(() => {})
     }

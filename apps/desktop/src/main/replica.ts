@@ -41,6 +41,15 @@ export class Replica {
       CREATE TABLE IF NOT EXISTS html (message_id TEXT PRIMARY KEY, html TEXT NOT NULL);
     `)
     this.db.exec(ORGANISE_SCHEMA)
+    const columns = this.db.prepare('PRAGMA table_info(organise_queue)').all()
+    if (!columns.some((column) => column.name === 'superseded')) {
+      this.db.exec("ALTER TABLE organise_queue ADD COLUMN superseded TEXT NOT NULL DEFAULT '[]'")
+    }
+    if (!columns.some((column) => column.name === 'supersession_notified')) {
+      this.db.exec(
+        'ALTER TABLE organise_queue ADD COLUMN supersession_notified INTEGER NOT NULL DEFAULT 0',
+      )
+    }
     this.organise = new LocalOrganise(this)
     this.organise.rebuild()
   }
