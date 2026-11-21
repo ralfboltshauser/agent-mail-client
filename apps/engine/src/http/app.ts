@@ -8,9 +8,11 @@ import { authenticate, type Principal, redeemPairingCode } from '../auth/tokens.
 import { type Config, databasePath } from '../config.ts'
 import { type Db, fileSize, schemaVersion } from '../db/database.ts'
 import type { Logger } from '../log.ts'
+import type { Mutations } from '../mail/mutations.ts'
 import { buildMcpServer } from '../mcp/server.ts'
 import { VERSION } from '../version.ts'
 import { type MailDeps, mailRoutes } from './mail.ts'
+import { mutationRoutes } from './mutations.ts'
 import { syncRoutes } from './sync.ts'
 import { tokenRoutes } from './tokens.ts'
 
@@ -24,9 +26,10 @@ export interface AppDeps {
   log: Logger
   startedAt?: number
   mail?: MailDeps
+  mutations?: Mutations
 }
 
-export function createApp({ db, config, log, startedAt = Date.now(), mail }: AppDeps) {
+export function createApp({ db, config, log, startedAt = Date.now(), mail, mutations }: AppDeps) {
   const app = new Hono<AppEnv>()
 
   app.onError((error, c) => {
@@ -92,9 +95,10 @@ export function createApp({ db, config, log, startedAt = Date.now(), mail }: App
   })
 
   v1.route('/', tokenRoutes(db))
+  if (mutations) v1.route('/', mutationRoutes(mutations))
   if (mail) {
     v1.route('/', mailRoutes(mail))
-    v1.route('/', syncRoutes(mail))
+    v1.route('/', syncRoutes(mail, mutations))
 
     // MCP over Streamable HTTP, stateless: one server per request, built from the token's scopes.
     app.all('/mcp', requireAuth(db), async (c) => {

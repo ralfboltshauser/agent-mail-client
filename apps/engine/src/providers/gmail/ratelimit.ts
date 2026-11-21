@@ -94,4 +94,8 @@ export const QUOTA_COST: Record<string, number> = {
   draftCreate: 10,
   draftUpdate: 15,
   draftDelete: 10,
+  batchModify: 50,
+  trash: 20,
+  untrash: 5,
+  labelCreate: 5,
 }

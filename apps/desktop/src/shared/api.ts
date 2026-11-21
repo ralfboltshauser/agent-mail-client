@@ -4,6 +4,7 @@ import type {
   Draft,
   Label,
   MessageDetail,
+  OrganiseAction,
   SearchHit,
   ThreadSummary,
 } from '@amc/protocol'
@@ -16,6 +17,8 @@ export type View =
   | { kind: 'sent' }
   | { kind: 'drafts' }
   | { kind: 'all' }
+  | { kind: 'snoozed' }
+  | { kind: 'trash' }
   | { kind: 'label'; labelId: string }
 
 export interface ThreadQuery {
@@ -54,12 +57,15 @@ export interface AmcApi {
   unpair(): Promise<void>
   status(): Promise<SyncStatus>
   syncNow(): Promise<void>
+  organise(action: OrganiseAction): Promise<string>
+  organiseErrors(): Promise<{ id: string; message: string }[]>
 
   accounts(): Promise<AccountSummary[]>
   labels(accountId: string | null): Promise<Label[]>
   counts(accountId: string | null): Promise<Counts>
   threads(query: ThreadQuery): Promise<ThreadSummary[]>
   thread(id: string): Promise<ThreadWithMessages | null>
+  summaries(ids: string[]): Promise<ThreadSummary[]>
   /** Instant local filter over subject, people and snippet. */
   filter(text: string, accountId: string | null): Promise<ThreadSummary[]>
   /** Full-text search over the entire history, on the Engine. */

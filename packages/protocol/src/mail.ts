@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import type { MutationResult } from './organise.ts'
 
 export const Address = z.object({ name: z.string().nullable(), address: z.string() })
 export type Address = z.infer<typeof Address>
@@ -46,6 +47,8 @@ export const ThreadSummary = z.object({
   hasAttachments: z.boolean(),
   labelIds: z.array(z.string()),
   lastMessageAt: z.number(),
+  snoozedUntil: z.number().nullable().default(null),
+  muted: z.boolean().default(false),
 })
 export type ThreadSummary = z.infer<typeof ThreadSummary>
 
@@ -152,6 +155,7 @@ export interface SyncState {
 
 export interface SyncChanges {
   changes: SyncChange[]
+  organiseFailures?: MutationResult[]
   /** Ask again with since = this. */
   modseq: number
   more: boolean

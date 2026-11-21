@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Counts, ThreadWithMessages, View } from '../../shared/api'
 import { AppSidebar, SYSTEM_VIEWS } from './components/app-sidebar'
 import { CommandPalette } from './components/command-palette'
+import { OrganisePicker, OrganiseToolbar, useOrganise } from './components/organise'
 import { PairScreen } from './components/pair-screen'
 import { ThreadList } from './components/thread-list'
 import { ThreadView } from './components/thread-view'
@@ -64,7 +65,22 @@ function MailApp() {
 
   const self = useMemo(() => new Set(accounts.map((a) => a.address.toLowerCase())), [accounts])
   const labelNames = useMemo(() => new Map(labels.map((l) => [l.id, l.name])), [labels])
-  const threads: ThreadSummary[] = search?.hits ?? filtered ?? viewThreads
+  const searchSummaries = useReplica(
+    () =>
+      search?.hits ? window.amc.summaries(search.hits.map((hit) => hit.id)) : Promise.resolve([]),
+    [search?.hits],
+    [] as ThreadSummary[],
+  )
+  const searchThreads = useMemo(() => {
+    if (!search?.hits) return null
+    const byId = new Map(searchSummaries.map((summary) => [summary.id, summary]))
+    return search.hits.map((hit) => byId.get(hit.id) ?? hit)
+  }, [search?.hits, searchSummaries])
+  const threads: ThreadSummary[] = searchThreads ?? filtered ?? viewThreads
+  const selected = threads.find((item) => item.id === selectedId)
+  const activeThread = selected && thread?.thread.id === selectedId ? thread : null
+  const canOrganise = activeThread?.messages.length === activeThread?.thread.messageCount
+  const organise = useOrganise(canOrganise ? (activeThread?.thread ?? null) : null)
   const matchSnippets = useMemo(
     () => (search?.hits ? new Map(search.hits.map((h) => [h.id, h.matchSnippet])) : undefined),
     [search],
@@ -72,7 +88,10 @@ function MailApp() {
 
   // Keep a selection whenever there is something to select.
   useEffect(() => {
-    if (threads.length === 0) return
+    if (threads.length === 0) {
+      setSelectedId(null)
+      return
+    }
     if (!selectedId || !threads.some((t) => t.id === selectedId))
       setSelectedId(threads[0]?.id ?? null)
   }, [threads, selectedId])
@@ -123,6 +142,16 @@ function MailApp() {
 
   const dark = document.documentElement.classList.contains('dark')
   useHotkeys({
+    ...(!paletteOpen && !organise.picker
+      ? Object.fromEntries(
+          Object.entries(organise.shortcuts).map(([key, run]) => [
+            key,
+            (event: KeyboardEvent) => {
+              if (!event.repeat) run()
+            },
+          ]),
+        )
+      : {}),
     j: () => move(1),
     arrowdown: () => move(1),
     k: () => move(-1),
@@ -142,6 +171,8 @@ function MailApp() {
     'g d': () => goTo({ kind: 'drafts' }),
     'g t': () => goTo({ kind: 'sent' }),
     'g a': () => goTo({ kind: 'all' }),
+    'g h': () => goTo({ kind: 'snoozed' }),
+    'g x': () => goTo({ kind: 'trash' }),
     'mod+0': () => setAccountId(null),
     ...Object.fromEntries(
       accounts.slice(0, 9).map((a, i) => [`mod+${i + 1}`, () => setAccountId(a.id)]),
@@ -237,14 +268,24 @@ function MailApp() {
           <ResizableHandle />
           <ResizablePanel defaultSize="60%" minSize="35%">
             <div className="flex h-full flex-col">
-              <div className="app-drag h-12 shrink-0 border-b" />
+              <div className="app-drag flex h-12 shrink-0 items-center border-b px-3">
+                <OrganiseToolbar controls={organise.controls} />
+              </div>
               <div className="min-h-0 flex-1">
-                <ThreadView data={thread} labelNames={labelNames} scrollRef={readerScroll} />
+                <ThreadView data={activeThread} labelNames={labelNames} scrollRef={readerScroll} />
               </div>
             </div>
           </ResizablePanel>
         </ResizablePanelGroup>
       </SidebarInset>
+      {organise.picker && (
+        <OrganisePicker
+          picker={organise.picker}
+          labels={labels}
+          onClose={() => organise.setPicker(null)}
+          run={organise.run}
+        />
+      )}
       <CommandPalette
         open={paletteOpen}
         onOpenChange={setPaletteOpen}
@@ -257,6 +298,8 @@ function MailApp() {
           setTheme(dark ? 'light' : theme === 'system' && !dark ? 'dark' : dark ? 'light' : 'dark')
         }
         dark={dark}
+        organise={organise.controls}
+        undo={organise.undo}
       />
     </SidebarProvider>
   )

@@ -1,5 +1,16 @@
-import type { AccountSummary, Label } from '@amc/protocol'
-import { Archive, ChevronsUpDown, FileText, Inbox, Mail, Send, Star, Tag } from 'lucide-react'
+import { type AccountSummary, type Label, SNOOZED_LABEL } from '@amc/protocol'
+import {
+  Archive,
+  ChevronsUpDown,
+  Clock3,
+  FileText,
+  Inbox,
+  Mail,
+  Send,
+  Star,
+  Tag,
+  Trash2,
+} from 'lucide-react'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -33,6 +44,8 @@ export const SYSTEM_VIEWS: { view: View; title: string; icon: typeof Inbox; keys
   { view: { kind: 'drafts' }, title: 'Drafts', icon: FileText, keys: 'G D' },
   { view: { kind: 'sent' }, title: 'Sent', icon: Send, keys: 'G T' },
   { view: { kind: 'all' }, title: 'All Mail', icon: Archive, keys: 'G A' },
+  { view: { kind: 'snoozed' }, title: 'Snoozed', icon: Clock3, keys: 'G H' },
+  { view: { kind: 'trash' }, title: 'Trash', icon: Trash2, keys: 'G X' },
 ]
 
 export function sameView(a: View, b: View): boolean {
@@ -77,7 +90,7 @@ export function AppSidebar({
 }: Props) {
   const current = accounts.find((a) => a.id === accountId) ?? null
   const userLabels = labels
-    .filter((l) => l.kind === 'user')
+    .filter((l) => l.kind === 'user' && l.name !== SNOOZED_LABEL)
     .sort((a, b) => a.name.localeCompare(b.name))
 
   const badge = (kind: View['kind']) => {

@@ -206,4 +206,54 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX draft_thread ON draft (thread_id);
     `,
   },
+  {
+    version: 4,
+    name: 'organise',
+    sql: `
+      ALTER TABLE message ADD COLUMN provider_label_ids TEXT;
+      ALTER TABLE message ADD COLUMN first_seen_at INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE thread ADD COLUMN snoozed_until INTEGER;
+      ALTER TABLE thread ADD COLUMN muted INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE thread ADD COLUMN snooze_no_reply INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE thread ADD COLUMN snooze_started_at INTEGER;
+      ALTER TABLE thread ADD COLUMN organise_state TEXT NOT NULL DEFAULT '{}';
+      ALTER TABLE account ADD COLUMN write_epoch INTEGER NOT NULL DEFAULT 0;
+      CREATE INDEX thread_snooze ON thread (snoozed_until) WHERE snoozed_until IS NOT NULL;
+      CREATE INDEX thread_muted ON thread (muted) WHERE muted = 1;
+
+      CREATE TABLE mutation (
+        seq           INTEGER PRIMARY KEY AUTOINCREMENT,
+        id            TEXT NOT NULL UNIQUE,
+        principal     TEXT NOT NULL,
+        account_id    TEXT NOT NULL REFERENCES account (id) ON DELETE CASCADE,
+        thread_id     TEXT NOT NULL,
+        request       TEXT NOT NULL,
+        status        TEXT NOT NULL DEFAULT 'pending'
+                      CHECK (status IN ('pending', 'applied', 'failed')),
+        error         TEXT,
+        modseq        INTEGER NOT NULL DEFAULT 0,
+        attempts      INTEGER NOT NULL DEFAULT 0,
+        next_attempt  INTEGER NOT NULL DEFAULT 0,
+        progress      INTEGER NOT NULL DEFAULT 0,
+        rollback_error TEXT,
+        rollback_progress INTEGER NOT NULL DEFAULT 0,
+        state_patch   TEXT NOT NULL DEFAULT '{}',
+        state_before  TEXT NOT NULL DEFAULT '{}',
+        undo_of       TEXT REFERENCES mutation (id)
+      ) STRICT;
+      CREATE INDEX mutation_pending ON mutation (account_id, seq) WHERE status = 'pending';
+      CREATE INDEX mutation_thread_queue ON mutation (thread_id, status, seq);
+      CREATE INDEX mutation_undo ON mutation (principal, thread_id, seq);
+      CREATE INDEX mutation_failures ON mutation (principal, modseq) WHERE status = 'failed';
+      CREATE UNIQUE INDEX mutation_undo_once ON mutation (undo_of) WHERE status != 'failed';
+      CREATE TABLE mutation_message (
+        mutation_id TEXT NOT NULL REFERENCES mutation (id) ON DELETE CASCADE,
+        message_id  TEXT NOT NULL,
+        patch       TEXT NOT NULL,
+        before      TEXT NOT NULL,
+        PRIMARY KEY (mutation_id, message_id)
+      ) STRICT;
+      CREATE INDEX mutation_message_by_message ON mutation_message (message_id, mutation_id);
+    `,
+  },
 ]

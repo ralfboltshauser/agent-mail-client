@@ -76,6 +76,10 @@ export interface GmailApi {
   }): Promise<GmailListMessages>
   /** `urgent` = live sync: served before backfill under the quota. */
   getMessage(id: string, urgent?: boolean): Promise<GmailMessage | null>
+  getMessageLabels(id: string): Promise<string[] | null>
+  batchModify(ids: string[], addLabelIds: string[], removeLabelIds: string[]): Promise<void>
+  setTrashed(id: string, trashed: boolean): Promise<string[]>
+  createLabel(name: string): Promise<GmailLabel>
   history(startHistoryId: string, pageToken?: string): Promise<GmailHistoryList | null>
   attachment(messageId: string, attachmentId: string): Promise<Uint8Array>
   /** Creates or replaces a draft from a raw RFC 5322 message; returns the draft and its message. */

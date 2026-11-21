@@ -114,6 +114,36 @@ export class FakeGmail implements GmailApi {
     return m ? structuredClone(m) : null
   }
 
+  async getMessageLabels(id: string): Promise<string[] | null> {
+    const message = this.messages.get(id)
+    return message ? [...(message.labelIds ?? [])] : null
+  }
+
+  async batchModify(ids: string[], addLabelIds: string[], removeLabelIds: string[]) {
+    for (const id of ids) {
+      const labels = await this.getMessageLabels(id)
+      if (labels)
+        this.setLabels(id, [
+          ...new Set([...labels.filter((l) => !removeLabelIds.includes(l)), ...addLabelIds]),
+        ])
+    }
+  }
+
+  async setTrashed(id: string, trashed: boolean): Promise<string[]> {
+    const labels = (await this.getMessageLabels(id)) ?? []
+    const next = trashed
+      ? [...new Set([...labels.filter((l) => l !== 'INBOX'), 'TRASH'])]
+      : labels.filter((l) => l !== 'TRASH')
+    this.setLabels(id, next)
+    return next
+  }
+
+  async createLabel(name: string): Promise<GmailLabel> {
+    const label = { id: `Label_${this.labelList.length}`, name, type: 'user' as const }
+    this.labelList.push(label)
+    return label
+  }
+
   async history(startHistoryId: string): Promise<GmailHistoryList | null> {
     if (Number(startHistoryId) < this.oldestHistory) return null
     return {

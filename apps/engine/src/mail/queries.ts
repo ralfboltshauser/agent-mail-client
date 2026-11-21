@@ -24,6 +24,8 @@ interface ThreadRow {
   has_attachments: number
   label_ids: string
   last_message_at: number
+  snoozed_until: number | null
+  muted: number
 }
 
 interface MessageRow {
@@ -64,7 +66,8 @@ function parseCursor(cursor: string | null): [number | null, string | null] {
 }
 
 const THREAD_COLUMNS = `t.id, t.account_id, t.subject, t.snippet, t.participants, t.message_count,
-  t.unread_count, t.starred, t.in_inbox, t.has_attachments, t.label_ids, t.last_message_at`
+  t.unread_count, t.starred, t.in_inbox, t.has_attachments, t.label_ids, t.last_message_at,
+  t.snoozed_until, t.muted`
 
 function toThread(row: ThreadRow): ThreadSummary {
   return {
@@ -80,6 +83,8 @@ function toThread(row: ThreadRow): ThreadSummary {
     hasAttachments: row.has_attachments === 1,
     labelIds: JSON.parse(row.label_ids) as string[],
     lastMessageAt: row.last_message_at,
+    snoozedUntil: row.snoozed_until,
+    muted: row.muted === 1,
   }
 }
 

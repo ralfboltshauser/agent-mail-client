@@ -18,13 +18,13 @@ export function useHotkeys(map: HotkeyMap): void {
     let pending: string | null = null
     let pendingTimer: number | undefined
     const onKey = (event: KeyboardEvent) => {
-      if (event.isComposing) return
-      const key = event.key.length === 1 ? event.key.toLowerCase() : event.key.toLowerCase()
+      if (event.isComposing || event.defaultPrevented) return
+      const key = event.key.toLowerCase()
       const combo = [
         event.metaKey ? 'mod' : '',
         event.ctrlKey ? 'ctrl' : '',
         event.altKey ? 'alt' : '',
-        event.shiftKey && key.length > 1 ? 'shift' : '',
+        event.shiftKey && (key.length > 1 || /^[a-z]$/.test(key)) ? 'shift' : '',
         key,
       ]
         .filter(Boolean)

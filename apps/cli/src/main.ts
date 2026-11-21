@@ -1,10 +1,14 @@
+import { randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
+import { setTimeout as delay } from 'node:timers/promises'
 import type {
   AccountSummary,
   Contact,
   GmailAuthStartResponse,
   Health,
   Me,
+  MutationResponse,
+  OrganiseAction,
   PairResponse,
   SearchHit,
   ThreadDetail,
@@ -176,6 +180,70 @@ program
     if (opts.json) return printJson(hits)
     if (hits.length === 0) return console.log('Nothing found.')
     printThreads(hits)
+  })
+
+async function organise(action: OrganiseAction) {
+  const api = authed(requireConfig())
+  const id = randomUUID()
+  const post = (path: string, body: unknown) =>
+    api<MutationResponse>(path, { method: 'POST', body })
+  let result = (await post('/v1/mutations', { mutations: [{ id, action }] })).mutations[0]
+  for (let attempt = 0; result?.status === 'pending' && attempt < 10; attempt++) {
+    await delay(500)
+    result = (await post('/v1/mutations/status', { ids: [id] })).mutations[0]
+  }
+  if (!result) throw new Error(`Mutation status missing for ${id}`)
+  if (result.status === 'failed') throw new Error(result.error ?? 'Gmail writeback failed')
+  console.log(`${result.status === 'applied' ? 'Applied' : 'Queued'} · ${id}`)
+}
+
+for (const kind of ['archive', 'trash', 'read', 'unread', 'star', 'mute', 'undo'] as const) {
+  program
+    .command(kind)
+    .argument('<thread>', 'Thread id')
+    .option('--remove', 'restore from Trash, remove the star or unmute')
+    .action((threadId: string, opts: { remove?: boolean }) => {
+      if (opts.remove && !['trash', 'star', 'mute'].includes(kind))
+        throw new Error(`--remove is not valid for ${kind}`)
+      if (kind === 'archive' || kind === 'undo') return organise({ kind, threadId })
+      if (kind === 'read' || kind === 'unread')
+        return organise({ kind: 'read', threadId, value: kind === 'read' })
+      return organise({ kind, threadId, value: !opts.remove })
+    })
+}
+
+program
+  .command('label')
+  .argument('<thread>', 'Thread id')
+  .argument('<label>', 'Label id')
+  .option('--remove', 'remove the Label')
+  .action((threadId: string, labelId: string, opts: { remove?: boolean }) =>
+    organise({ kind: 'label', threadId, labelId, value: !opts.remove }),
+  )
+
+program
+  .command('snooze')
+  .argument('<thread>', 'Thread id')
+  .argument('<until>', 'ISO date and time')
+  .option('--if-no-reply', 'cancel the Snooze if a reply arrives first')
+  .action((threadId: string, until: string, opts: { ifNoReply?: boolean }) => {
+    const timestamp = Date.parse(until)
+    if (!Number.isFinite(timestamp) || timestamp <= Date.now())
+      throw new Error('Choose a future ISO date and time')
+    return organise({ kind: 'snooze', threadId, until: timestamp, noReply: opts.ifNoReply })
+  })
+
+program
+  .command('mutation-status')
+  .argument('<id>', 'Mutation id')
+  .action(async (id: string) => {
+    const { mutations } = await authed(requireConfig())<MutationResponse>('/v1/mutations/status', {
+      method: 'POST',
+      body: { ids: [id] },
+    })
+    if (!mutations.length) throw new Error('Unknown mutation')
+    printJson(mutations[0])
+    if (mutations[0]?.status === 'failed') process.exitCode = 1
   })
 
 const token = program.command('token').description('Tokens for Agents (MCP)')

@@ -1,4 +1,4 @@
-import type { MessageDetail } from '@amc/protocol'
+import { type MessageDetail, SNOOZED_LABEL } from '@amc/protocol'
 import { FileText, Paperclip, Star } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
@@ -31,7 +31,7 @@ export function ThreadView({ data, labelNames, scrollRef }: Props) {
   }
   const { thread, messages } = data
   const labels = thread.labelIds
-    .filter((id) => !HIDDEN_LABELS.test(id))
+    .filter((id) => !HIDDEN_LABELS.test(id) && id !== `${thread.accountId}:${SNOOZED_LABEL}`)
     .map((id) => labelNames.get(id) ?? id.split(':').pop() ?? id)
 
   return (
@@ -45,8 +45,12 @@ export function ThreadView({ data, labelNames, scrollRef }: Props) {
             <Star className="mt-1.5 size-4 shrink-0 fill-amber-400 text-amber-400" />
           )}
         </div>
-        {labels.length > 0 && (
+        {(labels.length > 0 || thread.muted || thread.snoozedUntil) && (
           <div className="-mt-3 mb-5 flex flex-wrap gap-1.5">
+            {thread.muted && <Badge variant="secondary">Muted</Badge>}
+            {thread.snoozedUntil && (
+              <Badge variant="secondary">Snoozed until {fullDate(thread.snoozedUntil)}</Badge>
+            )}
             {labels.map((l) => (
               <Badge key={l} variant="secondary" className="font-normal">
                 {l}

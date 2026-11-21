@@ -15,11 +15,13 @@ const BASE = 'https://gmail.googleapis.com/gmail/v1/users/me'
 export class GmailHttpError extends Error {
   readonly status: number
   readonly reason: string
+  readonly retryAfterMs: number
 
-  constructor(status: number, reason: string, message: string) {
+  constructor(status: number, reason: string, message: string, retryAfterMs = 0) {
     super(message)
     this.status = status
     this.reason = reason
+    this.retryAfterMs = retryAfterMs
   }
 }
 
@@ -41,6 +43,8 @@ interface CallOptions {
   cost?: Cost
   /** Skip ahead of backfill in the quota queue. */
   urgent?: boolean
+  /** Durable writeback handles retries for these calls. */
+  writeback?: boolean
 }
 
 /**
@@ -78,6 +82,7 @@ export class GmailHttpApi implements GmailApi {
       )
       const res = await this.#fetch(url, {
         method: options.method ?? 'GET',
+        ...(options.writeback ? { signal: AbortSignal.timeout(15_000) } : {}),
         headers: {
           Authorization: `Bearer ${await this.#tokens.get()}`,
           ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
@@ -108,21 +113,26 @@ export class GmailHttpApi implements GmailApi {
           /rateLimitExceeded|userRateLimitExceeded|quotaExceeded|quota exceeded/i.test(
             `${reason} ${message}`,
           ))
+      const retryAfter = Number(res.headers.get('retry-after'))
+      const retryAfterMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 0
       const retryable =
         quota || res.status >= 500 || (res.status === 403 && reason === 'backendError')
-      if (retryable && attempt < 8) {
+      if (retryable && attempt < 8 && !options.writeback) {
         if (quota) this.#limiter.penalize()
-        const retryAfter = Number(res.headers.get('retry-after'))
         // Per-minute quotas need waits on the scale of the minute window.
         const base = quota ? Math.min(5_000 * (attempt + 1), 60_000) : 2 ** attempt * 500
-        const delayMs =
-          (Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : base) +
-          Math.random() * 250
+        const delayMs = (retryAfterMs || base) + Math.random() * 250
         this.#onRetry?.({ path, status: res.status, delayMs, rate: this.#limiter.rate })
         await sleep(delayMs)
         continue
       }
-      throw new GmailHttpError(res.status, reason, `Gmail ${path}: ${res.status} ${message}`)
+      if (quota) this.#limiter.penalize()
+      throw new GmailHttpError(
+        res.status,
+        reason,
+        `Gmail ${path}: ${res.status} ${message}`,
+        retryAfterMs,
+      )
     }
   }
 
@@ -139,6 +149,7 @@ export class GmailHttpApi implements GmailApi {
       params: {
         pageToken: options.pageToken,
         q: options.q,
+        includeSpamTrash: options.q ? undefined : 'true',
         maxResults: String(options.maxResults ?? 500),
       },
       cost: 'list',
@@ -169,6 +180,54 @@ export class GmailHttpApi implements GmailApi {
       if (error instanceof GmailHttpError && error.status === 404) return null
       throw error
     }
+  }
+
+  async getMessageLabels(id: string): Promise<string[] | null> {
+    try {
+      const message = await this.#call<GmailMessage>(`/messages/${encodeURIComponent(id)}`, {
+        params: { format: 'minimal', fields: 'id,labelIds' },
+        cost: 'get',
+        urgent: true,
+      })
+      return message.labelIds ?? []
+    } catch (error) {
+      if (error instanceof GmailHttpError && error.status === 404) return null
+      throw error
+    }
+  }
+
+  batchModify(ids: string[], addLabelIds: string[], removeLabelIds: string[]): Promise<void> {
+    return this.#call('/messages/batchModify', {
+      method: 'POST',
+      body: { ids, addLabelIds, removeLabelIds },
+      cost: 'batchModify',
+      urgent: true,
+      writeback: true,
+    })
+  }
+
+  async setTrashed(id: string, trashed: boolean): Promise<string[]> {
+    const action = trashed ? 'trash' : 'untrash'
+    const message = await this.#call<GmailMessage>(
+      `/messages/${encodeURIComponent(id)}/${action}`,
+      {
+        method: 'POST',
+        cost: action,
+        urgent: true,
+        writeback: true,
+      },
+    )
+    return message.labelIds ?? []
+  }
+
+  createLabel(name: string): Promise<GmailLabel> {
+    return this.#call('/labels', {
+      method: 'POST',
+      body: { name, labelListVisibility: 'labelShow', messageListVisibility: 'show' },
+      cost: 'labelCreate',
+      urgent: true,
+      writeback: true,
+    })
   }
 
   async attachment(messageId: string, attachmentId: string) {

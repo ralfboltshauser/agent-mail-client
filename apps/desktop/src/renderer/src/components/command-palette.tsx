@@ -1,5 +1,5 @@
-import type { AccountSummary, Label } from '@amc/protocol'
-import { Moon, RefreshCw, Search, Sun, Tag, Users } from 'lucide-react'
+import { type AccountSummary, type Label, SNOOZED_LABEL } from '@amc/protocol'
+import { Moon, RefreshCw, Search, Sun, Tag, Undo2, Users } from 'lucide-react'
 import { useState } from 'react'
 import {
   CommandDialog,
@@ -23,6 +23,8 @@ interface Props {
   onSearch: (text: string) => void
   onToggleTheme: () => void
   dark: boolean
+  organise: { name: string; shortcut: string; icon: typeof Moon; run: () => void }[]
+  undo: () => void
 }
 
 /** ⌘K: every action, reachable by typing. */
@@ -36,6 +38,8 @@ export function CommandPalette({
   onSearch,
   onToggleTheme,
   dark,
+  organise,
+  undo,
 }: Props) {
   const [query, setQuery] = useState('')
   const run = (fn: () => void) => () => {
@@ -65,6 +69,20 @@ export function CommandPalette({
             </CommandItem>
           </CommandGroup>
         )}
+        <CommandGroup heading="Organise">
+          {organise.map((item) => (
+            <CommandItem key={item.name} value={item.name} onSelect={run(item.run)}>
+              <item.icon />
+              {item.name}
+              <CommandShortcut>{item.shortcut}</CommandShortcut>
+            </CommandItem>
+          ))}
+          <CommandItem value="undo organise" onSelect={run(undo)}>
+            <Undo2 />
+            Undo
+            <CommandShortcut>Z</CommandShortcut>
+          </CommandItem>
+        </CommandGroup>
         <CommandGroup heading="Go to">
           {SYSTEM_VIEWS.map((item) => (
             <CommandItem
@@ -78,7 +96,7 @@ export function CommandPalette({
             </CommandItem>
           ))}
           {labels
-            .filter((l) => l.kind === 'user')
+            .filter((l) => l.kind === 'user' && l.name !== SNOOZED_LABEL)
             .map((l) => (
               <CommandItem
                 key={l.id}

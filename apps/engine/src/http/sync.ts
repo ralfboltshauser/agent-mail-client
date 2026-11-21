@@ -5,11 +5,12 @@ import type {
   SyncSnapshotPage,
   SyncState,
 } from '@amc/protocol'
-import { SYNC_ENTITIES } from '@amc/protocol'
+import { hasScope, SYNC_ENTITIES } from '@amc/protocol'
 import { Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import type { Db } from '../db/database.ts'
 import type { Drafts } from '../mail/drafts.ts'
+import type { Mutations } from '../mail/mutations.ts'
 import type { MailQueries } from '../mail/queries.ts'
 import type { MailStore } from '../mail/store.ts'
 import { type AppEnv, requireScope } from './app.ts'
@@ -48,7 +49,7 @@ export function syncState(db: Db): SyncState {
  * The replica sync protocol (plan §5): snapshot at a modseq, then changes since it, with a
  * Server-Sent Events stream that nudges Clients when something changed.
  */
-export function syncRoutes(deps: SyncDeps) {
+export function syncRoutes(deps: SyncDeps, queue?: Mutations) {
   const { db } = deps
   const r = new Hono<AppEnv>()
 
@@ -124,6 +125,11 @@ export function syncRoutes(deps: SyncDeps) {
     }
     changes.sort((a, b) => a.modseq - b.modseq)
     const body: SyncChanges = { changes, modseq: window.at(-1)?.modseq ?? since, more }
+    const principal = c.get('principal')
+    if (queue && principal.kind === 'desktop' && hasScope(principal.scopes, 'organize')) {
+      const failures = queue.internalFailures(since, body.modseq)
+      if (failures.length) body.organiseFailures = failures
+    }
     return c.json(body)
   })
 

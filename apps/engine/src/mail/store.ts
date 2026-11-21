@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import type { Address } from '@amc/protocol'
+import { type Address, applyLabelPatch, type LabelPatch, SNOOZED_LABEL } from '@amc/protocol'
 import type { BlobStore } from '../blobs.ts'
 import { type Db, transaction } from '../db/database.ts'
 
@@ -104,13 +104,7 @@ export class MailStore extends EventEmitter<{ change: [] }> {
         ) {
           continue
         }
-        this.db
-          .prepare(
-            `INSERT INTO label (id, account_id, provider_id, name, kind, color) VALUES (?, ?, ?, ?, ?, ?)
-             ON CONFLICT (id) DO UPDATE SET name = excluded.name, kind = excluded.kind, color = excluded.color`,
-          )
-          .run(id, accountId, label.providerId, label.name, label.kind, label.color)
-        this.recordChange('label', id, 'upsert')
+        this.putLabel(accountId, label)
       }
       for (const id of existing.keys()) {
         this.db.prepare('DELETE FROM label WHERE id = ?').run(id)
@@ -125,6 +119,24 @@ export class MailStore extends EventEmitter<{ change: [] }> {
         .prepare('SELECT 1 FROM message WHERE id = ?')
         .get(messageId(accountId, providerId)) !== undefined
     )
+  }
+
+  putLabel(accountId: string, label: IncomingLabel): void {
+    const id = labelId(accountId, label.providerId)
+    this.db
+      .prepare(
+        `INSERT INTO label (id, account_id, provider_id, name, kind, color) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (id) DO UPDATE SET name = excluded.name, kind = excluded.kind, color = excluded.color`,
+      )
+      .run(id, accountId, label.providerId, label.name, label.kind, label.color)
+    this.recordChange('label', id, 'upsert')
+  }
+
+  private providerLabels(accountId: string, labels: string[]): string[] {
+    const snoozed = this.db
+      .prepare('SELECT provider_id FROM label WHERE account_id = ? AND name = ?')
+      .get(accountId, SNOOZED_LABEL) as { provider_id: string } | undefined
+    return labels.map((id) => labelId(accountId, id === snoozed?.provider_id ? SNOOZED_LABEL : id))
   }
 
   /** Inserts or fully replaces one message, then refreshes its Thread. */
@@ -143,7 +155,8 @@ export class MailStore extends EventEmitter<{ change: [] }> {
   #putMessage(accountId: string, ownAddresses: readonly string[], msg: IncomingMessage): void {
     const tid = threadId(accountId, msg.providerThreadId)
     const mid = messageId(accountId, msg.providerId)
-    const labels = msg.labels.map((l) => labelId(accountId, l))
+    const providerLabels = this.providerLabels(accountId, msg.labels)
+    const labels = this.projectLabels(mid, providerLabels)
     const htmlBlob = msg.bodyHtml ? this.blobs.put(msg.bodyHtml) : null
     const previous = this.db.prepare('SELECT thread_id FROM message WHERE id = ?').get(mid) as
       | { thread_id: string }
@@ -161,8 +174,8 @@ export class MailStore extends EventEmitter<{ change: [] }> {
         `INSERT INTO message (
            id, account_id, thread_id, provider_id, rfc_message_id, in_reply_to, refs,
            from_json, to_json, cc_json, bcc_json, reply_to_json, subject, snippet, body_text,
-           html_blob, sent_at, size, label_ids, unread, starred, list_unsubscribe
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           html_blob, sent_at, size, label_ids, unread, starred, list_unsubscribe, provider_label_ids, first_seen_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            thread_id = excluded.thread_id, rfc_message_id = excluded.rfc_message_id,
            in_reply_to = excluded.in_reply_to, refs = excluded.refs, from_json = excluded.from_json,
@@ -171,7 +184,7 @@ export class MailStore extends EventEmitter<{ change: [] }> {
            snippet = excluded.snippet, body_text = excluded.body_text, html_blob = excluded.html_blob,
            sent_at = excluded.sent_at, size = excluded.size, label_ids = excluded.label_ids,
            unread = excluded.unread, starred = excluded.starred,
-           list_unsubscribe = excluded.list_unsubscribe`,
+           list_unsubscribe = excluded.list_unsubscribe, provider_label_ids = excluded.provider_label_ids`,
       )
       .run(
         mid,
@@ -193,9 +206,11 @@ export class MailStore extends EventEmitter<{ change: [] }> {
         msg.sentAt,
         msg.size,
         JSON.stringify(labels),
-        msg.labels.includes('UNREAD') ? 1 : 0,
-        msg.labels.includes('STARRED') ? 1 : 0,
+        labels.includes(labelId(accountId, 'UNREAD')) ? 1 : 0,
+        labels.includes(labelId(accountId, 'STARRED')) ? 1 : 0,
         msg.listUnsubscribe,
+        JSON.stringify(providerLabels),
+        this.#now(),
       )
 
     this.#putAttachments(mid, msg.attachments)
@@ -277,27 +292,68 @@ export class MailStore extends EventEmitter<{ change: [] }> {
 
   /** Applies a label change reported by the provider (Gmail history labelsAdded/Removed). */
   setMessageLabels(accountId: string, providerId: string, providerLabels: string[]): boolean {
-    return transaction(this.db, () => {
-      const mid = messageId(accountId, providerId)
-      const row = this.db.prepare('SELECT thread_id FROM message WHERE id = ?').get(mid) as
-        | { thread_id: string }
-        | undefined
-      if (!row) return false
-      this.db
-        .prepare('UPDATE message SET label_ids = ?, unread = ?, starred = ? WHERE id = ?')
-        .run(
-          JSON.stringify(providerLabels.map((l) => labelId(accountId, l))),
-          providerLabels.includes('UNREAD') ? 1 : 0,
-          providerLabels.includes('STARRED') ? 1 : 0,
-          mid,
-        )
-      this.recordChange('message', mid, 'upsert')
-      this.refreshThread(row.thread_id)
-      return true
-    })
+    return transaction(this.db, () => this.putProviderLabels(accountId, providerId, providerLabels))
   }
 
-  /** The provider label ids currently on a message, or null if unknown. */
+  /** Stores provider labels inside the caller's transaction. */
+  putProviderLabels(accountId: string, providerId: string, providerLabels: string[]): boolean {
+    const mid = messageId(accountId, providerId)
+    const updated = this.db
+      .prepare('UPDATE message SET provider_label_ids = ? WHERE id = ? RETURNING thread_id')
+      .get(JSON.stringify(this.providerLabels(accountId, providerLabels)), mid) as
+      | { thread_id: string }
+      | undefined
+    if (!updated) return false
+    if (this.refreshMessageLabels(mid)) this.refreshThread(updated.thread_id)
+    return true
+  }
+
+  private projectLabels(id: string, base: string[]): string[] {
+    const pending = this.db
+      .prepare(
+        `SELECT p.patch FROM mutation_message p JOIN mutation m ON m.id = p.mutation_id
+       WHERE p.message_id = ? AND m.status = 'pending' ORDER BY m.seq`,
+      )
+      .all(id) as { patch: string }[]
+    return pending.reduce(
+      (labels, row) => applyLabelPatch(labels, JSON.parse(row.patch) as LabelPatch),
+      base,
+    )
+  }
+
+  refreshMessageLabels(id: string): boolean {
+    const row = this.db
+      .prepare('SELECT account_id, label_ids, provider_label_ids FROM message WHERE id = ?')
+      .get(id) as
+      | { account_id: string; label_ids: string; provider_label_ids: string | null }
+      | undefined
+    if (!row) return false
+    const labels = this.projectLabels(
+      id,
+      JSON.parse(row.provider_label_ids ?? row.label_ids) as string[],
+    ).sort()
+    if (JSON.stringify(labels) === JSON.stringify((JSON.parse(row.label_ids) as string[]).sort()))
+      return false
+    this.db
+      .prepare('UPDATE message SET label_ids = ?, unread = ?, starred = ? WHERE id = ?')
+      .run(
+        JSON.stringify(labels),
+        Number(labels.includes(labelId(row.account_id, 'UNREAD'))),
+        Number(labels.includes(labelId(row.account_id, 'STARRED'))),
+        id,
+      )
+    this.recordChange('message', id, 'upsert')
+    return true
+  }
+
+  writeEpoch(accountId: string): number {
+    const row = this.db.prepare('SELECT write_epoch FROM account WHERE id = ?').get(accountId) as
+      | { write_epoch: number }
+      | undefined
+    return row?.write_epoch ?? 0
+  }
+
+  /** The effective provider label ids currently on a message, or null if unknown. */
   messageLabels(accountId: string, providerId: string): string[] | null {
     const row = this.db
       .prepare('SELECT label_ids FROM message WHERE id = ?')
@@ -364,7 +420,7 @@ export class MailStore extends EventEmitter<{ change: [] }> {
     this.db
       .prepare(
         `UPDATE thread SET subject = ?, snippet = ?, participants = ?, message_count = ?,
-           unread_count = ?, starred = ?, in_inbox = ?, has_attachments = ?, label_ids = ?,
+           unread_count = ?, starred = ?, in_inbox = (? AND snoozed_until IS NULL AND muted = 0), has_attachments = ?, label_ids = ?,
            last_message_at = ?
          WHERE id = ?`,
       )
