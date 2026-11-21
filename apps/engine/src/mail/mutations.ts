@@ -98,6 +98,7 @@ interface Change {
 }
 
 interface JournalEntry {
+  inheritedMarkers?: string[]
   archiveScope?: string[]
   observations?: Change[]
   applied: Change[]
@@ -140,6 +141,18 @@ interface Step {
 
 function readJournal(row: MutationRow): JournalEntry[] {
   return JSON.parse(row.write_journal ?? '[]') as JournalEntry[]
+}
+
+function acknowledgedLabels(journal: JournalEntry[]): Set<string> {
+  return new Set(
+    journal.flatMap(({ applied }) =>
+      applied.flatMap(({ message_id, revisions }) =>
+        Object.entries(revisions ?? {}).map(([label, revision]) =>
+          JSON.stringify([message_id, label, revision]),
+        ),
+      ),
+    ),
+  )
 }
 
 function messageResults(journal: JournalEntry[]): MutationMessageResult[] {
@@ -571,9 +584,9 @@ export class Mutations {
     const trash = labelId(account, 'TRASH')
     const spam = labelId(account, 'SPAM')
     let wake = exiting && !muted && !replied
-    return (labels: string[]): LabelPatch => {
+    return (labels: string[], ownsMarker: boolean): LabelPatch => {
       const patch: LabelPatch = {}
-      if (exiting && labels.includes(snoozedLabel)) patch[snoozedLabel] = false
+      if (exiting && ownsMarker && labels.includes(snoozedLabel)) patch[snoozedLabel] = false
       if (labels.includes(trash) || labels.includes(spam)) return patch
       if (wake) {
         patch[inbox] = true
@@ -600,6 +613,8 @@ export class Mutations {
     const checkpoint = startsIntent ? (await api.profile()).historyId : undefined
     if (startsIntent && !checkpoint) throw new Error('Gmail did not provide a history checkpoint')
     const messages = await this.#gmailThread(api, row)
+    const inheritedMarkers =
+      action.kind === 'snooze' ? await this.#inheritSnoozeMarkers(api, row, messages) : []
     transaction(this.#db, () => {
       const state = this.#committedState(row.thread_id)
       let statePatch: Partial<ThreadState>
@@ -625,7 +640,10 @@ export class Mutations {
           (a, b) =>
             Number(b.internalDate ?? 0) - Number(a.internalDate ?? 0) || b.id.localeCompare(a.id),
         )
-        patchFor = (id, labels) => (exiting || scoped.has(id) ? sweep(labels) : {})
+        const markers = exiting
+          ? this.#markerMessages(account, this.#intentJournals(row.intent_id, row.id))
+          : new Set<string>()
+        patchFor = (id, labels) => (exiting || scoped.has(id) ? sweep(labels, markers.has(id)) : {})
       } else {
         const { startedAt } = JSON.parse(row.state_patch) as Partial<ThreadState>
         const planned = this.#actionPatch(action, account, state, row.id, startedAt ?? undefined)
@@ -712,14 +730,17 @@ export class Mutations {
       }
       for (const patch of projected) this.#store.refreshMessageLabels(patch.message_id)
       row.prepared = 1
-      row.write_journal = '[]'
+      const journal: JournalEntry[] = inheritedMarkers.length
+        ? [{ inheritedMarkers, applied: [], superseded: [], failed: [] }]
+        : []
+      row.write_journal = JSON.stringify(journal)
       row.state_patch = JSON.stringify(statePatch)
       row.state_before = JSON.stringify(stateBefore)
       this.#db
         .prepare(
-          "UPDATE mutation SET prepared = 1, write_journal = '[]', state_patch = ?, state_before = ? WHERE id = ?",
+          'UPDATE mutation SET prepared = 1, write_journal = ?, state_patch = ?, state_before = ? WHERE id = ?',
         )
-        .run(row.state_patch, row.state_before, row.id)
+        .run(row.write_journal, row.state_patch, row.state_before, row.id)
       this.#refreshThread(row.thread_id, row.id)
     })
   }
@@ -805,6 +826,9 @@ export class Mutations {
         status: string | null
       }[]
       const patches = new Map<string, LabelPatch>()
+      const markers = exiting
+        ? this.#markerMessages(thread.account_id, this.#intentJournals(intent.id))
+        : new Set<string>()
       let checkThrough = intent.checked_history_id
       for (const row of rows) {
         const revision = row.provider_history_id
@@ -813,7 +837,7 @@ export class Mutations {
         if (row.status || labels.includes(labelId(thread.account_id, 'DRAFT'))) continue
         if (!exiting && !this.#historyIncludes(thread.history_cursor, revision ?? undefined))
           continue
-        const patch = sweep(labels)
+        const patch = sweep(labels, markers.has(row.id))
         if (Object.keys(patch).length) patches.set(row.id, patch)
       }
       if (exiting || patches.size || (snooze && checkThrough !== intent.checked_history_id)) {
@@ -983,7 +1007,7 @@ export class Mutations {
     })
   }
 
-  #intentJournals(row: MutationRow, intentId: string): JournalEntry[] {
+  #intentJournals(intentId: string, excludeId = ''): JournalEntry[] {
     const rows = this.#db
       .prepare(
         `SELECT * FROM mutation
@@ -993,8 +1017,61 @@ export class Mutations {
          ) OR (undo_of IS NOT NULL AND status = 'applied'
              AND json_extract(state_patch, '$.snoozeIntent') = ?))`,
       )
-      .all(row.id, intentId, intentId, intentId, intentId) as unknown as MutationRow[]
+      .all(excludeId, intentId, intentId, intentId, intentId) as unknown as MutationRow[]
     return rows.flatMap(readJournal)
+  }
+
+  #markerMessages(account: string, journal: JournalEntry[]): Set<string> {
+    const marker = labelId(account, SNOOZED_LABEL)
+    const messages = new Set<string>()
+    for (const { applied, inheritedMarkers } of journal) {
+      for (const id of inheritedMarkers ?? []) messages.add(id)
+      // Only a Gmail acknowledgement with a revision can establish ownership.
+      for (const change of applied) {
+        if (change.after[marker] && change.revisions?.[marker]) messages.add(change.message_id)
+      }
+    }
+    return messages
+  }
+
+  async #inheritSnoozeMarkers(api: GmailApi, row: MutationRow, messages: GmailMessage[]) {
+    const account = row.account_id
+    const markerId = this.#snoozedLabel(account)
+    if (!markerId) return []
+    // A user action may have queued cleanup behind this replacement.
+    const queued = this.#db
+      .prepare(
+        `SELECT intent_id FROM mutation WHERE thread_id = ? AND status = 'pending'
+       AND json_extract(request, '$.cancelled') = 1 ORDER BY seq DESC LIMIT 1`,
+      )
+      .get(row.thread_id) as { intent_id: string } | undefined
+    const previous = this.#committedState(row.thread_id).snoozeIntent ?? queued?.intent_id
+    const intent = previous ? this.#intent(previous) : undefined
+    if (intent?.status !== 'active' || intent.marker_id !== markerId) return []
+
+    const journals = this.#intentJournals(intent.id)
+    const marked = this.#markerMessages(account, journals)
+    const live = messages.filter(
+      ({ id, labelIds }) => marked.has(messageId(account, id)) && labelIds?.includes(markerId),
+    )
+    if (!live.length) return []
+
+    const history = await this.#readHistory(api, intent.history_id)
+    const marker = labelId(account, SNOOZED_LABEL)
+    const acknowledged = acknowledgedLabels(journals)
+    return live.flatMap((message) => {
+      const id = messageId(account, message.id)
+      const observed = { labels: [], historyId: message.historyId }
+      const changes = this.#messageHistory(account, id, observed, markerId, history)
+      return changes &&
+        !changes.deleted &&
+        changes.events.every(
+          ({ label, revision }) =>
+            label !== marker || acknowledged.has(JSON.stringify([id, label, revision])),
+        )
+        ? [id]
+        : []
+    })
   }
 
   async #step(
@@ -1003,7 +1080,11 @@ export class Mutations {
     step: Step,
     entry: JournalEntry,
     journal: JournalEntry[],
-    replan?: (messages: GmailMessage[], current: Map<string, ProviderObservation>) => Change[],
+    replan?: (
+      messages: GmailMessage[],
+      current: Map<string, ProviderObservation>,
+      markers: ReadonlySet<string>,
+    ) => Change[],
   ) {
     const account = row.account_id
     const inbox = labelId(account, 'INBOX')
@@ -1013,7 +1094,8 @@ export class Mutations {
     const rawId = (id: string) => id.slice(account.length + 1)
     const intent = row.intent_id ? this.#intent(row.intent_id) : undefined
     const automatic = intent ? (JSON.parse(row.request) as AutomaticRequest) : undefined
-    const sourceJournals = intent ? this.#intentJournals(row, intent.id) : []
+    const sourceJournals = intent ? this.#intentJournals(intent.id, row.id) : []
+    const markers = this.#markerMessages(account, sourceJournals)
     const save = () => this.#saveJournal(row, journal)
     const snoozedId = this.#snoozedLabel(account)
     const startsSnooze = JSON.parse(row.request).kind === 'snooze' && this.#intent(row.id)
@@ -1084,15 +1166,7 @@ export class Mutations {
           save()
         }
       }
-      const acknowledged = new Set(
-        [...sourceJournals, ...journal].flatMap(({ applied }) =>
-          applied.flatMap(({ message_id, revisions }) =>
-            Object.entries(revisions ?? {}).map(([label, revision]) =>
-              JSON.stringify([message_id, label, revision]),
-            ),
-          ),
-        ),
-      )
+      const acknowledged = acknowledgedLabels([...sourceJournals, ...journal])
       const ownerChanged = (id: string, event: Pick<LabelEvent, 'label' | 'revision'>) =>
         !acknowledged.has(JSON.stringify([id, event.label, event.revision]))
       if (intent && automatic?.snooze) {
@@ -1131,7 +1205,7 @@ export class Mutations {
           return true
         }
       }
-      const changes = replan && thread ? replan(thread, current) : step.changes
+      const changes = replan && thread ? replan(thread, current, markers) : step.changes
       const touched = async (change: Change, key: string, start = change.revisions?.[key]) => {
         if (!start) return true
         const { message_id } = change
@@ -1311,6 +1385,7 @@ export class Mutations {
     current: Map<string, ProviderObservation>,
     baseline: Map<string, Change>,
     entry: JournalEntry,
+    markers: ReadonlySet<string>,
   ): Change[] {
     const account = row.account_id
     const inbox = labelId(account, 'INBOX')
@@ -1389,7 +1464,8 @@ export class Mutations {
       if (archive) {
         after[inbox] = false
       } else {
-        if (labels.includes(marker) || original?.before[marker]) after[marker] = false
+        if (markers.has(id) && (labels.includes(marker) || original?.before[marker]))
+          after[marker] = false
         if (id === wake) after[inbox] = true
       }
       for (const key of Object.keys(applied.get(id)?.after ?? {})) {
@@ -1473,7 +1549,8 @@ export class Mutations {
           entry,
           journal,
           dynamic
-            ? (messages, current) => this.#replan(row, messages, current, baseline, entry)
+            ? (messages, current, markers) =>
+                this.#replan(row, messages, current, baseline, entry, markers)
             : undefined,
         )
         if (!complete) return

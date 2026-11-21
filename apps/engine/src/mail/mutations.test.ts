@@ -889,7 +889,9 @@ describe('seeded Gmail writeback interleavings', () => {
         const ownerEdit = (phase: string) => {
           const ids = [...gmail.messages.keys()]
           const id = ids[pick(ids.length)] ?? ''
-          const edit = ids.length < 2 ? 8 : pick(phase === 'during backoff' ? 10 : 9)
+          const choices = phase === 'during backoff' ? 11 : phase === 'before planning' ? 10 : 9
+          let edit = ids.length < 2 ? 8 : pick(choices)
+          if (phase === 'before planning' && edit === 9) edit = 10
           trace.push(`owner ${phase}: ${edit} ${id}`)
           if (phase === 'after read') ownerEditedAfterRead = true
           if (edit === 8) {
@@ -929,9 +931,13 @@ describe('seeded Gmail writeback interleavings', () => {
                 ['TRASH', 'INBOX', 'STARRED', 'UNREAD', 'Label_work'][pick(5)] ?? 'INBOX',
               )
               return
-            case 6: {
+            case 6:
+            case 10: {
               const marker = gmail.labelList.find((label) => label.name === SNOOZED_LABEL)
-              if (marker) labels.delete(marker.id)
+              if (marker) {
+                if (edit === 6) labels.delete(marker.id)
+                else labels.add(marker.id)
+              }
               break
             }
           }
@@ -973,6 +979,9 @@ describe('seeded Gmail writeback interleavings', () => {
             expect(snapshot).toBeDefined()
             expect(snapshot?.labels.includes(label)).not.toBe(present)
             if (owner?.writer !== 'owner') return
+            const marker = gmail.labelList.find(({ name }) => name === SNOOZED_LABEL)?.id
+            if (!present && label === marker)
+              throw new Error(`Removed an owner-applied Snooze marker: ${id}`)
             if (owner.revision > (snapshot?.revision ?? 0))
               throw new Error(`Overwrote owner write after dispatch read: ${id} ${label}`)
             const row = active()
@@ -1121,6 +1130,13 @@ describe('seeded Gmail writeback interleavings', () => {
           )
           scenarios.push((fixture) =>
             checkSnoozedActionAfterMarkerEdit(fixture, targeted(2) ? 'archive' : 'trash'),
+          )
+          scenarios.push((fixture) =>
+            checkOwnerSnoozeMarker(
+              fixture,
+              (['before Snooze', 'at delivery', 'during Snooze'] as const)[targeted(3)] ??
+                'during Snooze',
+            ),
           )
           // Each automatic path gets an owner edit after the action has settled.
           // Vary the path, pagination, and whether a first dispatch was refused.
@@ -1740,6 +1756,55 @@ it.each(['archive', 'trash'] as const)(
   },
 )
 
+async function checkOwnerSnoozeMarker(
+  { gmail, queue, submit, lookup, sync, now, thread }: OrganiseFixture,
+  timing: 'before Snooze' | 'at delivery' | 'during Snooze',
+) {
+  const marker = gmail.labelList.find(({ name }) => name === SNOOZED_LABEL)?.id
+  if (!marker) throw new Error('Missing Snoozed label')
+  const ownerMessage = timing === 'before Snooze' ? 'm1' : 'm3'
+  if (timing === 'before Snooze') {
+    gmail.setLabels(ownerMessage, ['INBOX', 'UNREAD', marker])
+    await sync.incremental()
+  }
+  const deadline = now() + 60_000
+  const snooze = submit({ kind: 'snooze', threadId: THREAD, until: deadline })
+  await queue.tick()
+  expect(lookup(snooze.id)?.status).toBe('applied')
+  if (timing !== 'before Snooze') {
+    gmail.add(ownerMessage, {
+      threadId: 'thread',
+      labels: timing === 'at delivery' ? ['INBOX', 'UNREAD', marker] : ['INBOX', 'UNREAD'],
+    })
+    if (timing === 'during Snooze') gmail.setLabels(ownerMessage, ['INBOX', 'UNREAD', marker])
+    await sync.incremental()
+  }
+  expect(thread()?.snoozedUntil).toBe(deadline)
+  expect(gmail.lastWriter.get(ownerMessage)?.get(marker)?.writer).toBe('owner')
+
+  const writes = vi.spyOn(gmail, 'modifyMessage')
+  const star = submit({ kind: 'star', threadId: THREAD, value: true })
+  await queue.tick()
+  expect(lookup(star.id)?.status).toBe('applied')
+  expect(thread()?.snoozedUntil).toBeNull()
+  await queue.tick()
+  expect(
+    writes.mock.calls.filter(([id, , remove]) => id === ownerMessage && remove.includes(marker)),
+  ).toEqual([])
+  expect(await gmail.getMessageLabels(ownerMessage)).toEqual(
+    expect.arrayContaining(['STARRED', marker]),
+  )
+  const amcMarker = await gmail.getMessageLabels('m2')
+  expect(amcMarker?.includes(marker)).toBe(timing === 'during Snooze')
+}
+
+it.each(['before Snooze', 'at delivery'] as const)(
+  'preserves an owner marker applied %s when a Star cancels Snooze',
+  async (timing) => {
+    await withFixture((fixture) => checkOwnerSnoozeMarker(fixture, timing))
+  },
+)
+
 it('cleans untouched Snoozed markers after a user action without waking the thread', async () => {
   await withFixture(async ({ gmail, queue, submit, lookup, now, advance, thread, store }) => {
     submit({ kind: 'snooze', threadId: THREAD, until: now() + 1000 })
@@ -1786,6 +1851,27 @@ it('leaves the marker for a replacement Snooze queued ahead of cancellation clea
     await queue.tick()
     expect(await gmail.getMessageLabels('m1')).not.toContain(marker)
     expect(thread()).toMatchObject({ inInbox: true, snoozedUntil: null })
+  })
+})
+
+it('inherits only untouched AMC markers when replacing a Snooze', async () => {
+  await withFixture(async ({ gmail, queue, submit, lookup, now, advance, sync, store }) => {
+    submit({ kind: 'snooze', threadId: THREAD, until: now() + 30_000 })
+    await queue.tick()
+    const marker = gmail.labelList.find(({ name }) => name === SNOOZED_LABEL)?.id
+    if (!marker) throw new Error('Missing Snoozed label')
+    flipAwayAndBack(gmail, 'm1', marker)
+    await sync.incremental()
+
+    const replacement = submit({ kind: 'snooze', threadId: THREAD, until: now() + 60_000 })
+    await queue.tick()
+    expect(lookup(replacement.id)?.status).toBe('applied')
+
+    advance(60_000)
+    const restarted = new Mutations(store, () => gmail, silentLog, now)
+    await restarted.tick()
+    expect(await gmail.getMessageLabels('m1')).toContain(marker)
+    expect(await gmail.getMessageLabels('m2')).not.toContain(marker)
   })
 })
 
