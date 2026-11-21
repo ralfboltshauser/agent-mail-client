@@ -61,6 +61,8 @@ export function App() {
     <TooltipProvider delayDuration={400}>
       {status.phase === 'unpaired' ? (
         <PairScreen savedEngineUrl={status.engineUrl} recoveryMessage={status.error} />
+      ) : status.phase === 'restoring-pairing' || status.phase === 'pairing-read-error' ? (
+        <SavedPairingState retrying={status.phase === 'restoring-pairing'} />
       ) : (
         <MailApp
           status={status}
@@ -70,6 +72,25 @@ export function App() {
       )}
       <Toaster theme={dark ? 'dark' : 'light'} position="bottom-center" />
     </TooltipProvider>
+  )
+}
+
+function SavedPairingState({ retrying }: { retrying: boolean }) {
+  return (
+    <main className="grid h-screen place-items-center">
+      <div className="app-drag absolute inset-x-0 top-0 h-11" />
+      {retrying ? (
+        <output className="text-sm text-muted-foreground">Reconnecting…</output>
+      ) : (
+        <div className="grid justify-items-center gap-3 px-6 text-center">
+          <h1 className="text-lg font-semibold">AMC couldn't read its saved pairing</h1>
+          <p className="text-sm text-muted-foreground">
+            Make sure your Mac’s Keychain is unlocked, then retry.
+          </p>
+          <Button onClick={() => void getAmc().retrySavedPairing()}>Retry</Button>
+        </div>
+      )}
+    </main>
   )
 }
 

@@ -56,6 +56,8 @@ export interface Counts {
 
 export type SyncPhase =
   | 'unpaired'
+  | 'restoring-pairing'
+  | 'pairing-read-error'
   | 'connecting'
   | 'bootstrapping'
   | 'live'
@@ -107,6 +109,11 @@ export interface TriageResult {
   skipped: number
 }
 
+export interface TriageCounts {
+  recent: number
+  older: number
+}
+
 export interface TriageStatus {
   enabled: boolean
   running: boolean
@@ -124,7 +131,8 @@ export interface AmcApi {
   onOpenThread(listener: (thread: ThreadSummary) => void): () => void
   triageStatus(): Promise<TriageStatus>
   setAutoTriage(enabled: boolean): Promise<void>
-  triageNow(accountId: string | null): Promise<void>
+  triageCounts(accountId: string | null): Promise<TriageCounts>
+  triageNow(accountId: string | null, scope: 'recent' | 'account'): Promise<void>
   onTriageStatus(listener: (status: TriageStatus) => void): () => void
   t3Setup(): Promise<{ kind: 'cli' | 'mcp'; address: string }>
   t3Projects(address: string | null): Promise<T3Project[]>
@@ -133,6 +141,7 @@ export interface AmcApi {
   activeHandoff(threadId: string): Promise<ActiveHandoff | null>
   endHandoff(id: string): Promise<void>
   pair(engineUrl: string, code: string): Promise<void>
+  retrySavedPairing(): Promise<void>
   unpair(): Promise<void>
   status(): Promise<SyncStatus>
   syncNow(): Promise<void>

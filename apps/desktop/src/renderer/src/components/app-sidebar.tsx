@@ -16,6 +16,8 @@ import {
   Tag,
   Trash2,
 } from 'lucide-react'
+import { useEffect } from 'react'
+import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -39,6 +41,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from '@/components/ui/sidebar'
+import { useReplicaQuery } from '@/hooks/use-amc'
 import { getAmc } from '@/lib/amc'
 import { cn } from '@/lib/utils'
 import type { Counts, SyncStatus, View } from '../../../shared/api'
@@ -125,6 +128,22 @@ export function AppSidebar({
   status,
 }: Props) {
   const triage = useTriageStatus()
+  const { value: backlog, refresh: refreshBacklog } = useReplicaQuery(
+    async () => ({ accountId, ...(await getAmc().triageCounts(accountId)) }),
+    [accountId],
+    null,
+  )
+  useEffect(() => {
+    const timer = setInterval(refreshBacklog, 60_000)
+    return () => clearInterval(timer)
+  }, [refreshBacklog])
+  const triageCounts = backlog?.accountId === accountId ? backlog : null
+  const triageDisabled = status?.phase !== 'live' || !triage || triage.running
+  const runTriage = (scope: 'recent' | 'account') => {
+    void getAmc()
+      .triageNow(accountId, scope)
+      .catch(() => toast.error('Could not start triage.'))
+  }
   const current = accounts.find((a) => a.id === accountId) ?? null
   const folderLabels = navigableLabels(labels, accounts).sort((a, b) =>
     a.name.localeCompare(b.name),
@@ -222,15 +241,33 @@ export function AppSidebar({
         </SidebarGroup>
 
         <SidebarGroup>
-          <div className="flex items-center justify-between">
-            <SidebarGroupLabel>Triage</SidebarGroupLabel>
+          <SidebarGroupLabel>Triage</SidebarGroupLabel>
+          {triageCounts && (
+            <p className="px-2 pb-1 text-xs text-muted-foreground">
+              {triageCounts.recent
+                ? `${triageCounts.recent.toLocaleString()} new to triage`
+                : 'No new mail to triage'}
+              {' · '}
+              {triageCounts.older.toLocaleString()} older untriaged
+            </p>
+          )}
+          <div className="flex flex-wrap gap-x-1 px-1">
             <Button
               variant="ghost"
               size="sm"
-              disabled={status?.phase !== 'live' || !triage || triage.running}
-              onClick={() => void getAmc().triageNow(accountId)}
+              disabled={triageDisabled}
+              onClick={() => runTriage('recent')}
+              title="Triage Inbox Threads delivered in the last 24 hours"
             >
-              Triage now
+              Triage recent
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={triageDisabled || triageCounts?.older === 0}
+              onClick={() => runTriage('account')}
+            >
+              Triage older…
             </Button>
           </div>
           <LastTriageRun status={triage} />

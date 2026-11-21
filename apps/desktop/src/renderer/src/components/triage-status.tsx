@@ -57,6 +57,7 @@ export function LastTriageRun({ status }: { status: TriageStatus | undefined }) 
         <>
           {last && (
             <span className="block">
+              {'Last run · '}
               <time dateTime={new Date(last.at).toISOString()}>
                 {new Date(last.at).toLocaleString()}
               </time>

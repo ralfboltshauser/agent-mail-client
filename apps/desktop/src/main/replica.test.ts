@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { TRIAGE_RECENT_WINDOW_MS } from '@amc/protocol'
 import { expect, it, vi } from 'vitest'
 import { Replica } from './replica'
 
@@ -76,11 +77,31 @@ it('triggers triage for new Inbox mail and recognizes synced triage grant assign
     expect(arrivals).toEqual(new Map([['new', 'one']]))
     expect(replica.apply([upsert({ ...thread, starred: true })]).size).toBe(0)
     expect(replica.apply([upsert({ ...thread, lastMessageAt: 11 })]).size).toBe(1)
-    expect(replica.triageAccount(null, arrivals)).toBe('one')
+    const now = Date.now()
+    const putMessage = (threadId: string, deliveredAt?: number) => {
+      replica.put('message', {
+        id: threadId,
+        threadId,
+        sentAt: now,
+        deliveredAt,
+        bodyText: '',
+      } as Parameters<typeof replica.put<'message'>>[1])
+    }
+    putMessage('new', now - TRIAGE_RECENT_WINDOW_MS + 60_000)
+    putMessage('snapshot', now - TRIAGE_RECENT_WINDOW_MS - 60_000)
+    replica.put('thread', { ...thread, id: 'unknown', accountId: 'two', lastMessageAt: 100 })
+    putMessage('unknown')
+    expect(replica.triageCounts(null)).toEqual({ recent: 1, older: 2 })
+    expect(replica.triageCounts('two')).toEqual({ recent: 0, older: 1 })
+    expect(replica.triageAccount(null, arrivals, 'recent')).toBe('one')
+    expect(replica.triageAccount(null, undefined, 'recent')).toBe('one')
+    expect(replica.triageAccount(null, undefined, 'account')).toBe('two')
+    expect(replica.triageAccount(null, undefined, 'older')).toBe('two')
 
     const bucket = { bucket: 'Reply' as const, reason: 'Fixture', setAt: 50, setBy: 'triage-host' }
     replica.apply([upsert({ ...thread, lastMessageAt: 11, bucket })])
-    expect(replica.triageAccount(null, arrivals)).toBeUndefined()
+    expect(replica.triageAccount(null, arrivals, 'recent')).toBeUndefined()
+    expect(replica.triageCounts(null)).toEqual({ recent: 0, older: 2 })
   } finally {
     replica.db.close()
   }

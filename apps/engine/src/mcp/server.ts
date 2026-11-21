@@ -3,6 +3,7 @@ import {
   hasScope,
   type OrganiseAction,
   type Scope,
+  TRIAGE_RECENT_WINDOW_MS,
   UntriagedLimit,
 } from '@amc/protocol'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -152,7 +153,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
             untriaged: true,
             accountId: target,
             limit,
-            ...(recent ? { deliveredSince: Date.now() - 24 * 60 * 60_000 } : {}),
+            ...(recent ? { deliveredSince: Date.now() - TRIAGE_RECENT_WINDOW_MS } : {}),
           }).threads,
         )
       },

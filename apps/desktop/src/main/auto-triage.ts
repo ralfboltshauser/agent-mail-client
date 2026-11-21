@@ -9,7 +9,8 @@ interface TriageOptions {
   onLowBattery: () => Promise<boolean>
   accountForRun: (
     accountId: string | null,
-    pending?: ReadonlyMap<string, string>,
+    pending: ReadonlyMap<string, string> | undefined,
+    recent: boolean,
   ) => string | undefined
   saveLastRun: (lastRun: TriageStatus['lastRun']) => void
   changed: (status: TriageStatus) => void
@@ -79,8 +80,8 @@ export class AutoTriage {
     this.#schedule()
   }
 
-  now(accountId: string | null) {
-    return this.#attempt(accountId, true)
+  now(accountId: string | null, recent = true) {
+    return this.#attempt(accountId, true, recent)
   }
 
   stop() {
@@ -103,7 +104,7 @@ export class AutoTriage {
     this.#timer = setTimeout(() => void this.#attempt(null, false), Math.max(0, next - Date.now()))
   }
 
-  async #attempt(requestedAccount: string | null, manual: boolean) {
+  async #attempt(requestedAccount: string | null, manual: boolean, recent = true) {
     if (this.#active) return
     const run = this.#run
     if (!this.#available || !run) {
@@ -119,10 +120,11 @@ export class AutoTriage {
         const account = this.#options.accountForRun(
           requestedAccount,
           manual ? undefined : this.#pending,
+          recent,
         )
         if (!account) {
           if (!manual) this.#pending.clear()
-          this.#skip('No untriaged Inbox threads.')
+          this.#notice = recent ? null : 'No untriaged Inbox threads in this Account.'
           return
         }
         const last = this.#lastRun?.at ?? -Infinity
@@ -148,7 +150,7 @@ export class AutoTriage {
         for (const [id] of pending) this.#pending.delete(id)
         const at = Date.now()
         try {
-          const result = await run(account, signal, !manual)
+          const result = await run(account, signal, recent)
           if (result === null) {
             if (this.#run === run && this.#enabled) {
               for (const [id, accountId] of pending) this.#pending.set(id, accountId)

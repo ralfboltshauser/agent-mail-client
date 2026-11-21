@@ -11,10 +11,27 @@ import type {
   SyncEntity,
   ThreadSummary,
 } from '@amc/protocol'
-import { RECENT_THREAD_BODIES } from '@amc/protocol'
-import type { Counts, ReplicaThreadMessage, ThreadQuery, ThreadWithMessages } from '../shared/api'
+import { RECENT_THREAD_BODIES, TRIAGE_RECENT_WINDOW_MS } from '@amc/protocol'
+import type {
+  Counts,
+  ReplicaThreadMessage,
+  ThreadQuery,
+  ThreadWithMessages,
+  TriageCounts,
+} from '../shared/api'
 import { LocalDraftUpdates } from './draft-updates'
 import { LocalOrganise, ORGANISE_SCHEMA } from './organise'
+
+const UNTRIAGED_INBOX = "in_inbox = 1 AND json_extract(data, '$.bucket.bucket') IS NULL"
+const RECENT_DELIVERY = `(
+  SELECT MAX(json_extract(message.data, '$.deliveredAt'))
+  FROM message WHERE message.thread_id = thread.id
+) BETWEEN :cutoff AND :now`
+
+function triageWindow() {
+  const now = Date.now()
+  return { cutoff: now - TRIAGE_RECENT_WINDOW_MS, now }
+}
 
 function splitMessage({ bodyText, ...metadata }: MessageDetail) {
   const body = Buffer.from(bodyText, 'utf8')
@@ -239,22 +256,41 @@ export class Replica {
     return arrivals
   }
 
+  triageCounts(accountId: string | null): TriageCounts {
+    const row = this.db
+      .prepare(`
+        SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE ${RECENT_DELIVERY}) AS recent
+        FROM thread WHERE ${UNTRIAGED_INBOX} AND (:account IS NULL OR account_id = :account)
+      `)
+      .get({ ...triageWindow(), account: accountId })
+    const recent = Number(row?.recent)
+    return { recent, older: Number(row?.total) - recent }
+  }
+
   triageAccount(
     accountId: string | null,
-    pending?: ReadonlyMap<string, string>,
+    pending: ReadonlyMap<string, string> | undefined,
+    scope: 'recent' | 'older' | 'account',
   ): string | undefined {
-    const untriaged = "in_inbox = 1 AND json_extract(data, '$.bucket.bucket') IS NULL"
+    const window = scope === 'account' ? {} : triageWindow()
+    const ageFilter = {
+      account: '',
+      recent: ` AND ${RECENT_DELIVERY}`,
+      older: ` AND NOT COALESCE(${RECENT_DELIVERY}, 0)`,
+    }[scope]
+    const eligible = UNTRIAGED_INBOX + ageFilter
     if (pending) {
-      const find = this.db.prepare(`SELECT 1 FROM thread WHERE id = ? AND ${untriaged}`)
-      for (const [id, account] of pending) if (find.get(id)) return account
+      const find = this.db.prepare(`SELECT 1 FROM thread WHERE id = :id AND ${eligible}`)
+      for (const [id, account] of pending) if (find.get({ ...window, id })) return account
       return undefined
     }
     const row = this.db
       .prepare(`
-      SELECT account_id FROM thread WHERE ${untriaged} AND (?1 IS NULL OR account_id = ?1)
-      ORDER BY last_message_at DESC LIMIT 1
-    `)
-      .get(accountId)
+        SELECT account_id FROM thread WHERE ${eligible}
+          AND (:account IS NULL OR account_id = :account)
+        ORDER BY last_message_at DESC LIMIT 1
+      `)
+      .get({ ...window, account: accountId })
     return typeof row?.account_id === 'string' ? row.account_id : undefined
   }
 

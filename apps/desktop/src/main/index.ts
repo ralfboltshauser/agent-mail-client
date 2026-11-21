@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type {
@@ -67,7 +75,7 @@ const UNPAIRED: SyncStatus = {
   error: null,
 }
 
-let unpairedStatus = UNPAIRED
+let startupStatus: SyncStatus = { ...UNPAIRED, phase: 'restoring-pairing' }
 const pauseFile = () => join(app.getPath('userData'), 'sync-paused')
 const triageOffFile = () => join(app.getPath('userData'), 'auto-triage-off')
 const triageRunFile = () => join(app.getPath('userData'), 'triage-run.json')
@@ -78,6 +86,49 @@ function loadLastTriageRun(): TriageStatus['lastRun'] {
     return Number.isFinite(run?.at) ? run : null
   } catch {
     return null
+  }
+}
+
+function startupLog(event: string) {
+  try {
+    appendFileSync(
+      join(app.getPath('userData'), 'startup.log'),
+      `${new Date().toISOString()} [${process.pid}] ${event}\n`,
+      {
+        mode: 0o600,
+      },
+    )
+  } catch {
+    // Diagnostics must never prevent the app from opening.
+  }
+}
+
+function setStartupStatus(status: SyncStatus) {
+  startupStatus = status
+  broadcast('amc:status', status)
+}
+
+async function restoreSavedPairing() {
+  setStartupStatus({ ...startupStatus, phase: 'restoring-pairing', error: null })
+  startupLog('reading saved pairing')
+  let pairing = await loadPairing()
+  if (quittingTriage.signal.aborted) return
+  if (pairing && !pairing.token) {
+    startupLog('saved pairing unreadable; retrying')
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    if (quittingTriage.signal.aborted) return
+    pairing = await loadPairing()
+    if (quittingTriage.signal.aborted) return
+  }
+  if (pairing?.token) {
+    startupLog('saved pairing decrypted')
+    connect(pairing.engineUrl, pairing.token)
+  } else if (pairing) {
+    startupLog('saved pairing unreadable after retry')
+    setStartupStatus({ ...UNPAIRED, phase: 'pairing-read-error', engineUrl: pairing.engineUrl })
+  } else {
+    startupLog('no saved pairing file')
+    setStartupStatus(UNPAIRED)
   }
 }
 
@@ -146,8 +197,23 @@ function startSync(client: EngineClient) {
   organise = createOrganise(client, loop)
   broadcast('amc:status', loop.status)
   let replayOnLive = true
+  let reportedPhase = loop.status.phase
   loop.on('status', (status) => {
     if (sync !== loop) return
+    if (status.phase === 'unpaired') {
+      startupLog('Engine rejected saved pairing (401)')
+      stopSync()
+      engine = null
+      organise = null
+      triage.connect(null)
+      setStartupStatus(status)
+      refreshTray()
+      return
+    }
+    if (replayOnLive && status.phase !== reportedPhase) {
+      startupLog(`Engine sync phase: ${status.phase}`)
+      reportedPhase = status.phase
+    }
     broadcast('amc:status', status)
     triage.setAvailable(status.phase === 'live')
     if (status.phase === 'live' && replayOnLive) {
@@ -225,11 +291,36 @@ function registerIpc() {
     else writeFileSync(triageOffFile(), '')
     triage.setEnabled(enabled)
   })
-  ipcMain.handle('amc:triageNow', (_e, accountId: unknown) => {
+  ipcMain.handle('amc:triageCounts', (_e, accountId: unknown) => {
     if (accountId !== null && typeof accountId !== 'string') throw new Error('Invalid Account')
-    return triage.now(accountId)
+    return openReplica().triageCounts(accountId)
+  })
+  ipcMain.handle('amc:triageNow', async (_e, accountId: unknown, scope: unknown) => {
+    if (accountId !== null && typeof accountId !== 'string') throw new Error('Invalid Account')
+    if (scope === 'recent') return triage.now(accountId)
+    if (scope !== 'account') throw new Error('Invalid triage scope')
+    if (!window || sync?.status.phase !== 'live' || triage.status.running) return
+    const connection = engine
+    const account = openReplica().triageAccount(accountId, undefined, 'older')
+    if (!account) return
+    const address = openReplica()
+      .accounts()
+      .find(({ id }) => id === account)?.address
+    const { response } = await dialog.showMessageBox(window, {
+      type: 'question',
+      title: 'Triage older mail?',
+      message: 'Triage older mail?',
+      detail: `This runs one batch across ${address ?? 'the selected Account'}’s untriaged Inbox, including recent and older mail.`,
+      buttons: ['Cancel', 'Triage mail'],
+      defaultId: 0,
+      cancelId: 0,
+    })
+    if (response === 1 && engine === connection) await triage.now(account, false)
   })
   ipcMain.handle('amc:pair', (_e, engineUrl: string, code: string) => pair(engineUrl, code))
+  ipcMain.handle('amc:retrySavedPairing', () => {
+    if (startupStatus.phase === 'pairing-read-error') return restoreSavedPairing()
+  })
   ipcMain.handle('amc:unpair', () => {
     stopSync()
     organise = null
@@ -242,8 +333,7 @@ function registerIpc() {
     openReplica().organise.clear()
     openReplica().draftUpdates.clear()
     draftRecovery = null
-    unpairedStatus = UNPAIRED
-    broadcast('amc:status', unpairedStatus)
+    setStartupStatus(UNPAIRED)
     refreshTray()
   })
   ipcMain.handle('amc:setBucket', async (_event, input: unknown) => {
@@ -284,7 +374,7 @@ async function pair(engineUrl: string, code: string) {
   if (!res.ok || !body.token) throw new Error(body.message ?? 'Pairing failed')
   if (body.kind !== 'desktop')
     throw new Error('That code is for the CLI. Run `sudo amc-engine pair --desktop` on the Host.')
-  const previousUrl = engine?.baseUrl ?? unpairedStatus.engineUrl
+  const previousUrl = engine?.baseUrl ?? startupStatus.engineUrl
   savePairing(url, body.token)
   stopSync()
   if (previousUrl !== url) {
@@ -440,7 +530,7 @@ function registerReadIpc() {
     void sync?.pull()
   })
 
-  ipcMain.handle('amc:status', () => sync?.status ?? pausedStatus ?? unpairedStatus)
+  ipcMain.handle('amc:status', () => sync?.status ?? pausedStatus ?? startupStatus)
   ipcMain.handle('amc:syncNow', () => sync?.pull())
 
   ipcMain.handle('amc:accounts', () => openReplica().accounts())
@@ -619,6 +709,8 @@ function buildMenu() {
   )
 }
 
+// Chromium chooses the Safe Storage service name during Electron startup.
+app.setName('AMC')
 // Both the packaged app and electron-vite use the original dev profile by default.
 const customProfile = app.commandLine.getSwitchValue('user-data-dir')
 const profile = customProfile || join(app.getPath('appData'), '@amc', 'desktop')
@@ -630,17 +722,18 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   app.on('second-instance', openWindow)
   app.whenReady().then(() => {
-    // Keep the same app name at safeStorage initialization as the dev build.
-    app.setName('AMC')
     buildMenu()
     triage = new AutoTriage({
       enabled: !existsSync(triageOffFile()),
       lastRun: loadLastTriageRun(),
       onLowBattery,
-      accountForRun: (accountId, pending) => openReplica().triageAccount(accountId, pending),
+      accountForRun: (accountId, pending, recent) =>
+        openReplica().triageAccount(accountId, pending, recent ? 'recent' : 'account'),
       saveLastRun: (run) => {
         try {
-          writeFileSync(triageRunFile(), JSON.stringify(run))
+          const path = triageRunFile()
+          writeFileSync(`${path}.tmp`, JSON.stringify(run), { mode: 0o600 })
+          renameSync(`${path}.tmp`, path)
         } catch {
           console.error('Could not save the last AMC triage result')
         }
@@ -692,17 +785,8 @@ if (!app.requestSingleInstanceLock()) {
       }
     }
     refreshTray()
-    const pairing = loadPairing()
-    if (pairing?.token) connect(pairing.engineUrl, pairing.token)
-    else {
-      if (pairing) {
-        unpairedStatus = {
-          ...UNPAIRED,
-          engineUrl: pairing.engineUrl,
-          error:
-            "AMC couldn't read its saved pairing (the app changed). Pair again with `sudo amc-engine pair --desktop` on the Host.",
-        }
-      }
+    void restoreSavedPairing().then(() => {
+      if (startupStatus.phase !== 'unpaired' || quittingTriage.signal.aborted) return
       // Scriptable first run: --engine-url=… --pairing-code=…
       const arg = (name: string) =>
         process.argv.find((a) => a.startsWith(`--${name}=`))?.split('=')[1]
@@ -712,7 +796,7 @@ if (!app.requestSingleInstanceLock()) {
         void pair(url, code).catch((error: Error) =>
           console.error(`Pairing failed: ${error.message}`),
         )
-    }
+    })
     if (!loginItem || !app.getLoginItemSettings().wasOpenedAtLogin) createWindow()
     app.on('activate', openWindow)
     app.on('browser-window-focus', refreshTray)

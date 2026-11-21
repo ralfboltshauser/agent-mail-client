@@ -17,6 +17,8 @@ export const BucketReason = z
   .min(1)
   .max(500)
   .regex(/^[^\r\n]+$/)
+export const TRIAGE_RECENT_WINDOW_MS = 24 * 60 * 60_000
+
 export const UntriagedLimit = z.number().int().min(1).max(100).default(25)
 
 export const BucketInput = z.object({

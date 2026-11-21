@@ -38,12 +38,9 @@ export function SyncIndicator({
   } else if (status.phase === 'bootstrapping') {
     tone = 'busy'
     text = `Downloading mail${status.progress ? ` · ${Math.round(status.progress * 100)}%` : '…'}`
-  } else if (status.phase === 'offline') {
+  } else if (status.phase === 'offline' || status.phase === 'error') {
     tone = 'bad'
-    text = 'Engine unreachable · retrying'
-  } else if (status.phase === 'error') {
-    tone = 'bad'
-    text = 'Sync error'
+    text = 'Reconnecting…'
   } else if (broken.length > 0) {
     tone = 'bad'
     text = broken[0]?.status === 'auth_expired' ? 'Sign in again needed' : 'Account sync error'
