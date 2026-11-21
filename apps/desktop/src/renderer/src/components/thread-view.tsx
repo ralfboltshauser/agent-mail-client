@@ -1,16 +1,23 @@
 import { INLINE_IMAGE_TYPES } from '@amc/composer'
 import { SNOOZED_LABEL } from '@amc/protocol'
-import { FileText, Paperclip, Star } from 'lucide-react'
+import { ChevronDown, CircleAlert, FileText, MailOpen, Paperclip, Star } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
+import { getAmc } from '@/lib/amc'
 import { fileSize, fullDate, hueFor, initials, listDate, personName } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import type { ReplicaThreadMessage, ThreadWithMessages } from '../../../shared/api'
+import { MailLoading, MailState } from './mail-state'
 import { HtmlBody, TextBody } from './message-body'
+import { Button } from './ui/button'
+import { Kbd } from './ui/kbd'
 
 interface Props {
   data: ThreadWithMessages | null
+  loading?: boolean
+  unavailable?: boolean
+  onRetry?: () => void
   snoozeEnabled: boolean
   labelNames: Map<string, string>
   scrollRef: React.RefObject<HTMLDivElement | null>
@@ -18,17 +25,31 @@ interface Props {
 
 const HIDDEN_LABELS = /:(INBOX|UNREAD|STARRED|IMPORTANT|SENT|DRAFT|CATEGORY_\w+)$/
 
-export function ThreadView({ data, snoozeEnabled, labelNames, scrollRef }: Props) {
-  if (!data) {
+export function ThreadView({
+  data,
+  loading,
+  unavailable,
+  onRetry,
+  snoozeEnabled,
+  labelNames,
+  scrollRef,
+}: Props) {
+  if (!data && unavailable) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-1 text-sm text-muted-foreground">
-        <span>No Thread selected</span>
-        <span className="text-xs">
-          <kbd className="font-sans">J</kbd> / <kbd className="font-sans">K</kbd> to move ·{' '}
-          <kbd className="font-sans">/</kbd> to search · <kbd className="font-sans">⌘K</kbd> for
-          everything
-        </span>
-      </div>
+      <MailState icon={CircleAlert} title="Could not open this thread" error>
+        <Button variant="outline" size="sm" onClick={onRetry}>
+          Retry
+        </Button>
+      </MailState>
+    )
+  }
+  if (!data) {
+    return loading ? (
+      <MailLoading label="Loading thread" />
+    ) : (
+      <MailState icon={MailOpen} title="No thread selected">
+        Use <Kbd>J</Kbd> and <Kbd>K</Kbd> to move through mail.
+      </MailState>
     )
   }
   const { thread, messages } = data
@@ -39,17 +60,15 @@ export function ThreadView({ data, snoozeEnabled, labelNames, scrollRef }: Props
 
   return (
     <div ref={scrollRef} className="h-full overflow-y-auto">
-      <div className="mx-auto max-w-3xl px-8 pt-4 pb-24">
-        <div className="mb-5 flex items-start gap-3">
-          <h1 className="flex-1 select-text text-xl font-semibold leading-snug tracking-tight">
+      <div className="mx-auto max-w-[48rem] px-6 pt-7 pb-16 xl:px-8">
+        <div className="mb-3 flex items-start gap-3">
+          <h1 className="flex-1 select-text text-[24px] font-semibold leading-tight tracking-[-0.035em]">
             {thread.subject || '(no subject)'}
           </h1>
-          {thread.starred && (
-            <Star className="mt-1.5 size-4 shrink-0 fill-amber-400 text-amber-400" />
-          )}
+          {thread.starred && <Star className="mt-1.5 size-4 shrink-0 fill-current text-star" />}
         </div>
         {(labels.length > 0 || thread.muted || snoozedUntil) && (
-          <div className="-mt-3 mb-5 flex flex-wrap gap-1.5">
+          <div className="mb-4 flex flex-wrap gap-1.5">
             {thread.muted && <Badge variant="secondary">Muted</Badge>}
             {snoozedUntil && (
               <Badge variant="secondary">Snoozed until {fullDate(snoozedUntil)}</Badge>
@@ -61,7 +80,17 @@ export function ThreadView({ data, snoozeEnabled, labelNames, scrollRef }: Props
             ))}
           </div>
         )}
-        <div className="space-y-3">
+        {thread.bucket && (
+          <div className="mb-5 flex items-start gap-2.5 rounded-md bg-muted/65 px-3 py-2.5">
+            <Badge variant="secondary" className="shrink-0 text-accent-foreground">
+              {thread.bucket.bucket}
+            </Badge>
+            <p className="select-text wrap-anywhere pt-px text-xs leading-relaxed text-muted-foreground">
+              {thread.bucket.reason}
+            </p>
+          </div>
+        )}
+        <div className="space-y-2.5">
           <ThreadMessages key={thread.id} messages={messages} />
         </div>
       </div>
@@ -117,10 +146,12 @@ function DeferredText({ id }: { id: string }) {
   useEffect(() => {
     if (body !== undefined) return
     let cancelled = false
-    window.amc.messageText(id).then(
-      (text) => !cancelled && setBody(text),
-      () => !cancelled && setBody(null),
-    )
+    getAmc()
+      .messageText(id)
+      .then(
+        (text) => !cancelled && setBody(text),
+        () => !cancelled && setBody(null),
+      )
     return () => {
       cancelled = true
     }
@@ -155,7 +186,7 @@ function Message({
   useEffect(() => {
     if (!open || !m.hasHtml || html !== undefined) return
     let cancelled = false
-    window.amc
+    getAmc()
       .messageHtml(m.id)
       .then(async (h) => {
         if (!h || !/src=["']cid:/i.test(h)) {
@@ -173,7 +204,9 @@ function Message({
         const embedded = new Map(
           await Promise.all(
             parts.map(async (part) => {
-              const content = await window.amc.inlineAttachment(part.id).catch(() => '')
+              const content = await getAmc()
+                .inlineAttachment(part.id)
+                .catch(() => '')
               return [
                 part.contentId,
                 content ? `data:${part.mimeType};base64,${content}` : '',
@@ -205,42 +238,43 @@ function Message({
     >
       <button
         type="button"
-        className="flex w-full items-start gap-3 px-4 py-3 text-left"
+        className="flex w-full items-start gap-3 rounded-lg px-4 py-3.5 text-left hover:bg-muted/45"
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
       >
         <div
-          className="flex size-8 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold"
-          style={{ background: `oklch(0.9 0.05 ${hue})`, color: `oklch(0.35 0.08 ${hue})` }}
+          className="flex size-8 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold mail-avatar"
+          style={{ '--avatar-hue': hue } as React.CSSProperties}
         >
           {initials(m.from)}
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline gap-2">
-            <span className="truncate text-[13px] font-semibold">{personName(m.from)}</span>
+            <span className="truncate text-sm font-semibold">{personName(m.from)}</span>
             {isDraft && <Badge className="h-4 px-1.5 text-[10px]">Draft</Badge>}
-            {open && m.from && (
-              <span className="truncate text-xs text-muted-foreground">{m.from.address}</span>
-            )}
             <span
               className="ml-auto shrink-0 text-xs text-muted-foreground tabular-nums"
               title={fullDate(m.sentAt)}
             >
-              {open ? fullDate(m.sentAt) : listDate(m.sentAt)}
+              {listDate(m.sentAt)}
             </span>
           </div>
           {open ? (
-            <div className="truncate text-xs text-muted-foreground">
-              to{' '}
+            <div className="truncate text-xs text-muted-foreground" title={m.from?.address}>
+              {m.from && <>{m.from.address} · </>}to{' '}
               {[...m.to, ...m.cc].map((a) => personName(a)).join(', ') || 'undisclosed recipients'}
             </div>
           ) : (
             <div className="truncate text-[13px] text-muted-foreground">{m.snippet}</div>
           )}
         </div>
+        <ChevronDown
+          aria-hidden
+          className={cn('mt-0.5 size-3.5 shrink-0 text-muted-foreground', open && 'rotate-180')}
+        />
       </button>
       {open && (
-        <div className="px-4 pb-4">
+        <div className="px-4 pt-2 pb-5 sm:pl-[3.75rem]">
           {m.hasHtml && html === undefined ? (
             <div className="space-y-2 py-2">
               <Skeleton className="h-3 w-3/4" />
@@ -265,7 +299,7 @@ function Message({
                 <button
                   key={a.id}
                   type="button"
-                  onClick={() => void window.amc.openAttachment(a.id, a.filename)}
+                  onClick={() => void getAmc().openAttachment(a.id, a.filename)}
                   className="flex max-w-64 items-center gap-2 rounded-md border bg-background px-2.5 py-1.5 text-left text-xs hover:bg-muted"
                 >
                   {a.mimeType.startsWith('image/') ? (

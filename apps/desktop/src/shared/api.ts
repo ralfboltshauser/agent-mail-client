@@ -67,6 +67,7 @@ export interface SyncStatus {
   phase: SyncPhase
   snoozeEnabled?: boolean
   healthWarnings?: string[]
+  healthRefreshFailed?: boolean
   engineUrl: string | null
   /** Bootstrap progress, 0..1. */
   progress: number | null
@@ -94,10 +95,30 @@ export interface T3Project {
   deletedAt?: string | null
 }
 
+export interface TriageResult {
+  assigned: number
+  skipped: number
+}
+
+export interface TriageStatus {
+  enabled: boolean
+  running: boolean
+  lastRun: {
+    at: number
+    result: TriageResult | null
+    error: string | null
+  } | null
+  notice: string | null
+}
+
 export interface AmcApi {
-  savedT3Url(): Promise<string>
-  t3Projects(address: string): Promise<T3Project[]>
-  handoff(address: string, projectId: string, threadId: string): Promise<ComposeDraft>
+  triageStatus(): Promise<TriageStatus>
+  setAutoTriage(enabled: boolean): Promise<void>
+  triageNow(accountId: string | null): Promise<void>
+  onTriageStatus(listener: (status: TriageStatus) => void): () => void
+  t3Setup(): Promise<{ kind: 'cli' | 'mcp'; address: string }>
+  t3Projects(address: string | null): Promise<T3Project[]>
+  handoff(address: string | null, projectId: string, threadId: string): Promise<ComposeDraft>
   cancelHandoff(projectId: string, threadId: string): Promise<void>
   activeHandoff(threadId: string): Promise<ActiveHandoff | null>
   endHandoff(id: string): Promise<void>

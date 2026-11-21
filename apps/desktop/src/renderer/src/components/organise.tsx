@@ -29,6 +29,7 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { getAmc } from '@/lib/amc'
 
 type Picker = {
   kind: 'labels' | 'snooze'
@@ -47,7 +48,7 @@ type Control = {
 
 const run = async (action: OrganiseAction, description: string) => {
   try {
-    const id = await window.amc.organise(action)
+    const id = await getAmc().organise(action)
     if (action.kind === 'undo') toast('Undo queued')
     else
       toast(description, {
@@ -78,7 +79,7 @@ export function useOrganise(
 
   useEffect(() => {
     const showErrors = () => {
-      void window.amc
+      void getAmc()
         .organiseErrors()
         .then((errors) => {
           for (const notice of errors) {
@@ -96,7 +97,7 @@ export function useOrganise(
         .catch(() => {})
     }
     showErrors()
-    return window.amc.onChanged(showErrors)
+    return getAmc().onChanged(showErrors)
   }, [])
 
   const openPicker = (kind: Picker['kind'], thread: ThreadSummary, trigger?: HTMLElement) => {
@@ -128,7 +129,12 @@ export function useOrganise(
         icon: Archive,
         run: () => void run({ kind: 'archive', threadId }, 'Archived'),
       })
-    if (!trashed && snoozeEnabled && !imap)
+    if (
+      !trashed &&
+      snoozeEnabled &&
+      (!imap ||
+        (canMove && has('ARCHIVE') && thread.labelIds.includes(`${thread.accountId}:INBOX`)))
+    )
       controls.push({
         name: 'Snooze',
         key: 'h',

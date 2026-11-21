@@ -98,7 +98,7 @@ The root NVMe disk is at **97%** (7.5 GB free), and `/srv` is a 1.8 TB spinning 
 ### 4.3 Provider sync
 
 - **Backfill:** the entire history, newest first, resumable, rate-limited, using Gmail batch requests (about 30–60 minutes per 100k messages). The inbox and the last 90 days come first so the app is usable within minutes, and older mail streams in behind.
-- **Gmail incremental:** `history.list` from the last `historyId`, polled every 15 seconds per Account. A Pub/Sub watch for instant delivery is an optional switch (it needs billing on the Cloud project). On a `historyId` too old, fall back to a full resync.
+- **Gmail incremental:** `history.list` from the last `historyId`, polled every 15 seconds per Account. Optional Pub/Sub delivery triggers incremental sync on notification and uses a 60-second fallback while healthy. On a `historyId` too old, fall back to a full resync.
 - **IMAP incremental:** IDLE on INBOX, and CONDSTORE/QRESYNC on every folder every few minutes. Without those extensions, UID-range diffs (see the IMAP extensions ticket).
 - **IMAP parser memory follow-up.** Raw MIME and attachments stream to disk. MailParser retains decoded plain text and HTML in memory. Bound memory for very large bodies while preserving complete message display.
 - **Label mapping:** Gmail labels map 1:1. IMAP folders map to Labels, so a message carries at most one. Special-use folders (`\Archive`, `\Sent`, `\Trash`, `\Drafts`) map to the system Labels.
@@ -113,7 +113,9 @@ The root NVMe disk is at **97%** (7.5 GB free), and `/srv` is a 1.8 TB spinning 
 
 Before dispatch, the Engine records the requested delta and the message's Gmail history ID. If the response could have been lost after Gmail committed the write, the queue reads again before any retry. A matching history ID permits a retry. If the history ID changed or is unavailable, the Engine leaves the uncertain labels alone and excludes them from Undo because Gmail cannot attribute the change to AMC.
 
-Gmail has no conditional write for labels. The final read leaves a window in which the owner can edit the same label before dispatch. The write targets only explicit message IDs. A reply delivered after Archive's final read keeps its Inbox label and enters the replica through history sync. Trash adds the TRASH label and hides the message from Inbox. Untrash removes TRASH so the underlying Inbox membership becomes visible again.
+For acknowledged writes, the Engine records the Gmail history ID for each affected label. If the write response omits it, the Engine immediately reads the message with `messages.get` (`format=minimal`) and uses its history ID as the post-write checkpoint. Undo looks for label changes after that checkpoint, so expired pre-write history does not prevent Undo.
+
+Gmail has no conditional write for labels. Between the final read and the write, an owner can archive the message first, leaving AMC's Archive as a no-op. That race is accepted and Undo can restore Inbox in this case. When AMC needs the follow-up read, its checkpoint can also include owner edits made before that read. The write targets only explicit message IDs. A reply delivered after Archive's final read keeps its Inbox label and enters the replica through history sync. Trash adds the TRASH label and hides the message from Inbox. Untrash removes TRASH so the underlying Inbox membership becomes visible again.
 
 ### 4.5 Sending
 
@@ -240,7 +242,7 @@ Runs in parallel once M1 lands: M5 alongside M2–M4, and the agent tickets (hea
 ## 11. Decisions (defaults taken 2026-11-20)
 
 1. **Desktop shell:** Electron.
-2. **Instant Gmail:** 15-second polling. Pub/Sub push stays optional; it needs billing on `amc-mail-x097y3`.
+2. **Instant Gmail:** 15-second polling by default. The optional Pub/Sub pull setup for `amc-mail-x097y3` is in the [runbook](runbook.md#gmail-notifications).
 3. **Root disk:** untouched. AMC lives on `/srv` until Ralf frees the root disk.
 4. **Offsite backups:** deferred. `/srv/backups/amc` only for now.
 5. **First Gmail Account:** whichever Ralf signs in with first.

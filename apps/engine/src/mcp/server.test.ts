@@ -13,6 +13,7 @@ import { MailStore } from '../mail/store.ts'
 import { FakeGmail } from '../providers/gmail/fake.ts'
 import { fromGmail } from '../providers/gmail/mapping.ts'
 import { toIncomingLabel } from '../providers/gmail/sync.ts'
+import { parseMessage } from '../providers/imap/mapping.ts'
 import { silentLog, tempDir, testConfig, testDb } from '../test-support.ts'
 import { buildMcpServer } from './server.ts'
 
@@ -167,6 +168,57 @@ describe('MCP tools', () => {
     expect(queries.threadSummary(input.threadId)?.bucket?.bucket).toBe('Reply')
   })
 
+  it('limits recent triage to provider delivery time across Gmail and IMAP', async () => {
+    const { client, db, gmail, store } = await connect(['read'], setup())
+    const now = Date.now()
+    const old = now - 2 * DAY_MS
+    const inbox = {
+      path: 'INBOX',
+      label: { providerId: 'INBOX', name: 'Inbox', kind: 'system' as const, color: null },
+    }
+    db.exec(
+      "INSERT INTO account (id, kind, address, credentials, created_at) VALUES ('imap', 'imap', 'imap@example.com', x'00', 0)",
+    )
+    const putImap = async (
+      thread: string,
+      uid: number,
+      dateHeader: number,
+      internalDate: number,
+    ) => {
+      const source = store.blobs.put(
+        `From: sender@example.com\r\nDate: ${new Date(dateHeader).toUTCString()}\r\nSubject: Message ${uid}\r\n\r\nBody`,
+      )
+      const msg = await parseMessage(
+        inbox,
+        '1',
+        { seq: uid, uid, internalDate: new Date(internalDate) },
+        store.blobs,
+        source,
+      )
+      store.putMessage('imap', [], { ...msg, providerThreadId: thread })
+    }
+
+    await putImap('old', 1, now, old)
+    await putImap('fresh', 2, old, now - 1_000)
+    await putImap('fresh', 3, now, old)
+    store.putMessage('a', [], fromGmail(gmail.add('recent', { date: now - 2_000 })))
+    const unknown = gmail.add('unknown')
+    delete unknown.internalDate
+    unknown.payload?.headers?.push({ name: 'Date', value: new Date(now).toUTCString() })
+    store.putMessage('a', [], fromGmail(unknown))
+
+    const list = async (recent?: boolean) => {
+      const result = await client.callTool({
+        name: 'list_untriaged',
+        arguments: { limit: 20, recent },
+      })
+      return (JSON.parse(text(result)) as { id: string }[]).map(({ id }) => id)
+    }
+    expect(await list(true)).toEqual(expect.arrayContaining(['a:t-recent', 'imap:fresh']))
+    expect(await list(true)).toHaveLength(2)
+    expect(await list()).toEqual(expect.arrayContaining(['a:t-m1', 'a:t-unknown', 'imap:old']))
+  })
+
   it('refuses Bucket Undo and keeps a newer owner assignment', async () => {
     const { client, db, store, mutations, queries } = await connect(['organize'])
     const threadId = 'a:t-m1'
@@ -238,6 +290,33 @@ describe('MCP tools', () => {
       { tool: 'create_draft', status: 'applied', draftId: draft.id, threads: ['a:t-m1'] },
     ])
     expect(JSON.stringify(actions)).not.toContain('Friday at 7?')
+  })
+
+  it('shows a local draft save and clears its mirror error after a successful retry', async () => {
+    const { client, db, drafts, gmail, mutations } = await connect(['draft'])
+    vi.spyOn(gmail, 'saveDraft').mockRejectedValueOnce(new Error('Provider unavailable'))
+    try {
+      const response = await client.callTool({
+        name: 'create_draft',
+        arguments: { thread_id: 'a:t-m1', body: 'Saved locally' },
+      })
+      expect(response.isError).toBeFalsy()
+      const { id } = JSON.parse(text(response))
+      const activity = () => listAgentActions(db, mutations).actions[0]
+      expect(activity()).toMatchObject({
+        draftId: id,
+        status: 'applied',
+        error: 'Draft saved locally. Mirroring to the provider failed and will retry.',
+      })
+      expect(gmail.drafts.size).toBe(0)
+
+      await drafts.mirrorPending()
+      expect(gmail.drafts.size).toBe(1)
+      expect(activity()).toMatchObject({ draftId: id, status: 'applied', error: null })
+    } finally {
+      await client.close()
+      db.close()
+    }
   })
 
   it('uses the draft’s current From Account even when it is still linked to the original Thread', async () => {

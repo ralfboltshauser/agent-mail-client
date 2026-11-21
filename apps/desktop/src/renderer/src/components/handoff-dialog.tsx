@@ -1,5 +1,6 @@
 import type { ComposeDraft } from '@amc/protocol'
 import { useCallback, useEffect, useId, useState } from 'react'
+import { getAmc } from '@/lib/amc'
 import type { T3Project } from '../../../shared/api'
 import { Button } from './ui/button'
 import {
@@ -23,6 +24,7 @@ export function HandoffDialog({
 }) {
   const addressId = useId()
   const projectSelectId = useId()
+  const [kind, setKind] = useState<'cli' | 'mcp' | null>(null)
   const [address, setAddress] = useState('')
   const [projects, setProjects] = useState<T3Project[] | null>(null)
   const [projectId, setProjectId] = useState('')
@@ -30,11 +32,11 @@ export function HandoffDialog({
   const [attempted, setAttempted] = useState(false)
   const [error, setError] = useState('')
 
-  const load = useCallback(async (url: string) => {
+  const load = useCallback(async (url: string | null) => {
     setBusy(true)
     setError('')
     try {
-      const known = await window.amc.t3Projects(url)
+      const known = await getAmc().t3Projects(url)
       const previous = localStorage.getItem('amc-handoff-project')
       setProjects(known)
       setProjectId(known.find((project) => project.id === previous)?.id ?? known[0]?.id ?? '')
@@ -46,12 +48,15 @@ export function HandoffDialog({
   }, [])
 
   useEffect(() => {
-    void window.amc.savedT3Url().then((url) => {
-      if (url) {
-        setAddress(url)
-        void load(url)
-      }
-    })
+    void getAmc()
+      .t3Setup()
+      .then((setup) => {
+        setKind(setup.kind)
+        setAddress(setup.address)
+        if (setup.kind === 'cli') return load(null)
+        if (setup.address) return load(setup.address)
+      })
+      .catch((cause: Error) => setError(cause.message))
   }, [load])
 
   const launch = async () => {
@@ -60,7 +65,11 @@ export function HandoffDialog({
     setError('')
     setAttempted(true)
     try {
-      const draft = await window.amc.handoff(address.trim(), projectId, threadId)
+      const draft = await getAmc().handoff(
+        kind === 'cli' ? null : address.trim(),
+        projectId,
+        threadId,
+      )
       localStorage.setItem('amc-handoff-project', projectId)
       onDraft(draft)
     } catch (cause) {
@@ -75,7 +84,7 @@ export function HandoffDialog({
     if (attempted) {
       setBusy(true)
       try {
-        await window.amc.cancelHandoff(projectId, threadId)
+        await getAmc().cancelHandoff(projectId, threadId)
       } catch (cause) {
         setError((cause as Error).message)
         setBusy(false)
@@ -101,12 +110,12 @@ export function HandoffDialog({
           className="grid gap-4"
           onSubmit={(event) => {
             event.preventDefault()
-            if (busy) return
+            if (busy || !kind) return
             if (projects) void launch()
-            else void load(address.trim())
+            else void load(kind === 'cli' ? null : address.trim())
           }}
         >
-          {!projects ? (
+          {kind === 'mcp' && !projects && (
             <div className="grid gap-2">
               <label htmlFor={addressId} className="text-sm font-medium">
                 T3 MCP URL
@@ -120,11 +129,12 @@ export function HandoffDialog({
                 onChange={(event) => setAddress(event.target.value)}
               />
               <p className="text-sm text-muted-foreground">
-                Copy the MCP URL in T3 Settings → Environments. Approve Supervised access when
-                prompted.
+                In T3 Settings → Sharing & access → Use in another app (MCP), copy the MCP URL.
+                Approve Supervised access when prompted.
               </p>
             </div>
-          ) : (
+          )}
+          {projects && (
             <div className="grid gap-2">
               <label htmlFor={projectSelectId} className="text-sm font-medium">
                 T3 project
@@ -151,7 +161,21 @@ export function HandoffDialog({
             </p>
           )}
           <DialogFooter>
-            {projects && !attempted && (
+            {kind === 'cli' && !attempted && (
+              <Button
+                type="button"
+                variant="ghost"
+                disabled={busy}
+                onClick={() => {
+                  setKind('mcp')
+                  setError('')
+                  setProjects(null)
+                }}
+              >
+                Use T3 Connect
+              </Button>
+            )}
+            {kind === 'mcp' && projects && !attempted && (
               <Button
                 type="button"
                 variant="ghost"
@@ -164,14 +188,18 @@ export function HandoffDialog({
             <Button type="button" variant="outline" disabled={busy} onClick={() => void close()}>
               Cancel
             </Button>
-            <Button disabled={busy || (projects !== null && !projectId)}>
+            <Button disabled={busy || !kind || (projects !== null && !projectId)}>
               {projects
                 ? busy
                   ? 'Launching…'
                   : 'Hand off'
-                : busy
-                  ? 'Connecting…'
-                  : 'Connect to T3'}
+                : kind === 'mcp'
+                  ? busy
+                    ? 'Connecting…'
+                    : 'Connect to T3'
+                  : kind === 'cli' && !busy
+                    ? 'Retry'
+                    : 'Finding T3…'}
             </Button>
           </DialogFooter>
         </form>

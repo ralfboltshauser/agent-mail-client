@@ -17,6 +17,7 @@ import {
   type OAuthClient,
   OAuthError,
 } from '../providers/gmail/oauth.ts'
+import type { GmailPubSub } from '../providers/gmail/pubsub.ts'
 import { GmailAccountSync } from '../providers/gmail/sync.ts'
 import type { GmailApi } from '../providers/gmail/types.ts'
 import {
@@ -29,6 +30,12 @@ import {
 import { ImapProvider } from '../providers/imap/provider.ts'
 import { ImapAccountSync } from '../providers/imap/sync.ts'
 
+const WATCH_RENEW_MS = 24 * 60 * 60_000
+const WATCH_RETRY_MS = 60_000
+const PUSH_POLL_MS = 60_000
+const NOTIFICATION_DEBOUNCE_MS = 250
+const GMAIL_REPLACEMENT_WAIT_MS = 5_000
+
 export interface SyncManagerOptions {
   db: Db
   store: MailStore
@@ -38,16 +45,18 @@ export interface SyncManagerOptions {
   /** Overridable for tests. */
   gmailApi?: (tokens: AccessTokens) => GmailApi
   imapClient?: ImapClientFactory
+  gmailPubSub?: GmailPubSub
   pollMs?: number
   imapPollMs?: number
   labelsEveryMs?: number
-  snoozeEnabled?: boolean
 }
 
 interface Runner {
   stop: () => void
   done: Promise<void>
   api?: GmailApi
+  gmailNotification?: (address: string) => void
+  gmailWake?: () => void
   imap?: () => ImapAccountSync | undefined
 }
 
@@ -69,11 +78,13 @@ const sleep = (ms: number, signal: AbortSignal) =>
  * Emits `change` whenever the store may have changed, for live Clients.
  */
 export class SyncManager extends EventEmitter<{ change: [] }> {
-  readonly #o: Required<Omit<SyncManagerOptions, 'gmailApi' | 'imapClient'>> &
-    Pick<SyncManagerOptions, 'gmailApi' | 'imapClient'>
+  readonly #o: Required<Omit<SyncManagerOptions, 'gmailApi' | 'imapClient' | 'gmailPubSub'>> &
+    Pick<SyncManagerOptions, 'gmailApi' | 'imapClient' | 'gmailPubSub'>
   readonly #runners = new Map<string, Runner>()
   readonly #paused = new Map<string, Promise<void>>()
   #stopping = false
+  #pubSub?: { controller: AbortController; done: Promise<void> }
+  #pullHealthy = false
 
   constructor(options: SyncManagerOptions) {
     super()
@@ -81,15 +92,49 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
       pollMs: 15_000,
       imapPollMs: 2 * 60_000,
       labelsEveryMs: 5 * 60_000,
-      snoozeEnabled: false,
       ...options,
     }
   }
 
   start(): void {
     this.#stopping = false
+    if (this.#o.gmailPubSub && !this.#pubSub) {
+      const controller = new AbortController()
+      const done = this.#pullGmailNotifications(this.#o.gmailPubSub, controller.signal)
+      this.#pubSub = { controller, done }
+    }
     for (const row of listAccountRows(this.#o.db)) {
       if (row.status !== 'auth_expired') this.startAccount(row.id)
+    }
+  }
+
+  async #pullGmailNotifications(pubSub: GmailPubSub, signal: AbortSignal): Promise<void> {
+    while (!signal.aborted) {
+      try {
+        const messages = await pubSub.pull(signal)
+        if (signal.aborted) return
+        for (const { address } of messages) {
+          if (!address) continue
+          for (const runner of this.#runners.values()) runner.gmailNotification?.(address)
+        }
+        // These are wake-up hints. The stored Gmail cursor and periodic poll recover missed work.
+        if (messages.length) {
+          await pubSub.acknowledge(
+            messages.map(({ ackId }) => ackId),
+            signal,
+          )
+        }
+        this.#pullHealthy = true
+        if (!messages.length) await sleep(NOTIFICATION_DEBOUNCE_MS, signal)
+      } catch (error) {
+        if (signal.aborted) return
+        if (this.#pullHealthy) {
+          this.#pullHealthy = false
+          for (const runner of this.#runners.values()) runner.gmailWake?.()
+        }
+        this.#o.log.warn({ err: error }, 'Gmail Pub/Sub pull failed')
+        await sleep(this.#o.pollMs, signal)
+      }
     }
   }
 
@@ -241,18 +286,23 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
       : new GmailHttpApi(tokens, fetch, {
           onRetry: (info) => log.warn({ account: accountId, ...info }, 'gmail retry'),
         })
+    const controller = new AbortController()
+    const signal = controller.signal
+    const stop = () => controller.abort()
+    const isCurrent = () => !signal.aborted && this.#runners.get(accountId)?.stop === stop
     const sync = new GmailAccountSync(
       api,
       store,
       new DbAccountState(db, accountId, [row.address]),
       log,
-      this.#o.snoozeEnabled,
+      signal,
     )
-    sync.onProgress = () => this.emit('change')
-    const controller = new AbortController()
-    const signal = controller.signal
+    sync.onProgress = () => {
+      if (isCurrent()) this.emit('change')
+    }
 
     const fail = (error: unknown): boolean => {
+      if (!isCurrent()) return true
       if (error instanceof OAuthError && error.needsReauth) {
         log.warn(
           { account: accountId },
@@ -277,7 +327,7 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
     const backfill = async () => {
       while (!signal.aborted) {
         try {
-          if (!(await sync.backfillStep())) return
+          if (!(await sync.backfillStep()) || !isCurrent()) return
           setAccountStatus(db, store, accountId, 'backfilling')
           this.emit('change')
         } catch (error) {
@@ -295,16 +345,49 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
         })
     }
 
+    const pubSub = this.#o.gmailPubSub
+    const address = row.address.toLowerCase()
+    let watchExpiresAt = 0
+    let notified = false
+    let waiting: AbortController | undefined
+    const wake = () => waiting?.abort()
+
+    const renewWatch = async (topic: string) => {
+      while (!signal.aborted) {
+        try {
+          const expiration = await api.watch(topic, signal)
+          if (!isCurrent()) return
+          const remaining = expiration - Date.now()
+          if (!Number.isFinite(remaining) || remaining <= 0) {
+            throw new Error('Gmail returned an invalid watch expiration')
+          }
+          watchExpiresAt = expiration
+          await sleep(Math.min(WATCH_RENEW_MS, Math.max(1_000, remaining - 60_000)), signal)
+        } catch (error) {
+          if (signal.aborted) return
+          if (watchExpiresAt) {
+            watchExpiresAt = 0
+            wake()
+          }
+          log.warn({ account: accountId, err: error }, 'Gmail watch failed')
+          await sleep(WATCH_RETRY_MS, signal)
+        }
+      }
+    }
+
     const live = async () => {
       let backoff = this.#o.pollMs
       let lastLabels = Date.now()
       while (!signal.aborted) {
+        notified = false
         try {
           if (Date.now() - lastLabels > this.#o.labelsEveryMs) {
             await sync.syncLabels()
+            if (!isCurrent()) return
             lastLabels = Date.now()
           }
           const changes = await sync.incremental()
+          if (!isCurrent()) return
           touchAccountSync(db, accountId)
           if (sync.backfillDone) setAccountStatus(db, store, accountId, 'ready')
           else startBackfill()
@@ -313,15 +396,34 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
         } catch (error) {
           if (fail(error)) return
           backoff = Math.min(backoff * 2, 5 * 60_000)
+          await sleep(backoff, signal)
+          continue
         }
-        await sleep(backoff, signal)
+        if (!pubSub) {
+          await sleep(backoff, signal)
+          continue
+        }
+        if (!notified) {
+          waiting = new AbortController()
+          const healthy = this.#pullHealthy && watchExpiresAt > Date.now()
+          await sleep(healthy ? PUSH_POLL_MS : backoff, AbortSignal.any([signal, waiting.signal]))
+          waiting = undefined
+        }
+        if (notified) await sleep(NOTIFICATION_DEBOUNCE_MS, signal)
       }
     }
 
     const done = (async () => {
-      while (!signal.aborted) {
+      const wait = new AbortController()
+      await (previous &&
+        Promise.race([
+          previous.done,
+          sleep(GMAIL_REPLACEMENT_WAIT_MS, AbortSignal.any([signal, wait.signal])),
+        ]).finally(() => wait.abort()))
+      while (isCurrent()) {
         try {
           await sync.start()
+          if (!isCurrent()) return
           setAccountStatus(db, store, accountId, sync.backfillDone ? 'ready' : 'backfilling')
           this.emit('change')
           break
@@ -330,14 +432,27 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
           await sleep(30_000, signal)
         }
       }
-      if (!signal.aborted) {
+      if (isCurrent()) {
         startBackfill()
+        const watching = pubSub && renewWatch(pubSub.topic)
         await live()
-        await filling
+        await Promise.all([filling, watching])
       }
     })()
 
-    this.#runners.set(accountId, { stop: () => controller.abort(), done, api })
+    this.#runners.set(accountId, {
+      stop,
+      done,
+      api,
+      gmailWake: pubSub ? wake : undefined,
+      gmailNotification: pubSub
+        ? (mailbox) => {
+            if (mailbox !== address) return
+            notified = true
+            wake()
+          }
+        : undefined,
+    })
   }
 
   #startImap(row: NonNullable<ReturnType<typeof getAccountRow>>, previous?: Runner): void {
@@ -419,8 +534,11 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
 
   async stop(): Promise<void> {
     this.#stopping = true
+    this.#pubSub?.controller.abort()
     for (const runner of this.#runners.values()) runner.stop()
-    await Promise.all([...this.#runners.values()].map((r) => r.done))
+    await Promise.all([this.#pubSub?.done, ...[...this.#runners.values()].map((r) => r.done)])
     this.#runners.clear()
+    this.#pubSub = undefined
+    this.#pullHealthy = false
   }
 }

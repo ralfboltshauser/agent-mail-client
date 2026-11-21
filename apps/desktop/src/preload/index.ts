@@ -8,7 +8,16 @@ const invoke =
     ipcRenderer.invoke(`amc:${channel}`, ...args)
 
 const api: AmcApi = {
-  savedT3Url: invoke('savedT3Url') as AmcApi['savedT3Url'],
+  triageStatus: invoke('triageStatus') as AmcApi['triageStatus'],
+  setAutoTriage: invoke('setAutoTriage') as AmcApi['setAutoTriage'],
+  triageNow: invoke('triageNow') as AmcApi['triageNow'],
+  onTriageStatus(listener) {
+    const handler = (_e: unknown, status: Awaited<ReturnType<AmcApi['triageStatus']>>) =>
+      listener(status)
+    ipcRenderer.on('amc:triageStatus', handler)
+    return () => ipcRenderer.off('amc:triageStatus', handler)
+  },
+  t3Setup: invoke('t3Setup') as AmcApi['t3Setup'],
   t3Projects: invoke('t3Projects') as AmcApi['t3Projects'],
   handoff: invoke('handoff') as AmcApi['handoff'],
   cancelHandoff: invoke('cancelHandoff') as AmcApi['cancelHandoff'],

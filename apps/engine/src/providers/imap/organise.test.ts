@@ -29,7 +29,8 @@ async function fixture({
 } = {}) {
   const db = testDb()
   const store = new MailStore(db, new BlobStore(tempDir()))
-  const queries = new MailQueries(db)
+  const queries = new MailQueries(db, true)
+  let now = Date.now()
   const sealer = new Sealer(randomBytes(32))
   const imap = new FakeImap()
   if (capability) imap.capabilities.set(capability, true)
@@ -55,6 +56,8 @@ async function fixture({
   })
   const queue = new Mutations(store, () => null, silentLog, {
     imap: (account, work) => sync.organiseImap(account, work),
+    now: () => now,
+    snoozeEnabled: true,
   })
   cleanups.push(async () => {
     await Promise.all([sync.stop(), queue.stop()])
@@ -81,6 +84,10 @@ async function fixture({
   const run = (action: Input<OrganiseAction>) => settle(enqueue(action))
   return {
     db,
+    now: () => now,
+    advance: (ms: number) => {
+      now += ms
+    },
     imap,
     imapClient,
     queue,
@@ -282,6 +289,24 @@ it.each([
   },
 )
 
+it('undoes the last IMAP change after an explicit no-op unstar', async () => {
+  const { imap, view, run } = await fixture()
+  await run({ kind: 'archive' })
+  expect(await run({ kind: 'star', value: false })).toMatchObject({
+    status: 'applied',
+    messages: [],
+  })
+  expect(view()?.messages[0]?.labelIds).toEqual(['a:ARCHIVE'])
+  expect(await run({ kind: 'undo' })).toMatchObject({ status: 'applied' })
+  expect(view()?.messages[0]).toMatchObject({ labelIds: ['a:INBOX'], unread: true })
+  expect(imap.writes.map(({ command }) => command)).toEqual(['UID MOVE', 'UID MOVE'])
+
+  await run({ kind: 'mute', value: true })
+  await run({ kind: 'star', value: false })
+  expect(await run({ kind: 'undo' })).toMatchObject({ status: 'applied' })
+  expect(view()?.muted).toBe(false)
+})
+
 it('refuses to undo a mute touched by a newer owner client', async () => {
   const { queue, view, run, enqueue, threadId } = await fixture()
   await run({ kind: 'mute', value: true })
@@ -376,4 +401,99 @@ it('reconciles a move whose response is lost without replaying it or offering an
     { message_id: messageId },
   ])
   expect(view()?.messages[0]).toMatchObject({ id: messageId, labelIds: ['a:ARCHIVE'] })
+})
+
+it.each(['wake', 'undo', 'delete'] as const)('handles IMAP Snooze on %s', async (mode) => {
+  const { imap, view, run, now, queue, advance } = await fixture()
+  const until = now() + 1000
+  expect(await run({ kind: 'snooze', until })).toMatchObject({ status: 'applied' })
+  expect(view()).toMatchObject({ inInbox: false, snoozedUntil: until, labelIds: ['a:ARCHIVE'] })
+  if (mode === 'delete') {
+    const [uid] = imap.folder('Filed mail').messages.keys()
+    if (uid === undefined) throw new Error('Missing archived message')
+    imap.expunge('Filed mail', uid)
+  }
+  if (mode === 'undo') await run({ kind: 'undo' })
+  else {
+    advance(1000)
+    await queue.tick()
+  }
+  await queue.tick()
+  expect(view()?.snoozedUntil ?? null).toBeNull()
+  expect(imap.folder('INBOX').messages.size).toBe(mode === 'delete' ? 0 : 1)
+  expect(imap.folder('Filed mail').messages.size).toBe(0)
+  expect(imap.writes.map(({ command }) => command)).toEqual(
+    mode === 'delete' ? ['UID MOVE'] : ['UID MOVE', 'UID MOVE'],
+  )
+})
+
+it('refuses IMAP Snooze without a designated Archive folder', async () => {
+  const { imap, enqueue, now } = await fixture({ archive: false })
+  expect(() => enqueue({ kind: 'snooze', until: now() + 1000 })).toThrow(
+    'This IMAP Account has no Archive folder',
+  )
+  expect(imap.writes).toEqual([])
+})
+
+it('refuses IMAP Snooze in a custom folder', async () => {
+  const { imap, enqueue, run, now, view } = await fixture()
+  const result = await run({ kind: 'label', labelId: 'a:folder:Project', value: true })
+  expect(result?.status).toBe('applied')
+  expect(() => enqueue({ kind: 'snooze', until: now() + 1000 })).toThrow(
+    'Snooze is only available for IMAP threads in the Inbox',
+  )
+  expect(view()?.snoozedUntil).toBeNull()
+  expect(imap.folder('Project').messages.size).toBe(1)
+})
+
+it.each(['uid', 'validity'] as const)(
+  'consumes IMAP Snooze after the Archive %s changes',
+  async (mode) => {
+    const { imap, run, now, advance, queue, view } = await fixture()
+    const until = now() + 1000
+    expect(await run({ kind: 'snooze', until })).toMatchObject({ status: 'applied' })
+    const archive = imap.folder('Filed mail')
+    if (mode === 'uid') {
+      const [uid] = archive.messages.keys()
+      if (uid === undefined) throw new Error('Missing archived message')
+      imap.expunge('Filed mail', uid)
+      imap.add('Filed mail', 'Message-ID: <example@example.com>\r\nSubject: Organise me')
+    } else {
+      archive.validity++
+    }
+    advance(1000)
+    await queue.tick()
+    expect(view()?.snoozedUntil ?? null).toBeNull()
+    expect(imap.folder('INBOX').messages.size).toBe(0)
+    expect(archive.messages.size).toBe(1)
+    expect(imap.writes.map(({ command }) => command)).toEqual(['UID MOVE'])
+  },
+)
+
+it('keeps the IMAP schedule when a wake move fails and retries it', async () => {
+  const { imap, view, run, queue, now, advance } = await fixture()
+  const until = now() + 1000
+  expect(await run({ kind: 'snooze', until })).toMatchObject({ status: 'applied' })
+  const move = vi.spyOn(imap, 'uidMove').mockResolvedValueOnce(false)
+  advance(1000)
+  await queue.tick()
+  expect(view()).toMatchObject({ inInbox: false, snoozedUntil: until })
+  await queue.tick()
+  expect(move).toHaveBeenCalledTimes(1)
+  advance(60_000)
+  await queue.tick()
+  expect(view()).toMatchObject({ inInbox: true, snoozedUntil: null })
+  expect(move).toHaveBeenCalledTimes(2)
+})
+
+it('wakes an IMAP Snooze using the COPYUID when MOVE is unavailable', async () => {
+  const { imap, view, run, queue, now, advance } = await fixture({ capability: 'UIDPLUS' })
+  const until = now() + 1000
+  expect(await run({ kind: 'snooze', until })).toMatchObject({ status: 'applied' })
+  advance(1000)
+  await queue.tick()
+  expect(view()).toMatchObject({ inInbox: true, snoozedUntil: null })
+  expect(
+    imap.writes.map(({ command }) => command).filter((command) => command === 'UID COPY'),
+  ).toHaveLength(2)
 })

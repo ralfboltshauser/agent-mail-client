@@ -39,6 +39,22 @@ across restarts. **Launch at Login** is enabled on first run. If macOS requests
 approval, use the AMC menu to open Login Items settings or cancel the pending
 registration. Desktop upgrades move the previous app bundle to the Trash.
 
+### Mail triage
+
+Automatic desktop triage selects unbucketed Inbox threads whose latest
+provider-recorded delivery is within 24 hours. It uses Gmail's internalDate
+and IMAP's INTERNALDATE. Messages with no recorded delivery time do not count.
+Use `amc triage --recent` for the same selection on the CLI.
+
+The desktop and CLI share one Engine lease. A second client skips a run while
+the lease is held. The client releases the lease when it finishes, and the
+Engine expires leases after ten minutes if release fails.
+
+Desktop main revokes the run's grant by name after the worker exits, including
+on crash or timeout. On quit it stops the worker and allows up to three
+seconds for cleanup. If revocation cannot reach the Engine, the grant expires
+five minutes after minting.
+
 ## Layout
 
 | Path | What | Owner |
@@ -47,6 +63,7 @@ registration. Desktop upgrades move the previous app bundle to the Trash.
 | `/opt/amc/node` | the Engine's pinned Node runtime | root |
 | `/etc/amc/config.json` | Engine config | `amc`, 600 |
 | `/etc/amc/google-oauth-client.json` | Google OAuth client | `amc`, 600 |
+| `/etc/amc/gmail-pubsub-subscriber.json` | Optional Pub/Sub subscriber credential | `amc`, 600 |
 | `/srv/amc/db/amc.db` | the database | `amc`, 700 dir |
 | `/srv/amc/blobs` | raw mail and attachments (a cache) | `amc`, 700 dir |
 | `/srv/amc/backups` | pre-migration and nightly backups | `amc`, 700 dir |
@@ -74,7 +91,31 @@ journalctl -u amc-engine -f        # JSON logs; pipe through `npx pino-pretty` t
 
 The Engine listens on `127.0.0.1:4410`. `tailscale serve` publishes it on the tailnet only at `https://<host>.<tailnet>.ts.net:4443`. It is never on Funnel. Requests through `tailscale serve` must come from a login listed in `allowedTailscaleLogins`.
 
-M3 ships with Snooze disabled. The Engine reads `features.snooze` from its config at startup. The default is `false`.
+Snooze is enabled by default. Set `features.snooze` to `false` to disable it. The Engine keeps the schedule in its database and uses the Account’s archive and Inbox operations. IMAP Accounts need a server-designated Archive folder.
+
+## Gmail notifications
+
+1. From an authenticated machine with permissions on `amc-mail-x097y3`, run
+   `scripts/setup-gmail-pubsub.sh`. For manual setup in Google Cloud Console,
+   enable the Pub/Sub and IAM APIs, create the `amc-gmail` topic, and grant
+   `roles/pubsub.publisher` on that topic to
+   `gmail-api-push@system.gserviceaccount.com`. Create a pull subscription named
+   `amc-gmail-host` for that topic with expiration set to Never. Create the
+   `amc-gmail-subscriber` service account and grant it `roles/pubsub.subscriber`
+   on that subscription.
+2. The supervisor provisions the subscriber service account's JSON credential
+   through the Host secrets workflow as `/etc/amc/gmail-pubsub-subscriber.json`
+   (owner `amc:amc`, mode `0600`). The setup script creates only Cloud resources
+   and IAM bindings. Gmail's existing mailbox OAuth scope authorizes the watch.
+   The subscriber credential authorizes pull and acknowledge independently, so
+   existing users keep their Gmail sign-in. The Gmail Desktop OAuth client must
+   belong to the Pub/Sub topic's project.
+3. Add `"gmailPubSubProject": "amc-mail-x097y3"` to `/etc/amc/config.json` and
+   restart the Engine. The Host opens outbound HTTPS connections to Pub/Sub.
+   Check Engine logs for watch or pull failures. While both are healthy, incremental
+   sync runs on notifications with a 60-second fallback for missed notifications.
+   On a watch or pull failure, the fallback is 15 seconds. Remove the config
+   entry and restart to return to polling alone.
 
 ## T3 Handoff
 
@@ -91,16 +132,78 @@ its reply body. The Composer Link in the prompt lasts up to two hours. A new han
 the same Thread revokes both previous credentials. Sending or deleting the draft also
 revokes its Composer Link. Review and send the reply from AMC desktop.
 
+## IMAP Draft replacements
+
+If another client replaces a draft with a new UID, AMC can show the replacement
+as a separate draft and retain the previous AMC copy with a mirror conflict.
+Compare both drafts before sending, and keep the version you want in the
+composer. After a UIDVALIDITY reset, a reused UID can refer to a different
+draft and AMC imports it independently.
+
 ## Rolling back
 
-`pnpm deploy:host` rolls back by itself when the new release fails to migrate or to become healthy. To go back by hand:
+`pnpm deploy:host` rolls back by itself when the new release fails to migrate or
+to become healthy.
+
+Before switching to a release that predates the M9 `backup` command, disable
+`amc-backup.timer` and let any running `amc-backup.service` finish:
+
+```sh
+sudo systemctl disable --now amc-backup.timer
+systemctl is-active amc-backup.service
+```
+
+Wait until the backup service is inactive before changing the release. To
+switch releases by hand:
 
 ```sh
 ls -1t /opt/amc/releases
 sudo ln -sfn /opt/amc/releases/<sha> /opt/amc/current && sudo systemctl restart amc-engine
 ```
 
+After the Engine is healthy on an M9-compatible release, run
+`sudo systemctl enable --now amc-backup.timer` and check
+`systemctl list-timers amc-backup.timer`. On older Engines, `amc doctor` reports
+that backup status is unavailable.
+
 A migration that already ran is not undone by a rollback. Restore the `pre-migrate-*.db` copy from `/srv/amc/backups` with the Engine stopped.
+
+## Recovering an unreleased Organise preview database
+
+The unreleased Organise preview at `8926c99` recorded Organise as schema v4.
+Released history uses v4 for IMAP message locations. A preview database without
+`imap_location` cannot apply the current v5 migration.
+
+Stop the preview Engine and preserve its database and any matching `-wal` and
+`-shm` files together. Run this against a copy:
+
+```sh
+sqlite3 -readonly /path/to/preview-copy.db <<'SQL'
+PRAGMA user_version;
+SELECT name FROM sqlite_schema
+WHERE type = 'table' AND name IN ('mutation', 'mutation_message', 'imap_location');
+SQL
+```
+
+A schema version of `4`, with `mutation` and `mutation_message` present and
+`imap_location` absent, identifies this preview. If `schema_migration` exists,
+its v4 entry is `organise`. A released v4 database has `imap_location`.
+
+Start the current Engine with a fresh database in a separate data directory,
+reconnect the provider Accounts and let them sync. Provider-side changes that
+already landed will come back through sync. To save preview-only draft text and
+envelopes, export them from the copy and recreate those drafts manually:
+
+```sh
+umask 077
+sqlite3 -readonly -json /path/to/preview-copy.db \
+  'SELECT account_id, thread_id, to_json, cc_json, bcc_json, subject, body_text FROM draft' \
+  > preview-drafts.json
+```
+
+Keep the original and the export private. Pending mutations and Engine-only
+Organise state need to be reapplied by hand. Leave the preview's schema version
+and migration records intact.
 
 ## Backups and restore
 

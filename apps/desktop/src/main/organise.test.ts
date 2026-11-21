@@ -141,6 +141,29 @@ describe('desktop Organise outbox', () => {
     }
   })
 
+  it('skips an acknowledged no-op IMAP flag when selecting the desktop Undo target', () => {
+    const replica = new Replica(':memory:')
+    try {
+      seed(replica, 'imap')
+      const mute = replica.organise.enqueue({ kind: 'mute', threadId: THREAD.id, value: true })
+      const unstar = replica.organise.enqueue({ kind: 'star', threadId: THREAD.id, value: false })
+      replica.organise.resolve(
+        [mute, unstar].map((id) => ({
+          id,
+          threadId: THREAD.id,
+          status: 'applied',
+          modseq: 11,
+          error: null,
+          messages: [],
+        })),
+      )
+      replica.organise.enqueue({ kind: 'undo', threadId: THREAD.id })
+      expect(replica.organise.unsent()?.action).toMatchObject({ kind: 'undo', mutationId: mute })
+    } finally {
+      replica.db.close()
+    }
+  })
+
   it('keeps optimistic state after reopening and removes it only when the replica has the acknowledgment', () => {
     const dir = mkdtempSync(join(tmpdir(), 'amc-replica-'))
     const path = join(dir, 'replica.db')
@@ -263,7 +286,7 @@ describe('desktop Organise outbox', () => {
     }
   })
 
-  it('ends the projected Snooze and preserves the provider marker when archiving and undoing offline', () => {
+  it('preserves the projected Snooze and the provider marker when archiving and undoing offline', () => {
     const replica = new Replica(':memory:')
     try {
       seed(replica)
@@ -276,7 +299,7 @@ describe('desktop Organise outbox', () => {
       replica.put('message', message('1', ['account:AMC/Snoozed']))
       const archive = replica.organise.enqueue({ kind: 'archive', threadId: THREAD.id })
       const projected = () => replica.thread(THREAD.id)?.thread
-      expect(projected()?.snoozedUntil).toBeNull()
+      expect(projected()?.snoozedUntil).toBeGreaterThan(Date.now())
       expect(projected()?.labelIds).toContain('account:AMC/Snoozed')
 
       // Reopening an older outbox can restore a prepared patch that removed the marker.
@@ -289,7 +312,7 @@ describe('desktop Organise outbox', () => {
       expect(projected()?.labelIds).toContain('account:AMC/Snoozed')
 
       replica.organise.enqueue({ kind: 'undo', threadId: THREAD.id })
-      expect(projected()?.snoozedUntil).toBeNull()
+      expect(projected()?.snoozedUntil).toBeGreaterThan(Date.now())
       expect(projected()?.labelIds).toContain('account:AMC/Snoozed')
     } finally {
       replica.db.close()

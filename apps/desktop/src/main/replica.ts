@@ -16,6 +16,12 @@ import type { Counts, ReplicaThreadMessage, ThreadQuery, ThreadWithMessages } fr
 import { LocalDraftUpdates } from './draft-updates'
 import { LocalOrganise, ORGANISE_SCHEMA } from './organise'
 
+function splitMessage({ bodyText, ...metadata }: MessageDetail) {
+  const body = Buffer.from(bodyText, 'utf8')
+  const bodyRevision = createHash('sha256').update(body).digest('hex')
+  return { body, data: JSON.stringify({ ...metadata, bodyRevision }) }
+}
+
 /**
  * The local copy of the owner's mail on the Mac (plan §5). Every read in the UI comes from
  * here, so it is instant; the sync loop keeps it in step with the Engine.
@@ -45,7 +51,6 @@ export class Replica {
       CREATE TABLE IF NOT EXISTS draft (id TEXT PRIMARY KEY, thread_id TEXT, updated_at INTEGER NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS html (message_id TEXT PRIMARY KEY, html TEXT NOT NULL);
     `)
-    // Existing rows keep their embedded body until the next upsert.
     const messageColumns = this.db.prepare('PRAGMA table_info(message)').all()
     if (!messageColumns.some((column) => column.name === 'body_text')) {
       this.db.exec('ALTER TABLE message ADD COLUMN body_text BLOB')
@@ -66,6 +71,46 @@ export class Replica {
     this.draftUpdates = new LocalDraftUpdates(this.db)
     this.organise = new LocalOrganise(this)
     this.organise.rebuild()
+    this.#splitLegacyBodies()
+  }
+
+  #splitLegacyBodies() {
+    const marker = 'body_text_split'
+    if (this.db.prepare('SELECT 1 FROM meta WHERE key = ?').get(marker)) return
+    const next = this.db.prepare(
+      `SELECT rowid AS cursor, id, CASE WHEN body_text IS NULL THEN data END AS legacy
+       FROM message WHERE rowid > ? ORDER BY rowid LIMIT 1`,
+    )
+    const save = this.db.prepare(
+      'UPDATE message SET data = ?, body_text = ? WHERE id = ? AND body_text IS NULL',
+    )
+    let cursor = 0
+    const step = () => {
+      if (!this.db.isOpen) return
+      try {
+        for (let i = 0; i < 64; i++) {
+          const row = next.get(cursor) as
+            | { cursor: number; id: string; legacy: string | null }
+            | undefined
+          if (!row) {
+            this.db.prepare("INSERT OR IGNORE INTO meta VALUES (?, '1')").run(marker)
+            return
+          }
+          cursor = row.cursor
+          if (row.legacy !== null) {
+            const { body, data } = splitMessage(JSON.parse(row.legacy))
+            save.run(data, body, row.id)
+            break // Yield after each body to keep other Electron work responsive.
+          }
+        }
+      } catch {
+        // Keep the legacy read path available and retry after the next start.
+        console.error('Could not split legacy replica message bodies')
+        return
+      }
+      setImmediate(step).unref()
+    }
+    setImmediate(step).unref()
   }
 
   get modseq(): number | null {
@@ -148,14 +193,12 @@ export class Replica {
       }
       case 'message': {
         const m = row as MessageDetail
-        const { bodyText, ...metadata } = m
-        const body = Buffer.from(bodyText, 'utf8')
-        const bodyRevision = createHash('sha256').update(body).digest('hex')
+        const { body, data } = splitMessage(m)
         this.db
           .prepare(
             'INSERT OR REPLACE INTO message (id, thread_id, sent_at, data, body_text) VALUES (?, ?, ?, ?, ?)',
           )
-          .run(m.id, m.threadId, m.sentAt, JSON.stringify({ ...metadata, bodyRevision }), body)
+          .run(m.id, m.threadId, m.sentAt, data, body)
         break
       }
       case 'draft': {
@@ -175,11 +218,40 @@ export class Replica {
     if (entity === 'message') this.db.prepare('DELETE FROM html WHERE message_id = ?').run(id)
   }
 
-  apply(changes: SyncChange[]): void {
+  apply(changes: SyncChange[]): Map<string, string> {
+    const arrivals = new Map<string, string>()
+    const previous = this.db.prepare('SELECT last_message_at FROM thread WHERE id = ?')
     for (const change of changes) {
+      if (change.entity === 'thread') {
+        if (change.op === 'upsert' && change.data.inInbox && !change.data.bucket) {
+          const old = previous.get(change.id)
+          if (!old || Number(old.last_message_at) < change.data.lastMessageAt)
+            arrivals.set(change.id, change.data.accountId)
+        } else arrivals.delete(change.id)
+      }
       if (change.op === 'upsert') this.put(change.entity, change.data)
       else this.remove(change.entity, change.id)
     }
+    return arrivals
+  }
+
+  triageAccount(
+    accountId: string | null,
+    pending?: ReadonlyMap<string, string>,
+  ): string | undefined {
+    const untriaged = "in_inbox = 1 AND json_extract(data, '$.bucket.bucket') IS NULL"
+    if (pending) {
+      const find = this.db.prepare(`SELECT 1 FROM thread WHERE id = ? AND ${untriaged}`)
+      for (const [id, account] of pending) if (find.get(id)) return account
+      return undefined
+    }
+    const row = this.db
+      .prepare(`
+      SELECT account_id FROM thread WHERE ${untriaged} AND (?1 IS NULL OR account_id = ?1)
+      ORDER BY last_message_at DESC LIMIT 1
+    `)
+      .get(accountId)
+    return typeof row?.account_id === 'string' ? row.account_id : undefined
   }
 
   // ── reads ──────────────────────────────────────────────────────────────

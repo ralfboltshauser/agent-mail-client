@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
@@ -5,7 +6,24 @@ import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin({ exclude: ['@amc/protocol', '@modelcontextprotocol/sdk'] })],
+    plugins: [
+      externalizeDepsPlugin({
+        exclude: ['@amc/cli', '@amc/protocol', '@modelcontextprotocol/sdk'],
+      }),
+    ],
+    define: {
+      AMC_TRIAGE_PROMPT: JSON.stringify(
+        readFileSync(new URL('../cli/prompts/triage.md', import.meta.url), 'utf8'),
+      ),
+    },
+    build: {
+      rollupOptions: {
+        input: {
+          index: resolve('src/main/index.ts'),
+          'triage-worker': resolve('src/main/triage-worker.ts'),
+        },
+      },
+    },
   },
   preload: {
     plugins: [externalizeDepsPlugin()],
