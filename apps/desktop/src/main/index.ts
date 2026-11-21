@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type {
@@ -12,17 +12,20 @@ import type {
 } from '@amc/protocol'
 import { BucketInput } from '@amc/protocol'
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell } from 'electron'
-import type { SyncStatus, ThreadQuery } from '../shared/api'
+import type { SyncStatus, ThreadQuery, TriageStatus } from '../shared/api'
 import { clearPairing, loadPairing, savePairing } from './auth'
+import { AutoTriage } from './auto-triage'
 import { composeDraftPath } from './draft-updates'
 import { EngineClient, EngineError } from './engine'
-import { Handoff, t3NavigationLink } from './handoff'
+import { Handoff, type T3Launcher, t3NavigationLink } from './handoff'
 import { OrganiseSync } from './organise'
 import { loadRenderer } from './renderer-load'
 import { Replica } from './replica'
 import { SyncLoop } from './sync'
-import { launchInT3, savedT3Url, t3Projects } from './t3'
+import { mcpLauncher, savedT3Url } from './t3'
+import { cliLauncher, detectT3Cli } from './t3-cli'
 import { createTray } from './tray'
+import { onLowBattery, runTriageProcess } from './triage-process'
 
 let window: BrowserWindow | null = null
 let replica: Replica | null = null
@@ -34,6 +37,8 @@ let tray: ReturnType<typeof createTray> | null = null
 let changedTimer: NodeJS.Timeout | null = null
 let draftRecovery: Promise<void> | null = null
 let handoff: Handoff
+let triage: AutoTriage
+const quittingTriage = new AbortController()
 
 const UNPAIRED: SyncStatus = {
   phase: 'unpaired',
@@ -45,6 +50,17 @@ const UNPAIRED: SyncStatus = {
 
 let unpairedStatus = UNPAIRED
 const pauseFile = () => join(app.getPath('userData'), 'sync-paused')
+const triageOffFile = () => join(app.getPath('userData'), 'auto-triage-off')
+const triageRunFile = () => join(app.getPath('userData'), 'triage-run.json')
+
+function loadLastTriageRun(): TriageStatus['lastRun'] {
+  try {
+    const run = JSON.parse(readFileSync(triageRunFile(), 'utf8')) as TriageStatus['lastRun']
+    return Number.isFinite(run?.at) ? run : null
+  } catch {
+    return null
+  }
+}
 
 function broadcast(channel: string, payload?: unknown) {
   window?.webContents.send(channel, payload)
@@ -78,6 +94,9 @@ function createOrganise(client: EngineClient, loop?: SyncLoop) {
 function connect(engineUrl: string, token: string) {
   engine = new EngineClient(engineUrl, token)
   recoverHandoffs(engine)
+  triage.connect((accountId, signal, recent) =>
+    runTriageProcess({ engineUrl, token }, accountId, recent, signal, quittingTriage.signal),
+  )
   if (existsSync(pauseFile())) {
     organise = createOrganise(engine)
     pausedStatus = { ...UNPAIRED, phase: 'paused', engineUrl }
@@ -108,6 +127,7 @@ function startSync(client: EngineClient) {
   loop.on('status', (status) => {
     if (sync !== loop) return
     broadcast('amc:status', status)
+    triage.setAvailable(status.phase === 'live')
     if (status.phase === 'live' && replayOnLive) {
       replayOnLive = false
       draftRecovery = recovering.then(() => {
@@ -115,6 +135,7 @@ function startSync(client: EngineClient) {
       })
     }
   })
+  loop.on('arrivals', (threads) => triage.arrivals(threads))
   loop.on('changed', () => {
     // Coalesce bursts (backfill pages) into one UI refresh per 120 ms.
     if (changedTimer) return
@@ -128,9 +149,11 @@ function startSync(client: EngineClient) {
 }
 
 function stopSync() {
+  const stoppingTriage = triage?.stop()
   sync?.stop()
   sync = null
   organise?.stop()
+  return stoppingTriage
 }
 
 function toggleSync() {
@@ -158,12 +181,24 @@ function requireEngine(): EngineClient {
 }
 
 function registerIpc() {
+  ipcMain.handle('amc:triageStatus', () => triage.status)
+  ipcMain.handle('amc:setAutoTriage', (_e, enabled: unknown) => {
+    if (typeof enabled !== 'boolean') throw new Error('Invalid auto-triage setting')
+    if (enabled) rmSync(triageOffFile(), { force: true })
+    else writeFileSync(triageOffFile(), '')
+    triage.setEnabled(enabled)
+  })
+  ipcMain.handle('amc:triageNow', (_e, accountId: unknown) => {
+    if (accountId !== null && typeof accountId !== 'string') throw new Error('Invalid Account')
+    return triage.now(accountId)
+  })
   ipcMain.handle('amc:pair', (_e, engineUrl: string, code: string) => pair(engineUrl, code))
   ipcMain.handle('amc:unpair', () => {
     stopSync()
     organise = null
     pausedStatus = null
     engine = null
+    triage.connect(null)
     clearPairing()
     openReplica().clear()
     openReplica().organise.clear()
@@ -228,17 +263,27 @@ async function pair(engineUrl: string, code: string) {
 
 function registerComposeIpc() {
   handoff = new Handoff(openReplica().db)
-  ipcMain.handle('amc:savedT3Url', () => savedT3Url())
-  ipcMain.handle('amc:t3Projects', (_e, address: string) => t3Projects(address))
+  let local: T3Launcher | null = null
+  ipcMain.handle('amc:t3Setup', async () => {
+    const cli = local ? null : await detectT3Cli()
+    if (cli) local = cliLauncher(cli)
+    return { kind: local ? 'cli' : 'mcp', address: savedT3Url() }
+  })
+  const launcher = (address: string | null) => {
+    if (address !== null) return mcpLauncher(address)
+    if (!local) throw new Error('AMC could not find the local T3 CLI.')
+    return local
+  }
+  ipcMain.handle('amc:t3Projects', (_e, address: string | null) => launcher(address).projects())
   ipcMain.handle(
     'amc:handoff',
-    async (_e, address: string, projectId: string, threadId: string) => {
+    async (_e, address: string | null, projectId: string, threadId: string) => {
       await draftRecovery
       const { draft, thread } = await handoff.launch(
         requireEngine(),
         projectId,
         threadId,
-        (request) => launchInT3(address, request),
+        launcher(address).launch,
       )
       const link = thread.link && t3NavigationLink(thread.link)
       if (link) void shell.openExternal(link).catch(() => {})
@@ -535,6 +580,20 @@ if (!app.requestSingleInstanceLock()) {
     // Keep the same app name at safeStorage initialization as the dev build.
     app.setName('AMC')
     buildMenu()
+    triage = new AutoTriage({
+      enabled: !existsSync(triageOffFile()),
+      lastRun: loadLastTriageRun(),
+      onLowBattery,
+      accountForRun: (accountId, pending) => openReplica().triageAccount(accountId, pending),
+      saveLastRun: (run) => {
+        try {
+          writeFileSync(triageRunFile(), JSON.stringify(run))
+        } catch {
+          console.error('Could not save the last AMC triage result')
+        }
+      },
+      changed: (status) => broadcast('amc:triageStatus', status),
+    })
     registerIpc()
     openReplica()
     const packagedMac = process.platform === 'darwin' && app.isPackaged
@@ -571,9 +630,10 @@ if (!app.requestSingleInstanceLock()) {
     event.preventDefault()
     if (flushingBeforeQuit) return
     flushingBeforeQuit = true
-    stopSync()
+    quittingTriage.abort()
+    const stoppingTriage = stopSync()
     if (changedTimer) clearTimeout(changedTimer)
-    void flushDrafts().finally(() => {
+    void Promise.allSettled([flushDrafts(), stoppingTriage]).then(() => {
       quitting = true
       app.quit()
     })

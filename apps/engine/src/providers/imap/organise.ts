@@ -77,6 +77,7 @@ export async function executeImap(
   save: () => void,
   allowTrash: boolean,
   beforeWrite: () => void,
+  requireDestinationUid = false,
 ) {
   const { client, store, accountId, locations } = sync
   const unreadId = labelId(accountId, 'UNREAD')
@@ -105,6 +106,8 @@ export async function executeImap(
         change.revisions = Object.fromEntries(Object.keys(change.after).map((id) => [id, revision]))
       } else {
         delete change.revisions
+        if (requireDestinationUid)
+          entry.error ??= 'Snooze unavailable: the IMAP server did not verify the Archive UID'
       }
       entry.applied.push(change)
       delete entry.pending

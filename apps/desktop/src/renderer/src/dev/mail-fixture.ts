@@ -7,7 +7,7 @@ import {
   type OutboxItem,
   type ThreadSummary,
 } from '@amc/protocol'
-import type { AmcApi, ReplicaThreadMessage, SyncStatus } from '../../../shared/api'
+import type { AmcApi, ReplicaThreadMessage, SyncStatus, TriageStatus } from '../../../shared/api'
 
 /** Synthetic data only. The fixture never calls the preload bridge. */
 export function createFixture(scenario: string): AmcApi {
@@ -171,7 +171,21 @@ export function createFixture(scenario: string): AmcApi {
         .toLowerCase()
         .includes(query.toLowerCase()),
     )
+  let triage: TriageStatus = { enabled: true, running: false, lastRun: null, notice: null }
+  const triageListeners = new Set<(status: TriageStatus) => void>()
   return {
+    triageStatus: async () => triage,
+    setAutoTriage: async (enabled) => {
+      triage = { ...triage, enabled }
+      for (const listener of triageListeners) listener(triage)
+    },
+    triageNow: async () => {},
+    onTriageStatus: (listener) => {
+      triageListeners.add(listener)
+      return () => {
+        triageListeners.delete(listener)
+      }
+    },
     status: async () => status,
     onStatus: () => () => {},
     onChanged: (listener) => {
@@ -388,7 +402,7 @@ export function createFixture(scenario: string): AmcApi {
     inlineAttachment: async () => '',
     openAttachment: async () => {},
     openExternal: async () => {},
-    savedT3Url: async () => '',
+    t3Setup: async () => ({ kind: 'mcp', address: '' }),
     t3Projects: async () => [],
     handoff: async () => {
       throw new Error('Hand off is unavailable in the fixture.')

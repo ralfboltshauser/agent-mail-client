@@ -88,6 +88,38 @@ describe('HTTP API', () => {
     expect(res.status).toBe(403)
   })
 
+  it('grants one triage lease across clients and releases or expires it', async () => {
+    const { db, app } = setup()
+    const desktop = issueToken(db, { kind: 'desktop', name: 'Mac', scopes: ['admin'] })
+    const cli = issueToken(db, { kind: 'cli', name: 'Host', scopes: ['admin'] })
+    const lease = (holder: string, secret: string, method = 'POST') =>
+      app.request('/v1/triage/lease', {
+        method,
+        headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ holder }),
+      })
+    const fromDesktop = (method?: string) => lease('desktop', desktop.secret, method)
+    const fromCli = (method?: string) => lease('cli', cli.secret, method)
+    const [desktopResult, cliResult] = await Promise.all([fromDesktop(), fromCli()])
+    const { granted: desktopWon } = await desktopResult.json()
+    expect(await cliResult.json()).toEqual({ granted: !desktopWon })
+    const winner = desktopWon ? fromDesktop : fromCli
+    const loser = desktopWon ? fromCli : fromDesktop
+    const winnerName = desktopWon ? 'desktop' : 'cli'
+
+    await loser('DELETE')
+    expect(await (await loser()).json()).toEqual({ granted: false })
+    await winner('DELETE')
+    expect(await (await loser()).json()).toEqual({ granted: true })
+    expect(db.prepare('SELECT expires_at FROM triage_lease').get()?.expires_at).toBeGreaterThan(
+      Date.now() + 9 * 60_000,
+    )
+    db.exec('UPDATE triage_lease SET expires_at = 0')
+    expect(await (await winner()).json()).toEqual({ granted: true })
+    await loser('DELETE')
+    expect(db.prepare('SELECT holder FROM triage_lease').get()?.holder).toBe(winnerName)
+  })
+
   it('issues an expiring scoped Agent grant and lets the owner revoke it', async () => {
     const { db, app } = setup()
     db.exec(

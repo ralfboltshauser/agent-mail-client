@@ -1,6 +1,7 @@
 import { useId, useState } from 'react'
 import { toast } from 'sonner'
 import { getAmc } from '@/lib/amc'
+import { AutoTriageSetting } from './triage-status'
 import { Button } from './ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
 import { Input } from './ui/input'
@@ -26,7 +27,7 @@ export function SendSettings({
     >
       <DialogContent onCloseAutoFocus={onCloseAutoFocus} className="sm:max-w-sm">
         <DialogHeader>
-          <DialogTitle>Undo send</DialogTitle>
+          <DialogTitle>Settings</DialogTitle>
           <DialogDescription>
             Hold outgoing mail briefly so you can bring it back to Drafts.
           </DialogDescription>
@@ -65,6 +66,7 @@ export function SendSettings({
             Save settings
           </Button>
         </form>
+        <AutoTriageSetting />
       </DialogContent>
     </Dialog>
   )

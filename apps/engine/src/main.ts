@@ -109,7 +109,7 @@ async function main(argv: string[]) {
       const sealer = Sealer.fromSecretsDir(config.secretsDir)
       const blobs = new BlobStore(config.blobDir)
       const snoozeEnabled = config.features.snooze
-      const store = new MailStore(db, blobs, { snoozeEnabled })
+      const store = new MailStore(db, blobs)
       const queries = new MailQueries(db, snoozeEnabled, blobs)
       let oauth: OAuthClient | null = null
       const oauthClient = () => {
@@ -122,7 +122,6 @@ async function main(argv: string[]) {
         sealer,
         log,
         oauthClient,
-        snoozeEnabled,
         gmailPubSub: config.gmailPubSubProject
           ? gmailPubSub(config.gmailPubSubProject, config.secretsDir)
           : undefined,

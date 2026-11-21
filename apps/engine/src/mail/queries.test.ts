@@ -59,14 +59,13 @@ describe('MailQueries', () => {
 
   it('ignores saved Snooze state in the Inbox when disabled', () => {
     const { db, store, queries } = setup()
-    const enabled = new MailStore(db, store.blobs, { snoozeEnabled: true })
-    enabled.putMessage('a', [], msg('m1'))
-    enabled.putMessage('a', [], msg('m2', { labels: ['INBOX', 'SPAM'] }))
+    store.putMessage('a', [], msg('m1'))
+    store.putMessage('a', [], msg('m2', { labels: ['INBOX', 'SPAM'] }))
     db.prepare('UPDATE thread SET snoozed_until = 2000').run()
-    enabled.refreshThread('a:t-m1')
-    enabled.refreshThread('a:t-m2')
+    store.refreshThread('a:t-m1')
+    store.refreshThread('a:t-m2')
     expect(new MailQueries(db, true).thread('a:t-m1')).toMatchObject({
-      inInbox: false,
+      inInbox: true,
       snoozedUntil: 2000,
     })
 

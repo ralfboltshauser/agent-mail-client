@@ -133,14 +133,27 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
       'list_untriaged',
       {
         description: 'List Inbox Threads without a Bucket, newest first.',
-        inputSchema: { limit: UntriagedLimit, account_id: z.string().optional() },
+        inputSchema: {
+          limit: UntriagedLimit,
+          account_id: z.string().optional(),
+          recent: z
+            .boolean()
+            .optional()
+            .describe('Require provider delivery in the last 24 hours.'),
+        },
         annotations: { readOnlyHint: true },
       },
-      async ({ limit, account_id }) => {
+      async ({ limit, account_id, recent }) => {
         const target = account_id ?? accountId
         if (!withinAccount(principal, target)) return failure('Account unavailable to this Agent')
         return json(
-          queries.threads({ inbox: true, untriaged: true, accountId: target, limit }).threads,
+          queries.threads({
+            inbox: true,
+            untriaged: true,
+            accountId: target,
+            limit,
+            ...(recent ? { deliveredSince: Date.now() - 24 * 60 * 60_000 } : {}),
+          }).threads,
         )
       },
     )

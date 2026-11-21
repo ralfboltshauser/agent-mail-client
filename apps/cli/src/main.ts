@@ -305,7 +305,8 @@ program
   .description('Triage the newest untriaged Inbox Threads with Claude Code')
   .option('--account <id>', 'Account to triage (required if there are multiple)')
   .option('--dry-run', 'print proposed Buckets and reasons')
-  .action(async (opts: { account?: string; dryRun?: boolean }) => {
+  .option('--recent', 'only include Threads with delivery in the last 24 hours')
+  .action(async (opts: { account?: string; dryRun?: boolean; recent?: boolean }) => {
     const controller = new AbortController()
     const interrupt = () => controller.abort(new Error('Triage interrupted'))
     process.once('SIGINT', interrupt)
@@ -322,8 +323,16 @@ program
           throw new Error('Choose an Account with --account <id> (see amc accounts --json)')
         accountId = accounts[0].id
       }
-      const results = await runTriage(config, accountId, opts.dryRun === true, controller.signal)
-      if (!results.length) console.log('No untriaged Inbox Threads.')
+      const results = await runTriage(
+        config,
+        accountId,
+        opts.dryRun === true,
+        controller.signal,
+        undefined,
+        opts.recent === true,
+      )
+      if (!results) console.log('Triage is already running.')
+      else if (!results.length) console.log('No untriaged Inbox Threads.')
       else printJson(results)
     } finally {
       process.off('SIGINT', interrupt)
@@ -559,7 +568,7 @@ async function main() {
         .command('snooze')
         .argument('<thread>', 'Thread id')
         .argument('<until>', 'ISO date and time')
-        .option('--if-no-reply', 'cancel the Snooze if a reply arrives first')
+        .option('--if-no-reply', 'wake early if a reply arrives')
         .action((threadId: string, until: string, opts: { ifNoReply?: boolean }) => {
           const timestamp = Date.parse(until)
           if (!Number.isFinite(timestamp) || timestamp <= Date.now())

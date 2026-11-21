@@ -1,4 +1,3 @@
-import { SNOOZED_LABEL } from '@amc/protocol'
 import type { Logger } from '../../log.ts'
 import type { MailStore } from '../../mail/store.ts'
 import { fromGmail } from './mapping.ts'
@@ -70,7 +69,6 @@ export class GmailAccountSync {
   readonly #store: MailStore
   readonly #state: AccountState
   readonly #log: Logger
-  readonly #snoozeEnabled: boolean
   // Each runner owns one signal. Replacement invalidates it before starting a new runner.
   readonly #signal: AbortSignal | undefined
   readonly #seen = new Set<string>()
@@ -85,14 +83,12 @@ export class GmailAccountSync {
     store: MailStore,
     state: AccountState,
     log: Logger,
-    snoozeEnabled = false,
     signal?: AbortSignal,
   ) {
     this.#api = api
     this.#store = store
     this.#state = state
     this.#log = log
-    this.#snoozeEnabled = snoozeEnabled
     this.#signal = signal
   }
 
@@ -117,20 +113,6 @@ export class GmailAccountSync {
     const labels = await this.#api.labels(this.#signal)
     this.#signal?.throwIfAborted()
     this.#store.syncLabels(this.#state.accountId, labels.map(toIncomingLabel))
-    if (this.#snoozeEnabled && !labels.some(({ name }) => name === SNOOZED_LABEL)) {
-      try {
-        const label = await this.#api.createLabel(SNOOZED_LABEL, this.#signal)
-        this.#signal?.throwIfAborted()
-        this.#store.putLabel(this.#state.accountId, toIncomingLabel(label))
-      } catch (error) {
-        this.#signal?.throwIfAborted()
-        // A lost create or a name conflict is recovered by the next label sync.
-        this.#log.warn(
-          { account: this.#state.accountId, err: error },
-          'Gmail Snooze label unavailable',
-        )
-      }
-    }
   }
 
   get backfillDone(): boolean {

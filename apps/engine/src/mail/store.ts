@@ -30,6 +30,7 @@ export interface IncomingMessage {
   bodyHtmlBlob?: string | null
   bodyHtml: string | null
   sentAt: number
+  deliveredAt?: number
   size: number
   /** Provider label ids, e.g. Gmail's INBOX, UNREAD, Label_123. */
   labels: string[]
@@ -81,19 +82,13 @@ export class MailStore extends EventEmitter<{ change: [] }> {
   readonly db: Db
   readonly blobs: BlobStore
   readonly #now: () => number
-  readonly #snoozeEnabled: boolean
 
-  constructor(
-    db: Db,
-    blobs: BlobStore,
-    { now = Date.now, snoozeEnabled = false }: { now?: () => number; snoozeEnabled?: boolean } = {},
-  ) {
+  constructor(db: Db, blobs: BlobStore, { now = Date.now }: { now?: () => number } = {}) {
     super()
     this.setMaxListeners(100)
     this.db = db
     this.blobs = blobs
     this.#now = now
-    this.#snoozeEnabled = snoozeEnabled
   }
 
   recordChange(entity: Entity, id: string, op: 'upsert' | 'delete'): number {
@@ -232,8 +227,8 @@ export class MailStore extends EventEmitter<{ change: [] }> {
            id, account_id, thread_id, provider_id, rfc_message_id, in_reply_to, refs,
            from_json, to_json, cc_json, bcc_json, reply_to_json, subject, snippet, body_text, body_search_limit,
            body_parts, html_blob, sent_at, size, label_ids, unread, starred, list_unsubscribe, provider_label_ids,
-           first_seen_at, provider_history_id, provider_delivery_history_id
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           first_seen_at, provider_history_id, provider_delivery_history_id, delivered_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            thread_id = excluded.thread_id, rfc_message_id = excluded.rfc_message_id,
            in_reply_to = excluded.in_reply_to, refs = excluded.refs, from_json = excluded.from_json,
@@ -245,7 +240,8 @@ export class MailStore extends EventEmitter<{ change: [] }> {
            unread = excluded.unread, starred = excluded.starred,
            list_unsubscribe = excluded.list_unsubscribe, provider_label_ids = excluded.provider_label_ids,
            provider_history_id = excluded.provider_history_id,
-           provider_delivery_history_id = COALESCE(message.provider_delivery_history_id, excluded.provider_delivery_history_id)`,
+           provider_delivery_history_id = COALESCE(message.provider_delivery_history_id, excluded.provider_delivery_history_id),
+           delivered_at = COALESCE(excluded.delivered_at, message.delivered_at)`,
       )
       .run(
         mid,
@@ -276,6 +272,7 @@ export class MailStore extends EventEmitter<{ change: [] }> {
         this.#now(),
         stale ? previous.provider_history_id : (msg.providerHistoryId ?? null),
         msg.providerDeliveryHistoryId ?? null,
+        msg.deliveredAt ?? null,
       )
 
     this.#putAttachments(mid, msg.attachments)
@@ -609,7 +606,7 @@ export class MailStore extends EventEmitter<{ change: [] }> {
     this.db
       .prepare(
         `UPDATE thread SET subject = ?, snippet = ?, participants = ?, message_count = ?,
-           unread_count = ?, starred = ?, in_inbox = (? AND (NOT ? OR snoozed_until IS NULL) AND muted = 0),
+           unread_count = ?, starred = ?, in_inbox = (? AND muted = 0),
            has_attachments = ?, label_ids = ?,
            last_message_at = ?
          WHERE id = ?`,
@@ -622,7 +619,6 @@ export class MailStore extends EventEmitter<{ change: [] }> {
         unread,
         starred,
         Number(inInbox),
-        Number(this.#snoozeEnabled),
         hasAttachments,
         JSON.stringify([...labels].sort()),
         lastSentAt,
