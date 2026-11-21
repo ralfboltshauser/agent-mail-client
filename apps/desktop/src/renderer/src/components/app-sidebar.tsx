@@ -1,5 +1,16 @@
-import type { AccountSummary, Label } from '@amc/protocol'
-import { Archive, ChevronsUpDown, FileText, Inbox, Mail, Send, Star, Tag } from 'lucide-react'
+import { type AccountSummary, type Label, SNOOZED_LABEL } from '@amc/protocol'
+import {
+  Archive,
+  ChevronsUpDown,
+  Clock3,
+  FileText,
+  Inbox,
+  Mail,
+  Send,
+  Star,
+  Tag,
+  Trash2,
+} from 'lucide-react'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -26,14 +37,20 @@ import { cn } from '@/lib/utils'
 import type { Counts, SyncStatus, View } from '../../../shared/api'
 import { SyncIndicator } from './sync-indicator'
 
-export const SYSTEM_VIEWS: { view: View; title: string; icon: typeof Inbox; keys: string }[] = [
+const SYSTEM_VIEWS: { view: View; title: string; icon: typeof Inbox; keys: string }[] = [
   { view: { kind: 'inbox' }, title: 'Inbox', icon: Inbox, keys: 'G I' },
   { view: { kind: 'unread' }, title: 'Unread', icon: Mail, keys: 'G U' },
   { view: { kind: 'starred' }, title: 'Starred', icon: Star, keys: 'G S' },
   { view: { kind: 'drafts' }, title: 'Drafts', icon: FileText, keys: 'G D' },
   { view: { kind: 'sent' }, title: 'Sent', icon: Send, keys: 'G T' },
   { view: { kind: 'all' }, title: 'All Mail', icon: Archive, keys: 'G A' },
+  { view: { kind: 'snoozed' }, title: 'Snoozed', icon: Clock3, keys: 'G H' },
+  { view: { kind: 'trash' }, title: 'Trash', icon: Trash2, keys: 'G X' },
 ]
+
+export function systemViews(snoozeEnabled: boolean) {
+  return snoozeEnabled ? SYSTEM_VIEWS : SYSTEM_VIEWS.filter(({ view }) => view.kind !== 'snoozed')
+}
 
 export function sameView(a: View, b: View): boolean {
   return (
@@ -45,10 +62,10 @@ export function navigableLabels(labels: Label[], accounts: AccountSummary[]): La
   const imapAccounts = new Set(
     accounts.filter((account) => account.kind === 'imap').map((account) => account.id),
   )
-  return labels.filter(
-    (label) =>
-      label.kind === 'user' ||
-      (imapAccounts.has(label.accountId) && !['INBOX', 'SENT', 'DRAFT'].includes(label.providerId)),
+  return labels.filter((label) =>
+    imapAccounts.has(label.accountId)
+      ? label.kind === 'user' || !['INBOX', 'SENT', 'DRAFT'].includes(label.providerId)
+      : label.kind === 'user' && label.name !== SNOOZED_LABEL,
   )
 }
 
@@ -147,7 +164,7 @@ export function AppSidebar({
         <SidebarGroup>
           <SidebarGroupContent>
             <SidebarMenu>
-              {SYSTEM_VIEWS.map((item) => (
+              {systemViews(status?.snoozeEnabled === true).map((item) => (
                 <SidebarMenuItem key={item.view.kind}>
                   <SidebarMenuButton
                     isActive={sameView(view, item.view)}

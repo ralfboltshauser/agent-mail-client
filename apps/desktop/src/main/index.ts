@@ -6,6 +6,7 @@ import { app, BrowserWindow, ipcMain, Menu, nativeTheme, shell } from 'electron'
 import type { SyncStatus, ThreadQuery } from '../shared/api'
 import { clearPairing, loadPairing, savePairing } from './auth'
 import { EngineClient, EngineError } from './engine'
+import { OrganiseSync } from './organise'
 import { Replica } from './replica'
 import { SyncLoop } from './sync'
 import { createTray } from './tray'
@@ -14,6 +15,7 @@ let window: BrowserWindow | null = null
 let replica: Replica | null = null
 let engine: EngineClient | null = null
 let sync: SyncLoop | null = null
+let organise: OrganiseSync | null = null
 let pausedStatus: SyncStatus | null = null
 let tray: ReturnType<typeof createTray> | null = null
 let changedTimer: NodeJS.Timeout | null = null
@@ -39,12 +41,29 @@ function openReplica(): Replica {
 }
 
 function refreshTray() {
-  if (tray) tray.refresh(engine ? openReplica().unreadInboxCount() : 0, !!engine, !!pausedStatus)
+  if (tray)
+    tray.refresh(engine ? openReplica().counts(null).inboxUnread : 0, !!engine, !!pausedStatus)
+}
+
+function refreshMail() {
+  broadcast('amc:changed')
+  refreshTray()
+}
+
+function createOrganise(client: EngineClient, loop?: SyncLoop) {
+  const worker = new OrganiseSync(
+    openReplica().organise,
+    client,
+    () => loop?.pull() ?? Promise.resolve(),
+  )
+  worker.on('changed', refreshMail)
+  return worker
 }
 
 function connect(engineUrl: string, token: string) {
   engine = new EngineClient(engineUrl, token)
   if (existsSync(pauseFile())) {
+    organise = createOrganise(engine)
     pausedStatus = { ...UNPAIRED, phase: 'paused', engineUrl }
     broadcast('amc:status', pausedStatus)
   } else {
@@ -54,10 +73,10 @@ function connect(engineUrl: string, token: string) {
 }
 
 function startSync(client: EngineClient) {
-  sync?.stop()
   pausedStatus = null
   const loop = new SyncLoop(client, openReplica())
   sync = loop
+  organise = createOrganise(client, loop)
   broadcast('amc:status', loop.status)
   loop.on('status', (status) => {
     if (sync === loop) broadcast('amc:status', status)
@@ -67,11 +86,17 @@ function startSync(client: EngineClient) {
     if (changedTimer) return
     changedTimer = setTimeout(() => {
       changedTimer = null
-      broadcast('amc:changed')
-      refreshTray()
+      refreshMail()
     }, 120)
   })
   loop.start()
+  organise.start()
+}
+
+function stopSync() {
+  sync?.stop()
+  sync = null
+  organise?.stop()
 }
 
 function toggleSync() {
@@ -85,8 +110,7 @@ function toggleSync() {
   }
   if (sync) {
     pausedStatus = { ...sync.status, phase: 'paused', progress: null, error: null }
-    sync.stop()
-    sync = null
+    stopSync()
     broadcast('amc:status', pausedStatus)
   } else {
     startSync(engine)
@@ -102,16 +126,25 @@ function requireEngine(): EngineClient {
 function registerIpc() {
   ipcMain.handle('amc:pair', (_e, engineUrl: string, code: string) => pair(engineUrl, code))
   ipcMain.handle('amc:unpair', () => {
-    sync?.stop()
-    sync = null
+    stopSync()
+    organise = null
     pausedStatus = null
     engine = null
     clearPairing()
     openReplica().clear()
+    openReplica().organise.clear()
     unpairedStatus = UNPAIRED
     broadcast('amc:status', unpairedStatus)
     refreshTray()
   })
+  ipcMain.handle('amc:organise', (_event, input: unknown) => {
+    if (!organise) throw new Error('Pair with the Engine first')
+    const id = organise.enqueue(input, (sync?.status ?? pausedStatus)?.snoozeEnabled)
+    refreshMail()
+    if (sync) void organise.flush()
+    return id
+  })
+  ipcMain.handle('amc:organiseErrors', () => openReplica().organise.errors())
   registerReadIpc()
 }
 
@@ -132,11 +165,13 @@ async function pair(engineUrl: string, code: string) {
     throw new Error('That code is for the CLI. Run `sudo amc-engine pair --desktop` on the Host.')
   const previousUrl = engine?.baseUrl ?? unpairedStatus.engineUrl
   savePairing(url, body.token)
-  sync?.stop()
-  sync = null
+  stopSync()
   if (previousUrl !== url) {
     const db = openReplica()
-    db.transaction(() => db.clear())
+    db.transaction(() => {
+      db.clear()
+      db.organise.clear()
+    })
     broadcast('amc:changed')
   }
   connect(url, body.token)
@@ -151,6 +186,7 @@ function registerReadIpc() {
   ipcMain.handle('amc:counts', (_e, accountId: string | null) => openReplica().counts(accountId))
   ipcMain.handle('amc:threads', (_e, query: ThreadQuery) => openReplica().threads(query))
   ipcMain.handle('amc:thread', (_e, id: string) => openReplica().thread(id))
+  ipcMain.handle('amc:summaries', (_e, ids: string[]) => openReplica().summaries(ids))
   ipcMain.handle('amc:filter', (_e, text: string, accountId: string | null) =>
     openReplica().filter(text, accountId),
   )
@@ -311,7 +347,7 @@ if (!app.requestSingleInstanceLock()) {
     app.on('browser-window-focus', refreshTray)
   })
   app.on('before-quit', () => {
-    sync?.stop()
+    stopSync()
     if (changedTimer) clearTimeout(changedTimer)
   })
   app.on('window-all-closed', () => {

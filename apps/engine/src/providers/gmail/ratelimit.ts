@@ -50,9 +50,9 @@ export class QuotaLimiter {
   async #wait(units: number): Promise<void> {
     for (;;) {
       const now = Date.now()
-      // Never bank more than two seconds' worth, so a quiet spell does not become a burst.
+      // A backed-off bucket must still be able to fund its largest call.
       this.#tokens = Math.min(
-        this.#rate * 2,
+        Math.max(this.#rate * 2, MAX_CALL_COST, units),
         this.#tokens + ((now - this.#last) / 1000) * this.#rate,
       )
       this.#last = now
@@ -74,6 +74,7 @@ export class QuotaLimiter {
     this.#lastPenalty = now
     this.#rate = Math.max(this.#minRate, this.#rate / 2)
     this.#tokens = 0
+    this.#last = now
   }
 
   /** A successful call: speed up slowly. */
@@ -82,16 +83,24 @@ export class QuotaLimiter {
   }
 }
 
-export const QUOTA_COST: Record<string, number> = {
+export const QUOTA_COST = {
   profile: 1,
   labels: 1,
   list: 5,
   // Not the documented 5: new projects are charged about 20 per messages.get under the
   // 6,000 units/user/min "Total Query Cost" limit (observed; see the M1 PR).
   get: 20,
+  threadGet: 20,
   history: 2,
   attachment: 5,
   draftCreate: 10,
   draftUpdate: 15,
   draftDelete: 10,
+  batchModify: 50,
+  modify: 5,
+  trash: 20,
+  untrash: 5,
+  labelCreate: 5,
 }
+
+const MAX_CALL_COST = Math.max(...Object.values(QUOTA_COST))

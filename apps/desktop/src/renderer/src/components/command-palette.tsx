@@ -1,5 +1,5 @@
 import type { AccountSummary, Label } from '@amc/protocol'
-import { Moon, RefreshCw, Search, Sun, Tag, Users } from 'lucide-react'
+import { Moon, RefreshCw, Search, Sun, Tag, Undo2, Users } from 'lucide-react'
 import { useState } from 'react'
 import {
   CommandDialog,
@@ -11,7 +11,7 @@ import {
   CommandShortcut,
 } from '@/components/ui/command'
 import type { View } from '../../../shared/api'
-import { navigableLabels, SYSTEM_VIEWS } from './app-sidebar'
+import { navigableLabels, systemViews } from './app-sidebar'
 
 interface Props {
   open: boolean
@@ -23,6 +23,9 @@ interface Props {
   onSearch: (text: string) => void
   onToggleTheme: () => void
   dark: boolean
+  snoozeEnabled: boolean
+  organise: { name: string; shortcut: string; icon: typeof Moon; run: () => void }[]
+  undo?: (() => void) | undefined
 }
 
 /** ⌘K: every action, reachable by typing. */
@@ -36,6 +39,9 @@ export function CommandPalette({
   onSearch,
   onToggleTheme,
   dark,
+  snoozeEnabled,
+  organise,
+  undo,
 }: Props) {
   const [query, setQuery] = useState('')
   const run = (fn: () => void) => () => {
@@ -65,8 +71,26 @@ export function CommandPalette({
             </CommandItem>
           </CommandGroup>
         )}
+        {(organise.length > 0 || undo) && (
+          <CommandGroup heading="Organise">
+            {organise.map((item) => (
+              <CommandItem key={item.name} value={item.name} onSelect={run(item.run)}>
+                <item.icon />
+                {item.name}
+                <CommandShortcut>{item.shortcut}</CommandShortcut>
+              </CommandItem>
+            ))}
+            {undo && (
+              <CommandItem value="undo organise" onSelect={run(undo)}>
+                <Undo2 />
+                Undo
+                <CommandShortcut>Z</CommandShortcut>
+              </CommandItem>
+            )}
+          </CommandGroup>
+        )}
         <CommandGroup heading="Go to">
-          {SYSTEM_VIEWS.map((item) => (
+          {systemViews(snoozeEnabled).map((item) => (
             <CommandItem
               key={item.view.kind}
               value={`go ${item.title}`}

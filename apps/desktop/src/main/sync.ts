@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import type { SyncChanges, SyncEntity, SyncSnapshotPage, SyncState } from '@amc/protocol'
+import type { Me, SyncChanges, SyncEntity, SyncSnapshotPage, SyncState } from '@amc/protocol'
 import type { SyncStatus } from '../shared/api'
 import { type EngineClient, EngineError } from './engine'
 import type { Replica } from './replica'
@@ -72,7 +72,16 @@ export class SyncLoop extends EventEmitter<{ status: [SyncStatus]; changed: [] }
       try {
         do {
           this.#pullAgain = false
-          await this.#pullChanges()
+          try {
+            await this.#pullChanges()
+          } catch (error) {
+            signal.throwIfAborted()
+            if (!(error instanceof EngineError && error.code === 'resync_required')) throw error
+            await this.#bootstrap()
+            signal.throwIfAborted()
+            this.#set({ phase: 'live', progress: null })
+            this.#pullAgain = true
+          }
         } while (this.#pullAgain && !signal.aborted)
       } catch (error) {
         if (!signal.aborted) throw error
@@ -88,6 +97,9 @@ export class SyncLoop extends EventEmitter<{ status: [SyncStatus]; changed: [] }
     let backoff = 1000
     while (!signal.aborted) {
       try {
+        const me = await this.#engine.get<Me>('/v1/me', { signal })
+        if (signal.aborted) return
+        this.#set({ snoozeEnabled: me.features?.snooze === true })
         if (this.#replica.modseq === null) await this.#bootstrap()
         await this.pull()
         if (signal.aborted) return
@@ -113,7 +125,11 @@ export class SyncLoop extends EventEmitter<{ status: [SyncStatus]; changed: [] }
           continue
         }
         const offline = error instanceof EngineError && error.code === 'unreachable'
-        this.#set({ phase: offline ? 'offline' : 'error', error: (error as Error).message })
+        this.#set({
+          phase: offline ? 'offline' : 'error',
+          error: (error as Error).message,
+          snoozeEnabled: false,
+        })
         await sleep(backoff, signal)
         backoff = Math.min(backoff * 2, 30_000)
       }
@@ -122,6 +138,7 @@ export class SyncLoop extends EventEmitter<{ status: [SyncStatus]; changed: [] }
 
   async #bootstrap(): Promise<void> {
     const signal = this.#controller.signal
+    signal.throwIfAborted()
     this.#set({ phase: 'bootstrapping', progress: 0 })
     const state = await this.#engine.get<SyncState>('/v1/sync/state', { signal })
     signal.throwIfAborted()
@@ -137,6 +154,7 @@ export class SyncLoop extends EventEmitter<{ status: [SyncStatus]; changed: [] }
         signal.throwIfAborted()
         this.#replica.transaction(() => {
           for (const row of page.rows) this.#replica.put(entity, row)
+          if (entity === 'thread' || entity === 'message') this.#replica.organise.rebuild()
         })
         cursor = page.cursor
         done += page.rows.length
@@ -146,6 +164,7 @@ export class SyncLoop extends EventEmitter<{ status: [SyncStatus]; changed: [] }
       } while (cursor)
     }
     this.#replica.modseq = state.modseq
+    this.#replica.organise.rebuild()
   }
 
   async #pullChanges(): Promise<void> {
@@ -162,8 +181,10 @@ export class SyncLoop extends EventEmitter<{ status: [SyncStatus]; changed: [] }
         this.#replica.transaction(() => {
           this.#replica.apply(res.changes)
           this.#replica.modseq = res.modseq
+          if (res.organiseFailures) this.#replica.organise.notice(res.organiseFailures)
+          this.#replica.organise.rebuild()
         })
-        if (res.changes.length > 0) this.emit('changed')
+        if (res.changes.length > 0 || res.organiseFailures?.length) this.emit('changed')
       }
       this.#set({ lastSyncAt: Date.now() })
       if (!res.more) return

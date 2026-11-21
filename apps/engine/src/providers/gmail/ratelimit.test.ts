@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { QuotaLimiter } from './ratelimit.ts'
+import { describe, expect, it, vi } from 'vitest'
+import { QUOTA_COST, QuotaLimiter } from './ratelimit.ts'
 
 describe('QuotaLimiter', () => {
   it('paces to the rate after the initial allowance', async () => {
@@ -10,6 +10,24 @@ describe('QuotaLimiter', () => {
     const elapsed = Date.now() - start
     expect(elapsed).toBeGreaterThanOrEqual(400)
     expect(elapsed).toBeLessThan(1000)
+  })
+
+  it('grants a batch at a backed-off rate and unblocks the following caller', async () => {
+    vi.useFakeTimers()
+    try {
+      const limiter = new QuotaLimiter()
+      limiter.penalize()
+      await vi.advanceTimersByTimeAsync(5000)
+      limiter.penalize()
+      expect(limiter.rate).toBe(20)
+      const order: string[] = []
+      void limiter.take(QUOTA_COST.batchModify, true).then(() => order.push('batch'))
+      void limiter.take(1).then(() => order.push('next'))
+      await vi.advanceTimersByTimeAsync(3000)
+      expect(order).toEqual(['batch', 'next'])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('halves on quota errors and recovers slowly', () => {

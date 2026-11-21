@@ -19,6 +19,7 @@ export const Me = z.object({
   kind: z.enum(TOKEN_KINDS),
   name: z.string(),
   scopes: z.array(z.enum(SCOPES)),
+  features: z.object({ snooze: z.boolean() }).optional(),
 })
 export type Me = z.infer<typeof Me>
 
