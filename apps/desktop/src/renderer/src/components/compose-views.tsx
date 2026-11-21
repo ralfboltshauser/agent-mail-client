@@ -192,7 +192,7 @@ export function OutboxView({
                       .catch((cause: Error) => toast.error(cause.message))
                   }}
                 >
-                  Cancel send
+                  {item.sendAt > item.undoUntil ? 'Cancel and reopen to reschedule' : 'Cancel send'}
                 </Button>
               )}
               {item.canResolve && (

@@ -3,7 +3,7 @@ import { GmailHttpError } from '../providers/gmail/http.ts'
 import { OAuthError } from '../providers/gmail/oauth.ts'
 import type { GmailApi } from '../providers/gmail/types.ts'
 import { providerMessageId } from '../providers/imap/mapping.ts'
-import type { ImapProvider } from '../providers/imap/provider.ts'
+import { type ImapProvider, SmtpRejection } from '../providers/imap/provider.ts'
 import { ImapThreads } from '../providers/imap/threading.ts'
 import type { DraftMirror, Drafts } from './drafts.ts'
 import { buildMessage } from './mime.ts'
@@ -82,7 +82,13 @@ export function imapDelivery(api: ImapProvider): Delivery {
   })
   return {
     async send(message, id) {
-      const sent = await api.send({ ...message, messageId: id })
+      let sent: Awaited<ReturnType<ImapProvider['send']>>
+      try {
+        sent = await api.send({ ...message, messageId: id })
+      } catch (error) {
+        if (error instanceof SmtpRejection) return { kind: 'failed', detail: error.message }
+        throw error
+      }
       const detail = [
         sent.rejected.length ? `${sent.rejected.length} recipient(s) were rejected by SMTP.` : null,
         sent.sentCopy === 'failed'
@@ -109,13 +115,17 @@ export function imapDelivery(api: ImapProvider): Delivery {
   }
 }
 
-export function imapDraftMirror(api: ImapProvider): DraftMirror {
+export function imapDraftMirror(
+  api: ImapProvider,
+  currentEndpoint?: () => string | undefined,
+): DraftMirror {
   return {
+    imap: true,
     saveDraft: async ({ raw }) => {
       const saved = await api.saveDraft(raw)
-      return { id: saved.id, message: { ...saved.message, threadId: '' } }
+      return { ...saved, message: { ...saved.message, threadId: '' } }
     },
-    deleteDraft: (id) => api.deleteDraft(id),
+    deleteDraft: (id, sourceHash) => api.deleteDraft(id, sourceHash ?? null, currentEndpoint),
   }
 }
 

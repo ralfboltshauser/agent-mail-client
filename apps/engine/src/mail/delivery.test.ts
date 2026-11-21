@@ -91,6 +91,113 @@ it('mirrors an IMAP draft and removes only the recorded UID under UIDPLUS', asyn
   imap.capabilities.set('UIDPLUS', true)
   const saved = await mirror.saveDraft({ raw })
   expect(imap.folder('Drafts').messages.size).toBe(1)
-  await mirror.deleteDraft(saved.id)
+  await mirror.deleteDraft(saved.id, saved.sourceHash)
   expect(imap.folder('Drafts').messages.size).toBe(0)
+})
+
+it('reports definitive SMTP failures and keeps a lost DATA reply in reconciliation', async () => {
+  const imap = new FakeImap()
+  imap.addFolder('Sent', '\\Sent')
+  let sent: Buffer | undefined
+  const sendMail = vi
+    .fn()
+    .mockRejectedValueOnce(
+      Object.assign(new Error('Private auth response'), {
+        command: 'AUTH PLAIN',
+        code: 'EAUTH',
+        responseCode: 535,
+      }),
+    )
+    .mockRejectedValueOnce(
+      Object.assign(new Error('Private recipient response'), {
+        command: 'RCPT TO',
+        code: 'EENVELOPE',
+        responseCode: 550,
+      }),
+    )
+    .mockRejectedValueOnce(
+      Object.assign(new Error('Private DATA response'), {
+        command: 'DATA',
+        code: 'EMESSAGE',
+        responseCode: 554,
+      }),
+    )
+    .mockImplementationOnce(async ({ raw }) => {
+      sent = raw
+      throw Object.assign(new Error('Lost DATA reply'), { command: 'CONN', code: 'ECONNECTION' })
+    })
+  const delivery = imapDelivery(
+    new ImapProvider(
+      credentials,
+      () => imap.client,
+      () => ({ sendMail, close() {} }),
+    ),
+  )
+  await expect(delivery.send(message, rfcId)).resolves.toEqual({
+    kind: 'failed',
+    detail: 'SMTP authentication failed (SMTP 535). Sign in to this Account again.',
+  })
+  await expect(delivery.send(message, rfcId)).resolves.toEqual({
+    kind: 'failed',
+    detail: 'SMTP rejected all recipients (SMTP 550).',
+  })
+  await expect(delivery.send(message, rfcId)).resolves.toEqual({
+    kind: 'failed',
+    detail: 'SMTP rejected the message (SMTP 554).',
+  })
+  await expect(delivery.send(message, rfcId)).rejects.toThrow('could not be confirmed')
+  await expect(delivery.find(message, rfcId)).resolves.toBeNull()
+  if (!sent) throw new Error('No message submitted')
+  await imap.append('Sent', sent, ['\\Seen'])
+  await expect(delivery.find(message, rfcId)).resolves.toMatchObject({ providerId: 'Sent:1:1' })
+  expect(sendMail).toHaveBeenCalledTimes(4)
+})
+
+it('reports both partial SMTP rejection and failed APPEND without losing the accepted receipt', async () => {
+  const imap = new FakeImap()
+  imap.addFolder('Sent', '\\Sent')
+  imap.failAppend = true
+  const sendMail = vi.fn().mockResolvedValue({
+    accepted: ['recipient@example.test'],
+    rejected: ['second@example.test'],
+  })
+  const delivery = imapDelivery(
+    new ImapProvider(
+      { ...credentials, smtpSavesSent: false },
+      () => imap.client,
+      () => ({ sendMail, close() {} }),
+    ),
+  )
+  await expect(
+    delivery.send(
+      {
+        ...message,
+        cc: [{ address: 'second@example.test', name: null }],
+      },
+      rfcId,
+    ),
+  ).resolves.toMatchObject({
+    kind: 'accepted',
+    receipt: {
+      detail:
+        '1 recipient(s) were rejected by SMTP. SMTP accepted the message. The Sent copy could not be saved.',
+    },
+  })
+  expect(sendMail).toHaveBeenCalledOnce()
+})
+
+it('closes an IMAP connection when the Sent lookup stalls', async () => {
+  const imap = new FakeImap()
+  imap.addFolder('Sent', '\\Sent')
+  vi.spyOn(imap, 'search').mockImplementation(() => new Promise(() => {}))
+  vi.useFakeTimers()
+  try {
+    const provider = new ImapProvider(credentials, () => imap.client)
+    const lookup = expect(provider.findSent(rfcId)).rejects.toThrow('Sent lookup timed out')
+    await vi.advanceTimersByTimeAsync(5000)
+    await lookup
+    expect(imap.usable).toBe(false)
+  } finally {
+    vi.useRealTimers()
+  }
 })

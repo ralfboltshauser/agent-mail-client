@@ -83,6 +83,7 @@ export async function parseMessage(
   item: FetchMessageObject,
   blobs: BlobStore,
   sourceBlob: string,
+  draftBody?: { text?: string; html?: string },
 ): Promise<IncomingMessage> {
   let headers: Headers = new Map()
   let lines: HeaderLines = []
@@ -97,6 +98,7 @@ export async function parseMessage(
     skipHtmlToText: true,
     skipTextToHtml: true,
     checksumAlgo: false,
+    keepDeliveryStatus: Boolean(draftBody),
     storeTextPart: (stream, charset, flowed, delSp) =>
       bodies.store(addAbortSignal(abort.signal, stream), charset, flowed, delSp),
   })
@@ -140,6 +142,10 @@ export async function parseMessage(
     throw error
   }
 
+  if (draftBody) {
+    draftBody.text = bodies.read(text.text)
+    draftBody.html = bodies.read(text.html || undefined)
+  }
   const bodiesForStore = await bodies.finish(text.text, text.html)
   const { bodyText } = bodiesForStore
   const unsubscribe = lines.find((header) => header.key === 'list-unsubscribe')
@@ -169,7 +175,7 @@ export async function parseMessage(
     snippet: bodyText.slice(0, 1024).replace(/\s+/g, ' ').slice(0, 200),
     ...bodiesForStore,
     bodySearchLimit: BODY_SEARCH_LIMIT,
-    bodyHtml: null,
+    bodyHtml: draftBody?.html ?? null,
     sentAt: Number.isFinite(timestamp) ? timestamp : 0,
     size: item.size ?? 0,
     labels: [folder.label.providerId],
