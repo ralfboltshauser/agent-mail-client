@@ -14,7 +14,7 @@ import type {
   OutboxItem,
   SendRequest,
 } from '@amc/protocol'
-import { DRAFT_CHANGED, MIRROR_CHANGED } from '@amc/protocol'
+import { DRAFT_CHANGED, MIRROR_CHANGED, ORIGINAL_DRAFT_LEFT } from '@amc/protocol'
 import Collaboration from '@tiptap/extension-collaboration'
 import {
   EditorContent,
@@ -124,6 +124,7 @@ export function Composer({
   const [uploading, setUploading] = useState(false)
   const [conflict, setConflict] = useState(false)
   const [error, setError] = useState('')
+  const [originalDraftLeft, setOriginalDraftLeft] = useState(draft.originalDraftLeft)
   const [mirrorError, setMirrorError] = useState(draft.mirrorError)
   const [mirrorConflict, setMirrorConflict] = useState(draft.mirrorConflict)
   const [schedule, setSchedule] = useState(false)
@@ -212,6 +213,7 @@ export function Composer({
         .then((next) => {
           if (!mounted || next.revision < baseline.current.revision || submitting.current) return
           apply(doc, next.update)
+          setOriginalDraftLeft(next.originalDraftLeft)
           setMirrorError(next.mirrorError)
           setMirrorConflict(next.mirrorConflict)
           if (versionRef.current === savedRef.current && !uploadInFlight.current) adopt(next)
@@ -643,7 +645,12 @@ export function Composer({
             </Button>
           </div>
         )}
-        {mirrorConflict && (
+        {originalDraftLeft && (
+          <output className="border-t px-4 py-2 text-xs text-muted-foreground">
+            {ORIGINAL_DRAFT_LEFT}
+          </output>
+        )}
+        {mirrorConflict && !originalDraftLeft && (
           <output className="border-t px-4 py-2 text-xs text-muted-foreground">
             The Account’s draft changed. Your local copy was kept.
           </output>

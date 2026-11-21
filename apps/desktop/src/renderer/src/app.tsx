@@ -3,6 +3,7 @@ import {
   type Bucket,
   type ComposeDraft,
   type ComposeStart,
+  ORIGINAL_DRAFT_LEFT,
   type OutboxItem,
   type SearchHit,
   type ThreadSummary,
@@ -243,6 +244,7 @@ function MailApp() {
   }
 
   const queued = (item: OutboxItem) => {
+    if (item.originalDraftLeft) toast.warning(ORIGINAL_DRAFT_LEFT)
     setDraft(null)
     const remaining = item.undoRemainingMs ?? 0
     const scheduled = item.sendAt > item.undoUntil

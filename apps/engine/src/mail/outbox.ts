@@ -16,6 +16,7 @@ export interface FrozenMessage extends Omit<OutgoingMessage, 'date' | 'messageId
   revision: number
   threadId: string | null
   providerDraftId: string | null
+  originalDraftLeft?: boolean
   attachments: NonNullable<OutgoingMessage['attachments']>
 }
 
@@ -53,6 +54,7 @@ interface Row {
   reconciles: number
   detail: string | null
   thread_id: string | null
+  original_draft_left: number
 }
 
 export function requireDesktopSend(principal: Principal): void {
@@ -113,8 +115,8 @@ export class Outbox {
       const sendAt = Math.max(input.sendAt ?? now, undoUntil)
       this.#db
         .prepare(
-          `INSERT INTO outbox (id, draft_id, account_id, revision, rfc_id, snapshot, subject, to_json, send_at, undo_until, status, next_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`,
+          `INSERT INTO outbox (id, draft_id, account_id, revision, rfc_id, snapshot, subject, to_json, send_at, undo_until, status, next_at, original_draft_left)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
         )
         .run(
           input.id,
@@ -128,6 +130,7 @@ export class Outbox {
           sendAt,
           undoUntil,
           sendAt,
+          Number(Boolean(message.originalDraftLeft)),
         )
       this.#db
         .prepare('UPDATE draft SET queued_send_id = ? WHERE id = ?')
@@ -324,6 +327,7 @@ export class Outbox {
       sendAt: row.send_at,
       undoUntil: row.undo_until,
       undoRemainingMs: row.status === 'queued' ? Math.max(0, row.undo_until - this.#now()) : 0,
+      ...(row.original_draft_left ? { originalDraftLeft: true } : {}),
       detail: row.detail,
       threadId: row.thread_id,
       canResolve: row.status === 'uncertain' && row.released_at === null,

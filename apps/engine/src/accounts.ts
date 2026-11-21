@@ -5,7 +5,7 @@ import type { Db } from './db/database.ts'
 import { transaction } from './db/database.ts'
 import type { MailStore } from './mail/store.ts'
 import type { AccountState, BackfillState, GmailCursor } from './providers/gmail/sync.ts'
-import type { ImapCredentials } from './providers/imap/client.ts'
+import { type ImapCredentials, imapEndpoint } from './providers/imap/client.ts'
 
 export interface AccountRow {
   id: string
@@ -67,12 +67,7 @@ function upsertAccount(
     if (existing && kind === 'imap') {
       const { imap: old } = sealer.open<ImapCredentials>(existing.credentials)
       const { imap } = input.credentials as ImapCredentials
-      if (
-        old.host.toLowerCase() !== imap.host.toLowerCase() ||
-        old.port !== imap.port ||
-        old.tls !== imap.tls ||
-        old.username !== imap.username
-      ) {
+      if (imapEndpoint(old) !== imapEndpoint(imap)) {
         const page = db.prepare('SELECT provider_id FROM message WHERE account_id = ? LIMIT 128')
         for (;;) {
           const messages = page.all(existing.id) as { provider_id: string }[]

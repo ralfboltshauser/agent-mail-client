@@ -91,7 +91,7 @@ it('mirrors an IMAP draft and removes only the recorded UID under UIDPLUS', asyn
   imap.capabilities.set('UIDPLUS', true)
   const saved = await mirror.saveDraft({ raw })
   expect(imap.folder('Drafts').messages.size).toBe(1)
-  await mirror.deleteDraft(saved.id)
+  await mirror.deleteDraft(saved.id, saved.sourceHash)
   expect(imap.folder('Drafts').messages.size).toBe(0)
 })
 

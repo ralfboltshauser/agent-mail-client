@@ -56,8 +56,11 @@ export function replaceDraftContent(doc: Y.Doc, text: string, html?: string | nu
   })
 }
 
-export function renderDraft(doc: Y.Doc): { text: string; html: string } {
+export function renderDraft(doc: Y.Doc, blockSeparator?: string): { text: string; html: string } {
   const json = yDocToProsemirrorJSON(doc, field)
   schema.nodeFromJSON(json).check()
-  return { text: generateText(json, extensions), html: generateHTML(json, extensions) }
+  return {
+    text: generateText(json, extensions, { blockSeparator }),
+    html: generateHTML(json, extensions),
+  }
 }

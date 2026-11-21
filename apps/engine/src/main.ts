@@ -101,7 +101,9 @@ async function main(argv: string[]) {
         const gmail = sync.gmailApi(accountId)
         if (gmail) return gmail
         const imap = sync.imapProvider(accountId)
-        return imap ? imapDraftMirror(imap) : null
+        return imap
+          ? imapDraftMirror(imap, () => sync.imapProvider(accountId)?.draftEndpoint)
+          : null
       })
       // The durable claim must reach disk before a provider may accept a send.
       db.exec('PRAGMA synchronous = FULL')

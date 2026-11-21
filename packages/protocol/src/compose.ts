@@ -16,6 +16,7 @@ export interface ComposeDraft extends Draft {
   signature: string
   mirrorError: boolean
   mirrorConflict: boolean
+  originalDraftLeft?: boolean
 }
 
 export interface ComposeStart {
@@ -42,6 +43,7 @@ export interface ComposePatch {
 export const DRAFT_CHANGED = 'Draft changed. Review before sending'
 export const MIRROR_CHANGED =
   'Send cancelled. The provider draft was changed or removed. Review it before sending.'
+export const ORIGINAL_DRAFT_LEFT = 'Original draft left on server'
 export const SEND_NEEDS_SIGN_IN = 'Needs attention: sign in again'
 export const SEND_ACCOUNT_UNAVAILABLE = 'The sending Account is unavailable.'
 
@@ -67,6 +69,7 @@ export interface OutboxItem {
   undoUntil: number
   /** Time remaining on the Engine clock when it produced this item. */
   undoRemainingMs?: number
+  originalDraftLeft?: boolean
   detail: string | null
   canResolve: boolean
   threadId: string | null

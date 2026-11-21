@@ -7,6 +7,7 @@ import {
   type BodyPart,
   type BodyParts,
   decodeBodyPart,
+  readBodyParts,
 } from '../../mail/body-blobs.ts'
 import { collapseWhitespace, htmlToText } from '../../mail/text.ts'
 
@@ -117,6 +118,13 @@ export class ImapBodyParts {
     const full = html ? htmlToText(prefix) : prefix.trimEnd()
     const bodyText = searchPrefix(full)
     return { bodyText, partial: partial || bodyText !== full }
+  }
+
+  read(body: string | undefined): string | undefined {
+    if (!body) return undefined
+    const content = readBodyParts(this.#blobs, this.#expand(body))
+    if (content === undefined) throw new Error('Missing IMAP body part')
+    return content
   }
 
   async finish(text: string | undefined, html: string | false | undefined) {

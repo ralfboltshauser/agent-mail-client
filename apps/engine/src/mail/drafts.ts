@@ -11,6 +11,7 @@ import type {
   SendRequest,
 } from '@amc/protocol'
 import { DRAFT_CHANGED, MIRROR_CHANGED } from '@amc/protocol'
+import type { MessageStructureObject } from 'imapflow'
 import * as Y from 'yjs'
 import { newId } from '../auth/secrets.ts'
 import type { Principal } from '../auth/tokens.ts'
@@ -18,7 +19,7 @@ import { type Db, transaction } from '../db/database.ts'
 import { fromGmail } from '../providers/gmail/mapping.ts'
 import type { GmailApi, GmailDraft } from '../providers/gmail/types.ts'
 import { parseMessage } from '../providers/imap/mapping.ts'
-import type { ImapProvider } from '../providers/imap/provider.ts'
+import { draftSourceHash, type ImapProvider } from '../providers/imap/provider.ts'
 import { draftDocument, renderDraft, replaceDraftContent } from './draft-document.ts'
 import { buildMessage, replySubject } from './mime.ts'
 import type { FrozenMessage, Outbox } from './outbox.ts'
@@ -61,10 +62,102 @@ interface DraftRow {
   mirror_dirty: number
   mirror_hash: string | null
   mirror_conflict: number
+  mirror_left: number
+  imap_content: string | null
 }
 
-export interface DraftMirror extends Pick<GmailApi, 'saveDraft' | 'deleteDraft'> {
+export interface DraftMirror {
+  imap?: true
+  saveDraft(
+    input: Parameters<GmailApi['saveDraft']>[0],
+  ): Promise<GmailDraft & { sourceHash?: string }>
+  deleteDraft(id: string, sourceHash?: string | null): Promise<boolean>
   getDraft?: GmailApi['getDraft']
+}
+
+interface ImapContent {
+  text?: string
+  html?: string
+  editorHtml: string
+  editorText: string
+  complete: boolean
+}
+
+function canRepresentMime(
+  structure: MessageStructureObject | undefined,
+  parts: { mimeType: string; contentId: string | null }[],
+): boolean {
+  if (!structure) return false
+  let index = 0
+  const parametersAre = (parameters: Record<string, string> | undefined, allowed: string[]) =>
+    Object.keys(parameters ?? {}).every((key) => allowed.includes(key))
+
+  function leaf(node: MessageStructureObject): boolean {
+    return (
+      !node.childNodes?.length &&
+      !node.type.startsWith('message/') &&
+      !node.description &&
+      !node.location &&
+      !node.language?.length &&
+      parametersAre(node.dispositionParameters, ['filename'])
+    )
+  }
+
+  function attachment(node: MessageStructureObject): boolean {
+    const part = parts[index++]
+    return (
+      !!part &&
+      leaf(node) &&
+      parametersAre(node.parameters, ['name']) &&
+      node.type === part.mimeType &&
+      (node.id?.replace(/^<|>$/g, '') ?? null) === part.contentId
+    )
+  }
+
+  function text(node: MessageStructureObject, type: string): boolean {
+    return (
+      node.type === type &&
+      leaf(node) &&
+      !node.id &&
+      (!node.disposition || node.disposition === 'inline') &&
+      parametersAre(node.parameters, ['charset'])
+    )
+  }
+
+  function body(node: MessageStructureObject): boolean {
+    const children = node.childNodes ?? []
+    if (node.type === 'multipart/alternative') {
+      const [plain, rich] = children
+      return (
+        parametersAre(node.parameters, ['boundary']) &&
+        children.length === 2 &&
+        !!plain &&
+        !!rich &&
+        text(plain, 'text/plain') &&
+        (text(rich, 'text/html') || (rich.type === 'multipart/related' && body(rich)))
+      )
+    }
+    if (node.type === 'multipart/related') {
+      const [root, ...related] = children
+      return (
+        parametersAre(node.parameters, ['boundary', 'type']) &&
+        !!root &&
+        (text(root, 'text/html') || (root.type === 'multipart/alternative' && body(root))) &&
+        related.every(attachment)
+      )
+    }
+    return text(node, 'text/plain') || text(node, 'text/html')
+  }
+
+  const [root, ...files] = structure.childNodes ?? []
+  const represented =
+    structure.type === 'multipart/mixed'
+      ? parametersAre(structure.parameters, ['boundary']) &&
+        !!root &&
+        body(root) &&
+        files.every(attachment)
+      : body(structure)
+  return represented && index === parts.length
 }
 
 function mirrorHash(messageId: string): string {
@@ -81,6 +174,7 @@ interface MirrorRemoval {
 
 interface AttachmentRow extends ComposeAttachment {
   blob: string
+  disposition: 'attachment' | 'inline' | null
 }
 
 function escapeHtml(value: string): string {
@@ -160,6 +254,7 @@ export class Drafts {
       })),
       mirrorError: Boolean(row.mirror_error),
       mirrorConflict: Boolean(row.mirror_conflict),
+      originalDraftLeft: Boolean(row.mirror_left),
     }
   }
 
@@ -274,7 +369,7 @@ export class Drafts {
       Y.applyUpdate(doc, Buffer.from(patch.update, 'base64'))
       if (doc.store.pendingStructs || doc.store.pendingDs)
         throw new Error('Missing Yjs dependencies')
-      text = renderDraft(doc).text
+      text = this.#body(row, doc).text
     } catch {
       throw new DraftError('Could not apply the document update')
     }
@@ -292,7 +387,7 @@ export class Drafts {
     }
     transaction(this.#db, () => {
       if (current.accountId !== accountId && row.provider_draft_id) {
-        this.#queueMirrorRemoval(row)
+        this.#queueMirrorRemoval({ ...row, yjs: Y.encodeStateAsUpdate(doc) })
       }
       const signature = current.accountId === accountId ? row.signature : this.signature(accountId)
       this.#db
@@ -416,20 +511,26 @@ export class Drafts {
       .prepare('SELECT * FROM draft_mirror_removal WHERE draft_id = ?')
       .all(id) as unknown as MirrorRemoval[]
     for (const old of oldMirrors) {
-      if (!(await this.#removeOldMirror(old))) throw new DraftError(MIRROR_CHANGED, 409)
+      if ((await this.#removeOldMirror(old)) === 'changed')
+        throw new DraftError(MIRROR_CHANGED, 409)
     }
     const row = this.#row(id)
     if (!row || row.modseq !== message.revision) throw new DraftError(DRAFT_CHANGED, 409)
     if (row.provider_draft_id) {
       const api = this.#api(row.account_id)
-      if (!api)
-        throw new DraftError('Could not remove the provider draft. Sign in again before sending.')
-      const remote = api.getDraft ? await api.getDraft(row.provider_draft_id) : undefined
-      if (remote === null || (remote && !this.#matchesMirror(row, remote))) {
-        throw new DraftError(MIRROR_CHANGED, 409)
+      if (this.#isImap(row.account_id)) {
+        if (!(await this.#removeImapMirror(api, row.provider_draft_id, this.#removalHash(row))))
+          this.#markMirrorLeft(id)
+      } else {
+        if (!api)
+          throw new DraftError('Could not remove the provider draft. Sign in again before sending.')
+        const remote = api.getDraft ? await api.getDraft(row.provider_draft_id) : undefined
+        if (remote === null || (remote && !this.#matchesMirror(row, remote)))
+          throw new DraftError(MIRROR_CHANGED, 409)
+        this.freeze(id, message.revision)
+        if (!(await api.deleteDraft(row.provider_draft_id)))
+          throw new DraftError(MIRROR_CHANGED, 409)
       }
-      this.freeze(id, message.revision)
-      if (!(await api.deleteDraft(row.provider_draft_id))) throw new DraftError(MIRROR_CHANGED, 409)
       this.#db
         .prepare(`UPDATE draft SET provider_draft_id = NULL, provider_message_id = NULL, mirror_hash = NULL
         WHERE id = ? AND account_id = ? AND provider_draft_id = ?`)
@@ -438,27 +539,55 @@ export class Drafts {
     return outbox.enqueue(principal, input, () => this.freeze(id, message.revision))
   }
 
-  async #removeOldMirror(row: MirrorRemoval): Promise<boolean> {
+  #isImap(accountId: string): boolean {
+    return Boolean(
+      this.#db.prepare("SELECT 1 FROM account WHERE id = ? AND kind = 'imap'").get(accountId),
+    )
+  }
+
+  async #removeImapMirror(
+    api: DraftMirror | null,
+    id: string,
+    hash: string | null,
+  ): Promise<boolean> {
+    return Boolean(api?.imap && hash && (await api.deleteDraft(id, hash)))
+  }
+
+  #markMirrorLeft(id: string): void {
+    this.#db.prepare('UPDATE draft SET mirror_left = 1 WHERE id = ?').run(id)
+  }
+
+  async #removeOldMirror(row: MirrorRemoval): Promise<'removed' | 'changed' | 'left'> {
     const pending = this.#db
       .prepare('SELECT 1 FROM draft_mirror_removal WHERE account_id = ? AND provider_draft_id = ?')
       .get(row.account_id, row.provider_draft_id)
-    if (!pending) return true
+    if (!pending) return 'removed'
     const api = this.#api(row.account_id)
+    if (this.#isImap(row.account_id)) {
+      const removed = await this.#removeImapMirror(api, row.provider_draft_id, row.mirror_hash)
+      this.#clearRemoval(row)
+      if (!removed) this.#markMirrorLeft(row.draft_id)
+      return removed ? 'removed' : 'left'
+    }
     if (!api)
       throw new DraftError('Could not remove the provider draft. Sign in again before sending.')
     const remote = api.getDraft ? await api.getDraft(row.provider_draft_id) : undefined
     const changed = remote && row.mirror_hash !== mirrorHash(remote.message.id)
     const removed = remote !== null && !changed && (await api.deleteDraft(row.provider_draft_id))
-    this.#db
-      .prepare('DELETE FROM draft_mirror_removal WHERE account_id = ? AND provider_draft_id = ?')
-      .run(row.account_id, row.provider_draft_id)
+    this.#clearRemoval(row)
     if (
       changed &&
       this.#db.prepare('UPDATE draft SET mirror_conflict = 1 WHERE id = ?').run(row.draft_id)
         .changes
     )
       this.#store.recordChange('draft', row.draft_id, 'upsert')
-    return removed
+    return removed ? 'removed' : 'changed'
+  }
+
+  #clearRemoval(row: MirrorRemoval): void {
+    this.#db
+      .prepare('DELETE FROM draft_mirror_removal WHERE account_id = ? AND provider_draft_id = ?')
+      .run(row.account_id, row.provider_draft_id)
   }
 
   freeze(id: string, revision: number): FrozenMessage {
@@ -549,19 +678,29 @@ export class Drafts {
         location.size > MAX_ATTACHMENT_BYTES * 2
       )
         continue
-      const raw = await api.readDraft(location)
-      if (!raw || raw.byteLength > MAX_ATTACHMENT_BYTES * 2) continue
+      const source = await api.readDraft(location)
+      if (!source || source.raw.byteLength > MAX_ATTACHMENT_BYTES * 2) continue
+      const { raw, structure } = source
+      const body: { text?: string; html?: string } = {}
       const incoming = await parseMessage(
         location.folder,
         location.uidValidity,
         { uid: location.uid, seq: 0, size: raw.byteLength },
         this.#store.blobs,
         this.#store.blobs.put(raw),
+        body,
       )
       const parts = incoming.attachments.flatMap((part) =>
         part.blob ? [{ ...part, blob: part.blob }] : [],
       )
-      this.#importDraft(accountId, location.id, location.id, incoming, parts)
+      this.#importDraft(accountId, location.id, location.id, incoming, parts, undefined, {
+        ...body,
+        hash: draftSourceHash(raw),
+        complete:
+          canRepresentMime(structure, parts) &&
+          !body.text?.includes('\uFFFD') &&
+          !body.html?.includes('\uFFFD'),
+      })
     }
     // A new UID can be a replacement or a separate draft. Keep the original local
     // copy bound to its old UID so it cannot be sent as if its mirror still existed.
@@ -576,10 +715,12 @@ export class Drafts {
         this.#hasActiveSend(local.id)
       )
         continue
-      transaction(this.#db, () => {
-        this.#db.prepare('UPDATE draft SET mirror_conflict = 1 WHERE id = ?').run(local.id)
-        this.#store.recordChange('draft', local.id, 'upsert')
-      })
+      this.#db.prepare('UPDATE draft SET mirror_conflict = 1 WHERE id = ?').run(local.id)
+      if (
+        (JSON.parse(local.provider_draft_id) as { endpoint?: string }).endpoint !==
+        api.draftEndpoint
+      )
+        this.#markMirrorLeft(local.id)
     }
   }
 
@@ -639,8 +780,10 @@ export class Drafts {
       size: number
       blob: string
       contentId: string | null
+      inline?: boolean
     }[],
     previous?: DraftRow,
+    imap?: Omit<ImapContent, 'editorHtml' | 'editorText'> & { hash: string },
   ): void {
     if (parts.reduce((total, part) => total + part.size, 0) > MAX_ATTACHMENT_BYTES) return
     transaction(this.#db, () => {
@@ -655,8 +798,28 @@ export class Drafts {
         return
       const id = current?.id ?? newId('drf')
       const doc = draftDocument(current?.yjs ?? null, current?.body_text ?? '')
-      replaceDraftContent(doc, incoming.bodyText, incoming.bodyHtml)
-      const { text } = renderDraft(doc)
+      const sourceText = imap?.text?.replace(/\r\n?/g, '\n') ?? incoming.bodyText
+      let complete = imap?.complete ?? true
+      let rendered: ReturnType<typeof renderDraft>
+      try {
+        replaceDraftContent(doc, sourceText, incoming.bodyHtml)
+        rendered = renderDraft(doc)
+      } catch (error) {
+        if (!imap) throw error
+        complete = false
+        replaceDraftContent(doc, sourceText)
+        rendered = renderDraft(doc)
+      }
+      const text = imap?.text ?? rendered.text
+      const imapContent: ImapContent | null = imap
+        ? {
+            text: imap.text,
+            html: imap.html,
+            complete,
+            editorHtml: rendered.html,
+            editorText: rendered.text,
+          }
+        : null
       const target = `${accountId}:${incoming.providerThreadId}`
       const threadId =
         incoming.inReplyTo && this.#db.prepare('SELECT 1 FROM thread WHERE id = ?').get(target)
@@ -666,8 +829,8 @@ export class Drafts {
       this.#db
         .prepare(
           `INSERT INTO draft (id, account_id, thread_id, provider_draft_id, provider_message_id,
-          to_json, cc_json, bcc_json, subject, body_text, yjs, last_author, updated_at, created_at, in_reply_to, refs, mirror_hash)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'owner', ?, ?, ?, ?, ?)
+          to_json, cc_json, bcc_json, subject, body_text, yjs, last_author, updated_at, created_at, in_reply_to, refs, mirror_hash, imap_content, mirror_left)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'owner', ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET thread_id = excluded.thread_id, provider_message_id = excluded.provider_message_id,
           to_json = excluded.to_json, cc_json = excluded.cc_json, bcc_json = excluded.bcc_json, subject = excluded.subject,
           body_text = excluded.body_text, yjs = excluded.yjs, last_author = excluded.last_author, updated_at = excluded.updated_at,
@@ -689,13 +852,15 @@ export class Drafts {
           now,
           incoming.inReplyTo,
           incoming.references,
-          mirrorHash(messageId),
+          imap?.hash ?? mirrorHash(messageId),
+          imapContent ? JSON.stringify(imapContent) : null,
+          Number(!complete),
         )
       this.#db.prepare('UPDATE draft_attachment SET active = 0 WHERE draft_id = ?').run(id)
       for (const part of parts) {
         this.#db
           .prepare(
-            'INSERT INTO draft_attachment (id, draft_id, filename, mime_type, size, blob, content_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            'INSERT INTO draft_attachment (id, draft_id, filename, mime_type, size, blob, content_id, disposition) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
           )
           .run(
             newId('att'),
@@ -704,9 +869,10 @@ export class Drafts {
             part.mimeType,
             part.size,
             part.blob,
-            part.contentId && incoming.bodyHtml?.includes(`cid:${part.contentId}`)
+            imap || (part.contentId && incoming.bodyHtml?.includes(`cid:${part.contentId}`))
               ? part.contentId
               : null,
+            imap ? (part.inline ? 'inline' : 'attachment') : null,
           )
       }
       this.#store.recordChange('draft', id, 'upsert')
@@ -726,12 +892,27 @@ export class Drafts {
   #queueMirrorRemoval(row: DraftRow) {
     this.#db
       .prepare('INSERT OR IGNORE INTO draft_mirror_removal VALUES (?, ?, ?, ?)')
-      .run(
-        row.account_id,
-        row.provider_draft_id,
-        row.mirror_hash ?? (row.provider_message_id && mirrorHash(row.provider_message_id)),
-        row.id,
-      )
+      .run(row.account_id, row.provider_draft_id, this.#removalHash(row), row.id)
+  }
+
+  #removalHash(row: DraftRow): string | null {
+    if (!this.#isImap(row.account_id))
+      return row.mirror_hash ?? (row.provider_message_id && mirrorHash(row.provider_message_id))
+    return this.#canReplaceContent(row) ? row.mirror_hash : null
+  }
+
+  #canReplaceContent(row: DraftRow): boolean {
+    if (!row.imap_content) return true
+    const body = JSON.parse(row.imap_content) as ImapContent
+    if (!body.complete) return false
+    if (!body.html) return true
+    const editor = renderDraft(draftDocument(row.yjs, row.body_text)).html
+    return (
+      editor === body.editorHtml ||
+      (body.html.replace(/\r?\n$/, '') === body.editorHtml &&
+        (body.text === undefined ||
+          body.text.replace(/\r\n/g, '\n').replace(/\n$/, '') === body.editorText))
+    )
   }
 
   #hasActiveSend(id: string): boolean {
@@ -752,13 +933,25 @@ export class Drafts {
   #attachments(id: string, active = true): AttachmentRow[] {
     return this.#db
       .prepare(
-        'SELECT id, filename, mime_type AS mimeType, size, blob, content_id AS contentId FROM draft_attachment WHERE draft_id = ? AND (? = 0 OR active = 1) ORDER BY rowid',
+        'SELECT id, filename, mime_type AS mimeType, size, blob, content_id AS contentId, disposition FROM draft_attachment WHERE draft_id = ? AND (? = 0 OR active = 1) ORDER BY rowid',
       )
       .all(id, +active) as unknown as AttachmentRow[]
   }
 
+  #body(row: DraftRow, doc = draftDocument(row.yjs, row.body_text)) {
+    const original = row.imap_content ? (JSON.parse(row.imap_content) as ImapContent) : null
+    const rendered = renderDraft(doc, original && !original.html ? '\n' : undefined)
+    if (!original || rendered.html !== original.editorHtml)
+      return { ...rendered, editorHtml: rendered.html }
+    return { text: original.text ?? '', html: original.html ?? '', editorHtml: rendered.html }
+  }
+
   #message(row: DraftRow): FrozenMessage {
-    const { text, html } = renderDraft(draftDocument(row.yjs, row.body_text))
+    const { text, html, editorHtml } = this.#body(row)
+    const displaysInline = (part: AttachmentRow) => {
+      const src = `src="cid:${part.contentId}"`
+      return !!part.contentId && (editorHtml.includes(src) || html.includes(src))
+    }
     const signature = row.signature
       ? `<div style="white-space:pre-wrap">${escapeHtml(row.signature)}</div>`
       : ''
@@ -770,6 +963,7 @@ export class Drafts {
       draftId: row.id,
       revision: row.modseq,
       providerDraftId: row.provider_draft_id,
+      ...(row.mirror_left ? { originalDraftLeft: true } : {}),
       threadId: row.thread_id?.startsWith(`${row.account_id}:`) ? row.thread_id : null,
       from: { address: this.#ownAddress(row.account_id), name: null },
       to: JSON.parse(row.to_json),
@@ -781,7 +975,7 @@ export class Drafts {
       inReplyTo: row.in_reply_to,
       references: row.refs,
       attachments: this.#attachments(row.id)
-        .filter((part) => !part.contentId || html.includes(`src="cid:${part.contentId}"`))
+        .filter((part) => part.disposition || !part.contentId || displaysInline(part))
         .map((part) => {
           const bytes = this.#store.blobs.get(part.blob)
           if (!bytes) throw new DraftError(`Attachment ${part.filename} is unavailable`)
@@ -790,6 +984,10 @@ export class Drafts {
             mimeType: part.mimeType,
             content: bytes.toString('base64'),
             contentId: part.contentId ?? undefined,
+            contentDisposition:
+              part.disposition && part.contentId && !displaysInline(part)
+                ? 'attachment'
+                : (part.disposition ?? undefined),
           }
         }),
     }
@@ -954,16 +1152,31 @@ export class Drafts {
     return this.get(id) as Draft
   }
 
-  async delete(id: string): Promise<void> {
-    const row = this.#row(id)
-    if (!row) return
-    this.#checkEditable(id)
-    transaction(this.#db, () => {
-      if (row.provider_draft_id) this.#queueMirrorRemoval(row)
-      this.#db.prepare('DELETE FROM draft WHERE id = ?').run(id)
-      this.#store.recordChange('draft', id, 'delete')
+  async delete(id: string): Promise<boolean> {
+    return this.#withMirror(id, async () => {
+      const row = this.#row(id)
+      if (!row) return false
+      this.#checkEditable(id)
+      transaction(this.#db, () => {
+        if (row.provider_draft_id) this.#queueMirrorRemoval(row)
+        this.#db.prepare('DELETE FROM draft WHERE id = ?').run(id)
+        this.#store.recordChange('draft', id, 'delete')
+      })
+      const removals = this.#db
+        .prepare('SELECT * FROM draft_mirror_removal WHERE draft_id = ?')
+        .all(id) as unknown as MirrorRemoval[]
+      const results = await Promise.allSettled(
+        removals.map((removal) => this.#removeOldMirror(removal)),
+      )
+      return (
+        Boolean(row.mirror_left) ||
+        results.some((result, index) =>
+          result.status === 'fulfilled'
+            ? result.value === 'left'
+            : this.#isImap(removals[index]?.account_id ?? ''),
+        )
+      )
     })
-    await this.mirrorPending()
   }
 
   #push(id: string): Promise<void> {
@@ -980,6 +1193,10 @@ export class Drafts {
     try {
       const api = this.#api(row.account_id)
       if (!api) throw new Error('Account is unavailable')
+      if (api.imap && row.provider_draft_id && !this.#canReplaceContent(row)) {
+        this.#db.prepare('UPDATE draft SET mirror_left = 1, mirror_dirty = 0 WHERE id = ?').run(id)
+        return
+      }
       const message = this.#message(row)
       const raw = await buildMessage(message)
       const providerThread = message.threadId?.slice(row.account_id.length + 1)
@@ -1002,7 +1219,7 @@ export class Drafts {
           .run(
             saved.id,
             saved.message.id,
-            mirrorHash(saved.message.id),
+            saved.sourceHash ?? mirrorHash(saved.message.id),
             Number(Boolean(diverged)),
             row.modseq,
             id,
@@ -1013,7 +1230,8 @@ export class Drafts {
           this.#queueMirrorRemoval({
             ...row,
             provider_draft_id: saved.id,
-            mirror_hash: mirrorHash(saved.message.id),
+            mirror_hash: saved.sourceHash ?? mirrorHash(saved.message.id),
+            imap_content: null,
           })
         } else if (previous && previous !== saved.id && remote === undefined) {
           this.#queueMirrorRemoval(row)

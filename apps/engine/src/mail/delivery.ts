@@ -115,13 +115,17 @@ export function imapDelivery(api: ImapProvider): Delivery {
   }
 }
 
-export function imapDraftMirror(api: ImapProvider): DraftMirror {
+export function imapDraftMirror(
+  api: ImapProvider,
+  currentEndpoint?: () => string | undefined,
+): DraftMirror {
   return {
+    imap: true,
     saveDraft: async ({ raw }) => {
       const saved = await api.saveDraft(raw)
-      return { id: saved.id, message: { ...saved.message, threadId: '' } }
+      return { ...saved, message: { ...saved.message, threadId: '' } }
     },
-    deleteDraft: (id) => api.deleteDraft(id),
+    deleteDraft: (id, sourceHash) => api.deleteDraft(id, sourceHash ?? null, currentEndpoint),
   }
 }
 

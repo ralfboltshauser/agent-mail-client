@@ -10,7 +10,13 @@ export interface OutgoingMessage {
   subject: string
   text: string
   html?: string
-  attachments?: { filename: string; mimeType: string; content: string; contentId?: string }[]
+  attachments?: {
+    filename: string
+    mimeType: string
+    content: string
+    contentId?: string
+    contentDisposition?: 'attachment' | 'inline'
+  }[]
   inReplyTo?: string | null
   references?: string | null
   messageId?: string
@@ -42,6 +48,7 @@ export function compileMessage(message: OutgoingMessage) {
       contentType: attachment.mimeType,
       content: Buffer.from(attachment.content, 'base64'),
       cid: attachment.contentId,
+      contentDisposition: attachment.contentDisposition,
     })),
     disableFileAccess: true,
     disableUrlAccess: true,

@@ -4,6 +4,10 @@ import nodemailer, { type SMTPTransportOptions } from 'nodemailer'
 
 export type ImapCredentials = Omit<ImapAccountInput, 'address'>
 
+export function imapEndpoint({ host, port, tls, username }: ImapCredentials['imap']): string {
+  return JSON.stringify([host.toLowerCase(), port, tls, username])
+}
+
 export type ImapClient = Pick<
   ImapFlow,
   | 'connect'
