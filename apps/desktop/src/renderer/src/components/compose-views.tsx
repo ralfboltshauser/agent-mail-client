@@ -1,4 +1,9 @@
-import type { Draft, OutboxItem } from '@amc/protocol'
+import {
+  type Draft,
+  type OutboxItem,
+  SEND_ACCOUNT_UNAVAILABLE,
+  SEND_NEEDS_SIGN_IN,
+} from '@amc/protocol'
 import { Settings2 } from 'lucide-react'
 import { useEffect, useId, useState } from 'react'
 import { toast } from 'sonner'
@@ -159,8 +164,13 @@ export function OutboxView({
                   {item.to.map((r) => r.name || r.address).join(', ')}
                 </p>
                 <p className="mt-1 text-xs">
-                  {statusText[item.status]}
-                  {item.status === 'queued' ? ` · ${new Date(item.sendAt).toLocaleString()}` : ''}
+                  {item.status === 'queued'
+                    ? item.sendAt <= Date.now()
+                      ? 'Waiting for delivery'
+                      : `Scheduled · ${new Date(item.sendAt).toLocaleString()}`
+                    : item.detail === SEND_ACCOUNT_UNAVAILABLE
+                      ? SEND_NEEDS_SIGN_IN
+                      : statusText[item.status]}
                 </p>
                 {item.detail && (
                   <p className="mt-1 max-w-prose text-xs text-muted-foreground">{item.detail}</p>

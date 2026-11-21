@@ -96,6 +96,7 @@ export interface AmcApi {
   startCompose(input: ComposeStart): Promise<ComposeDraft>
   composeDrafts(): Promise<Draft[]>
   composeDraft(id: string): Promise<ComposeDraft>
+  stageComposeBody(id: string, patch: ComposePatch): void
   saveCompose(id: string, patch: ComposePatch): Promise<ComposeDraft>
   addComposeAttachment(
     id: string,

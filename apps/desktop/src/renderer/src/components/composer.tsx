@@ -10,9 +10,11 @@ import type {
   ComposeAttachment,
   ComposeDraft,
   ComposeFields,
+  ComposePatch,
   OutboxItem,
   SendRequest,
 } from '@amc/protocol'
+import { DRAFT_CHANGED, MIRROR_CHANGED } from '@amc/protocol'
 import Collaboration from '@tiptap/extension-collaboration'
 import {
   EditorContent,
@@ -107,6 +109,7 @@ export function Composer({
   const [fields, setFields] = useState(() => headerFields(draft))
   const fieldsRef = useRef(fields)
   const baseline = useRef(draft)
+  const [reviewedRevision, setReviewedRevision] = useState(draft.revision)
   const [draftSignature, setDraftSignature] = useState(draft.signature)
   const [quote, setQuote] = useState(draft.quote)
   const [attachments, setAttachments] = useState(draft.attachments)
@@ -122,6 +125,7 @@ export function Composer({
   const [conflict, setConflict] = useState(false)
   const [error, setError] = useState('')
   const [mirrorError, setMirrorError] = useState(draft.mirrorError)
+  const [mirrorConflict, setMirrorConflict] = useState(draft.mirrorConflict)
   const [schedule, setSchedule] = useState(false)
   const [sendAt, setSendAt] = useState('')
   const [signature, setSignature] = useState<string | null>(null)
@@ -174,6 +178,7 @@ export function Composer({
 
   const adopt = useCallback((next: ComposeDraft) => {
     baseline.current = next
+    setReviewedRevision(next.revision)
     fieldsRef.current = headerFields(next)
     attachmentsRef.current = next.attachments
     setFields(fieldsRef.current)
@@ -185,7 +190,16 @@ export function Composer({
 
   useEffect(() => {
     const onUpdate = (_update: Uint8Array, origin: unknown) => {
-      if (origin !== remote) changed()
+      if (origin === remote) return
+      try {
+        window.amc.stageComposeBody(draft.id, {
+          baseRevision: baseline.current.revision,
+          update: base64(Y.encodeStateAsUpdate(doc)),
+        })
+      } catch (cause) {
+        setError((cause as Error).message)
+      }
+      changed()
     }
     doc.on('update', onUpdate)
     let running = false
@@ -199,6 +213,7 @@ export function Composer({
           if (!mounted || next.revision < baseline.current.revision || submitting.current) return
           apply(doc, next.update)
           setMirrorError(next.mirrorError)
+          setMirrorConflict(next.mirrorConflict)
           if (versionRef.current === savedRef.current && !uploadInFlight.current) adopt(next)
         })
         .catch(() => {})
@@ -213,22 +228,28 @@ export function Composer({
     }
   }, [doc, draft.id, adopt, changed])
 
+  const edits = (revision: number): ComposePatch => {
+    const current = {
+      ...fieldsRef.current,
+      attachmentIds: attachmentsRef.current.map((part) => part.id),
+    }
+    return {
+      baseRevision: revision,
+      update: base64(Y.encodeStateAsUpdate(doc)),
+      fields:
+        JSON.stringify(current) !== JSON.stringify(headerFields(baseline.current))
+          ? current
+          : undefined,
+    }
+  }
+
   const save = () => {
     const pending = saveChain.current
       .catch(() => {})
       .then(async () => {
         const started = versionRef.current
         const before = baseline.current
-        const current = {
-          ...fieldsRef.current,
-          attachmentIds: attachmentsRef.current.map((part) => part.id),
-        }
-        const headersChanged = JSON.stringify(current) !== JSON.stringify(headerFields(before))
-        const updated = await window.amc.saveCompose(draft.id, {
-          baseRevision: before.revision,
-          update: base64(Y.encodeStateAsUpdate(doc)),
-          fields: headersChanged ? current : undefined,
-        })
+        const updated = await window.amc.saveCompose(draft.id, edits(before.revision))
         apply(doc, updated.update)
         baseline.current = updated
         if (versionRef.current === started) adopt(updated)
@@ -333,20 +354,39 @@ export function Composer({
     setError('')
     try {
       if (!request.current) {
-        const current = await save()
+        const { update, fields: pendingFields } = edits(reviewedRevision)
         request.current = {
           id: crypto.randomUUID(),
           draftId: draft.id,
-          revision: current.revision,
+          revision: reviewedRevision,
+          ...(versionRef.current !== savedRef.current
+            ? { edits: { update, fields: pendingFields } }
+            : {}),
           ...(schedule ? { sendAt: new Date(sendAt).getTime() } : {}),
         }
       }
       const item = await window.amc.sendDraft(request.current)
       onQueued(item)
     } catch (cause) {
-      if (request.current)
-        setError(`${(cause as Error).message} Check the Outbox or confirm this send again.`)
-      else saveError(cause)
+      const message = (cause as Error).message
+      if (message.includes(DRAFT_CHANGED)) {
+        request.current = null
+        setError(DRAFT_CHANGED)
+        setConflict(true)
+        try {
+          const next = await window.amc.composeDraft(draft.id)
+          apply(doc, next.update)
+          adopt(next)
+          setConflict(false)
+        } catch {
+          // Keep the review message and allow a manual reload.
+        }
+      } else if (message.includes(MIRROR_CHANGED)) {
+        request.current = null
+        setError(MIRROR_CHANGED)
+      } else if (request.current) {
+        setError(`${message} Check the Outbox or confirm this send again.`)
+      } else saveError(cause)
     } finally {
       submitting.current = false
       setBusy(false)
@@ -602,6 +642,11 @@ export function Composer({
               Reload message details
             </Button>
           </div>
+        )}
+        {mirrorConflict && (
+          <output className="border-t px-4 py-2 text-xs text-muted-foreground">
+            Draft edited in two places. Both versions were kept.
+          </output>
         )}
         {mirrorError && !error && (
           <output className="border-t px-4 py-2 text-xs text-muted-foreground">

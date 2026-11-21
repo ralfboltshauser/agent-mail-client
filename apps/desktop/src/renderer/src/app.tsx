@@ -11,9 +11,9 @@ import { toast } from 'sonner'
 import type { Counts, ThreadWithMessages, View } from '../../shared/api'
 import { AppSidebar, systemViews } from './components/app-sidebar'
 import { CommandPalette } from './components/command-palette'
-import { OrganisePicker, OrganiseToolbar, useOrganise } from './components/organise'
 import { DraftsView, OutboxView } from './components/compose-views'
 import { Composer } from './components/composer'
+import { OrganisePicker, OrganiseToolbar, useOrganise } from './components/organise'
 import { PairScreen } from './components/pair-screen'
 import { ThreadList } from './components/thread-list'
 import { ThreadView } from './components/thread-view'
@@ -259,9 +259,15 @@ function MailApp() {
         ]),
       ),
       c: () => void startCompose('new'),
-      r: () => { if (!ownView) void startCompose('reply') },
-      a: () => { if (!ownView) void startCompose('reply-all') },
-      f: () => { if (!ownView) void startCompose('forward') },
+      r: () => {
+        if (!ownView) void startCompose('reply')
+      },
+      a: () => {
+        if (!ownView) void startCompose('reply-all')
+      },
+      f: () => {
+        if (!ownView) void startCompose('forward')
+      },
       'g o': () => goTo({ kind: 'outbox' }),
       j: () => move(1),
       arrowdown: () => move(1),
@@ -438,7 +444,12 @@ function MailApp() {
                   )}
                 </div>
                 <div className="min-h-0 flex-1">
-                  <ThreadView data={activeThread} snoozeEnabled={snoozeEnabled} labelNames={labelNames} scrollRef={readerScroll} />
+                  <ThreadView
+                    data={activeThread}
+                    snoozeEnabled={snoozeEnabled}
+                    labelNames={labelNames}
+                    scrollRef={readerScroll}
+                  />
                 </div>
               </div>
             </ResizablePanel>

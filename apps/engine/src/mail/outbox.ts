@@ -1,4 +1,9 @@
-import type { OutboxItem, OutboxStatus, SendRequest } from '@amc/protocol'
+import {
+  type OutboxItem,
+  type OutboxStatus,
+  SEND_ACCOUNT_UNAVAILABLE,
+  type SendRequest,
+} from '@amc/protocol'
 import { HTTPException } from 'hono/http-exception'
 import type { Principal } from '../auth/tokens.ts'
 import { type Db, transaction } from '../db/database.ts'
@@ -76,16 +81,21 @@ export class Outbox {
   readonly #publish: (message: FrozenMessage, messageId: string, receipt: Receipt) => void
   readonly #now: () => number
 
+  replay(principal: Principal, input: SendRequest): OutboxItem | null {
+    requireDesktopSend(principal)
+    const previous = this.#row(input.id)
+    if (!previous) return null
+    if (previous.draft_id !== input.draftId || previous.revision !== input.revision) {
+      throw new HTTPException(409, { message: 'This send request ID is already in use' })
+    }
+    return this.#item(previous)
+  }
+
   enqueue(principal: Principal, input: SendRequest, freeze: () => FrozenMessage): OutboxItem {
     requireDesktopSend(principal)
     return transaction(this.#db, () => {
-      const previous = this.#row(input.id)
-      if (previous) {
-        if (previous.draft_id !== input.draftId || previous.revision !== input.revision) {
-          throw new HTTPException(409, { message: 'This send request ID is already in use' })
-        }
-        return this.#item(previous)
-      }
+      const previous = this.replay(principal, input)
+      if (previous) return previous
       const message = freeze()
       const active = this.#db
         .prepare(
@@ -109,7 +119,7 @@ export class Outbox {
           input.id,
           message.draftId,
           message.accountId,
-          message.revision,
+          input.revision,
           newMessageId(message.from.address),
           JSON.stringify(message),
           message.subject,
@@ -118,6 +128,9 @@ export class Outbox {
           undoUntil,
           sendAt,
         )
+      this.#db
+        .prepare('UPDATE draft SET queued_send_id = ? WHERE id = ?')
+        .run(input.id, message.draftId)
       return this.#item(this.#row(input.id) as Row)
     })
   }
@@ -210,20 +223,33 @@ export class Outbox {
       return
     }
 
-    if (!provider) {
-      this.#db
-        .prepare("UPDATE outbox SET next_at = ? WHERE id = ? AND status = 'queued'")
-        .run(this.#now() + 15_000, row.id)
-      return
-    }
-
-    // This durable compare-and-set is the only transition that permits submission.
-    const claim = this.#db
-      .prepare(
-        "UPDATE outbox SET status = 'dispatching', attempts = attempts + 1, next_at = ? WHERE id = ? AND status = 'queued' AND next_at <= ?",
+    const claimed = transaction(this.#db, () => {
+      const queued = this.#db
+        .prepare('SELECT 1 FROM draft WHERE id = ? AND queued_send_id = ? AND modseq = ?')
+        .get(row.draft_id, row.id, message.revision)
+      if (!queued || !provider) {
+        this.#db
+          .prepare(
+            "UPDATE outbox SET status = ?, snapshot = NULL, detail = ? WHERE id = ? AND status = 'queued' AND next_at <= ?",
+          )
+          .run(
+            queued ? 'failed' : 'cancelled',
+            queued ? SEND_ACCOUNT_UNAVAILABLE : 'The draft was removed or changed before delivery.',
+            row.id,
+            this.#now(),
+          )
+        return false
+      }
+      // This durable compare-and-set is the only transition that permits submission.
+      return (
+        this.#db
+          .prepare(
+            "UPDATE outbox SET status = 'dispatching', attempts = attempts + 1, next_at = ? WHERE id = ? AND status = 'queued' AND next_at <= ?",
+          )
+          .run(this.#now() + 15_000, row.id, this.#now()).changes > 0
       )
-      .run(this.#now() + 15_000, row.id, this.#now())
-    if (!claim.changes) return
+    })
+    if (!claimed || !provider) return
     let result: SubmitResult
     try {
       result = await provider.send(message, row.rfc_id)

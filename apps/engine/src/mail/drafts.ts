@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { INLINE_IMAGE_TYPES } from '@amc/composer'
 import type {
   Address,
@@ -7,16 +8,18 @@ import type {
   ComposeStart,
   Contact,
   Draft,
+  SendRequest,
 } from '@amc/protocol'
+import { DRAFT_CHANGED, MIRROR_CHANGED } from '@amc/protocol'
 import * as Y from 'yjs'
 import { newId } from '../auth/secrets.ts'
+import type { Principal } from '../auth/tokens.ts'
 import { type Db, transaction } from '../db/database.ts'
-import { GmailHttpError } from '../providers/gmail/http.ts'
 import { fromGmail } from '../providers/gmail/mapping.ts'
 import type { GmailApi, GmailDraft } from '../providers/gmail/types.ts'
 import { draftDocument, renderDraft, replaceDraftContent } from './draft-document.ts'
 import { buildMessage, replySubject } from './mime.ts'
-import type { FrozenMessage } from './outbox.ts'
+import type { FrozenMessage, Outbox } from './outbox.ts'
 import type { MailStore } from './store.ts'
 
 export interface DraftInput {
@@ -54,9 +57,25 @@ interface DraftRow {
   signature: string
   mirror_error: number
   mirror_dirty: number
+  mirror_hash: string | null
+  mirror_conflict: number
 }
 
-export interface DraftMirror extends Pick<GmailApi, 'saveDraft' | 'deleteDraft'> {}
+export interface DraftMirror extends Pick<GmailApi, 'saveDraft' | 'deleteDraft'> {
+  getDraft?: GmailApi['getDraft']
+}
+
+function mirrorHash(messageId: string): string {
+  // Replacing a Gmail draft message always assigns a new immutable message ID.
+  return createHash('sha256').update(messageId).digest('hex')
+}
+
+interface MirrorRemoval {
+  account_id: string
+  provider_draft_id: string
+  mirror_hash: string | null
+  draft_id: string
+}
 
 interface AttachmentRow extends ComposeAttachment {
   blob: string
@@ -64,7 +83,14 @@ interface AttachmentRow extends ComposeAttachment {
 
 export const MAX_ATTACHMENT_BYTES = 18 * 1024 * 1024
 
-export class DraftError extends Error {}
+export class DraftError extends Error {
+  readonly status: 400 | 409
+
+  constructor(message: string, status: 400 | 409 = 400) {
+    super(message)
+    this.status = status
+  }
+}
 
 /**
  * Drafts written by the owner or by Agents. Each one is mirrored to the provider's drafts, so
@@ -74,7 +100,7 @@ export class Drafts {
   readonly #db: Db
   readonly #store: MailStore
   readonly #api: (accountId: string) => DraftMirror | null
-  readonly #mirror = new Map<string, Promise<void>>()
+  readonly #mirror = new Map<string, Promise<unknown>>()
 
   constructor(db: Db, store: MailStore, api: (accountId: string) => DraftMirror | null) {
     this.#db = db
@@ -124,6 +150,7 @@ export class Drafts {
         contentId,
       })),
       mirrorError: Boolean(row.mirror_error),
+      mirrorConflict: Boolean(row.mirror_conflict),
     }
   }
 
@@ -251,7 +278,7 @@ export class Drafts {
     }
     transaction(this.#db, () => {
       if (current.accountId !== accountId && row.provider_draft_id) {
-        this.#queueMirrorRemoval(current.accountId, row.provider_draft_id)
+        this.#queueMirrorRemoval(row)
       }
       const signature = current.accountId === accountId ? row.signature : this.signature(accountId)
       this.#db
@@ -259,7 +286,8 @@ export class Drafts {
           `UPDATE draft SET signature = ?, account_id = ?, to_json = ?, cc_json = ?, bcc_json = ?, subject = ?,
           body_text = ?, yjs = ?, updated_at = ?, last_author = 'owner', mirror_dirty = 1,
           provider_draft_id = CASE WHEN account_id = ? THEN provider_draft_id ELSE NULL END,
-          provider_message_id = CASE WHEN account_id = ? THEN provider_message_id ELSE NULL END
+          provider_message_id = CASE WHEN account_id = ? THEN provider_message_id ELSE NULL END,
+          mirror_hash = CASE WHEN account_id = ? THEN mirror_hash ELSE NULL END
           WHERE id = ?`,
         )
         .run(
@@ -272,6 +300,7 @@ export class Drafts {
           text,
           Y.encodeStateAsUpdate(doc),
           Date.now(),
+          accountId,
           accountId,
           accountId,
           id,
@@ -343,10 +372,84 @@ export class Drafts {
     this.#db.prepare('UPDATE account SET signature = ? WHERE id = ?').run(value, accountId)
   }
 
+  async prepareSend(input: SendRequest, principal: Principal, outbox: Outbox) {
+    const id = input.draftId
+    return this.#withMirror(id, () => this.#prepareSend(input, principal, outbox))
+  }
+
+  async #withMirror<T>(id: string, operation: () => Promise<T>): Promise<T> {
+    while (this.#mirror.has(id)) await this.#mirror.get(id)?.catch(() => {})
+    const pending = operation().finally(() => this.#mirror.delete(id))
+    this.#mirror.set(id, pending)
+    return pending
+  }
+
+  async #prepareSend(input: SendRequest, principal: Principal, outbox: Outbox) {
+    const previous = outbox.replay(principal, input)
+    if (previous) return previous
+    const id = input.draftId
+    if (this.#hasActiveSend(id))
+      throw new DraftError('This draft already has a send in the Outbox', 409)
+    let message = this.freeze(id, input.revision)
+    if (input.edits) {
+      const saved = this.saveCompose(id, { ...input.edits, baseRevision: input.revision })
+      message = this.freeze(id, saved.revision)
+    }
+    if (![...message.to, ...message.cc, ...message.bcc].length)
+      throw new DraftError('Add a recipient before sending')
+
+    const oldMirrors = this.#db
+      .prepare('SELECT * FROM draft_mirror_removal WHERE draft_id = ?')
+      .all(id) as unknown as MirrorRemoval[]
+    for (const old of oldMirrors) {
+      if (!(await this.#removeOldMirror(old))) throw new DraftError(MIRROR_CHANGED, 409)
+    }
+    const row = this.#row(id)
+    if (!row || row.modseq !== message.revision) throw new DraftError(DRAFT_CHANGED, 409)
+    if (row.provider_draft_id) {
+      const api = this.#api(row.account_id)
+      if (!api)
+        throw new DraftError('Could not remove the provider draft. Sign in again before sending.')
+      const remote = api.getDraft ? await api.getDraft(row.provider_draft_id) : undefined
+      if (remote === null || (remote && !this.#matchesMirror(row, remote))) {
+        throw new DraftError(MIRROR_CHANGED, 409)
+      }
+      this.freeze(id, message.revision)
+      if (!(await api.deleteDraft(row.provider_draft_id))) throw new DraftError(MIRROR_CHANGED, 409)
+      this.#db
+        .prepare(`UPDATE draft SET provider_draft_id = NULL, provider_message_id = NULL, mirror_hash = NULL
+        WHERE id = ? AND account_id = ? AND provider_draft_id = ?`)
+        .run(id, row.account_id, row.provider_draft_id)
+    }
+    return outbox.enqueue(principal, input, () => this.freeze(id, message.revision))
+  }
+
+  async #removeOldMirror(row: MirrorRemoval): Promise<boolean> {
+    const pending = this.#db
+      .prepare('SELECT 1 FROM draft_mirror_removal WHERE account_id = ? AND provider_draft_id = ?')
+      .get(row.account_id, row.provider_draft_id)
+    if (!pending) return true
+    const api = this.#api(row.account_id)
+    if (!api)
+      throw new DraftError('Could not remove the provider draft. Sign in again before sending.')
+    const remote = api.getDraft ? await api.getDraft(row.provider_draft_id) : undefined
+    const changed = remote && row.mirror_hash !== mirrorHash(remote.message.id)
+    const removed = remote !== null && !changed && (await api.deleteDraft(row.provider_draft_id))
+    this.#db
+      .prepare('DELETE FROM draft_mirror_removal WHERE account_id = ? AND provider_draft_id = ?')
+      .run(row.account_id, row.provider_draft_id)
+    if (
+      changed &&
+      this.#db.prepare('UPDATE draft SET mirror_conflict = 1 WHERE id = ?').run(row.draft_id)
+        .changes
+    )
+      this.#store.recordChange('draft', row.draft_id, 'upsert')
+    return removed
+  }
+
   freeze(id: string, revision: number): FrozenMessage {
     const row = this.#row(id)
-    if (!row || row.modseq !== revision)
-      throw new DraftError('The draft changed. Save it again before sending.')
+    if (!row || row.modseq !== revision) throw new DraftError(DRAFT_CHANGED, 409)
     const message = this.#message(row)
     const recipient = /^[^\s<>@,;:"()\\]+@[a-z0-9.-]+$/i
     if (
@@ -362,7 +465,6 @@ export class Drafts {
   finishSend(message: FrozenMessage): void {
     const row = this.#row(message.draftId)
     if (row?.modseq !== message.revision) return
-    if (row.provider_draft_id) this.#queueMirrorRemoval(row.account_id, row.provider_draft_id)
     this.#db.prepare('DELETE FROM draft WHERE id = ?').run(row.id)
     this.#store.recordChange('draft', row.id, 'delete')
   }
@@ -377,19 +479,10 @@ export class Drafts {
       .all() as { id: string }[]
     await Promise.allSettled(pending.map(({ id }) => this.#push(id)))
     const removals = this.#db
-      .prepare('SELECT account_id, provider_draft_id FROM draft_mirror_removal LIMIT 20')
-      .all() as { account_id: string; provider_draft_id: string }[]
+      .prepare('SELECT * FROM draft_mirror_removal LIMIT 20')
+      .all() as unknown as MirrorRemoval[]
     await Promise.allSettled(
-      removals.map(async ({ account_id, provider_draft_id }) => {
-        const api = this.#api(account_id)
-        if (!api) return
-        await api.deleteDraft(provider_draft_id)
-        this.#db
-          .prepare(
-            'DELETE FROM draft_mirror_removal WHERE account_id = ? AND provider_draft_id = ?',
-          )
-          .run(account_id, provider_draft_id)
-      }),
+      removals.map((row) => this.#withMirror(row.draft_id, () => this.#removeOldMirror(row))),
     )
   }
 
@@ -496,12 +589,12 @@ export class Drafts {
       this.#db
         .prepare(
           `INSERT INTO draft (id, account_id, thread_id, provider_draft_id, provider_message_id,
-          to_json, cc_json, bcc_json, subject, body_text, yjs, last_author, updated_at, created_at, in_reply_to, refs)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'owner', ?, ?, ?, ?)
+          to_json, cc_json, bcc_json, subject, body_text, yjs, last_author, updated_at, created_at, in_reply_to, refs, mirror_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'owner', ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET thread_id = excluded.thread_id, provider_message_id = excluded.provider_message_id,
           to_json = excluded.to_json, cc_json = excluded.cc_json, bcc_json = excluded.bcc_json, subject = excluded.subject,
           body_text = excluded.body_text, yjs = excluded.yjs, last_author = excluded.last_author, updated_at = excluded.updated_at,
-          in_reply_to = excluded.in_reply_to, refs = excluded.refs, quote = '', signature = ''`,
+          in_reply_to = excluded.in_reply_to, refs = excluded.refs, mirror_hash = excluded.mirror_hash, quote = '', signature = ''`,
         )
         .run(
           id,
@@ -519,6 +612,7 @@ export class Drafts {
           now,
           incoming.inReplyTo,
           incoming.references,
+          mirrorHash(resource.id),
         )
       this.#db.prepare('UPDATE draft_attachment SET active = 0 WHERE draft_id = ?').run(id)
       for (const part of parts) {
@@ -546,8 +640,21 @@ export class Drafts {
     return !row.mirror_dirty && !this.#mirror.has(row.id) && !this.#hasActiveSend(row.id)
   }
 
-  #queueMirrorRemoval(accountId: string, id: string) {
-    this.#db.prepare('INSERT OR IGNORE INTO draft_mirror_removal VALUES (?, ?)').run(accountId, id)
+  #matchesMirror(row: DraftRow, remote: GmailDraft): boolean {
+    const baseline =
+      row.mirror_hash ?? (row.provider_message_id && mirrorHash(row.provider_message_id))
+    return baseline === mirrorHash(remote.message.id)
+  }
+
+  #queueMirrorRemoval(row: DraftRow) {
+    this.#db
+      .prepare('INSERT OR IGNORE INTO draft_mirror_removal VALUES (?, ?, ?, ?)')
+      .run(
+        row.account_id,
+        row.provider_draft_id,
+        row.mirror_hash ?? (row.provider_message_id && mirrorHash(row.provider_message_id)),
+        row.id,
+      )
   }
 
   #hasActiveSend(id: string): boolean {
@@ -756,7 +863,7 @@ export class Drafts {
     if (!row) return
     this.#checkEditable(id)
     transaction(this.#db, () => {
-      if (row.provider_draft_id) this.#queueMirrorRemoval(row.account_id, row.provider_draft_id)
+      if (row.provider_draft_id) this.#queueMirrorRemoval(row)
       this.#db.prepare('DELETE FROM draft WHERE id = ?').run(id)
       this.#store.recordChange('draft', id, 'delete')
     })
@@ -765,7 +872,7 @@ export class Drafts {
 
   #push(id: string): Promise<void> {
     const existing = this.#mirror.get(id)
-    if (existing) return existing
+    if (existing) return existing.then(() => {})
     const pending = this.#pushOnce(id).finally(() => this.#mirror.delete(id))
     this.#mirror.set(id, pending)
     return pending
@@ -773,38 +880,50 @@ export class Drafts {
 
   async #pushOnce(id: string): Promise<void> {
     const row = this.#row(id)
-    if (!row) return
+    if (!row || this.#hasActiveSend(id)) return
     try {
       const api = this.#api(row.account_id)
       if (!api) throw new Error('Account is unavailable')
       const message = this.#message(row)
       const raw = await buildMessage(message)
       const providerThread = message.threadId?.slice(row.account_id.length + 1)
+      const previous = row.provider_draft_id
+      const remote = previous && api.getDraft ? await api.getDraft(previous) : undefined
+      if (remote === null) throw new DraftError(MIRROR_CHANGED, 409)
+      const diverged = remote && !this.#matchesMirror(row, remote)
       const saved = await api.saveDraft({
-        draftId: row.provider_draft_id ?? undefined,
+        draftId: diverged ? undefined : (previous ?? undefined),
         raw,
         threadId: providerThread,
       })
       transaction(this.#db, () => {
         const updated = this.#db
           .prepare(
-            `UPDATE draft SET provider_draft_id = ?, provider_message_id = ?, mirror_error = 0,
+            `UPDATE draft SET provider_draft_id = ?, provider_message_id = ?, mirror_hash = ?, mirror_error = 0,
+             mirror_conflict = MAX(mirror_conflict, ?),
              mirror_dirty = CASE WHEN modseq = ? THEN 0 ELSE 1 END WHERE id = ? AND account_id = ? AND provider_draft_id IS ?`,
           )
-          .run(saved.id, saved.message.id, row.modseq, id, row.account_id, row.provider_draft_id)
-        if (!updated.changes) this.#queueMirrorRemoval(row.account_id, saved.id)
-        else if (row.provider_draft_id && row.provider_draft_id !== saved.id) {
-          this.#queueMirrorRemoval(row.account_id, row.provider_draft_id)
+          .run(
+            saved.id,
+            saved.message.id,
+            mirrorHash(saved.message.id),
+            Number(Boolean(diverged)),
+            row.modseq,
+            id,
+            row.account_id,
+            previous,
+          )
+        if (!updated.changes) {
+          this.#queueMirrorRemoval({
+            ...row,
+            provider_draft_id: saved.id,
+            mirror_hash: mirrorHash(saved.message.id),
+          })
+        } else if (previous && previous !== saved.id && remote === undefined) {
+          this.#queueMirrorRemoval(row)
         }
       })
-    } catch (error) {
-      if (row.provider_draft_id && error instanceof GmailHttpError && error.status === 404) {
-        this.#db
-          .prepare(
-            'UPDATE draft SET provider_draft_id = NULL, provider_message_id = NULL WHERE id = ? AND account_id = ? AND provider_draft_id = ?',
-          )
-          .run(id, row.account_id, row.provider_draft_id)
-      }
+    } catch {
       this.#db
         .prepare('UPDATE draft SET mirror_error = 1 WHERE id = ? AND account_id = ?')
         .run(id, row.account_id)

@@ -393,6 +393,9 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE draft ADD COLUMN signature TEXT NOT NULL DEFAULT '';
       ALTER TABLE draft ADD COLUMN quote TEXT NOT NULL DEFAULT '';
       ALTER TABLE draft ADD COLUMN mirror_error INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE draft ADD COLUMN mirror_hash TEXT;
+      ALTER TABLE draft ADD COLUMN mirror_conflict INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE draft ADD COLUMN queued_send_id TEXT;
       ALTER TABLE draft ADD COLUMN mirror_dirty INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE account ADD COLUMN signature TEXT NOT NULL DEFAULT '';
 
@@ -413,6 +416,8 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE TABLE draft_mirror_removal (
         account_id TEXT NOT NULL REFERENCES account (id) ON DELETE CASCADE,
         provider_draft_id TEXT NOT NULL,
+        mirror_hash TEXT,
+        draft_id TEXT NOT NULL,
         PRIMARY KEY (account_id, provider_draft_id)
       ) STRICT;
 

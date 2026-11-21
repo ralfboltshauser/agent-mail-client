@@ -27,8 +27,18 @@ const message: FrozenMessage = {
   attachments: [],
 }
 
+function seedDraft(db: ReturnType<typeof testDb>) {
+  db.exec(`
+    INSERT INTO account (id, kind, address, credentials, created_at)
+    VALUES ('account', 'gmail', 'owner@example.test', X'00', 0);
+    INSERT INTO draft (id, account_id, modseq, last_author, created_at, updated_at)
+    VALUES ('draft', 'account', 1, 'owner', 0, 0);
+  `)
+}
+
 it('never submits an item twice under lost responses, 5xx, 429, restarts and undo races', async () => {
   const db = testDb()
+  seedDraft(db)
   const seeds = Number(process.env.AMC_OUTBOX_SEEDS ?? 512)
   for (let seed = 1; seed <= seeds; seed++) {
     let state = seed
@@ -135,6 +145,7 @@ it('reopens an on-disk outbox with a lost provider acknowledgement without submi
   const file = join(tempDir(), 'outbox.db')
   let db = openDatabase(file)
   migrate(db)
+  seedDraft(db)
   let now = 100_000
   let sent: string | undefined
   const provider: Delivery = {
@@ -173,5 +184,30 @@ it('reopens an on-disk outbox with a lost provider acknowledgement without submi
       throw new Error('Cannot reuse draft')
     }).status,
   ).toBe('sent')
+  db.close()
+})
+
+it('fails a due send with an unavailable Account and preserves its draft for review', async () => {
+  const db = testDb()
+  seedDraft(db)
+  let now = 100_000
+  const outbox = new Outbox(
+    db,
+    () => null,
+    () => {},
+    () => now,
+  )
+  const item = outbox.enqueue(
+    owner,
+    { id: 'offline', draftId: message.draftId, revision: 1 },
+    () => message,
+  )
+  now = item.sendAt + 1
+  await outbox.runDue()
+  expect(outbox.get(item.id)).toMatchObject({
+    status: 'failed',
+    detail: 'The sending Account is unavailable.',
+  })
+  expect(db.prepare('SELECT id FROM draft WHERE id = ?').get(message.draftId)).toBeDefined()
   db.close()
 })

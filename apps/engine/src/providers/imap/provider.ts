@@ -126,18 +126,23 @@ export class ImapProvider {
     })
   }
 
-  deleteDraft(id: string): Promise<void> {
+  deleteDraft(id: string): Promise<boolean> {
     return this.#withImap((client) => this.#removeDraft(client, id))
   }
 
-  async #removeDraft(client: ImapClient, id: string): Promise<void> {
+  async #removeDraft(client: ImapClient, id: string): Promise<boolean> {
     const location = JSON.parse(id) as ImapMessageLocation
     const mailbox = await client.mailboxOpen(location.folder)
-    if (String(mailbox.uidValidity) !== location.uidValidity) return
+    if (String(mailbox.uidValidity) !== location.uidValidity) return false
+    let present = false
+    for await (const draft of client.fetch(String(location.uid), { flags: true }, { uid: true })) {
+      present = !draft.flags?.has('\\Deleted')
+    }
+    if (!present) return false
     // UID EXPUNGE is safe only when the server supports UIDPLUS or IMAP4rev2.
     if (!this.#supportsUidExpunge(client))
       throw new Error('IMAP Draft replacement needs UID EXPUNGE')
-    await client.messageDelete(String(location.uid), { uid: true })
+    return client.messageDelete(String(location.uid), { uid: true })
   }
 
   #supportsUidExpunge(client: ImapClient): boolean {

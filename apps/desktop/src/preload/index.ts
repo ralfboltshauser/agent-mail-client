@@ -1,3 +1,4 @@
+import type { ComposePatch } from '@amc/protocol'
 import { contextBridge, ipcRenderer } from 'electron'
 import type { AmcApi, SyncStatus } from '../shared/api'
 
@@ -25,6 +26,10 @@ const api: AmcApi = {
   startCompose: invoke('startCompose') as AmcApi['startCompose'],
   composeDrafts: invoke('composeDrafts') as AmcApi['composeDrafts'],
   composeDraft: invoke('composeDraft') as AmcApi['composeDraft'],
+  stageComposeBody(id: string, patch: ComposePatch) {
+    const error = ipcRenderer.sendSync('amc:stageComposeBody', id, patch)
+    if (error) throw new Error(error)
+  },
   saveCompose: invoke('saveCompose') as AmcApi['saveCompose'],
   addComposeAttachment: invoke('addComposeAttachment') as AmcApi['addComposeAttachment'],
   composeImage: invoke('composeImage') as AmcApi['composeImage'],

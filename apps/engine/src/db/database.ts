@@ -57,15 +57,27 @@ export function migrate(
   const hasTable = (name: string) =>
     db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?").get(name)
   const applied = hasTable('schema_migration')
-    ? (db.prepare('SELECT version, name FROM schema_migration').all() as { version: number; name: string }[])
+    ? (db.prepare('SELECT version, name FROM schema_migration').all() as {
+        version: number
+        name: string
+      }[])
     : []
-  if (current >= 8 && !applied.some(({ version }) => version === 8) && (hasTable('outbox') || hasTable('organise_intent'))) {
-    applied.push({ version: 8, name: hasTable('organise_intent') ? 'organise' : 'Compose documents and durable outbox' })
+  if (
+    current >= 8 &&
+    !applied.some(({ version }) => version === 8) &&
+    (hasTable('outbox') || hasTable('organise_intent'))
+  ) {
+    applied.push({
+      version: 8,
+      name: hasTable('organise_intent') ? 'organise' : 'Compose documents and durable outbox',
+    })
   }
   for (const { version, name } of applied) {
     const expected = migrations.find((migration) => migration.version === version)
     if (expected && expected.name !== name)
-      throw new Error(`Schema migration v${version} mismatch: database has "${name}", code expects "${expected.name}"`)
+      throw new Error(
+        `Schema migration v${version} mismatch: database has "${name}", code expects "${expected.name}"`,
+      )
   }
   const pending = migrations
     .filter((m) => m.version > current)
@@ -81,9 +93,14 @@ export function migrate(
 
   for (const migration of pending) {
     transaction(db, () => {
-      db.exec('CREATE TABLE IF NOT EXISTS schema_migration (version INTEGER PRIMARY KEY, name TEXT NOT NULL) STRICT')
+      db.exec(
+        'CREATE TABLE IF NOT EXISTS schema_migration (version INTEGER PRIMARY KEY, name TEXT NOT NULL) STRICT',
+      )
       db.exec(migration.sql)
-      db.prepare('INSERT INTO schema_migration VALUES (?, ?)').run(migration.version, migration.name)
+      db.prepare('INSERT INTO schema_migration VALUES (?, ?)').run(
+        migration.version,
+        migration.name,
+      )
       db.exec(`PRAGMA user_version = ${migration.version}`)
     })
     options.log?.info({ version: migration.version, name: migration.name }, 'applied migration')

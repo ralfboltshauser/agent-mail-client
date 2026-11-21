@@ -19,8 +19,7 @@ const start = z.object({
   threadId: id.optional(),
   mode: z.enum(['new', 'reply', 'reply-all', 'forward']),
 })
-const patch = z.object({
-  baseRevision: z.number().int().nonnegative(),
+const edits = z.object({
   update: z.base64().max(2_000_000),
   fields: z
     .object({
@@ -33,7 +32,9 @@ const patch = z.object({
     })
     .optional(),
 })
+const patch = edits.extend({ baseRevision: z.number().int().nonnegative() })
 const send = z.object({
+  edits: edits.optional(),
   id,
   draftId: id,
   revision: z.number().int().nonnegative(),
@@ -105,12 +106,7 @@ export function composeRoutes(deps: MailDeps, outbox: Outbox) {
   r.get('/outbox', (c) => c.json({ items: outbox.list(c.get('principal')) }))
   r.post('/outbox', async (c) => {
     const input = await body<SendRequest>(c, send)
-    return c.json(
-      outbox.enqueue(c.get('principal'), input, () =>
-        deps.drafts.freeze(input.draftId, input.revision),
-      ),
-      202,
-    )
+    return c.json(await deps.drafts.prepareSend(input, c.get('principal'), outbox), 202)
   })
   r.post('/outbox/:id/cancel', (c) => {
     if (!outbox.cancel(c.get('principal'), c.req.param('id'))) {

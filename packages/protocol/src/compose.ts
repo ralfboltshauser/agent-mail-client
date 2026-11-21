@@ -15,6 +15,7 @@ export interface ComposeDraft extends Draft {
   quote: string
   signature: string
   mirrorError: boolean
+  mirrorConflict: boolean
 }
 
 export interface ComposeStart {
@@ -38,11 +39,18 @@ export interface ComposePatch {
   fields?: ComposeFields
 }
 
+export const DRAFT_CHANGED = 'Draft changed. Review before sending'
+export const MIRROR_CHANGED =
+  'Send cancelled. The provider draft was changed or removed. Review it before sending.'
+export const SEND_NEEDS_SIGN_IN = 'Needs attention: sign in again'
+export const SEND_ACCOUNT_UNAVAILABLE = 'The sending Account is unavailable.'
+
 export interface SendRequest {
   id: string
   draftId: string
   revision: number
   sendAt?: number
+  edits?: Omit<ComposePatch, 'baseRevision'>
 }
 
 export type OutboxStatus = 'queued' | 'dispatching' | 'sent' | 'cancelled' | 'uncertain' | 'failed'

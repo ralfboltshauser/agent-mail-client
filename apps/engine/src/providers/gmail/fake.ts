@@ -1,5 +1,5 @@
-import { GmailHttpError } from './http.ts'
 import { simpleParser } from 'mailparser'
+import { GmailHttpError } from './http.ts'
 import type {
   GmailApi,
   GmailDraft,
@@ -155,7 +155,11 @@ export class FakeGmail implements GmailApi {
             )
           )
         }
-        return m.labelIds?.includes('INBOX') && !m.labelIds.includes('TRASH') && !m.labelIds.includes('SPAM')
+        return (
+          m.labelIds?.includes('INBOX') &&
+          !m.labelIds.includes('TRASH') &&
+          !m.labelIds.includes('SPAM')
+        )
       })
       .sort((a, b) => Number(b.internalDate) - Number(a.internalDate))
     const start = Number(options.pageToken ?? 0)
@@ -339,6 +343,6 @@ export class FakeGmail implements GmailApi {
   async deleteDraft(draftId: string) {
     const d = this.drafts.get(draftId)
     if (d) this.remove(d.messageId)
-    this.drafts.delete(draftId)
+    return this.drafts.delete(draftId)
   }
 }

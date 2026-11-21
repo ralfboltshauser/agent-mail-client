@@ -1,5 +1,5 @@
 import { COMPOSER_FIELD } from '@amc/composer'
-import type { ComposeDraft, OutboxItem } from '@amc/protocol'
+import { type ComposeDraft, DRAFT_CHANGED, MIRROR_CHANGED, type OutboxItem } from '@amc/protocol'
 import { simpleParser } from 'mailparser'
 import { expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
@@ -168,6 +168,7 @@ it('composes a threaded Gmail reply, merges Yjs updates, schedules, and publishe
   })
   const request = {
     id: 'send-operation',
+    edits: { update: edit(saved, 'Sent from the latest local edit') },
     draftId: draft.id,
     revision: saved.revision,
     sendAt: 80_000,
@@ -176,6 +177,7 @@ it('composes a threaded Gmail reply, merges Yjs updates, schedules, and publishe
   expect(queued.status).toBe(202)
   const item = (await queued.json()) as OutboxItem
   expect(item).toMatchObject({ sendAt: 80_000, undoUntil: 60_000, status: 'queued' })
+  expect(gmail.drafts.size).toBe(0)
   expect(await (await call('/outbox', 'POST', request)).json()).toEqual(item)
   expect((await call('/outbox', 'POST', { ...request, id: 'another-operation' })).status).toBe(409)
   advance(29_999)
@@ -191,6 +193,7 @@ it('composes a threaded Gmail reply, merges Yjs updates, schedules, and publishe
   expect(sentMime?.messageId).toBe(`<${item.messageId}>`)
   expect(sentMime?.inReplyTo).toBe(`<${rfcId}>`)
   expect(sentMime?.references).toEqual(['<ancestor@example.test>', `<${rfcId}>`])
+  expect(sentMime?.text).toContain('Sent from the latest local edit')
   expect(sentMime?.text).toContain('The owner')
   expect(sentMime?.html).toContain('<strong>')
   expect(sentMime?.html).toContain('<blockquote')
@@ -205,7 +208,7 @@ it('composes a threaded Gmail reply, merges Yjs updates, schedules, and publishe
   db.close()
 })
 
-it('imports a Gmail draft, preserves a local pending edit, then accepts an external deletion', async () => {
+it('keeps both versions when Gmail changes a draft with pending AMC edits', async () => {
   const { account, db, drafts, gmail } = setup()
   const makeRaw = (text: string) =>
     buildMessage({
@@ -227,8 +230,117 @@ it('imports a Gmail draft, preserves a local pending edit, then accepts an exter
   await drafts.pullGmail(account, gmail)
   expect(drafts.get(local.id)?.body).toContain('Local text')
   await drafts.mirrorPending()
+  expect(gmail.drafts.size).toBe(2)
+  expect((await simpleParser(gmail.drafts.get(remote.id)?.raw ?? '')).text).toContain(
+    'Remote overwrite',
+  )
+  const copy = [...gmail.drafts].find(([id]) => id !== remote.id)
+  expect((await simpleParser(copy?.[1].raw ?? '')).text).toContain('Local text')
+  expect(drafts.compose(local.id)?.mirrorConflict).toBe(true)
+
+  db.close()
+})
+
+const reader = [{ name: null, address: 'reviewed@example.test' }]
+
+it('imports a Gmail draft and accepts deletion of the unchanged provider copy', async () => {
+  const { account, db, drafts, gmail } = setup()
+  const remote = await gmail.saveDraft({
+    raw: await buildMessage({
+      from: { name: null, address: gmail.address },
+      to: reader,
+      cc: [],
+      bcc: [],
+      subject: 'Remote draft',
+      text: 'Remote text',
+    }),
+  })
+  await drafts.pullGmail(account, gmail)
+  expect(drafts.list()).toHaveLength(1)
   await gmail.deleteDraft(remote.id)
   await drafts.pullGmail(account, gmail)
-  expect(drafts.get(local.id)).toBeNull()
+  expect(drafts.list()).toEqual([])
+  db.close()
+})
+
+it('rejects send with a stale displayed revision even when the click includes a body-only update', async () => {
+  const { account, call, drafts, db, outbox } = setup()
+  const draft = await drafts.create({ accountId: account, to: reader, body: 'Private' }, 'owner')
+  const displayed = drafts.compose(draft.id) as ComposeDraft
+  await drafts.update(
+    draft.id,
+    { to: [{ name: null, address: 'unreviewed@example.test' }] },
+    'agent',
+  )
+  const response = await call('/outbox', 'POST', {
+    id: 'stale',
+    draftId: draft.id,
+    revision: displayed.revision,
+    edits: { update: edit(displayed, 'Local edit') },
+  })
+  expect(await response.json()).toMatchObject({ message: DRAFT_CHANGED })
+  expect(outbox.get('stale')).toBeNull()
+  expect(drafts.compose(draft.id)?.body).toBe('Private')
+  db.close()
+})
+
+it('refuses queueing if the provider mirror was sent or edited in Gmail', async () => {
+  const { account, call, drafts, gmail, db, outbox, advance } = setup()
+  for (const change of ['sent', 'edited'] as const) {
+    const draft = await drafts.create({ accountId: account, to: reader, body: change }, 'owner')
+    const version = drafts.compose(draft.id) as ComposeDraft
+    const entry = [...gmail.drafts.entries()][0]
+    if (!entry) throw new Error('Draft was not mirrored')
+    const [remoteId, remote] = entry
+    if (change === 'sent') {
+      await gmail.sendMessage({ raw: remote.raw })
+      await gmail.deleteDraft(remoteId)
+    } else {
+      await gmail.saveDraft({
+        draftId: remoteId,
+        raw: await buildMessage({
+          from: { address: gmail.address, name: null },
+          to: reader,
+          cc: [],
+          bcc: [],
+          subject: 'Changed',
+          text: 'Gmail edit',
+        }),
+      })
+    }
+    const response = await call('/outbox', 'POST', {
+      id: change,
+      draftId: draft.id,
+      revision: version.revision,
+      sendAt: 100_000,
+    })
+    expect(await response.json()).toMatchObject({ message: MIRROR_CHANGED })
+    expect(outbox.get(change)).toBeNull()
+    expect(gmail.drafts.has(remoteId)).toBe(change === 'edited')
+  }
+  const send = vi.spyOn(gmail, 'sendMessage')
+  advance(50_000)
+  await outbox.runDue()
+  expect(send).not.toHaveBeenCalled()
+  db.close()
+})
+
+it('cancels a due send when a rollback writer deleted the queued draft', async () => {
+  const { account, call, drafts, gmail, db, outbox, advance } = setup()
+  const draft = await drafts.create({ accountId: account, to: reader, body: 'Test' }, 'owner')
+  const version = drafts.compose(draft.id) as ComposeDraft
+  const queued = await call('/outbox', 'POST', {
+    id: 'rollback',
+    draftId: draft.id,
+    revision: version.revision,
+  })
+  expect(queued.status).toBe(202)
+  // The pre-Compose writer deleted the draft without consulting the Outbox.
+  db.prepare('DELETE FROM draft WHERE id = ?').run(draft.id)
+  const send = vi.spyOn(gmail, 'sendMessage')
+  advance(10_000)
+  await outbox.runDue()
+  expect(send).not.toHaveBeenCalled()
+  expect(outbox.get('rollback')?.status).toBe('cancelled')
   db.close()
 })

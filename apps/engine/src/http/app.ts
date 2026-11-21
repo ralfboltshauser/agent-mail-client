@@ -8,8 +8,8 @@ import { authenticate, type Principal, redeemPairingCode } from '../auth/tokens.
 import { type Config, databasePath } from '../config.ts'
 import { type Db, fileSize, schemaVersion } from '../db/database.ts'
 import type { Logger } from '../log.ts'
-import type { Mutations } from '../mail/mutations.ts'
 import { DraftError } from '../mail/drafts.ts'
+import type { Mutations } from '../mail/mutations.ts'
 import type { Outbox } from '../mail/outbox.ts'
 import { buildMcpServer } from '../mcp/server.ts'
 import { VERSION } from '../version.ts'
@@ -33,11 +33,20 @@ export interface AppDeps {
   outbox?: Outbox
 }
 
-export function createApp({ db, config, log, startedAt = Date.now(), mail, mutations, outbox }: AppDeps) {
+export function createApp({
+  db,
+  config,
+  log,
+  startedAt = Date.now(),
+  mail,
+  mutations,
+  outbox,
+}: AppDeps) {
   const app = new Hono<AppEnv>()
 
   app.onError((error, c) => {
-    if (error instanceof DraftError) return c.json({ error: 'draft', message: error.message }, 400)
+    if (error instanceof DraftError)
+      return c.json({ error: 'draft', message: error.message }, error.status)
     if (error instanceof HTTPException) {
       return c.json({ error: error.message || 'error', message: error.message }, error.status)
     }

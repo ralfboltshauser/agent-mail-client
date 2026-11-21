@@ -92,7 +92,8 @@ describe('migrate', () => {
 
   it('upgrades legacy Organise v8 and rejects a different migration at the same version', () => {
     const db = openDatabase(':memory:')
-    const compose = MIGRATIONS.find(({ version }) => version === 9)!
+    const compose = MIGRATIONS.find(({ version }) => version === 9)
+    if (!compose) throw new Error('Compose migration missing')
     expect(migrate(db, { migrations: MIGRATIONS.slice(0, -1) })).toBe(8)
     db.exec('DROP TABLE schema_migration')
     expect(migrate(db)).toBe(9)
@@ -102,6 +103,7 @@ describe('migrate', () => {
     const wrong = openDatabase(':memory:')
     migrate(wrong, { migrations: [...MIGRATIONS.slice(0, -2), { ...compose, version: 8 }] })
     db.close()
+    expect(() => migrate(wrong)).toThrow(/Schema migration v8 mismatch.*organise/)
     wrong.exec('DROP TABLE schema_migration')
     expect(() => migrate(wrong)).toThrow(/Schema migration v8 mismatch.*organise/)
     wrong.close()

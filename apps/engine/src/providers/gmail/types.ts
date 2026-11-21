@@ -98,7 +98,7 @@ export interface GmailApi {
   listDrafts(pageToken?: string): Promise<{ drafts?: GmailDraft[]; nextPageToken?: string }>
   getDraft(id: string): Promise<GmailDraft | null>
   sendMessage(input: { raw: string; threadId?: string }): Promise<GmailMessageRef>
-  deleteDraft(draftId: string): Promise<void>
+  deleteDraft(draftId: string): Promise<boolean>
 }
 
 export interface GmailDraft {

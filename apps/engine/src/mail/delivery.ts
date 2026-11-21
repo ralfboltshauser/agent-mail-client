@@ -1,4 +1,6 @@
+import { SEND_ACCOUNT_UNAVAILABLE } from '@amc/protocol'
 import { GmailHttpError } from '../providers/gmail/http.ts'
+import { OAuthError } from '../providers/gmail/oauth.ts'
 import type { GmailApi } from '../providers/gmail/types.ts'
 import { providerMessageId } from '../providers/imap/mapping.ts'
 import type { ImapProvider } from '../providers/imap/provider.ts'
@@ -24,6 +26,12 @@ export function gmailDelivery(api: GmailApi): Delivery {
           receipt: { providerId: receipt.id, providerThreadId: receipt.threadId },
         }
       } catch (error) {
+        if (
+          (error instanceof OAuthError && error.needsReauth) ||
+          (error instanceof GmailHttpError && error.status === 401)
+        ) {
+          return { kind: 'failed', detail: SEND_ACCOUNT_UNAVAILABLE }
+        }
         if (error instanceof GmailHttpError) {
           if (
             error.status === 429 ||
@@ -32,7 +40,7 @@ export function gmailDelivery(api: GmailApi): Delivery {
           ) {
             return { kind: 'retry', afterMs: error.retryAfterMs }
           }
-          if ([400, 401, 404, 413].includes(error.status))
+          if ([400, 404, 413].includes(error.status))
             return {
               kind: 'failed',
               detail:

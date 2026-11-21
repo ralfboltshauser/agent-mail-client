@@ -7,8 +7,8 @@ import type {
   GmailLabel,
   GmailListMessages,
   GmailMessage,
-  GmailMessageState,
   GmailMessageRef,
+  GmailMessageState,
   GmailProfile,
 } from './types.ts'
 
@@ -139,7 +139,9 @@ export class GmailHttpApi implements GmailApi {
           ))
       const retryHeader = res.headers.get('retry-after')
       const seconds = Number(retryHeader)
-      const retryMs = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(retryHeader ?? '') - Date.now()
+      const retryMs = Number.isFinite(seconds)
+        ? seconds * 1000
+        : Date.parse(retryHeader ?? '') - Date.now()
       const retryAfterMs = retryMs > 0 ? retryMs : 0
       const retryable =
         quota ||
@@ -307,11 +309,13 @@ export class GmailHttpApi implements GmailApi {
           method: 'PUT',
           body: { id: input.draftId, message },
           cost: 'draftUpdate',
+          submission: true,
         })
       : this.#call<GmailDraft>('/drafts', {
           method: 'POST',
           body: { message },
           cost: 'draftCreate',
+          submission: true,
         })
   }
 
@@ -351,9 +355,11 @@ export class GmailHttpApi implements GmailApi {
       await this.#call<void>(`/drafts/${encodeURIComponent(draftId)}`, {
         method: 'DELETE',
         cost: 'draftDelete',
+        submission: true,
       })
+      return true
     } catch (error) {
-      if (error instanceof GmailHttpError && error.status === 404) return
+      if (error instanceof GmailHttpError && error.status === 404) return false
       throw error
     }
   }
