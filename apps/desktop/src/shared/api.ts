@@ -61,6 +61,7 @@ export type SyncPhase =
 export interface SyncStatus {
   phase: SyncPhase
   snoozeEnabled?: boolean
+  healthWarnings?: string[]
   engineUrl: string | null
   /** Bootstrap progress, 0..1. */
   progress: number | null

@@ -16,6 +16,7 @@ import type {
   ThreadList,
   ThreadSummary,
 } from '@amc/protocol'
+import { doctorWarnings } from '@amc/protocol'
 import { Command } from 'commander'
 import { authed, EngineError, request } from './client.ts'
 import { readConfig, writeConfig } from './config.ts'
@@ -48,7 +49,7 @@ program
 
 program
   .command('status')
-  .description('Show the Engine version, storage and who this token is')
+  .description('Show Engine health and token details')
   .option('--json', 'print JSON')
   .action(async (opts: { json?: boolean }) => {
     const api = authed(requireConfig())
@@ -62,11 +63,40 @@ program
     )
     console.log(`Token  ${me.name} (${me.kind}) · ${me.scopes.join(', ')}`)
     console.log(`Database ${formatBytes(health.database.bytes)}`)
+    if (health.lastBackup !== undefined) {
+      const b = health.lastBackup
+      console.log(
+        `Backup ${b ? `${new Date(b.at).toISOString()} · ${formatBytes(b.bytes)}` : 'none yet'}`,
+      )
+    }
+    for (const account of health.accounts ?? []) {
+      const lag = account.syncLagSeconds
+      console.log(
+        `Account ${account.address} · ${account.status} · ${lag === null ? 'never synced' : `sync lag ${formatDuration(Math.floor(lag))}`}`,
+      )
+      if (account.lastError) console.log(`  ${account.lastError}`)
+    }
+    if (health.outboxDepth !== undefined) {
+      console.log(`Outbox ${health.outboxDepth} pending`)
+    }
+    if (health.mutationQueueDepth !== undefined) {
+      console.log(`Mutation queue ${health.mutationQueueDepth} pending`)
+    }
     for (const disk of health.disks) {
       console.log(
         `Disk   ${disk.path}: ${formatBytes(disk.freeBytes)} free of ${formatBytes(disk.totalBytes)}`,
       )
     }
+  })
+
+program
+  .command('doctor')
+  .description('Warn about stale backups, slow sync, low disk space and Account errors')
+  .action(async () => {
+    const health = await authed(requireConfig())<Health>('/v1/health')
+    const warnings = doctorWarnings(health)
+    if (!warnings.length) return console.log('No health warnings.')
+    for (const warning of warnings) console.warn(`Warning: ${warning}`)
   })
 
 const account = program.command('account').description('Manage mail Accounts')
