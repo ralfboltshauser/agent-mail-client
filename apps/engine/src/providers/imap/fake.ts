@@ -171,13 +171,30 @@ export class FakeImap extends EventEmitter {
     return this.mailbox
   }
 
-  async search(query: SearchObject): Promise<number[]> {
+  async search(query: SearchObject, options?: { uid?: boolean }): Promise<number[]> {
     const selected = this.#selected
     if (!selected) throw new Error('No selected test folder')
-    const uids =
+    let uids =
       typeof query.seq === 'string'
         ? [...selected.messages.keys()].slice(Number(query.seq) - 1, Number(query.seq))
         : this.#uids(selected, typeof query.uid === 'string' ? query.uid : '1:*')
+    if (query.header) {
+      if (!options?.uid) throw new Error('Expected UID SEARCH HEADER')
+      uids = uids.filter((uid) => {
+        const headers = selected.messages.get(uid)?.source.toString().split('\r\n\r\n', 1)[0]
+        const lines = headers?.split('\r\n') ?? []
+        return Object.entries(query.header ?? {}).every(([name, value]) =>
+          lines.some((line) => {
+            const prefix = `${name.toLowerCase()}:`
+            const header = line.toLowerCase()
+            return (
+              header.startsWith(prefix) &&
+              (value === true || header.slice(prefix.length).includes(String(value).toLowerCase()))
+            )
+          }),
+        )
+      })
+    }
     this.searches.push({ path: selected.path, uids })
     this.onSearch?.(selected.path)
     return uids

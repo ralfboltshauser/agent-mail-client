@@ -229,24 +229,90 @@ it('falls back to UID COPY, Deleted, and UID EXPUNGE for just the source UID', a
   expect(view()?.messages[0]).toMatchObject({ id: messageId, labelIds: ['a:ARCHIVE'] })
 })
 
-it('syncs an acknowledged move without COPYUID and refuses to undo an identical replacement', async () => {
-  const { imap, messageId, view, run, enqueue } = await fixture({ copyUid: false })
-  const move = imap.uidMove.bind(imap)
-  vi.spyOn(imap, 'uidMove').mockImplementationOnce(async (...args) => {
-    const result = await move(...args)
-    const archive = imap.folder('Filed mail')
-    const target = [...archive.messages.entries()][0]
-    if (!target) throw new Error('Missing moved message')
-    const [uid, message] = target
-    imap.expunge('Filed mail', uid)
-    archive.messages.set(archive.nextUid++, message)
-    return result
+it('undoes a MOVE without COPYUID using the unique full-source match', async () => {
+  const { imap, uid, messageId, view, run } = await fixture({ copyUid: false })
+  const other = imap.add(
+    'Filed mail',
+    'Message-ID: <example@example.com>\r\nSubject: Organise me',
+    'Different body',
+  )
+  expect(await run({ kind: 'archive' })).toMatchObject({ status: 'applied' })
+  expect(view()?.messages.find(({ id }) => id === messageId)?.labelIds).toEqual(['a:ARCHIVE'])
+  expect(await run({ kind: 'undo' })).toMatchObject({ status: 'applied' })
+  expect(view()?.messages.find(({ id }) => id === messageId)?.labelIds).toEqual(['a:INBOX'])
+  expect(imap.writes).toEqual([
+    { command: 'UID MOVE', path: 'INBOX', uid },
+    { command: 'UID MOVE', path: 'Filed mail', uid: other + 1 },
+  ])
+  expect([...imap.folder('Filed mail').messages.keys()]).toEqual([other])
+})
+
+it.each([
+  'duplicate',
+  'hash mismatch',
+  'missing',
+  'UIDVALIDITY changed',
+  'UIDVALIDITY changed during search',
+])(
+  'keeps Undo unavailable after MOVE without COPYUID when verification finds %s',
+  async (condition) => {
+    const { imap, run, enqueue } = await fixture({ copyUid: false })
+    const move = imap.uidMove.bind(imap)
+    vi.spyOn(imap, 'uidMove').mockImplementationOnce(async (...args) => {
+      const result = await move(...args)
+      const archive = imap.folder('Filed mail')
+      const target = [...archive.messages.entries()][0]
+      if (!target) throw new Error('Missing moved message')
+      const [uid, message] = target
+      switch (condition) {
+        case 'duplicate':
+          archive.messages.set(archive.nextUid++, message)
+          break
+        case 'hash mismatch':
+          message.source = Buffer.concat([message.source, Buffer.from('Changed')])
+          break
+        case 'missing':
+          imap.expunge('Filed mail', uid)
+          break
+        case 'UIDVALIDITY changed':
+          archive.validity++
+          break
+        case 'UIDVALIDITY changed during search':
+          imap.onSearch = (path) => {
+            if (path === 'Filed mail') {
+              archive.validity++
+              delete imap.onSearch
+            }
+          }
+          break
+      }
+      return result
+    })
+    expect(await run({ kind: 'archive' })).toMatchObject({ status: 'applied' })
+    expect(() => enqueue({ kind: 'undo' })).toThrow(
+      condition === 'missing'
+        ? 'Thread is no longer available'
+        : 'IMAP server did not verify the moved UID',
+    )
+    expect(imap.writes).toHaveLength(1)
+  },
+)
+
+it('refuses to undo an identical replacement after verifying a move without COPYUID', async () => {
+  const { imap, run } = await fixture({ copyUid: false })
+  expect(await run({ kind: 'archive' })).toMatchObject({ status: 'applied' })
+  const archive = imap.folder('Filed mail')
+  const target = [...archive.messages.entries()][0]
+  if (!target) throw new Error('Missing moved message')
+  const [uid, message] = target
+  imap.expunge('Filed mail', uid)
+  archive.messages.set(archive.nextUid++, message)
+  expect(await run({ kind: 'undo' })).toMatchObject({
+    status: 'failed',
+    error: 'Undo unavailable: the moved IMAP UID changed',
   })
-  expect((await run({ kind: 'archive' }))?.messages?.[0]?.status).toBe('applied')
-  expect(view()?.messages[0]).toMatchObject({ id: messageId, labelIds: ['a:ARCHIVE'] })
-  expect(() => enqueue({ kind: 'undo' })).toThrow('IMAP server did not verify the moved UID')
   expect(imap.writes).toHaveLength(1)
-  expect(imap.folder('Filed mail').messages.size).toBe(1)
+  expect(archive.messages.size).toBe(1)
 })
 
 it('refuses to undo a move into a replacement folder with changed UIDVALIDITY', async () => {
