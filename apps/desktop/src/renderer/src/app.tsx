@@ -126,6 +126,40 @@ function MailApp() {
     }
   }
   const activeThread = selected && thread?.thread.id === selectedId ? thread : null
+  const handoff = useReplica(
+    async () =>
+      selectedId
+        ? { threadId: selectedId, active: await window.amc.activeHandoff(selectedId) }
+        : null,
+    [selectedId, status?.engineUrl, status?.phase],
+    null,
+  )
+  const [inactiveHandoff, setInactiveHandoff] = useState<string | null>(null)
+  const [endingHandoff, setEndingHandoff] = useState<string | null>(null)
+  const activeHandoff =
+    handoff && handoff.threadId === selectedId && handoff.active?.id !== inactiveHandoff
+      ? handoff.active
+      : null
+  useEffect(() => {
+    if (!activeHandoff) return
+    const timer = setTimeout(
+      () => setInactiveHandoff(activeHandoff.id),
+      activeHandoff.expiresAt - Date.now(),
+    )
+    return () => clearTimeout(timer)
+  }, [activeHandoff])
+  const endHandoff = async (id: string) => {
+    setEndingHandoff(id)
+    try {
+      await window.amc.endHandoff(id)
+      setInactiveHandoff(id)
+      toast.success('Hand-off ended')
+    } catch (error) {
+      toast.error('Could not end hand-off', { description: (error as Error).message })
+    } finally {
+      setEndingHandoff(null)
+    }
+  }
   const organiseAccountId = selected?.accountId ?? accountId
   const organiseAccount = accounts.find((account) => account.id === organiseAccountId)
   const canUndoOrganise = organiseAccountId ? Boolean(organiseAccount) : accounts.length > 0
@@ -501,6 +535,19 @@ function MailApp() {
                       >
                         Hand off
                       </Button>
+                      {activeHandoff && (
+                        <>
+                          <span className="text-xs text-muted-foreground">Active hand-off</span>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={endingHandoff === activeHandoff.id}
+                            onClick={() => void endHandoff(activeHandoff.id)}
+                          >
+                            End hand-off
+                          </Button>
+                        </>
+                      )}
                     </>
                   )}
                   {selected && (

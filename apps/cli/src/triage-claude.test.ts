@@ -1,4 +1,6 @@
+import { EventEmitter } from 'node:events'
 import { homedir, userInfo } from 'node:os'
+import { PassThrough } from 'node:stream'
 import { afterEach, expect, it, vi } from 'vitest'
 import { runClaude } from './triage-claude.ts'
 
@@ -103,3 +105,57 @@ it.each([
     expect(spawn).not.toHaveBeenCalled()
   },
 )
+
+function failedRun(events: object[], stderr: string) {
+  authResult('{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}')
+  spawn.mockImplementation(() => {
+    const stdout = new PassThrough()
+    const stderrStream = new PassThrough()
+    const child = Object.assign(new EventEmitter(), { stdout, stderr: stderrStream, exitCode: 1 })
+    setImmediate(() => {
+      stdout.end(events.map((event) => JSON.stringify(event)).join('\n'))
+      stderrStream.end(stderr)
+      child.emit('close', 1)
+    })
+    return child
+  })
+}
+
+it.each([
+  {
+    events: [],
+    stderr: 'Error: --json-schema is not a valid JSON Schema',
+    message: 'Error: --json-schema is not a valid JSON Schema',
+  },
+  {
+    events: [{ type: 'error', error: { message: 'Could not connect using fixture' } }],
+    stderr: '',
+    message: 'Could not connect using [redacted]',
+  },
+  {
+    events: [{ type: 'result', is_error: true, errors: ['Invalid configuration'] }],
+    stderr: '',
+    message: 'Invalid configuration',
+  },
+])('surfaces startup diagnostics from Claude Code', async ({ events, stderr, message }) => {
+  failedRun(events, stderr)
+  await expect(run()).rejects.toThrow(`Claude Code triage failed: ${message}`)
+})
+
+it('reports a known failure subtype without echoing model or tool data', async () => {
+  failedRun(
+    [
+      { type: 'system', subtype: 'init', tools: ['StructuredOutput'] },
+      {
+        type: 'result',
+        subtype: 'error_max_structured_output_retries',
+        is_error: true,
+        errors: ['Private fixture text'],
+      },
+    ],
+    '',
+  )
+  await expect(run()).rejects.toThrow(
+    /^Claude Code triage failed: error_max_structured_output_retries$/,
+  )
+})
