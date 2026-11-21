@@ -446,4 +446,59 @@ export const MIGRATIONS: readonly Migration[] = [
         WHERE status IN ('queued','dispatching','uncertain','sent') AND released_at IS NULL;
     `,
   },
+  {
+    version: 10,
+    name: 'agent grants and action log',
+    sql: `
+      ALTER TABLE token ADD COLUMN account_id TEXT;
+      ALTER TABLE token ADD COLUMN mutation_minute INTEGER NOT NULL DEFAULT -1;
+      ALTER TABLE token ADD COLUMN mutation_count INTEGER NOT NULL DEFAULT 0;
+      UPDATE token SET revoked_at = unixepoch() * 1000
+        WHERE kind = 'agent' AND revoked_at IS NULL;
+
+      CREATE TABLE agent_action (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        token_id TEXT NOT NULL,
+        token_name TEXT NOT NULL,
+        tool TEXT NOT NULL,
+        threads TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'applied', 'failed', 'rejected')),
+        error TEXT,
+        draft_id TEXT
+      ) STRICT;
+      ALTER TABLE mutation ADD COLUMN agent_action_id TEXT REFERENCES agent_action (id);
+      ALTER TABLE mutation ADD COLUMN agent_message_ids TEXT NOT NULL DEFAULT '[]';
+      CREATE INDEX mutation_agent_action ON mutation (agent_action_id) WHERE agent_action_id IS NOT NULL;
+    `,
+  },
+  {
+    version: 11,
+    name: 'IMAP body blobs',
+    sql: 'ALTER TABLE message ADD COLUMN body_parts TEXT',
+  },
+  {
+    version: 12,
+    name: 'Thread Buckets',
+    sql: `
+      ALTER TABLE thread ADD COLUMN bucket TEXT;
+      ALTER TABLE thread ADD COLUMN bucket_reason TEXT;
+      ALTER TABLE thread ADD COLUMN bucket_set_by TEXT;
+      ALTER TABLE thread ADD COLUMN bucket_set_at INTEGER;
+
+      CREATE TABLE imap_bucket_reimport (
+        account_id TEXT NOT NULL REFERENCES account (id) ON DELETE CASCADE,
+        path_key TEXT NOT NULL,
+        identity TEXT NOT NULL,
+        thread_key TEXT NOT NULL,
+        bucket TEXT NOT NULL,
+        bucket_reason TEXT,
+        bucket_set_by TEXT,
+        bucket_set_at INTEGER,
+        PRIMARY KEY (account_id, path_key, identity)
+      ) STRICT;
+      CREATE INDEX imap_bucket_reimport_thread ON imap_bucket_reimport (account_id, path_key, thread_key);
+    `,
+  },
 ]

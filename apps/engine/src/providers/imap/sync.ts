@@ -194,8 +194,10 @@ export class ImapAccountSync {
     this.#folders = folders
   }
 
-  #saveCursor(): void {
-    const json = JSON.stringify({ folders: [...this.#cursor.values()] })
+  #saveCursor(next?: FolderCursor): void {
+    const folders = [...this.#cursor.values()].filter(({ path }) => path !== next?.path)
+    if (next) folders.push(next)
+    const json = JSON.stringify({ folders })
     this.store.db
       .prepare('UPDATE account SET cursor = ? WHERE id = ? AND cursor != ?')
       .run(json, this.accountId, json)
@@ -241,7 +243,6 @@ export class ImapAccountSync {
       cursor.validity !== validity ||
       (cursor.mailboxId && box.mailboxId && cursor.mailboxId !== box.mailboxId)
     ) {
-      this.#locations.clear(path)
       cursor = {
         path,
         validity,
@@ -250,8 +251,12 @@ export class ImapAccountSync {
         modseq,
         before: box.exists ? box.uidNext : 0,
       }
-      this.#cursor.set(path, cursor)
-      this.#saveCursor()
+      const reset = cursor
+      transaction(this.store.db, () => {
+        this.#locations.clear(path, true)
+        this.#saveCursor(reset)
+      })
+      this.#cursor.set(path, reset)
     } else if (reconcile) {
       await this.#reconcile(folder, cursor, box, modseq, yieldToInbox)
     }
@@ -268,14 +273,18 @@ export class ImapAccountSync {
       await this.#fetchMessages(folder, validity, page.uids.reverse())
       before = page.before
     }
-    this.#cursor.set(path, {
+    const next = {
       ...cursor,
       mailboxId: box.mailboxId ?? cursor.mailboxId,
       highUid,
       before: box.exists && before > 1 ? before : 0,
       modseq: reconcile ? modseq : cursor.modseq,
+    }
+    transaction(this.store.db, () => {
+      if (!next.before) this.#locations.finishReimport(path)
+      this.#saveCursor(next)
     })
-    this.#saveCursor()
+    this.#cursor.set(path, next)
   }
 
   async #search(query: SearchObject): Promise<number[]> {

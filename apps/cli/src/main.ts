@@ -1,27 +1,31 @@
 import { randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
 import { setTimeout as delay } from 'node:timers/promises'
-import type {
-  AccountSummary,
-  Contact,
-  GmailAuthStartResponse,
-  Health,
-  Me,
-  MessageDetail,
-  MutationResponse,
-  OrganiseAction,
-  PairResponse,
-  SearchHit,
-  ThreadDetail,
-  ThreadList,
-  ThreadSummary,
+import {
+  type AccountSummary,
+  type AgentAction,
+  Bucket,
+  BucketInput,
+  type Contact,
+  doctorWarnings,
+  type GmailAuthStartResponse,
+  type Health,
+  type Me,
+  type MessageDetail,
+  type MutationResponse,
+  type OrganiseAction,
+  type PairResponse,
+  type SearchHit,
+  type ThreadDetail,
+  type ThreadList,
+  type ThreadSummary,
 } from '@amc/protocol'
-import { doctorWarnings } from '@amc/protocol'
 import { Command } from 'commander'
 import { authed, EngineError, request } from './client.ts'
 import { readConfig, writeConfig } from './config.ts'
 import { addImapAccount } from './imap-signin.ts'
 import { loopbackSignIn } from './signin.ts'
+import { runTriage } from './triage.ts'
 
 declare const AMC_VERSION: string | undefined
 const VERSION = typeof AMC_VERSION === 'string' ? AMC_VERSION : 'dev'
@@ -272,6 +276,51 @@ program
   )
 
 program
+  .command('bucket')
+  .argument('<thread>', 'Thread id')
+  .argument('<bucket>', 'Reply, Action, Follow-up, Update, Later, "When I have time", or clear')
+  .option('--reason <text>', 'one-line reason', 'Set manually')
+  .action(async (threadId: string, value: string, opts: { reason: string }) => {
+    const bucket = Bucket.options.find((name) => name.toLowerCase() === value.toLowerCase())
+    if (!bucket && value.toLowerCase() !== 'clear')
+      throw new Error(`Choose ${Bucket.options.join(', ')}, or clear`)
+    const body = BucketInput.parse({ threadId, bucket: bucket ?? null, reason: opts.reason })
+    await authed(requireConfig())('/v1/bucket', { method: 'PUT', body })
+    console.log(bucket ? `Moved to ${bucket}` : 'Bucket cleared')
+  })
+
+program
+  .command('triage')
+  .description('Triage the newest untriaged Inbox Threads with Claude Code')
+  .option('--account <id>', 'Account to triage (required if there are multiple)')
+  .option('--dry-run', 'print proposed Buckets and reasons')
+  .action(async (opts: { account?: string; dryRun?: boolean }) => {
+    const controller = new AbortController()
+    const interrupt = () => controller.abort(new Error('Triage interrupted'))
+    process.once('SIGINT', interrupt)
+    process.once('SIGTERM', interrupt)
+    try {
+      const config = requireConfig()
+      let accountId = opts.account
+      if (!accountId) {
+        const { accounts } = await authed(config)<{ accounts: AccountSummary[] }>('/v1/accounts', {
+          signal: controller.signal,
+          redirect: 'error',
+        })
+        if (accounts.length !== 1 || !accounts[0])
+          throw new Error('Choose an Account with --account <id> (see amc accounts --json)')
+        accountId = accounts[0].id
+      }
+      const results = await runTriage(config, accountId, opts.dryRun === true, controller.signal)
+      if (!results.length) console.log('No untriaged Inbox Threads.')
+      else printJson(results)
+    } finally {
+      process.off('SIGINT', interrupt)
+      process.off('SIGTERM', interrupt)
+    }
+  })
+
+program
   .command('mutation-status')
   .argument('<id>', 'Mutation id')
   .action(async (id: string) => {
@@ -290,28 +339,32 @@ const token = program.command('token').description('Tokens for Agents (MCP)')
 token
   .command('create')
   .description('Create an Agent token and print how to connect Claude Code, Codex or T3 Code')
-  .requiredOption('--name <name>', 'who will use it, e.g. t3 or codex')
+  .requiredOption('--agent <name>', 'who will use it, e.g. t3 or codex')
   .option('--scopes <list>', 'comma-separated: read, organize, draft', 'read,draft')
-  .option('--days <n>', 'expire after n days')
-  .action(async (opts: { name: string; scopes: string; days?: string }) => {
+  .requiredOption('--expires <duration>', 'expiry in days, e.g. 30d (maximum 90d)')
+  .option('--account <id>', 'limit this token to one Account')
+  .action(async (opts: { agent: string; scopes: string; expires: string; account?: string }) => {
+    const match = /^([1-9]\d?)d$/.exec(opts.expires)
+    if (!match || Number(match[1]) > 90) throw new Error('Use an expiry between 1d and 90d')
     const config = requireConfig()
     const res = await authed(config)<{ id: string; token: string; scopes: string[] }>(
       '/v1/tokens',
       {
         method: 'POST',
         body: {
-          name: opts.name,
+          name: opts.agent,
           scopes: opts.scopes
             .split(',')
             .map((s) => s.trim())
             .filter(Boolean),
-          ...(opts.days ? { expiresInDays: Number(opts.days) } : {}),
+          expiresInDays: Number(match[1]),
+          ...(opts.account ? { accountId: opts.account } : {}),
         },
       },
     )
     const url = new URL('/mcp', config.engineUrl).toString()
     console.log(
-      `Created ${res.id} (${opts.name}) with scopes: ${res.scopes.join(', ')}. It is shown only once.\n`,
+      `Created ${res.id} (${opts.agent}) for ${opts.expires} with scopes: ${res.scopes.join(', ')}. It is shown only once.\n`,
     )
     console.log('Claude Code:')
     console.log(
@@ -338,16 +391,23 @@ token
         scopes: string[]
         last_used_at: number | null
         revoked_at: number | null
+        expires_at: number | null
+        account_id: string | null
       }[]
     }>('/v1/tokens')
     for (const t of tokens) {
-      const state = t.revoked_at
-        ? 'revoked'
-        : t.last_used_at
-          ? `used ${ago(t.last_used_at)}`
-          : 'unused'
+      const state =
+        t.kind === 'agent' && t.expires_at === null
+          ? 'legacy token · re-issue with an expiry'
+          : t.revoked_at
+            ? 'revoked'
+            : t.expires_at !== null && t.expires_at <= Date.now()
+              ? 'expired'
+              : t.last_used_at
+                ? `used ${ago(t.last_used_at)}`
+                : 'unused'
       console.log(
-        `${t.id}  ${t.kind.padEnd(8)} ${t.name.padEnd(16)} ${t.scopes.join(',').padEnd(30)} ${state}`,
+        `${t.id}  ${t.kind.padEnd(8)} ${t.name.padEnd(16)} ${t.scopes.join(',').padEnd(30)} ${state}${t.account_id ? ` · ${t.account_id}` : ''}`,
       )
     }
   })
@@ -359,6 +419,34 @@ token
   .action(async (id: string) => {
     await authed(requireConfig())(`/v1/tokens/${encodeURIComponent(id)}`, { method: 'DELETE' })
     console.log(`Revoked ${id}`)
+  })
+
+const agent = program.command('agent').description('Review Agent activity')
+
+agent
+  .command('log')
+  .description('List recent Agent actions')
+  .option('--before <cursor>', 'show the next page using nextBefore')
+  .action(async ({ before }: { before?: string }) => {
+    const query = before ? `?before=${encodeURIComponent(before)}` : ''
+    printJson(
+      await authed(requireConfig())<{ actions: AgentAction[]; nextBefore: number | null }>(
+        `/v1/agent/log${query}`,
+      ),
+    )
+  })
+
+agent
+  .command('undo')
+  .description('Undo an Agent organize action')
+  .argument('<id>', 'action id from amc agent log')
+  .action(async (id: string) => {
+    printJson(
+      await authed(requireConfig())<MutationResponse>(
+        `/v1/agent/log/${encodeURIComponent(id)}/undo`,
+        { method: 'POST' },
+      ),
+    )
   })
 
 program

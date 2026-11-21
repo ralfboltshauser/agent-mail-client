@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import {
+  type AgentMutationResult,
   actionLabels,
   type LabelPatch,
   type MutationMessageResult,
@@ -8,6 +9,7 @@ import {
   type OrganiseAction,
   SNOOZED_LABEL,
 } from '@amc/protocol'
+import { agentGrantActive } from '../auth/tokens.ts'
 import { transaction } from '../db/database.ts'
 import type { Logger } from '../log.ts'
 import { GmailHttpError } from '../providers/gmail/http.ts'
@@ -65,6 +67,8 @@ interface MutationRow {
   state_before: string
   intent_id: string | null
   undo_of: string | null
+  agent_action_id: string | null
+  agent_message_ids: string
 }
 
 interface Intent {
@@ -257,6 +261,8 @@ function inverse(changes: Change[]): Change[] {
 
 export const SNOOZE_DISABLED = 'Snooze is disabled on this Engine'
 
+const GRANT_EXPIRED = 'Agent grant expired'
+
 export class MutationError extends Error {}
 export class MutationPermissionError extends MutationError {}
 
@@ -311,6 +317,62 @@ export class Mutations {
     return ids.flatMap((id) => {
       const row = this.#row(id)
       return row?.principal === principal ? [result(row)] : []
+    })
+  }
+
+  agentResults(actionId: string): AgentMutationResult[] {
+    const rows = this.#db
+      .prepare('SELECT * FROM mutation WHERE agent_action_id = ? ORDER BY seq')
+      .all(actionId) as unknown as MutationRow[]
+    return rows.map((row) => {
+      const outcome = result(row)
+      const messages = new Map<string, AgentMutationResult['messages'][number]>(
+        outcome.messages?.map((message) => [message.messageId, message]),
+      )
+      for (const messageId of JSON.parse(row.agent_message_ids) as string[]) {
+        if (messages.has(messageId)) continue
+        messages.set(messageId, {
+          messageId,
+          status:
+            row.status === 'applied'
+              ? 'unchanged'
+              : row.status === 'partial'
+                ? 'failed'
+                : row.status,
+          appliedLabels: [],
+          failedLabels: [],
+          supersededLabels: [],
+        })
+      }
+      const undo = this.#agentUndoFor(row.id)
+      return { ...outcome, messages: [...messages.values()], undo: undo ? result(undo) : null }
+    })
+  }
+
+  #agentUndoFor(id: string): MutationRow | undefined {
+    return this.#db
+      .prepare('SELECT * FROM mutation WHERE undo_of = ? ORDER BY seq DESC LIMIT 1')
+      .get(id) as MutationRow | undefined
+  }
+
+  undoAgentAction(owner: string, actionId: string): MutationResult[] {
+    return transaction(this.#db, () => {
+      const targets = this.#db
+        .prepare(`
+        SELECT * FROM mutation WHERE agent_action_id = ? AND status != 'failed' ORDER BY seq DESC
+      `)
+        .all(actionId) as unknown as MutationRow[]
+      if (!targets.length) throw new MutationError('This action has no changes to undo')
+      return targets.map((target) => {
+        const existing = this.#agentUndoFor(target.id)
+        if (existing && existing.status !== 'failed') return result(existing)
+        return this.#submit(
+          owner,
+          { id: randomUUID(), action: { kind: 'undo', mutationId: target.id } },
+          false,
+          target,
+        )
+      })
     })
   }
 
@@ -372,7 +434,12 @@ export class Mutations {
     )
   }
 
-  #submit(principal: string, request: MutationRequest, allowTrash: boolean): MutationResult {
+  #submit(
+    principal: string,
+    request: MutationRequest,
+    allowTrash: boolean,
+    agentUndoTarget?: MutationRow,
+  ): MutationResult {
     const action = request.action
     if (!this.snoozeEnabled && action.kind === 'snooze') throw new MutationError(SNOOZE_DISABLED)
     if (action.kind === 'trash' && !allowTrash)
@@ -388,19 +455,21 @@ export class Mutations {
     }
 
     if (action.kind === 'undo') {
-      const target = this.#db
-        .prepare(
-          `SELECT m.* FROM mutation m JOIN thread t ON t.id = m.thread_id
+      const target =
+        agentUndoTarget ??
+        (this.#db
+          .prepare(
+            `SELECT m.* FROM mutation m JOIN thread t ON t.id = m.thread_id
          WHERE m.principal = ? AND (?2 IS NULL OR m.thread_id = ?2)
            AND m.status != 'failed' AND m.undo_of IS NULL
            AND NOT EXISTS (SELECT 1 FROM mutation u WHERE u.undo_of = m.id AND u.status != 'failed')
          ORDER BY m.seq DESC LIMIT 1`,
-        )
-        .get(
-          principal,
-          action.threadId ??
-            (action.mutationId ? (this.#row(action.mutationId)?.thread_id ?? '') : null),
-        ) as MutationRow | undefined
+          )
+          .get(
+            principal,
+            action.threadId ??
+              (action.mutationId ? (this.#row(action.mutationId)?.thread_id ?? '') : null),
+          ) as MutationRow | undefined)
       if (!target || (action.mutationId && target.id !== action.mutationId)) {
         throw new MutationError('There is no matching action to undo')
       }
@@ -888,13 +957,16 @@ export class Mutations {
         this.#finish(row, 'failed', SNOOZE_DISABLED, undefined, { discard: true })
         continue
       }
-      // Older Engine builds allowed scoped Agent tokens to enqueue Organise.
       const nonOwner = this.#db
         .prepare("SELECT 1 FROM token WHERE id = ? AND kind NOT IN ('desktop', 'cli')")
         .get(row.principal)
-      if (nonOwner) {
+      if (!row.agent_action_id && nonOwner) {
         const message = 'Organise requires a paired owner Client'
         this.#finish(row, 'failed', message)
+        continue
+      }
+      if (row.agent_action_id && !this.#agentGrantActive(row)) {
+        this.#stopAgentWrite(row, readJournal(row))
         continue
       }
       const api = this.#api(row.account_id)
@@ -915,6 +987,20 @@ export class Mutations {
       started.push(task)
     }
     await Promise.all(started)
+  }
+
+  #stopAgentWrite(row: MutationRow, journal: JournalEntry[]) {
+    for (const entry of journal) {
+      if (!entry.pending) continue
+      entry.uncertain = [...(entry.uncertain ?? []), entry.pending.change]
+      delete entry.pending
+    }
+    this.#failRemaining(row, journal, this.#writePlan(row).steps)
+    this.#finishWrite(row, journal, GRANT_EXPIRED)
+  }
+
+  #agentGrantActive(row: MutationRow): boolean {
+    return agentGrantActive(this.#db, row.principal, 'organize', this.#now(), row.account_id)
   }
 
   #snoozedLabel(account: string): string | undefined {
@@ -1311,6 +1397,12 @@ export class Mutations {
         return true
       }
 
+      const beforeDispatch = row.agent_action_id
+        ? () => {
+            if (!this.#agentGrantActive(row)) throw new MutationPermissionError(GRANT_EXPIRED)
+          }
+        : undefined
+      beforeDispatch?.()
       const { message_id, after } = candidate
       const historyId = current.get(message_id)?.historyId
       entry.pending = { change: candidate, historyId }
@@ -1342,9 +1434,18 @@ export class Mutations {
             const label = key === snoozed ? snoozedId : rawId(key)
             if (label) (present ? add : remove).push(label)
           }
-          acknowledge(await api.modifyMessage(rawId(message_id), add, remove))
+          acknowledge(
+            beforeDispatch
+              ? await api.modifyMessage(rawId(message_id), add, remove, beforeDispatch)
+              : await api.modifyMessage(rawId(message_id), add, remove),
+          )
         }
       } catch (error) {
+        if (error instanceof MutationPermissionError) {
+          // The request never started. Clear the journal marker before stopping the grant.
+          delete entry.pending
+          throw error
+        }
         const ambiguous =
           !(error instanceof GmailHttpError || error instanceof OAuthError) ||
           (error instanceof GmailHttpError && (error.status === 408 || error.status >= 500))
@@ -1515,6 +1616,14 @@ export class Mutations {
       this.#finish(row, 'failed', 'The original action has no verified Gmail undo')
       return
     }
+    if (
+      original?.agent_action_id &&
+      JSON.parse(original.request).kind === 'mute' &&
+      this.#committedState(row.thread_id).muteIntent !== original.id
+    ) {
+      this.#finish(row, 'failed', 'Mute has changed since the Agent action')
+      return
+    }
     if (!row.prepared) {
       try {
         await this.#prepare(api, row, original)
@@ -1552,6 +1661,10 @@ export class Mutations {
         row.progress = progress + 1
       }
     } catch (error) {
+      if (error instanceof MutationPermissionError) {
+        this.#stopAgentWrite(row, journal)
+        return
+      }
       if (this.#retry(row, error)) return
       this.#failRemaining(row, journal, steps)
       row.attempts = 0

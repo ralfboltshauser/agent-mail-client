@@ -1,4 +1,4 @@
-import { type AccountSummary, type Label, SNOOZED_LABEL } from '@amc/protocol'
+import { type AccountSummary, BUCKETS, type Label, SNOOZED_LABEL } from '@amc/protocol'
 import {
   Archive,
   ChevronsUpDown,
@@ -37,6 +37,7 @@ import {
 } from '@/components/ui/sidebar'
 import { cn } from '@/lib/utils'
 import type { Counts, SyncStatus, View } from '../../../shared/api'
+import { AgentActivity } from './agent-activity'
 import { SyncIndicator } from './sync-indicator'
 
 const SYSTEM_VIEWS: { view: View; title: string; icon: typeof Inbox; keys: string }[] = [
@@ -56,6 +57,7 @@ export function systemViews(snoozeEnabled: boolean) {
 }
 
 export function sameView(a: View, b: View): boolean {
+  if (a.kind === 'bucket') return b.kind === 'bucket' && a.bucket === b.bucket
   return (
     a.kind === b.kind && (a.kind !== 'label' || (b.kind === 'label' && a.labelId === b.labelId))
   )
@@ -201,6 +203,27 @@ export function AppSidebar({
           </SidebarGroupContent>
         </SidebarGroup>
 
+        <SidebarGroup>
+          <SidebarGroupLabel>Triage</SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              {BUCKETS.map((bucket) => {
+                const next: View = { kind: 'bucket', bucket }
+                return (
+                  <SidebarMenuItem key={bucket}>
+                    <SidebarMenuButton isActive={sameView(view, next)} onClick={() => onView(next)}>
+                      <span>{bucket}</span>
+                    </SidebarMenuButton>
+                    <SidebarMenuBadge className="tabular-nums">
+                      {(counts.buckets[bucket] ?? 0).toLocaleString()}
+                    </SidebarMenuBadge>
+                  </SidebarMenuItem>
+                )
+              })}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+
         {folderLabels.length > 0 && (
           <SidebarGroup>
             <SidebarGroupLabel>Labels</SidebarGroupLabel>
@@ -224,6 +247,7 @@ export function AppSidebar({
       </SidebarContent>
 
       <SidebarFooter>
+        <AgentActivity />
         <SyncIndicator status={status} accounts={accounts} />
       </SidebarFooter>
     </Sidebar>

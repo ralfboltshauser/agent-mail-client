@@ -206,7 +206,13 @@ export class FakeGmail implements GmailApi {
     return snapshot
   }
 
-  async modifyMessage(id: string, addLabelIds: string[], removeLabelIds: string[]) {
+  async modifyMessage(
+    id: string,
+    addLabelIds: string[],
+    removeLabelIds: string[],
+    beforeDispatch?: () => void,
+  ) {
+    beforeDispatch?.()
     // Capture the acknowledgement at commit, before test hooks can interleave owner edits.
     const result = await this.batchModify([id], addLabelIds, removeLabelIds)
     if (!result) throw new GmailHttpError(404, 'notFound', 'Message no longer exists')

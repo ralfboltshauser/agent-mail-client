@@ -1,5 +1,9 @@
 packages:
   - apps/*
   - packages/*
+
 onlyBuiltDependencies:
   - esbuild
+
+patchedDependencies:
+  mailparser@3.15.0: patches/mailparser@3.15.0.patch

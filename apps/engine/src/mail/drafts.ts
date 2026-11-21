@@ -119,10 +119,12 @@ export class Drafts {
     return row ? this.#toDraft(row) : null
   }
 
-  list(options: { threadId?: string; limit?: number; editable?: boolean } = {}): Draft[] {
+  list(
+    options: { threadId?: string; accountId?: string; limit?: number; editable?: boolean } = {},
+  ): Draft[] {
     const rows = this.#db
       .prepare(
-        `SELECT * FROM draft WHERE (?1 IS NULL OR thread_id = ?1)
+        `SELECT * FROM draft WHERE (?1 IS NULL OR thread_id = ?1) AND (?4 IS NULL OR account_id = ?4)
            AND (?3 = 0 OR NOT EXISTS (SELECT 1 FROM outbox WHERE draft_id = draft.id AND status IN ('queued','dispatching','uncertain') AND released_at IS NULL))
            ORDER BY updated_at DESC LIMIT ?2`,
       )
@@ -130,6 +132,7 @@ export class Drafts {
         options.threadId ?? null,
         Math.min(options.limit ?? 50, 200),
         Number(options.editable ?? false),
+        options.accountId ?? null,
       ) as unknown as DraftRow[]
     return rows.map((r) => this.#toDraft(r))
   }

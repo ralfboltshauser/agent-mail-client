@@ -20,7 +20,7 @@ describe('migrate', () => {
     try {
       expect(migrate(db, { migrations: MIGRATIONS.filter(({ version }) => version <= 7) })).toBe(7)
       expect(MIGRATIONS.filter(({ version }) => version > 7).map(({ version }) => version)).toEqual(
-        [8, 9],
+        [8, 9, 10, 11, 12],
       )
       db.exec(`
         INSERT INTO account (id, kind, address, credentials, created_at)
@@ -40,7 +40,10 @@ describe('migrate', () => {
         VALUES ('i', 'INBOX', '1', 2, 'i:m', 'i:INBOX', 1, 1, 'fixture-source');
       `)
       const backupDir = join(dir, 'backups')
-      expect(migrate(db, { backupDir })).toBe(9)
+      expect(migrate(db, { backupDir })).toBe(12)
+      expect(db.prepare('SELECT bucket FROM thread WHERE id = ?').get('a:t')).toEqual({
+        bucket: null,
+      })
       expect(db.prepare('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' })
       expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([])
       expect(
@@ -66,6 +69,9 @@ describe('migrate', () => {
       expect(
         db.prepare("SELECT 1 FROM message_fts WHERE message_fts MATCH 'hidden'").get(),
       ).toBeUndefined()
+      expect(db.prepare("SELECT body_parts FROM message WHERE id = 'i:m'").get()).toEqual({
+        body_parts: null,
+      })
       expect(db.prepare('SELECT subject FROM draft').get()).toEqual({ subject: 'Existing draft' })
       db.exec(`
         INSERT INTO mutation (id, principal, account_id, thread_id, request, status)
@@ -94,14 +100,16 @@ describe('migrate', () => {
     const db = openDatabase(':memory:')
     const compose = MIGRATIONS.find(({ version }) => version === 9)
     if (!compose) throw new Error('Compose migration missing')
-    expect(migrate(db, { migrations: MIGRATIONS.slice(0, -1) })).toBe(8)
+    expect(migrate(db, { migrations: MIGRATIONS.filter(({ version }) => version <= 8) })).toBe(8)
     db.exec('DROP TABLE schema_migration')
-    expect(migrate(db)).toBe(9)
+    expect(migrate(db)).toBe(12)
     expect(db.prepare('SELECT * FROM organise_intent').all()).toEqual([])
     expect(db.prepare('SELECT * FROM outbox').all()).toEqual([])
 
     const wrong = openDatabase(':memory:')
-    migrate(wrong, { migrations: [...MIGRATIONS.slice(0, -2), { ...compose, version: 8 }] })
+    migrate(wrong, {
+      migrations: [...MIGRATIONS.filter(({ version }) => version <= 7), { ...compose, version: 8 }],
+    })
     db.close()
     expect(() => migrate(wrong)).toThrow(/Schema migration v8 mismatch.*organise/)
     wrong.exec('DROP TABLE schema_migration')

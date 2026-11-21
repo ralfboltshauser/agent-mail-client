@@ -1,0 +1,156 @@
+diff --git a/dist/cjs/mail-parser.js b/dist/cjs/mail-parser.js
+index f545ec6d2dd77edcefa074521fe8ae66b4d1f734..c9f038069e0f96126dcd3a78717c884bd4deac23 100644
+--- a/dist/cjs/mail-parser.js
++++ b/dist/cjs/mail-parser.js
+@@ -238,6 +238,7 @@ class MailParser extends node_stream_1.Transform {
+         this.curnode = false;
+         this.waitUntilAttachmentEnd = false;
+         this.attachmentCallback = false;
++        this.pendingText = null;
+         this.hasHtml = false;
+         this.hasText = false;
+         this.text = false;
+@@ -365,6 +366,10 @@ class MailParser extends node_stream_1.Transform {
+     }
+     /** @internal */
+     cleanup(done) {
++        if (this.pendingText) {
++            this.pendingText.then(() => this.cleanup(done));
++            return;
++        }
+         let finish = () => {
+             try {
+                 let t = this.getTextContent();
+@@ -1005,7 +1010,7 @@ class MailParser extends node_stream_1.Transform {
+                     else if (node.contentType === 'message/delivery-status' && !this.options.keepDeliveryStatus) {
+                         this.hasText = true;
+                     }
+-                    if (node.node.flowed) {
++                    if (node.node.flowed && !this.options.storeTextPart) {
+                         let contentStream = node.contentStream;
+                         let flowDecoder = new flowed_decoder_js_1.default({
+                             delSp: node.node.delSp
+@@ -1016,6 +1021,21 @@ class MailParser extends node_stream_1.Transform {
+                         contentStream.pipe(flowDecoder);
+                         node.contentStream = flowDecoder;
+                     }
++                    if (this.options.storeTextPart) {
++                        // Wait at MIME boundaries so only one text-part stream is active.
++                        this.pendingText = this.options.storeTextPart(node.contentStream, node.charset, node.node.flowed, node.node.delSp).then(
++                            value => {
++                                node.textContent = value;
++                                this.pendingText = null;
++                            },
++                            err => {
++                                this.pendingText = null;
++                                this.hasFailed = true;
++                                this.destroy(err);
++                            }
++                        );
++                        break;
++                    }
+                     let charset = node.charset || this.options.defaultTextCharset || 'utf-8';
+                     if (!['ascii', 'usascii', 'utf8'].includes(charset.toLowerCase().replace(/[^a-z0-9]+/g, ''))) {
+                         try {
+@@ -1055,6 +1075,10 @@ class MailParser extends node_stream_1.Transform {
+                 if (this.curnode && this.curnode.decoder) {
+                     this.curnode.decoder.end();
+                 }
++                if (this.pendingText) {
++                    this.pendingText.then(() => done());
++                    return;
++                }
+                 if (this.waitUntilAttachmentEnd) {
+                     this.attachmentCallback = done;
+                     return;
+diff --git a/dist/cjs/types.d.ts b/dist/cjs/types.d.ts
+index 39575271415685b438a4452a3a89f446da7f7abd..f197d0a8aae99de0d7a3741ee717308ae6bf3d3d 100644
+--- a/dist/cjs/types.d.ts
++++ b/dist/cjs/types.d.ts
+@@ -211,6 +211,8 @@ export interface IconvConstructor {
+  * Options for {@link MailParser}. `simpleParser` takes the same options plus `keepCidLinks`.
+  */
+ export interface MailParserOptions {
++    /** Store a transfer-decoded text part and return the reference used in the MIME body. */
++    storeTextPart?: (source: Readable, charset: string | undefined, flowed: boolean, delSp: boolean) => Promise<string>;
+     /**
+      * Do not convert HTML to plain text when the message has no plain text part.
+      * @default false
+diff --git a/dist/esm/mail-parser.js b/dist/esm/mail-parser.js
+index d46213a0b2e22446c926ff3a039dfdb64df9ca1f..a75d2e81012302c771d82527f218ce3771fff1e1 100644
+--- a/dist/esm/mail-parser.js
++++ b/dist/esm/mail-parser.js
+@@ -233,6 +233,7 @@ class MailParser extends Transform {
+         this.curnode = false;
+         this.waitUntilAttachmentEnd = false;
+         this.attachmentCallback = false;
++        this.pendingText = null;
+         this.hasHtml = false;
+         this.hasText = false;
+         this.text = false;
+@@ -360,6 +361,10 @@ class MailParser extends Transform {
+     }
+     /** @internal */
+     cleanup(done) {
++        if (this.pendingText) {
++            this.pendingText.then(() => this.cleanup(done));
++            return;
++        }
+         let finish = () => {
+             try {
+                 let t = this.getTextContent();
+@@ -1000,7 +1005,7 @@ class MailParser extends Transform {
+                     else if (node.contentType === 'message/delivery-status' && !this.options.keepDeliveryStatus) {
+                         this.hasText = true;
+                     }
+-                    if (node.node.flowed) {
++                    if (node.node.flowed && !this.options.storeTextPart) {
+                         let contentStream = node.contentStream;
+                         let flowDecoder = new FlowedDecoder({
+                             delSp: node.node.delSp
+@@ -1011,6 +1016,21 @@ class MailParser extends Transform {
+                         contentStream.pipe(flowDecoder);
+                         node.contentStream = flowDecoder;
+                     }
++                    if (this.options.storeTextPart) {
++                        // Wait at MIME boundaries so only one text-part stream is active.
++                        this.pendingText = this.options.storeTextPart(node.contentStream, node.charset, node.node.flowed, node.node.delSp).then(
++                            value => {
++                                node.textContent = value;
++                                this.pendingText = null;
++                            },
++                            err => {
++                                this.pendingText = null;
++                                this.hasFailed = true;
++                                this.destroy(err);
++                            }
++                        );
++                        break;
++                    }
+                     let charset = node.charset || this.options.defaultTextCharset || 'utf-8';
+                     if (!['ascii', 'usascii', 'utf8'].includes(charset.toLowerCase().replace(/[^a-z0-9]+/g, ''))) {
+                         try {
+@@ -1050,6 +1070,10 @@ class MailParser extends Transform {
+                 if (this.curnode && this.curnode.decoder) {
+                     this.curnode.decoder.end();
+                 }
++                if (this.pendingText) {
++                    this.pendingText.then(() => done());
++                    return;
++                }
+                 if (this.waitUntilAttachmentEnd) {
+                     this.attachmentCallback = done;
+                     return;
+diff --git a/dist/esm/types.d.ts b/dist/esm/types.d.ts
+index 39575271415685b438a4452a3a89f446da7f7abd..f197d0a8aae99de0d7a3741ee717308ae6bf3d3d 100644
+--- a/dist/esm/types.d.ts
++++ b/dist/esm/types.d.ts
+@@ -211,6 +211,8 @@ export interface IconvConstructor {
+  * Options for {@link MailParser}. `simpleParser` takes the same options plus `keepCidLinks`.
+  */
+ export interface MailParserOptions {
++    /** Store a transfer-decoded text part and return the reference used in the MIME body. */
++    storeTextPart?: (source: Readable, charset: string | undefined, flowed: boolean, delSp: boolean) => Promise<string>;
+     /**
+      * Do not convert HTML to plain text when the message has no plain text part.
+      * @default false

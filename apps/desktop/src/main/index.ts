@@ -10,6 +10,7 @@ import type {
   PairResponse,
   SendRequest,
 } from '@amc/protocol'
+import { BucketInput } from '@amc/protocol'
 import { app, BrowserWindow, ipcMain, Menu, nativeTheme, shell } from 'electron'
 import type { SyncStatus, ThreadQuery } from '../shared/api'
 import { clearPairing, loadPairing, savePairing } from './auth'
@@ -160,6 +161,17 @@ function registerIpc() {
     broadcast('amc:status', unpairedStatus)
     refreshTray()
   })
+  ipcMain.handle('amc:setBucket', async (_event, input: unknown) => {
+    const body = BucketInput.parse(input)
+    const loop = sync
+    if (!loop) throw new Error('Resume sync to move Threads between Buckets')
+    await requireEngine().request('/v1/bucket', {
+      method: 'PUT',
+      body,
+      signal: AbortSignal.timeout(10_000),
+    })
+    void loop.pull().catch(() => {}) // The normal sync loop retries if this pull fails.
+  })
   ipcMain.handle('amc:organise', (_event, input: unknown) => {
     if (!organise) throw new Error('Pair with the Engine first')
     const id = organise.enqueue(input, (sync?.status ?? pausedStatus)?.snoozeEnabled)
@@ -278,6 +290,20 @@ function registerComposeIpc() {
 }
 
 function registerReadIpc() {
+  ipcMain.handle('amc:agentActivity', (_e, before: unknown) => {
+    if (before === undefined) return requireEngine().get('/v1/agent/log')
+    if (typeof before !== 'number' || !Number.isSafeInteger(before) || before <= 0)
+      throw new Error('Invalid activity cursor')
+    return requireEngine().get(`/v1/agent/log?before=${before}`)
+  })
+  ipcMain.handle('amc:undoAgentAction', async (_e, id: unknown) => {
+    if (typeof id !== 'string') throw new Error('Invalid action ID')
+    await requireEngine().request(`/v1/agent/log/${encodeURIComponent(id)}/undo`, {
+      method: 'POST',
+    })
+    void sync?.pull()
+  })
+
   ipcMain.handle('amc:status', () => sync?.status ?? pausedStatus ?? unpairedStatus)
   ipcMain.handle('amc:syncNow', () => sync?.pull())
 

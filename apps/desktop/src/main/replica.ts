@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import type {
   AccountSummary,
+  Bucket,
   Draft,
   Label,
   MessageDetail,
@@ -230,6 +231,10 @@ export class Replica {
       case 'drafts':
         hasLabel('DRAFT')
         break
+      case 'bucket':
+        where.push("json_extract(data, '$.bucket.bucket') = ?")
+        params.push(query.view.bucket)
+        break
       case 'label':
         where.push('EXISTS (SELECT 1 FROM json_each(label_ids) WHERE value = ?)')
         params.push(query.view.labelId)
@@ -311,7 +316,16 @@ export class Replica {
          AND EXISTS (SELECT 1 FROM json_each(label_ids) WHERE value LIKE '%:DRAFT')`,
       )
       .get(accountId) as { n: number }
+    const buckets = this.db
+      .prepare(`
+      SELECT json_extract(data, '$.bucket.bucket') AS bucket, count(*) AS n
+      FROM effective_thread
+      WHERE (?1 IS NULL OR account_id = ?1) AND json_extract(data, '$.bucket.bucket') IS NOT NULL
+      GROUP BY bucket
+    `)
+      .all(accountId) as { bucket: Bucket; n: number }[]
     return {
+      buckets: Object.fromEntries(buckets.map(({ bucket, n }) => [bucket, n])),
       inbox: row.inbox ?? 0,
       inboxUnread: row.inbox_unread ?? 0,
       starred: row.starred ?? 0,
