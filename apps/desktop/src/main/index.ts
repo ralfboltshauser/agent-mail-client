@@ -549,19 +549,26 @@ if (!app.requestSingleInstanceLock()) {
     if (process.platform === 'darwin') {
       tray = createTray(openWindow, toggleSync, loginItem)
       if (Notification.isSupported()) {
+        // Keep Electron's JavaScript wrappers alive while their alerts can be clicked.
+        const active = new Set<Notification>()
         notifications = new NewMailNotifications(
           openReplica(),
           () => notificationSettings,
           ({ threadId, ...options }) => {
             const source = engine
             const notification = new Notification(options)
-            notification.on('click', () => {
+            active.add(notification)
+            const release = () => active.delete(notification)
+            notification.once('close', release)
+            notification.once('click', () => {
+              release()
               if (engine !== source) return
               pendingThreadId = threadId
               openWindow()
               openPendingThread()
             })
-            notification.on('failed', (_event, error) => {
+            notification.once('failed', (_event, error) => {
+              release()
               console.error('Could not show an AMC notification', error)
             })
             notification.show()
