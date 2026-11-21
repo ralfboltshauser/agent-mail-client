@@ -18,6 +18,10 @@ export type FakeGmailWrite =
 /** An in-memory Gmail for tests: messages, labels and a history log with expiry. */
 export class FakeGmail implements GmailApi {
   address = 'owner@example.com'
+
+  async watch(_topicName: string, _signal: AbortSignal): Promise<number> {
+    return Date.now() + 7 * 24 * 60 * 60_000
+  }
   messages = new Map<string, GmailMessage>()
   labelList: GmailLabel[] = [
     { id: 'INBOX', name: 'INBOX', type: 'system' },

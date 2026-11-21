@@ -45,9 +45,10 @@ interface CallOptions {
   cost?: Cost
   /** Skip ahead of backfill in the quota queue. */
   urgent?: boolean
-  /** Durable writeback handles retries for these calls. */
+  /** The caller handles retries for these calls. */
   writeback?: boolean
   submission?: boolean
+  signal?: AbortSignal
   beforeDispatch?: (() => void) | undefined
 }
 
@@ -97,9 +98,10 @@ export class GmailHttpApi implements GmailApi {
       try {
         const token = await this.#tokens.get()
         options.beforeDispatch?.()
+        const timeout = AbortSignal.timeout(options.submission ? 60_000 : this.#timeoutMs)
         res = await this.#fetch(url, {
           method: options.method ?? 'GET',
-          signal: AbortSignal.timeout(options.submission ? 60_000 : this.#timeoutMs),
+          signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
           ...(options.submission ? { redirect: 'error' } : {}),
           headers: {
             Authorization: `Bearer ${token}`,
@@ -170,6 +172,17 @@ export class GmailHttpApi implements GmailApi {
     const delayMs = (retryAfterMs || base) + Math.random() * 250
     this.#onRetry?.({ path, status, delayMs, rate: this.#limiter.rate })
     await sleep(delayMs)
+  }
+
+  async watch(topicName: string, signal: AbortSignal): Promise<number> {
+    const { expiration } = await this.#call<{ expiration: string }>('/watch', {
+      method: 'POST',
+      body: { topicName },
+      cost: 'watch',
+      signal,
+      writeback: true,
+    })
+    return Number(expiration)
   }
 
   profile() {

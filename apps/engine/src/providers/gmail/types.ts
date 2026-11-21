@@ -69,6 +69,7 @@ export interface GmailHistoryList {
 
 /** Everything the sync needs from Gmail; the HTTP client and the test fake both implement it. */
 export interface GmailApi {
+  watch(topicName: string, signal: AbortSignal): Promise<number>
   profile(): Promise<GmailProfile>
   labels(): Promise<GmailLabel[]>
   listMessages(options: {

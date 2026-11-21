@@ -84,6 +84,7 @@ export class QuotaLimiter {
 }
 
 export const QUOTA_COST = {
+  watch: 100,
   profile: 1,
   labels: 1,
   list: 5,
