@@ -41,6 +41,17 @@ export function sameView(a: View, b: View): boolean {
   )
 }
 
+export function navigableLabels(labels: Label[], accounts: AccountSummary[]): Label[] {
+  const imapAccounts = new Set(
+    accounts.filter((account) => account.kind === 'imap').map((account) => account.id),
+  )
+  return labels.filter(
+    (label) =>
+      label.kind === 'user' ||
+      (imapAccounts.has(label.accountId) && !['INBOX', 'SENT', 'DRAFT'].includes(label.providerId)),
+  )
+}
+
 interface Props {
   accounts: AccountSummary[]
   accountId: string | null
@@ -76,9 +87,9 @@ export function AppSidebar({
   status,
 }: Props) {
   const current = accounts.find((a) => a.id === accountId) ?? null
-  const userLabels = labels
-    .filter((l) => l.kind === 'user')
-    .sort((a, b) => a.name.localeCompare(b.name))
+  const folderLabels = navigableLabels(labels, accounts).sort((a, b) =>
+    a.name.localeCompare(b.name),
+  )
 
   const badge = (kind: View['kind']) => {
     if (kind === 'inbox') return counts.inboxUnread || null
@@ -157,12 +168,12 @@ export function AppSidebar({
           </SidebarGroupContent>
         </SidebarGroup>
 
-        {userLabels.length > 0 && (
+        {folderLabels.length > 0 && (
           <SidebarGroup>
             <SidebarGroupLabel>Labels</SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu>
-                {userLabels.map((label) => {
+                {folderLabels.map((label) => {
                   const v: View = { kind: 'label', labelId: label.id }
                   return (
                     <SidebarMenuItem key={label.id}>

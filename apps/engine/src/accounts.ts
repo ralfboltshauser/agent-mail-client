@@ -2,8 +2,10 @@ import type { AccountStatus } from '@amc/protocol'
 import { newId } from './auth/secrets.ts'
 import type { Sealer } from './crypto.ts'
 import type { Db } from './db/database.ts'
+import { transaction } from './db/database.ts'
 import type { MailStore } from './mail/store.ts'
 import type { AccountState, BackfillState, GmailCursor } from './providers/gmail/sync.ts'
+import type { ImapCredentials } from './providers/imap/client.ts'
 
 export interface AccountRow {
   id: string
@@ -34,23 +36,56 @@ export function upsertGmailAccount(
   sealer: Sealer,
   input: { address: string; credentials: unknown },
 ): { id: string; created: boolean } {
-  const sealed = sealer.seal(input.credentials)
-  const existing = db.prepare('SELECT id FROM account WHERE address = ?').get(input.address) as
-    | { id: string }
-    | undefined
-  if (existing) {
+  return upsertAccount(db, store, sealer, 'gmail', input)
+}
+
+export class AccountConflict extends Error {}
+
+export function upsertImapAccount(
+  db: Db,
+  store: MailStore,
+  sealer: Sealer,
+  input: { address: string; credentials: ImapCredentials },
+): { id: string; created: boolean } {
+  return upsertAccount(db, store, sealer, 'imap', input)
+}
+
+function upsertAccount(
+  db: Db,
+  store: MailStore,
+  sealer: Sealer,
+  kind: AccountRow['kind'],
+  input: { address: string; credentials: unknown },
+): { id: string; created: boolean } {
+  return transaction(db, () => {
+    const existing = db
+      .prepare('SELECT id, kind, credentials FROM account WHERE address = ? COLLATE NOCASE')
+      .get(input.address) as AccountRow | undefined
+    if (existing && existing.kind !== kind) {
+      throw new AccountConflict('This address belongs to an Account with a different provider')
+    }
+    if (existing && kind === 'imap') {
+      const { imap: old } = sealer.open<ImapCredentials>(existing.credentials)
+      const { imap } = input.credentials as ImapCredentials
+      if (old.host.toLowerCase() !== imap.host.toLowerCase() || old.username !== imap.username) {
+        throw new AccountConflict('This address already belongs to a different IMAP mailbox')
+      }
+    }
+    const sealed = sealer.seal(input.credentials)
+    if (existing) {
+      db.prepare(
+        "UPDATE account SET credentials = ?, status = 'new', last_error = NULL WHERE id = ?",
+      ).run(sealed, existing.id)
+      store.recordChange('account', existing.id, 'upsert')
+      return { id: existing.id, created: false }
+    }
+    const id = newId('acc')
     db.prepare(
-      "UPDATE account SET credentials = ?, status = 'new', last_error = NULL WHERE id = ?",
-    ).run(sealed, existing.id)
-    store.recordChange('account', existing.id, 'upsert')
-    return { id: existing.id, created: false }
-  }
-  const id = newId('acc')
-  db.prepare(
-    "INSERT INTO account (id, kind, address, credentials, status, created_at) VALUES (?, 'gmail', ?, ?, 'new', ?)",
-  ).run(id, input.address, sealed, Date.now())
-  store.recordChange('account', id, 'upsert')
-  return { id, created: true }
+      "INSERT INTO account (id, kind, address, credentials, status, created_at) VALUES (?, ?, ?, ?, 'new', ?)",
+    ).run(id, kind, input.address, sealed, Date.now())
+    store.recordChange('account', id, 'upsert')
+    return { id, created: true }
+  })
 }
 
 /** Updates status; only a status change is a synced change (last_sync_at is not). */

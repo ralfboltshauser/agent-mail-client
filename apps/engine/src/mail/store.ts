@@ -23,6 +23,9 @@ export interface IncomingMessage {
   size: number
   /** Provider label ids, e.g. Gmail's INBOX, UNREAD, Label_123. */
   labels: string[]
+  /** Providers with separate flags can supply them without adding synthetic Labels. */
+  unread?: boolean
+  starred?: boolean
   listUnsubscribe: string | null
   attachments: IncomingAttachment[]
 }
@@ -193,8 +196,8 @@ export class MailStore extends EventEmitter<{ change: [] }> {
         msg.sentAt,
         msg.size,
         JSON.stringify(labels),
-        msg.labels.includes('UNREAD') ? 1 : 0,
-        msg.labels.includes('STARRED') ? 1 : 0,
+        (msg.unread ?? msg.labels.includes('UNREAD')) ? 1 : 0,
+        (msg.starred ?? msg.labels.includes('STARRED')) ? 1 : 0,
         msg.listUnsubscribe,
       )
 
@@ -305,6 +308,46 @@ export class MailStore extends EventEmitter<{ change: [] }> {
     if (!row) return null
     const prefix = `${accountId}:`
     return (JSON.parse(row.label_ids) as string[]).map((l) => l.slice(prefix.length))
+  }
+
+  setMessageFlags(
+    accountId: string,
+    providerId: string,
+    flags: { unread: boolean; starred: boolean },
+  ): void {
+    transaction(this.db, () => {
+      const mid = messageId(accountId, providerId)
+      const row = this.db
+        .prepare(
+          'UPDATE message SET unread = ?, starred = ? WHERE id = ? AND (unread != ? OR starred != ?) RETURNING thread_id',
+        )
+        .get(+flags.unread, +flags.starred, mid, +flags.unread, +flags.starred) as
+        | { thread_id: string }
+        | undefined
+      if (!row) return
+      this.recordChange('message', mid, 'upsert')
+      this.refreshThread(row.thread_id)
+    })
+  }
+
+  mergeThreads(accountId: string, source: string, destination: string): void {
+    if (source === destination) return
+    const from = threadId(accountId, source)
+    const to = threadId(accountId, destination)
+    transaction(this.db, () => {
+      if (!this.db.prepare('SELECT 1 FROM thread WHERE id = ?').get(from)) return
+      this.db
+        .prepare(
+          'INSERT INTO thread (id, account_id, provider_thread_id) VALUES (?, ?, ?) ON CONFLICT (id) DO NOTHING',
+        )
+        .run(to, accountId, destination)
+      const moved = this.db
+        .prepare('UPDATE message SET thread_id = ? WHERE thread_id = ? RETURNING id')
+        .all(to, from) as { id: string }[]
+      for (const { id } of moved) this.recordChange('message', id, 'upsert')
+      this.refreshThread(to)
+      this.refreshThread(from)
+    })
   }
 
   deleteMessage(accountId: string, providerId: string): void {

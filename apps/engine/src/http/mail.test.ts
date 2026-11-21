@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { issueToken } from '../auth/tokens.ts'
 import { BlobStore } from '../blobs.ts'
 import { Sealer } from '../crypto.ts'
@@ -7,6 +7,8 @@ import { Drafts } from '../mail/drafts.ts'
 import { MailQueries } from '../mail/queries.ts'
 import { MailStore } from '../mail/store.ts'
 import { FakeGmail } from '../providers/gmail/fake.ts'
+import type { ImapCredentials } from '../providers/imap/client.ts'
+import { FakeImap } from '../providers/imap/fake.ts'
 import { SyncManager } from '../sync/manager.ts'
 import { silentLog, tempDir, testConfig, testDb } from '../test-support.ts'
 import { createApp } from './app.ts'
@@ -18,6 +20,8 @@ function setup() {
   const sealer = new Sealer(randomBytes(32))
   const oauthClient = () => ({ clientId: 'cid', clientSecret: 'secret' })
   const gmail = new FakeGmail()
+  const imap = new FakeImap(['CONDSTORE', 'QRESYNC'])
+  const verifyImap = vi.fn<(credentials: ImapCredentials) => Promise<void>>().mockResolvedValue()
   const sync = new SyncManager({
     db,
     store,
@@ -25,6 +29,7 @@ function setup() {
     log: silentLog,
     oauthClient,
     gmailApi: () => gmail,
+    imapClient: () => imap.client,
     pollMs: 10,
   })
   const app = createApp({
@@ -39,6 +44,7 @@ function setup() {
       sealer,
       sync,
       oauthClient,
+      verifyImap,
       drafts: new Drafts(db, store, (id) => sync.gmailApi(id)),
       log: silentLog,
     },
@@ -51,10 +57,96 @@ function setup() {
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     })
-  return { db, sealer, sync, gmail, call, admin, reader }
+  return { db, sealer, sync, gmail, imap, verifyImap, call, admin, reader }
 }
 
 describe('mail routes', () => {
+  it('verifies IMAP/SMTP under admin, seals the login, and syncs Inbox updates alongside Gmail', async () => {
+    const { db, sealer, sync, gmail, imap, verifyImap, call, admin, reader } = setup()
+    const login = {
+      address: 'IMAP@example.com',
+      imap: {
+        host: 'imap.example.com',
+        port: 993,
+        tls: 'implicit',
+        username: 'imap-user',
+        password: 'fake-imap-secret',
+      },
+      smtp: {
+        host: 'smtp.example.com',
+        port: 587,
+        tls: 'starttls',
+        username: 'smtp-user',
+        password: 'fake-smtp-secret',
+      },
+    }
+    try {
+      expect((await call('/v1/accounts/imap', reader, login)).status).toBe(403)
+      expect(verifyImap).not.toHaveBeenCalled()
+      verifyImap.mockRejectedValueOnce(new Error(login.imap.password))
+      const rejected = await call('/v1/accounts/imap', admin, login)
+      expect(rejected.status).toBe(400)
+      expect(await rejected.text()).not.toContain(login.imap.password)
+      expect(db.prepare('SELECT id FROM account').all()).toHaveLength(0)
+
+      gmail.add('m1', { subject: 'Gmail subject' })
+      db.prepare(
+        "INSERT INTO account (id, kind, address, credentials, created_at) VALUES ('g', 'gmail', 'owner@example.com', ?, 0)",
+      ).run(sealer.seal({ refreshToken: 'r', scope: 's' }))
+      sync.start()
+      imap.addFolder('Remote Archive', '\\Archive')
+      const added = await call('/v1/accounts/imap', admin, login)
+      expect(added.status).toBe(200)
+      const result = (await added.json()) as { accountId: string }
+      expect(result).toEqual({
+        accountId: expect.any(String),
+        address: 'imap@example.com',
+        created: true,
+      })
+      const row = db
+        .prepare('SELECT kind, credentials FROM account WHERE id = ?')
+        .get(result.accountId)
+      expect(row?.kind).toBe('imap')
+      const sealed = row?.credentials as Uint8Array
+      expect(Buffer.from(sealed).toString()).not.toContain(login.imap.password)
+      const credentials = { imap: login.imap, smtp: login.smtp, smtpSavesSent: false }
+      expect(verifyImap).toHaveBeenLastCalledWith(credentials)
+      expect(sealer.open(sealed)).toEqual(credentials)
+      await vi.waitFor(() => {
+        const mailbox = imap.mailbox
+        expect(mailbox === false ? '' : mailbox.path).toBe('INBOX')
+      })
+      imap.add('INBOX', 'Subject: Pushed message')
+      await vi.waitFor(async () => {
+        const response = await call('/v1/threads?inbox=1', reader)
+        const { threads } = (await response.json()) as { threads: { subject: string }[] }
+        expect(threads.map((thread) => thread.subject)).toEqual(
+          expect.arrayContaining(['Gmail subject', 'Pushed message']),
+        )
+      })
+      const accountSnapshot = await (await call('/v1/sync/snapshot?entity=account', reader)).text()
+      expect(JSON.parse(accountSnapshot).rows).toContainEqual(
+        expect.objectContaining({ kind: 'imap', status: 'ready', messageCount: 1 }),
+      )
+      for (const secret of [
+        login.imap.password,
+        login.smtp.password,
+        login.imap.username,
+        login.smtp.host,
+      ]) {
+        expect(accountSnapshot).not.toContain(secret)
+      }
+      const labelSnapshot = await (await call('/v1/sync/snapshot?entity=label', reader)).json()
+      expect(labelSnapshot).toMatchObject({
+        rows: expect.arrayContaining([
+          expect.objectContaining({ providerId: 'ARCHIVE', accountId: result.accountId }),
+        ]),
+      })
+    } finally {
+      await sync.stop()
+    }
+  })
+
   it('starts a Google sign-in only for loopback redirects and only with admin', async () => {
     const { call, admin, reader } = setup()
     const ok = await call('/v1/accounts/gmail/start', admin, {

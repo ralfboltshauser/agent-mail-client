@@ -19,6 +19,14 @@ import {
 } from '../providers/gmail/oauth.ts'
 import { GmailAccountSync } from '../providers/gmail/sync.ts'
 import type { GmailApi } from '../providers/gmail/types.ts'
+import {
+  connectImap,
+  createImapClient,
+  ImapAuthError,
+  type ImapClientFactory,
+  type ImapCredentials,
+} from '../providers/imap/client.ts'
+import { ImapAccountSync } from '../providers/imap/sync.ts'
 
 export interface SyncManagerOptions {
   db: Db
@@ -28,23 +36,28 @@ export interface SyncManagerOptions {
   oauthClient: () => OAuthClient
   /** Overridable for tests. */
   gmailApi?: (tokens: AccessTokens) => GmailApi
+  imapClient?: ImapClientFactory
   pollMs?: number
+  imapPollMs?: number
   labelsEveryMs?: number
 }
 
 interface Runner {
   stop: () => void
   done: Promise<void>
-  api: GmailApi
+  api?: GmailApi
 }
 
 const sleep = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms)
-    signal.addEventListener('abort', () => {
+    if (signal.aborted) return resolve()
+    const finish = () => {
       clearTimeout(timer)
+      signal.removeEventListener('abort', finish)
       resolve()
-    })
+    }
+    const timer = setTimeout(finish, ms)
+    signal.addEventListener('abort', finish, { once: true })
   })
 
 /**
@@ -53,17 +66,18 @@ const sleep = (ms: number, signal: AbortSignal) =>
  * Emits `change` whenever the store may have changed, for live Clients.
  */
 export class SyncManager extends EventEmitter<{ change: [] }> {
-  readonly #o: Required<Omit<SyncManagerOptions, 'gmailApi'>> & Pick<SyncManagerOptions, 'gmailApi'>
+  readonly #o: Required<Omit<SyncManagerOptions, 'gmailApi' | 'imapClient'>> &
+    Pick<SyncManagerOptions, 'gmailApi' | 'imapClient'>
   readonly #runners = new Map<string, Runner>()
 
   constructor(options: SyncManagerOptions) {
     super()
-    this.#o = { pollMs: 15_000, labelsEveryMs: 5 * 60_000, ...options }
+    this.#o = { pollMs: 15_000, imapPollMs: 2 * 60_000, labelsEveryMs: 5 * 60_000, ...options }
   }
 
   start(): void {
     for (const row of listAccountRows(this.#o.db)) {
-      if (row.kind === 'gmail' && row.status !== 'auth_expired') this.startAccount(row.id)
+      if (row.status !== 'auth_expired') this.startAccount(row.id)
     }
   }
 
@@ -73,9 +87,14 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
   }
 
   startAccount(accountId: string): void {
-    this.#runners.get(accountId)?.stop()
+    const previous = this.#runners.get(accountId)
+    previous?.stop()
     const row = getAccountRow(this.#o.db, accountId)
-    if (!row || row.kind !== 'gmail') return
+    if (!row) return
+    if (row.kind === 'imap') {
+      this.#startImap(row, previous)
+      return
+    }
     const { db, store, log } = this.#o
     const tokens = new AccessTokens(
       this.#o.oauthClient(),
@@ -169,6 +188,62 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
     })()
 
     this.#runners.set(accountId, { stop: () => controller.abort(), done, api })
+  }
+
+  #startImap(row: NonNullable<ReturnType<typeof getAccountRow>>, previous?: Runner): void {
+    const { db, store, log, sealer, imapPollMs } = this.#o
+    const controller = new AbortController()
+    const signal = controller.signal
+    const done = (async () => {
+      await previous?.done
+      let retryMs = 5_000
+      while (!signal.aborted) {
+        try {
+          const credentials = sealer.open<ImapCredentials>(row.credentials)
+          const client = (this.#o.imapClient ?? createImapClient)(credentials.imap)
+          const close = () => client.close()
+          signal.addEventListener('abort', close, { once: true })
+          try {
+            await connectImap(client)
+            if (signal.aborted) return
+            const sync = new ImapAccountSync(client, store, row.id, row.address)
+            let nextPoll = 0
+            let backfilled = false
+            while (client.usable && !signal.aborted) {
+              const mode = Date.now() >= nextPoll ? 'all' : sync.inboxChanged ? 'inbox' : 'backfill'
+              if (mode !== 'backfill' || !backfilled) {
+                backfilled = await sync.step(mode)
+                if (signal.aborted) return
+                if (mode === 'all') nextPoll = Date.now() + imapPollMs
+                touchAccountSync(db, row.id)
+                setAccountStatus(db, store, row.id, backfilled ? 'ready' : 'backfilling')
+                this.emit('change')
+                retryMs = 5_000
+              }
+              if (backfilled) await sync.waitForInbox(Math.max(0, nextPoll - Date.now()), signal)
+            }
+            if (signal.aborted) return
+            throw new Error('IMAP connection closed')
+          } finally {
+            signal.removeEventListener('abort', close)
+            close()
+          }
+        } catch (error) {
+          if (signal.aborted) return
+          if (error instanceof ImapAuthError) {
+            setAccountStatus(db, store, row.id, 'auth_expired', error.message)
+            this.emit('change')
+            return
+          }
+          log.warn({ account: row.id }, 'IMAP sync failed')
+          setAccountStatus(db, store, row.id, 'error', 'IMAP sync failed. The Engine will retry.')
+          this.emit('change')
+          await sleep(retryMs, signal)
+          retryMs = Math.min(retryMs * 2, 5 * 60_000)
+        }
+      }
+    })()
+    this.#runners.set(row.id, { stop: () => controller.abort(), done })
   }
 
   async stop(): Promise<void> {

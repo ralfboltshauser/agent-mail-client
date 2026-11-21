@@ -1,6 +1,8 @@
 import type { ApiError } from '@amc/protocol'
 import type { CliConfig } from './config.ts'
 
+type Redirect = NonNullable<Parameters<typeof fetch>[1]>['redirect']
+
 export class EngineError extends Error {
   readonly status: number
   readonly code: string
@@ -15,13 +17,14 @@ export class EngineError extends Error {
 export async function request<T>(
   engineUrl: string,
   path: string,
-  init: { method?: string; token?: string; body?: unknown } = {},
+  init: { method?: string; token?: string; body?: unknown; redirect?: Redirect } = {},
 ): Promise<T> {
   const url = new URL(path, engineUrl)
   let res: Response
   try {
     res = await fetch(url, {
       method: init.method ?? 'GET',
+      redirect: init.redirect ?? 'follow',
       headers: {
         ...(init.token ? { Authorization: `Bearer ${init.token}` } : {}),
         ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
@@ -45,6 +48,6 @@ export async function request<T>(
 }
 
 export function authed(config: CliConfig) {
-  return <T>(path: string, init: { method?: string; body?: unknown } = {}) =>
+  return <T>(path: string, init: { method?: string; body?: unknown; redirect?: Redirect } = {}) =>
     request<T>(config.engineUrl, path, { ...init, token: config.token })
 }

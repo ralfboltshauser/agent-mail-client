@@ -1,6 +1,11 @@
-import { GmailAuthComplete, GmailAuthStart } from '@amc/protocol'
+import {
+  GmailAuthComplete,
+  GmailAuthStart,
+  type ImapAccountAdded,
+  ImapAccountInput,
+} from '@amc/protocol'
 import { Hono } from 'hono'
-import { upsertGmailAccount } from '../accounts.ts'
+import { AccountConflict, upsertGmailAccount, upsertImapAccount } from '../accounts.ts'
 import { newSecret } from '../auth/secrets.ts'
 import type { BlobStore } from '../blobs.ts'
 import type { Sealer } from '../crypto.ts'
@@ -18,6 +23,7 @@ import {
   type OAuthClient,
   OAuthError,
 } from '../providers/gmail/oauth.ts'
+import { verifyImapAccount } from '../providers/imap/client.ts'
 import type { SyncManager } from '../sync/manager.ts'
 import { type AppEnv, requireScope } from './app.ts'
 
@@ -32,6 +38,7 @@ export interface MailDeps {
   drafts: Drafts
   log: Logger
   fetchImpl?: typeof fetch
+  verifyImap?: typeof verifyImapAccount
 }
 
 const OAUTH_TTL_MS = 10 * 60 * 1000
@@ -48,6 +55,45 @@ export function mailRoutes(deps: MailDeps) {
   const r = new Hono<AppEnv>()
 
   r.get('/accounts', requireScope('read'), (c) => c.json({ accounts: queries.accounts() }))
+
+  r.post('/accounts/imap', requireScope('admin'), async (c) => {
+    const parsed = ImapAccountInput.safeParse(await c.req.json().catch(() => null))
+    if (!parsed.success) {
+      return c.json(
+        { error: 'bad_request', message: 'Expected an address and TLS logins for IMAP and SMTP' },
+        400,
+      )
+    }
+    const { address, ...credentials } = parsed.data
+    try {
+      await (deps.verifyImap ?? verifyImapAccount)(credentials)
+    } catch {
+      return c.json(
+        {
+          error: 'imap_signin_failed',
+          message: 'Could not verify the IMAP and SMTP logins over TLS',
+        },
+        400,
+      )
+    }
+    try {
+      const { id, created } = upsertImapAccount(db, deps.store, deps.sealer, {
+        address,
+        credentials,
+      })
+      deps.sync.startAccount(id)
+      return c.json({ accountId: id, address, created } satisfies ImapAccountAdded)
+    } catch (error) {
+      if (error instanceof AccountConflict) {
+        return c.json({ error: 'account_conflict', message: error.message }, 409)
+      }
+      log.error('could not save IMAP Account')
+      return c.json(
+        { error: 'account_save_failed', message: 'Could not save the IMAP Account' },
+        500,
+      )
+    }
+  })
 
   // Adding a Gmail Account: the Client opens authUrl in a browser with a loopback redirect on
   // its own machine, then hands the code back here. The Engine alone exchanges and keeps it.
@@ -117,6 +163,9 @@ export function mailRoutes(deps: MailDeps) {
       log.info({ account: id, created }, 'gmail account signed in')
       return c.json({ accountId: id, address: profile.emailAddress, created })
     } catch (error) {
+      if (error instanceof AccountConflict) {
+        return c.json({ error: 'account_conflict', message: error.message }, 409)
+      }
       const message =
         error instanceof OAuthError ? error.message : 'Could not complete the Google sign-in'
       log.warn({ err: (error as Error).message }, 'gmail sign-in failed')

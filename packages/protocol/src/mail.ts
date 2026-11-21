@@ -101,6 +101,28 @@ export const GmailAuthStartResponse = z.object({ authUrl: z.string().url(), stat
 export type GmailAuthStartResponse = z.infer<typeof GmailAuthStartResponse>
 export const GmailAuthComplete = z.object({ code: z.string().min(1), state: z.string().min(1) })
 
+const MailServerLogin = z.object({
+  host: z.hostname(),
+  port: z.number().int().min(1).max(65535),
+  tls: z.enum(['implicit', 'starttls']),
+  username: z.string().min(1).max(512),
+  password: z.string().min(1).max(4096),
+})
+
+export const ImapAccountInput = z.object({
+  address: z.email().transform((address) => address.toLowerCase()),
+  imap: MailServerLogin,
+  smtp: MailServerLogin,
+  smtpSavesSent: z.boolean().default(false),
+})
+export type ImapAccountInput = z.infer<typeof ImapAccountInput>
+
+export interface ImapAccountAdded {
+  accountId: string
+  address: string
+  created: boolean
+}
+
 export const Draft = z.object({
   id: z.string(),
   accountId: z.string(),
