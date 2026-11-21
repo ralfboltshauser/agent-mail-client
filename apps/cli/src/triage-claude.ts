@@ -1,10 +1,11 @@
-import { execFile, spawn } from 'node:child_process'
+import { type ExecFileException, execFile, spawn } from 'node:child_process'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { homedir, tmpdir } from 'node:os'
+import { homedir, tmpdir, userInfo } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
-import { promisify } from 'node:util'
 import type { TriageHarness } from './triage.ts'
+
+export class ClaudeAuthError extends Error {}
 
 export const runClaude: TriageHarness = async ({
   url,
@@ -15,30 +16,48 @@ export const runClaude: TriageHarness = async ({
   signal,
   allowReads,
 }) => {
-  const cwd = await mkdtemp(join(tmpdir(), 'amc-triage-'))
   const home = homedir()
+  const { username } = userInfo()
   const command = join(home, '.local', 'bin', 'claude')
   // Match the tested headless profile. An allow-list keeps billing and gateway variables out.
   const env = {
     HOME: home,
     PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
     TMPDIR: '/tmp',
+    USER: username,
+    LOGNAME: username,
   }
+  const cwd = await mkdtemp(join(tmpdir(), 'amc-triage-'))
   try {
-    const { stdout } = await promisify(execFile)(command, ['auth', 'status', '--json'], {
-      cwd,
-      env,
-      timeout: 10_000,
-      signal,
-    }).catch(() => {
-      signal.throwIfAborted()
-      throw new Error(
-        'Claude Code must be installed at ~/.local/bin/claude and signed into Claude.ai',
+    const { error, stdout } = await new Promise<{
+      error: ExecFileException | null
+      stdout: string
+    }>((resolve) => {
+      execFile(
+        command,
+        ['auth', 'status', '--json'],
+        { cwd, env, timeout: 10_000, signal },
+        (error, stdout) => resolve({ error, stdout }),
       )
     })
-    const auth = JSON.parse(stdout)
+    signal.throwIfAborted()
+    if (error?.code === 'ENOENT')
+      throw new ClaudeAuthError('Claude Code not found at ~/.local/bin/claude')
+
+    const statusError = 'Could not check Claude Code sign-in status'
+    let auth: { loggedIn?: unknown; authMethod?: unknown; apiProvider?: unknown } | null
+    try {
+      auth = JSON.parse(stdout)
+    } catch {
+      throw new ClaudeAuthError(statusError)
+    }
+    if (auth?.loggedIn === false)
+      throw new ClaudeAuthError(
+        'Claude Code is not signed in: run `claude` and log in with Claude.ai',
+      )
+    if (error || auth?.loggedIn !== true) throw new ClaudeAuthError(statusError)
     if (auth.authMethod !== 'claude.ai' || auth.apiProvider !== 'firstParty')
-      throw new Error('Triage requires a Claude.ai subscription login')
+      throw new ClaudeAuthError('Triage requires a Claude.ai subscription login')
 
     const config = join(cwd, 'mcp.json')
     await writeFile(
