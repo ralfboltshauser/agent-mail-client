@@ -69,6 +69,8 @@ export class GmailAccountSync {
   readonly #store: MailStore
   readonly #state: AccountState
   readonly #log: Logger
+  // Each runner owns one signal. Replacement invalidates it before starting a new runner.
+  readonly #signal: AbortSignal | undefined
   readonly #seen = new Set<string>()
   /** Called after each stored chunk (the manager uses it to tell live Clients). */
   onProgress?: (stored: number) => void
@@ -76,18 +78,27 @@ export class GmailAccountSync {
   #scanGeneration = 0
   #backfillChanges: Set<string> | undefined
 
-  constructor(api: GmailApi, store: MailStore, state: AccountState, log: Logger) {
+  constructor(
+    api: GmailApi,
+    store: MailStore,
+    state: AccountState,
+    log: Logger,
+    signal?: AbortSignal,
+  ) {
     this.#api = api
     this.#store = store
     this.#state = state
     this.#log = log
+    this.#signal = signal
   }
 
   /** First run: remember where history starts, before backfilling, so nothing is missed. */
   async start(): Promise<void> {
     await this.syncLabels()
+    this.#signal?.throwIfAborted()
     if (!this.#state.cursor().historyId) {
-      const profile = await this.#api.profile()
+      const profile = await this.#api.profile(this.#signal)
+      this.#signal?.throwIfAborted()
       this.#state.saveCursor({ historyId: profile.historyId })
       this.#state.saveBackfill({
         phase: 'recent',
@@ -99,7 +110,8 @@ export class GmailAccountSync {
   }
 
   async syncLabels(): Promise<void> {
-    const labels = await this.#api.labels()
+    const labels = await this.#api.labels(this.#signal)
+    this.#signal?.throwIfAborted()
     this.#store.syncLabels(this.#state.accountId, labels.map(toIncomingLabel))
   }
 
@@ -121,7 +133,8 @@ export class GmailAccountSync {
     let latest = startId
 
     do {
-      const page = await this.#api.history(startId, pageToken)
+      const page = await this.#api.history(startId, pageToken, false, this.#signal)
+      this.#signal?.throwIfAborted()
       if (!page) {
         await this.#resync()
         return 0
@@ -165,7 +178,10 @@ export class GmailAccountSync {
       added.set(id, null)
       return false
     })
-    const current = await mapLimit(known, FETCH_CONCURRENCY, (id) => this.#api.getMessageState(id))
+    const current = await mapLimit(known, FETCH_CONCURRENCY, (id) =>
+      this.#api.getMessageState(id, false, this.#signal),
+    )
+    this.#signal?.throwIfAborted()
     if (this.#store.writeEpoch(account) !== epoch) return 0
     let changes = 0
     for (const id of deleted) {
@@ -183,6 +199,7 @@ export class GmailAccountSync {
     }
     changes += await this.#fetchAndStore([...added.keys()], true, undefined, added)
 
+    this.#signal?.throwIfAborted()
     if (this.#store.writeEpoch(account) !== epoch) return changes
     this.#state.saveCursor({ historyId: latest })
     if (changes > 0)
@@ -203,13 +220,18 @@ export class GmailAccountSync {
 
   async #scanPage(generation: number, changed: Set<string>): Promise<boolean> {
     const state = this.#state.backfill()
+    this.#signal?.throwIfAborted()
     if (!state.phase || state.phase === 'done') return false
 
-    const page = await this.#api.listMessages({
-      pageToken: state.pageToken ?? undefined,
-      q: state.phase === 'recent' ? RECENT_QUERY : undefined,
-      maxResults: 500,
-    })
+    const page = await this.#api.listMessages(
+      {
+        pageToken: state.pageToken ?? undefined,
+        q: state.phase === 'recent' ? RECENT_QUERY : undefined,
+        maxResults: 500,
+      },
+      this.#signal,
+    )
+    this.#signal?.throwIfAborted()
     if (generation !== this.#scanGeneration) return true
     const ids = (page.messages ?? []).map((m) => m.id)
     const missing = ids.filter((id) => !this.#store.hasMessage(this.#state.accountId, id))
@@ -218,7 +240,10 @@ export class GmailAccountSync {
       const epoch = this.#store.writeEpoch(account)
       const missingSet = new Set(missing)
       const known = ids.filter((id) => !missingSet.has(id))
-      const labels = await mapLimit(known, FETCH_CONCURRENCY, (id) => this.#api.getMessageState(id))
+      const labels = await mapLimit(known, FETCH_CONCURRENCY, (id) =>
+        this.#api.getMessageState(id, false, this.#signal),
+      )
+      this.#signal?.throwIfAborted()
       if (this.#store.writeEpoch(account) !== epoch || generation !== this.#scanGeneration)
         return true
       for (const [index, id] of known.entries()) {
@@ -228,6 +253,7 @@ export class GmailAccountSync {
       }
     }
     const stored = await this.#fetchAndStore(missing, false, { generation, changed })
+    this.#signal?.throwIfAborted()
     if (generation !== this.#scanGeneration) return true
     if (state.phase === 'all') for (const id of ids) this.#seen.add(id)
 
@@ -241,6 +267,7 @@ export class GmailAccountSync {
       this.#seen.clear()
     } else {
       if (!(await this.#finishAllPhase(state, generation, changed))) return true
+      this.#signal?.throwIfAborted()
       if (generation !== this.#scanGeneration) return true
       next.phase = 'done'
       next.pageToken = null
@@ -262,8 +289,9 @@ export class GmailAccountSync {
       const epoch = this.#store.writeEpoch(this.#state.accountId)
       const chunk = ids.slice(i, i + STORE_CHUNK)
       const messages = await mapLimit(chunk, FETCH_CONCURRENCY, (id) =>
-        this.#api.getMessage(id, perMessage),
+        this.#api.getMessage(id, perMessage, this.#signal),
       )
+      this.#signal?.throwIfAborted()
       if (epoch !== this.#store.writeEpoch(this.#state.accountId)) {
         i -= STORE_CHUNK
         continue
@@ -292,7 +320,8 @@ export class GmailAccountSync {
 
   /** History is gone (Gmail keeps about a week): start from now and rescan everything. */
   async #resync(): Promise<void> {
-    const profile = await this.#api.profile()
+    const profile = await this.#api.profile(this.#signal)
+    this.#signal?.throwIfAborted()
     this.#log.warn({ account: this.#state.accountId }, 'gmail history expired; resyncing')
     this.#state.saveCursor({ historyId: profile.historyId })
     this.#state.saveBackfill({
@@ -325,8 +354,9 @@ export class GmailAccountSync {
     const epoch = this.#store.writeEpoch(this.#state.accountId)
     const missing = local.map((row) => row.provider_id).filter((id) => !this.#seen.has(id))
     const current = await mapLimit(missing, FETCH_CONCURRENCY, (id) =>
-      this.#api.getMessageState(id),
+      this.#api.getMessageState(id, false, this.#signal),
     )
+    this.#signal?.throwIfAborted()
     if (
       generation !== this.#scanGeneration ||
       epoch !== this.#store.writeEpoch(this.#state.accountId)

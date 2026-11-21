@@ -1,8 +1,52 @@
 # Agent permissions in M6
 
-Design for [#9](https://github.com/ralfboltshauser/agent-mail-client/issues/9) and [M6](https://github.com/ralfboltshauser/agent-mail-client/issues/30). The Engine owns authorization. The Harness allow-list is a second check.
+This page records the external grant contract shipped in M6 v1 and the later runner design for [#9](https://github.com/ralfboltshauser/agent-mail-client/issues/9) and [M6](https://github.com/ralfboltshauser/agent-mail-client/issues/30). The Engine owns authorization. The Harness allow-list is a second check.
 
-## Grants and tool exposure
+## Shipped in M6 v1
+
+A paired owner CLI or desktop Client with `admin` can create, list and revoke Agent grants. From the CLI:
+
+```sh
+amc token create --agent <name> --expires <1d–90d> [--scopes read,organize,draft] [--account <id>]
+amc token list
+amc token revoke <id>
+```
+
+`--agent` and `--expires` are required. The default scopes are `read,draft`.
+Omit `--account` to grant the selected scopes across Accounts, or give one Account ID
+to cap the grant there. The CLI prints the bearer once. The Engine stores its hash,
+requires an expiry for Agent tokens, and revoked the previous Agent tokens in migration
+v10. Agent tokens cannot hold `admin` or `send`. Keep the paired-owner kind and
+`admin` checks together on Account administration if a future token kind can hold
+`admin`.
+
+The Engine counts up to 60 Thread or draft writes per token in each fixed clock minute.
+Each Thread in a batch consumes one write and each draft create or update consumes one.
+M6 v1 records write attempts that reach the Agent action handler after authentication,
+tool exposure and input validation. The log includes handler-level rejections, queued
+and finished Organise writes, and local draft write successes or failures. Reads,
+invalid tool inputs and requests rejected before the handler create no log entry.
+Entries include the token name, tool, Thread IDs, time, outcome and related mutation
+or draft IDs when available. They exclude draft content, raw mail and bearer secrets.
+The owner can review these writes in Agent activity and undo supported Organise changes.
+
+Gmail draft mirror retries are Engine work and can continue after the Agent grant
+expires. Organise checks the grant again before provider writeback. Draft-only grants
+get an ID, revision and status receipt, and can update a draft they created under that
+grant.
+
+Newer milestones add grants beyond the M6 external CLI flags, including short-lived
+internal triage grants and Thread-scoped T3 Handoff grants. See the
+[T3 Handoff runbook](../runbook.md#t3-handoff) for the current desktop workflow.
+
+## Deferred runner design
+
+The sections below describe the planned job-level contract. Mandatory Account sets,
+30-minute external job grants, immutable per-job operation and target metadata,
+audit of every invocation, workflow-wide rate limits and Agent send approvals were
+outside the M6 v1 external grant contract.
+
+### Grants and tool exposure
 
 | Scope | Capabilities |
 | --- | --- |
@@ -19,17 +63,13 @@ Hard delete and unsubscribe stay outside Agent scopes. Unsubscribe can send mail
 - Use one Engine operation registry for discovery and dispatch across MCP, HTTP and CLI, including batch items and queued work. Validate the grant on every Agent request. Authorize every action against the stored job and resolve all target Accounts at execution. Constrain reads before search, paging, joins and counts. Reject a direct call to an absent tool and reject an unauthorized batch in full before mutating.
 - Before opening M6 Agent endpoints, revoke all pre-M6 Agent tokens in the migration. Owners may explicitly approve fresh grants. Every Agent surface rejects missing expiry, empty or missing Account ceilings, and missing or invalid job metadata, including for tokens restored from older data. [Current authentication](../../apps/engine/src/auth/tokens.ts) · [Current token API](../../apps/engine/src/http/tokens.ts)
 
-M6 checks a draft's current From Account against the Agent's Account ceiling. Draft-only grants receive a write receipt with the draft ID, revision and status. They can update drafts they created under that grant.
-
-The organise queue rechecks the Agent grant immediately before starting a Gmail mutation. Replica event streams recheck the grant before each event and periodically while idle. The Engine owns Gmail draft mirroring after a draft is saved locally. Mirror retries can continue after the grant expires or is revoked.
-
-## Dangerously Allow Send
+### Dangerously Allow Send
 
 Only the confirmed desktop owner action may change the setting. Notify the owner when it is enabled. Unattended jobs are always send-free. An interactive Agent needs a live send grant and a separate, single-use desktop approval bound to the job, Account, draft ID, immutable draft version and exact recipient envelope (To, Cc and Bcc). Any edit invalidates the approval. Atomically consume it at enqueue, freeze the approved payload, and recheck grant, version, envelope and toggle before starting provider dispatch. Apply the gate to MCP, HTTP, `amc`, batches, the outbox and retries. The regular paired CLI and Composer Link cannot send. Desktop owner send is independent. [ADR 0001](../adr/0001-agents-cannot-send-by-construction.md)
 
 On disable, atomically revoke send-bearing Agent grants, invalidate affected internal sessions and their approvals, and cancel pending Agent sends. The forwarder closes affected MCP connections and the runner terminates the affected Harness processes, discards their tool schemas and closes their UI sessions before acknowledging completion. Serialize disable, draft edits and grant revocation with outbox claims and provider dispatch start. Record already-started attempts and reconcile ambiguous provider outcomes before retrying. Fresh discovery omits Send. External Clients may cache an old schema, but the Engine rejects every stale call, including after restart or re-enable. Any fresh send requires a new session, grant and approval.
 
-## Action history, undo and limits
+### Action history, undo and limits
 
 Write every invocation outcome against the run and token ID in `agent_action`. Record tool, target, timestamp, result and mutation ID. Store minimal sanitized arguments and before/after state for reversible changes. Exclude bearer secrets and raw read results. Persist the successful mutation, undo data and writeback enqueue atomically. The desktop shows attribution and status, including rejected and failed writes.
 
@@ -37,7 +77,7 @@ Undo is an owner-authorized, idempotent compensating mutation through the M3 wri
 
 Start with two internal runs at once, 20 starts per workflow per hour, 60 tool calls and 20 reversible writes per grant per minute. Count by workflow or external Client as well as by token so reissuing a token cannot reset the budget. Bound batch size, result bytes and affected objects. If enabled, cap Engine-wide Agent sends at one per minute and five per hour initially. Enforce counters atomically before mutations, return a retry delay, and keep provider quota handling separate. These are starting values for M6.
 
-## ADR 0001 regression suite
+### ADR 0001 regression suite
 
 Use a fake Engine database, fake Gmail and SMTP dispatch, and a captured provider-call counter.
 

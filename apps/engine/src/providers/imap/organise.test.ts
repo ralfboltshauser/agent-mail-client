@@ -289,6 +289,24 @@ it.each([
   },
 )
 
+it('undoes the last IMAP change after an explicit no-op unstar', async () => {
+  const { imap, view, run } = await fixture()
+  await run({ kind: 'archive' })
+  expect(await run({ kind: 'star', value: false })).toMatchObject({
+    status: 'applied',
+    messages: [],
+  })
+  expect(view()?.messages[0]?.labelIds).toEqual(['a:ARCHIVE'])
+  expect(await run({ kind: 'undo' })).toMatchObject({ status: 'applied' })
+  expect(view()?.messages[0]).toMatchObject({ labelIds: ['a:INBOX'], unread: true })
+  expect(imap.writes.map(({ command }) => command)).toEqual(['UID MOVE', 'UID MOVE'])
+
+  await run({ kind: 'mute', value: true })
+  await run({ kind: 'star', value: false })
+  expect(await run({ kind: 'undo' })).toMatchObject({ status: 'applied' })
+  expect(view()?.muted).toBe(false)
+})
+
 it('refuses to undo a mute touched by a newer owner client', async () => {
   const { queue, view, run, enqueue, threadId } = await fixture()
   await run({ kind: 'mute', value: true })

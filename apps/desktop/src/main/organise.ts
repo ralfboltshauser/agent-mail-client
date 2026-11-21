@@ -161,9 +161,20 @@ export class LocalOrganise {
       const row = this.#db
         .prepare(
           `SELECT q.* FROM organise_queue q
+         LEFT JOIN thread t ON t.id = q.thread_id
+         LEFT JOIN account a ON a.id = t.account_id
          WHERE q.status != 'failed' AND q.undo_of IS NULL
            AND json_extract(q.request, '$.action.kind') != 'undo'
            AND (?1 IS NULL OR q.thread_id = ?1)
+           AND NOT (
+             COALESCE(json_extract(a.data, '$.kind') = 'imap', 0)
+             AND q.status = 'applied' AND q.messages IS NOT NULL
+             AND json_extract(q.request, '$.action.kind') IN ('read', 'star')
+             AND NOT EXISTS (
+               SELECT 1 FROM json_each(q.messages) j
+               WHERE json_array_length(j.value, '$.appliedLabels') > 0
+             )
+           )
            AND NOT EXISTS (SELECT 1 FROM organise_queue u WHERE u.undo_of = q.id AND u.status != 'failed')
          ORDER BY q.seq DESC LIMIT 1`,
         )
