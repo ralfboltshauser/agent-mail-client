@@ -1,6 +1,6 @@
 import type { AgentAction } from '@amc/protocol'
-import { Activity } from 'lucide-react'
-import { useState } from 'react'
+import { Activity, CircleAlert } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -8,23 +8,32 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from '@/components/ui/dialog'
-import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from '@/components/ui/sidebar'
+import { getAmc } from '@/lib/amc'
+import { MailLoading, MailState } from './mail-state'
+import { Badge } from './ui/badge'
 
-export function AgentActivity() {
+export function AgentActivity({
+  open,
+  onOpenChange,
+  onCloseAutoFocus,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onCloseAutoFocus: (event: Event) => void
+}) {
   const [actions, setActions] = useState<AgentAction[]>([])
   const [cursor, setCursor] = useState<number>()
   const [next, setNext] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  async function load(before?: number, undoId?: string) {
+  const load = useCallback(async (before?: number, undoId?: string) => {
     setBusy(true)
     setError(null)
     try {
-      if (undoId) await window.amc.undoAgentAction(undoId)
-      const page = await window.amc.agentActivity(before)
+      if (undoId) await getAmc().undoAgentAction(undoId)
+      const page = await getAmc().agentActivity(before)
       setActions(page.actions)
       setCursor(before)
       setNext(page.nextBefore)
@@ -33,25 +42,15 @@ export function AgentActivity() {
     } finally {
       setBusy(false)
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    if (open) void load()
+  }, [open, load])
 
   return (
-    <Dialog
-      onOpenChange={(open) => {
-        if (open) void load()
-      }}
-    >
-      <SidebarMenu>
-        <SidebarMenuItem>
-          <DialogTrigger asChild>
-            <SidebarMenuButton tooltip="Agent activity">
-              <Activity aria-hidden="true" />
-              <span>Agent activity</span>
-            </SidebarMenuButton>
-          </DialogTrigger>
-        </SidebarMenuItem>
-      </SidebarMenu>
-      <DialogContent className="sm:max-w-xl">
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent onCloseAutoFocus={onCloseAutoFocus} className="sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>Agent activity</DialogTitle>
           <DialogDescription>Review Agent writes and undo organize actions.</DialogDescription>
@@ -70,16 +69,18 @@ export function AgentActivity() {
               Older
             </Button>
           )}
-          {busy && <output className="self-center text-sm text-muted-foreground">Loading…</output>}
         </div>
         {error && (
-          <p role="alert" className="text-sm text-destructive">
+          <MailState icon={CircleAlert} title="Could not load Agent activity" error>
             {error}
-          </p>
+          </MailState>
         )}
         {!actions.length && !busy && !error && (
-          <p className="text-sm text-muted-foreground">No Agent actions yet.</p>
+          <MailState icon={Activity} title="No Agent activity yet">
+            Actions the Agent takes on your mail will appear here.
+          </MailState>
         )}
+        {busy && !actions.length && <MailLoading label="Loading Agent activity" />}
         <ul className="max-h-[50vh] divide-y overflow-y-auto" aria-busy={busy}>
           {actions.map((action) => (
             <li key={action.id} className="flex items-start justify-between gap-3 py-3 text-sm">
@@ -88,7 +89,10 @@ export function AgentActivity() {
                   {action.tokenName} · {action.tool.replaceAll('_', ' ')}
                 </div>
                 <div className="text-muted-foreground">
-                  {new Date(action.createdAt).toLocaleString()} · {action.status}
+                  {new Date(action.createdAt).toLocaleString()}{' '}
+                  <Badge variant="secondary" className="ml-1 capitalize">
+                    {action.status}
+                  </Badge>
                 </div>
                 {action.error && <div className="text-destructive">{action.error}</div>}
                 {action.threads.map((thread) => {
