@@ -33,7 +33,7 @@ type MessageWithBody<Body extends string | null> = Omit<MessageDetail, 'bodyText
   bodyText: Body
 }
 
-interface MessageRow<Body extends string | null> {
+interface MessageRow {
   id: string
   thread_id: string
   account_id: string
@@ -46,7 +46,7 @@ interface MessageRow<Body extends string | null> {
   reply_to_json: string
   subject: string
   snippet: string
-  body_text: Body
+  body_text: Uint8Array | null
   body_search_truncated: number
   html_blob: string | null
   sent_at: number
@@ -108,9 +108,13 @@ export class MailQueries {
 
   readonly #inbox: string
   readonly #threadColumns: string
+  readonly #readAgentBody: ReturnType<Db['prepare']>
 
   constructor(db: Db, snoozeEnabled = false) {
     this.db = db
+    this.#readAgentBody = db.prepare(
+      'SELECT substr(CAST(body_text AS BLOB), 1, ?) AS body FROM message WHERE id = ?',
+    )
     // Old Gmail summaries may have suppressed Inbox membership while Snooze was enabled.
     this.#inbox = snoozeEnabled
       ? '(t.in_inbox AND t.snoozed_until IS NULL)'
@@ -224,7 +228,7 @@ export class MailQueries {
     return { threads: page, nextBefore: rows.length > limit && last ? last.lastMessageAt : null }
   }
 
-  thread(id: string): ThreadDetail | null {
+  thread(id: string, deferBodies = false): ThreadDetail | null {
     const thread = this.threadSummary(id)
     if (!thread) return null
     return {
@@ -232,10 +236,12 @@ export class MailQueries {
       messages: this.#messages<string | null>(
         'm.thread_id = ?1 ORDER BY m.sent_at, m.id',
         [id],
-        `CASE WHEN m.unread = 1 OR m.id IN (
+        deferBodies
+          ? `CASE WHEN m.unread = 1 OR m.id IN (
            SELECT id FROM message WHERE thread_id = ?1
            ORDER BY sent_at DESC, id DESC LIMIT ${RECENT_THREAD_BODIES}
-         ) THEN m.body_text END`,
+         ) THEN m.body_text END`
+          : 'm.body_text',
       ),
     }
   }
@@ -249,23 +255,35 @@ export class MailQueries {
     const thread = this.threadSummary(id)
     if (!thread) return null
     const messages = this.#messages<null>('m.thread_id = ? ORDER BY m.sent_at, m.id', [id], 'NULL')
-    const readBody = this.db.prepare(
-      'SELECT substr(CAST(body_text AS BLOB), 1, ?) AS body FROM message WHERE id = ?',
-    )
     let remaining = threadLimit
     return {
       ...thread,
-      messages: messages.map((message) => {
-        const limit = Math.min(messageLimit, remaining)
-        // Read enough UTF-8 bytes for the allowed text and one extra character to detect truncation.
-        const row = readBody.get(4 * (limit + 1), message.id) as { body: Uint8Array }
-        const body = Buffer.from(row.body).toString('utf8')
-        remaining -= Math.min(body.length, limit)
-        return {
-          ...message,
-          bodyText: body.length > limit ? `${body.slice(0, limit)}\n[…truncated]` : body,
-        }
-      }),
+      messages: messages
+        .reverse()
+        .map((message) => {
+          const { bodyText, length } = this.#agentBody(
+            message.id,
+            Math.min(messageLimit, remaining),
+          )
+          remaining -= length
+          return { ...message, bodyText }
+        })
+        .reverse(),
+    }
+  }
+
+  agentMessage(id: string, limit: number): MessageDetail | null {
+    const [message] = this.#messages<null>('m.id = ?', [id], 'NULL')
+    return message ? { ...message, bodyText: this.#agentBody(id, limit).bodyText } : null
+  }
+
+  #agentBody(id: string, limit: number): { bodyText: string; length: number } {
+    // Read enough UTF-8 bytes for the allowed text and one extra character to detect truncation.
+    const row = this.#readAgentBody.get(4 * (limit + 1), id) as { body: Uint8Array | null }
+    const body = row.body ? Buffer.from(row.body).toString('utf8') : ''
+    return {
+      bodyText: body.length > limit ? `${body.slice(0, limit)}\n[…truncated]` : body,
+      length: Math.min(body.length, limit),
     }
   }
 
@@ -330,12 +348,12 @@ export class MailQueries {
     const rows = this.db
       .prepare(
         `SELECT m.id, m.thread_id, m.account_id, m.rfc_message_id, m.in_reply_to, m.from_json, m.to_json,
-                m.cc_json, m.bcc_json, m.reply_to_json, m.subject, m.snippet, ${body} AS body_text, m.html_blob,
+                m.cc_json, m.bcc_json, m.reply_to_json, m.subject, m.snippet, CAST(${body} AS BLOB) AS body_text, m.html_blob,
                 CASE WHEN m.body_search_limit IS NOT NULL THEN length(m.body_text) > m.body_search_limit ELSE 0 END AS body_search_truncated,
                 m.sent_at, m.unread, m.starred, m.label_ids, m.list_unsubscribe
          FROM message m WHERE ${where}`,
       )
-      .all(...params) as unknown as MessageRow<Body>[]
+      .all(...params) as unknown as MessageRow[]
     const attachments = this.db.prepare(
       'SELECT id, filename, mime_type, size, inline, content_id FROM attachment WHERE message_id = ? ORDER BY id',
     )
@@ -353,7 +371,7 @@ export class MailQueries {
         replyTo: JSON.parse(m.reply_to_json) as Address[],
         subject: m.subject,
         snippet: m.snippet,
-        bodyText: m.body_text,
+        bodyText: (m.body_text === null ? null : Buffer.from(m.body_text).toString('utf8')) as Body,
         bodySearchTruncated: Boolean(m.body_search_truncated),
         hasHtml: m.html_blob !== null,
         sentAt: m.sent_at,

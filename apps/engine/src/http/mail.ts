@@ -222,7 +222,7 @@ export function mailRoutes(deps: MailDeps) {
   })
 
   r.get('/threads/:id', requireScope('read'), (c) => {
-    const thread = queries.thread(c.req.param('id'))
+    const thread = queries.thread(c.req.param('id'), c.req.query('deferBodies') === '1')
     return thread ? c.json(thread) : c.json({ error: 'not_found', message: 'No such Thread' }, 404)
   })
 
@@ -237,8 +237,9 @@ export function mailRoutes(deps: MailDeps) {
   })
 
   r.get('/messages/:id', requireScope('read'), (c) => {
+    const { accountId } = c.get('principal')
     const message = queries.message(c.req.param('id'))
-    return message
+    return message && (!accountId || message.accountId === accountId)
       ? c.json(message)
       : c.json({ error: 'not_found', message: 'No such message' }, 404)
   })

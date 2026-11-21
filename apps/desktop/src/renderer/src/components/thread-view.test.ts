@@ -7,13 +7,26 @@ import { expect, it, vi } from 'vitest'
 import { Replica } from '../../../main/replica'
 import { ThreadView } from './thread-view'
 
-it('reveals old headers and loads one complete body from the replica on expansion', async () => {
+it('loads and refreshes a complete deferred body while its message stays expanded', async () => {
   const replica = new Replica(':memory:')
   const root = createRoot(document.body)
   const longBody = 'Long message text. '.repeat(20_000)
   const messageText = vi.fn(async (id: string) => replica.messageText(id))
   vi.stubGlobal('amc', { messageText })
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+
+  const render = async () => {
+    await act(async () =>
+      root.render(
+        createElement(ThreadView, {
+          data: replica.thread('thread'),
+          labelNames: new Map(),
+          snoozeEnabled: false,
+          scrollRef: createRef<HTMLDivElement>(),
+        }),
+      ),
+    )
+  }
 
   try {
     const thread = ThreadSummary.parse({
@@ -73,16 +86,7 @@ it('reveals old headers and loads one complete body from the replica on expansio
       'Body 5',
       'Body 6',
     ])
-    await act(async () =>
-      root.render(
-        createElement(ThreadView, {
-          data,
-          labelNames: new Map(),
-          snoozeEnabled: false,
-          scrollRef: createRef<HTMLDivElement>(),
-        }),
-      ),
-    )
+    await render()
     expect(document.body.textContent).toContain('Body 3')
     expect(document.body.textContent).toContain('Body 6')
     expect(document.body.textContent).not.toContain('Preview 1')
@@ -102,6 +106,15 @@ it('reveals old headers and loads one complete body from the replica on expansio
     await act(async () => firstMessage?.click())
     expect(messageText.mock.calls).toEqual([['1']])
     expect(document.body.textContent).toContain(`${longBody}End 1`)
+
+    const original = data?.messages[0]
+    expect(original).toBeDefined()
+    replica.put('message', MessageDetail.parse({ ...original, bodyText: `${longBody}Updated 1` }))
+    await render()
+    expect(firstMessage?.getAttribute('aria-expanded')).toBe('true')
+    expect(messageText.mock.calls).toEqual([['1'], ['1']])
+    expect(document.body.textContent).toContain(`${longBody}Updated 1`)
+    expect(document.body.textContent).not.toContain('End 1')
   } finally {
     await act(async () => root.unmount())
     vi.unstubAllGlobals()

@@ -34,9 +34,11 @@ export interface ThreadQuery {
   limit?: number
 }
 
+export type ReplicaThreadMessage = ThreadMessage & { bodyRevision: string }
+
 export interface ThreadWithMessages {
   thread: ThreadSummary
-  messages: ThreadMessage[]
+  messages: ReplicaThreadMessage[]
   drafts: Draft[]
 }
 

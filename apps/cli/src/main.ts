@@ -160,7 +160,7 @@ program
   .option('--json', 'print JSON')
   .action(async (id: string, opts: { json?: boolean }) => {
     const api = authed(requireConfig())
-    const t = await api<ThreadDetail>(`/v1/threads/${encodeURIComponent(id)}`)
+    const t = await api<ThreadDetail>(`/v1/threads/${encodeURIComponent(id)}?deferBodies=1`)
     if (!opts.json) console.log(`# ${t.subject || '(no subject)'}\n`)
     for (const m of t.messages) {
       if (m.bodyText === null) {

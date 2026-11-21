@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import type {
   AccountSummary,
@@ -7,11 +8,10 @@ import type {
   SyncChange,
   SyncData,
   SyncEntity,
-  ThreadMessage,
   ThreadSummary,
 } from '@amc/protocol'
 import { RECENT_THREAD_BODIES } from '@amc/protocol'
-import type { Counts, ThreadQuery, ThreadWithMessages } from '../shared/api'
+import type { Counts, ReplicaThreadMessage, ThreadQuery, ThreadWithMessages } from '../shared/api'
 import { LocalDraftUpdates } from './draft-updates'
 import { LocalOrganise, ORGANISE_SCHEMA } from './organise'
 
@@ -47,7 +47,7 @@ export class Replica {
     // Existing rows keep their embedded body until the next upsert.
     const messageColumns = this.db.prepare('PRAGMA table_info(message)').all()
     if (!messageColumns.some((column) => column.name === 'body_text')) {
-      this.db.exec('ALTER TABLE message ADD COLUMN body_text TEXT')
+      this.db.exec('ALTER TABLE message ADD COLUMN body_text BLOB')
     }
     this.db.exec(ORGANISE_SCHEMA)
     const columns = this.db.prepare('PRAGMA table_info(organise_queue)').all()
@@ -148,11 +148,13 @@ export class Replica {
       case 'message': {
         const m = row as MessageDetail
         const { bodyText, ...metadata } = m
+        const body = Buffer.from(bodyText, 'utf8')
+        const bodyRevision = createHash('sha256').update(body).digest('hex')
         this.db
           .prepare(
             'INSERT OR REPLACE INTO message (id, thread_id, sent_at, data, body_text) VALUES (?, ?, ?, ?, ?)',
           )
-          .run(m.id, m.threadId, m.sentAt, JSON.stringify(metadata), bodyText)
+          .run(m.id, m.threadId, m.sentAt, JSON.stringify({ ...metadata, bodyRevision }), body)
         break
       }
       case 'draft': {
@@ -270,7 +272,9 @@ export class Replica {
            FROM message WHERE thread_id = ? ORDER BY sent_at, id`,
         )
         .all(id) as { data: string }[]
-    ).map((r): ThreadMessage => ({ ...JSON.parse(r.data), bodyText: null }))
+    ).map(
+      (r): ReplicaThreadMessage => ({ bodyRevision: '', ...JSON.parse(r.data), bodyText: null }),
+    )
     const drafts = (
       this.db
         .prepare('SELECT data FROM draft WHERE thread_id = ? ORDER BY updated_at DESC')
@@ -331,10 +335,13 @@ export class Replica {
   messageText(messageId: string): string | null {
     const row = this.db
       .prepare(
-        "SELECT coalesce(body_text, json_extract(data, '$.bodyText')) AS body FROM message WHERE id = ?",
+        'SELECT CAST(body_text AS BLOB) AS body, CASE WHEN body_text IS NULL THEN data END AS legacy FROM message WHERE id = ?',
       )
-      .get(messageId)
-    return (row?.body as string | null | undefined) ?? null
+      .get(messageId) as { body: Uint8Array | null; legacy: string | null } | undefined
+    if (row?.body) return Buffer.from(row.body).toString('utf8')
+    return typeof row?.legacy === 'string'
+      ? (JSON.parse(row.legacy) as MessageDetail).bodyText
+      : null
   }
 
   html(messageId: string): string | null {

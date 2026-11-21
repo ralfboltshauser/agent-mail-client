@@ -1,12 +1,12 @@
 import { INLINE_IMAGE_TYPES } from '@amc/composer'
-import { SNOOZED_LABEL, type ThreadMessage } from '@amc/protocol'
+import { SNOOZED_LABEL } from '@amc/protocol'
 import { FileText, Paperclip, Star } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { fileSize, fullDate, hueFor, initials, listDate, personName } from '@/lib/format'
 import { cn } from '@/lib/utils'
-import type { ThreadWithMessages } from '../../../shared/api'
+import type { ReplicaThreadMessage, ThreadWithMessages } from '../../../shared/api'
 import { HtmlBody, TextBody } from './message-body'
 
 interface Props {
@@ -69,7 +69,7 @@ export function ThreadView({ data, snoozeEnabled, labelNames, scrollRef }: Props
   )
 }
 
-function ThreadMessages({ messages }: { messages: ThreadMessage[] }) {
+function ThreadMessages({ messages }: { messages: ReplicaThreadMessage[] }) {
   const rows = []
   for (let i = 0; i < messages.length; ) {
     const message = messages[i]
@@ -92,7 +92,7 @@ function ThreadMessages({ messages }: { messages: ThreadMessage[] }) {
   return rows
 }
 
-function OlderMessages({ messages }: { messages: ThreadMessage[] }) {
+function OlderMessages({ messages }: { messages: ReplicaThreadMessage[] }) {
   const [shown, setShown] = useState(false)
   return (
     <div className="space-y-3">
@@ -140,7 +140,13 @@ function DeferredText({ id }: { id: string }) {
   return <TextBody text={body} />
 }
 
-function Message({ message: m, defaultOpen }: { message: ThreadMessage; defaultOpen: boolean }) {
+function Message({
+  message: m,
+  defaultOpen,
+}: {
+  message: ReplicaThreadMessage
+  defaultOpen: boolean
+}) {
   const [open, setOpen] = useState(defaultOpen)
   const [html, setHtml] = useState<string | null | undefined>(undefined)
   const isDraft = m.labelIds.some((l) => l.endsWith(':DRAFT'))
@@ -246,7 +252,7 @@ function Message({ message: m, defaultOpen }: { message: ThreadMessage; defaultO
           ) : m.bodyText !== null ? (
             <TextBody text={m.bodyText} />
           ) : (
-            <DeferredText id={m.id} />
+            <DeferredText key={m.bodyRevision} id={m.id} />
           )}
           {m.bodySearchTruncated && (
             <p className="mt-2 text-xs text-muted-foreground">

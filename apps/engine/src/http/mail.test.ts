@@ -101,7 +101,7 @@ const login = {
 }
 
 describe('mail routes', () => {
-  it('defers old read bodies and serves a complete older body by message id', async () => {
+  it('defers old read bodies on request and preserves full bodies for older clients', async () => {
     const { db, store, gmail, call, reader } = setup()
     db.prepare(
       "INSERT INTO account (id, kind, address, credentials, created_at) VALUES ('a', 'gmail', 'owner@example.com', x'00', 0)",
@@ -111,13 +111,13 @@ describe('mail routes', () => {
       const message = gmail.add(`m${n}`, {
         threadId: 'thread',
         labels: n === 2 ? ['INBOX', 'UNREAD'] : ['INBOX'],
-        body: `${body}End ${n}`,
+        body: `${body}\0End ${n}`,
         date: n === 4 ? 3000 : n * 1000,
       })
       store.putMessage('a', ['owner@example.com'], fromGmail(message))
     }
 
-    const response = await call('/v1/threads/a%3Athread', reader)
+    const response = await call('/v1/threads/a%3Athread?deferBodies=1', reader)
     expect(response.status).toBe(200)
     const thread = ThreadDetail.parse(await response.json())
     expect(thread.messages.map((m) => m.id)).toEqual([
@@ -144,7 +144,9 @@ describe('mail routes', () => {
 
     const older = await call('/v1/messages/a%3Am1', reader)
     expect(older.status).toBe(200)
-    expect(MessageDetail.parse(await older.json()).bodyText).toBe(`${body}End 1`)
+    expect(MessageDetail.parse(await older.json()).bodyText).toBe(`${body}\0End 1`)
+    const full = await call('/v1/threads/a%3Athread', reader)
+    expect(ThreadDetail.parse(await full.json()).messages[0]?.bodyText).toBe(`${body}\0End 1`)
     expect((await call('/v1/messages/missing', reader)).status).toBe(404)
   })
 

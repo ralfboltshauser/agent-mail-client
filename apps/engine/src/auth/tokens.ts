@@ -9,6 +9,7 @@ export interface Principal {
   name: string
   scopes: Scope[]
   subject: string | null
+  accountId?: string
 }
 
 interface TokenRow {
