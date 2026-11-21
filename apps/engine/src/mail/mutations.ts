@@ -1425,11 +1425,11 @@ export class Mutations {
     const automatic = intent ? (JSON.parse(row.request) as AutomaticRequest) : undefined
     const waking = this.#isSnoozeExit(row)
     const snoozeSource = waking ? this.#snoozeSource(row) : undefined
-    const snoozeMessages = snoozeSource ? this.#patches(snoozeSource.id) : []
+    const snoozeMessages = snoozeSource ? this.#patches(snoozeSource.id).map(fromPatch) : []
     const snoozeCheckpoint =
       snoozeSource &&
       (this.#intent(snoozeSource.id)?.history_id ??
-        snoozeMessages.map(fromPatch).reduce<string | undefined>((oldest, change) => {
+        snoozeMessages.reduce<string | undefined>((oldest, change) => {
           const revision = change.revisions?.[inbox]
           return revision && (!oldest || this.#historyIncludes(oldest, revision))
             ? revision
@@ -1440,6 +1440,16 @@ export class Mutations {
       : snoozeSource
         ? readJournal(snoozeSource)
         : []
+    const snoozeBaselines = new Map(snoozeMessages.map((change) => [change.message_id, change]))
+    const snoozeArchives = new Map<string, Change>()
+    if (snoozeSource) {
+      for (const { applied, observations } of sourceJournals) {
+        for (const change of observations ?? []) snoozeBaselines.set(change.message_id, change)
+        for (const change of applied) {
+          if (change.after[inbox] === false) snoozeArchives.set(change.message_id, change)
+        }
+      }
+    }
     const save = () => this.#saveJournal(row, journal)
     while (true) {
       const thread = replan ? await this.#gmailThread(api, row) : undefined
@@ -1522,9 +1532,27 @@ export class Mutations {
             historyUnavailable ||=
               !this.#historyIncludes(snoozeCheckpoint, revision) &&
               (!revision || ownerChanged(id, { label: inbox, revision }))
-          } else if (
-            found.events.some((event) => event.label === inbox && ownerChanged(id, event))
-          ) {
+            continue
+          }
+
+          const inboxEvents = found.events.filter(({ label }) => label === inbox)
+          const baseline = snoozeBaselines.get(id)?.revisions?.[inbox]
+          const checkpoint = snoozeArchives.get(id)?.revisions?.[inbox]
+          // An acknowledged message revision can be newer than its Inbox
+          // removal event. Match a single transition within the write bounds.
+          const archiveEvents =
+            baseline && checkpoint
+              ? inboxEvents.filter(
+                  ({ revision }) =>
+                    !this.#historyIncludes(baseline, revision) &&
+                    this.#historyIncludes(checkpoint, revision),
+                )
+              : []
+          const ownArchive =
+            archiveEvents.length === 1 && archiveEvents[0]?.present === false
+              ? archiveEvents[0]
+              : undefined
+          if (inboxEvents.some((event) => event !== ownArchive && ownerChanged(id, event))) {
             entry.wakeConsumed = true
             changes = []
             break
