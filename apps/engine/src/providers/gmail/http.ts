@@ -1,4 +1,4 @@
-import type { AccessTokens } from './oauth.ts'
+import { type AccessTokens, GMAIL_TIMEOUT_MS, OAuthError } from './oauth.ts'
 import { QUOTA_COST, QuotaLimiter } from './ratelimit.ts'
 import type {
   GmailApi,
@@ -38,7 +38,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 type Cost = keyof typeof QUOTA_COST
 
 interface CallOptions {
-  params?: Record<string, string | undefined>
+  params?: Record<string, string | string[] | undefined>
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
   body?: unknown
   cost?: Cost
@@ -56,23 +56,31 @@ export class GmailHttpApi implements GmailApi {
   readonly #tokens: AccessTokens
   readonly #fetch: typeof fetch
   readonly #limiter: QuotaLimiter
+  readonly #timeoutMs: number
   readonly #onRetry: ((info: RetryInfo) => void) | undefined
 
   constructor(
     tokens: AccessTokens,
     fetchImpl: typeof fetch = fetch,
-    options: { limiter?: QuotaLimiter; onRetry?: (info: RetryInfo) => void } = {},
+    options: {
+      limiter?: QuotaLimiter
+      onRetry?: (info: RetryInfo) => void
+      timeoutMs?: number
+    } = {},
   ) {
     this.#tokens = tokens
     this.#fetch = fetchImpl
     this.#limiter = options.limiter ?? new QuotaLimiter()
     this.#onRetry = options.onRetry
+    this.#timeoutMs = options.timeoutMs ?? GMAIL_TIMEOUT_MS
   }
 
   async #call<T>(path: string, options: CallOptions = {}): Promise<T> {
     const url = new URL(BASE + path)
     for (const [key, value] of Object.entries(options.params ?? {})) {
-      if (value !== undefined) url.searchParams.set(key, value)
+      for (const item of Array.isArray(value) ? value : [value]) {
+        if (item !== undefined) url.searchParams.append(key, item)
+      }
     }
 
     let refreshed = false
@@ -81,24 +89,36 @@ export class GmailHttpApi implements GmailApi {
         QUOTA_COST[options.cost ?? 'get'] ?? 5,
         options.urgent ?? (options.cost !== 'get' && options.cost !== 'list'),
       )
-      const res = await this.#fetch(url, {
-        method: options.method ?? 'GET',
-        ...(options.writeback ? { signal: AbortSignal.timeout(15_000) } : {}),
-        headers: {
-          Authorization: `Bearer ${await this.#tokens.get()}`,
-          ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-        },
-        ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
-      })
+      let res: Response
+      let text: string
+      try {
+        const token = await this.#tokens.get()
+        res = await this.#fetch(url, {
+          method: options.method ?? 'GET',
+          signal: AbortSignal.timeout(this.#timeoutMs),
+          headers: {
+            Authorization: `Bearer ${token}`,
+            ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+          },
+          ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
+        })
+        text = await res.text()
+      } catch (error) {
+        if (options.writeback || options.method || attempt >= 8 || error instanceof OAuthError)
+          throw error
+        await this.#delay(path, 0, attempt)
+        continue
+      }
       if (res.ok) {
         this.#limiter.reward()
-        if (res.status === 204) return undefined as T
-        const text = await res.text()
         return (text ? JSON.parse(text) : undefined) as T
       }
 
-      const body = (await res.json().catch(() => ({}))) as {
-        error?: { message?: string; errors?: { reason?: string }[] }
+      let body: { error?: { message?: string; errors?: { reason?: string }[] } } = {}
+      try {
+        body = JSON.parse(text) ?? {}
+      } catch {
+        // A proxy can return an error page in place of a Gmail error object.
       }
       const reason = body.error?.errors?.[0]?.reason ?? ''
       const message = body.error?.message ?? res.statusText
@@ -117,14 +137,13 @@ export class GmailHttpApi implements GmailApi {
       const retryAfter = Number(res.headers.get('retry-after'))
       const retryAfterMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 0
       const retryable =
-        quota || res.status >= 500 || (res.status === 403 && reason === 'backendError')
+        quota ||
+        res.status === 408 ||
+        res.status >= 500 ||
+        (res.status === 403 && reason === 'backendError')
       if (retryable && attempt < 8 && !options.writeback) {
         if (quota) this.#limiter.penalize()
-        // Per-minute quotas need waits on the scale of the minute window.
-        const base = quota ? Math.min(5_000 * (attempt + 1), 60_000) : 2 ** attempt * 500
-        const delayMs = (retryAfterMs || base) + Math.random() * 250
-        this.#onRetry?.({ path, status: res.status, delayMs, rate: this.#limiter.rate })
-        await sleep(delayMs)
+        await this.#delay(path, res.status, attempt, quota, retryAfterMs)
         continue
       }
       if (quota) this.#limiter.penalize()
@@ -135,6 +154,13 @@ export class GmailHttpApi implements GmailApi {
         retryAfterMs,
       )
     }
+  }
+
+  async #delay(path: string, status: number, attempt: number, quota = false, retryAfterMs = 0) {
+    const base = quota ? Math.min(5_000 * (attempt + 1), 60_000) : 2 ** attempt * 500
+    const delayMs = (retryAfterMs || base) + Math.random() * 250
+    this.#onRetry?.({ path, status, delayMs, rate: this.#limiter.rate })
+    await sleep(delayMs)
   }
 
   profile() {
@@ -170,10 +196,16 @@ export class GmailHttpApi implements GmailApi {
     }
   }
 
-  async history(startHistoryId: string, pageToken?: string) {
+  async history(startHistoryId: string, pageToken?: string, writeback = false) {
     try {
       return await this.#call<GmailHistoryList>('/history', {
-        params: { startHistoryId, pageToken, maxResults: '500' },
+        params: {
+          startHistoryId,
+          pageToken,
+          maxResults: '500',
+          historyTypes: writeback ? ['labelAdded', 'labelRemoved', 'messageDeleted'] : undefined,
+        },
+        writeback,
         cost: 'history',
       })
     } catch (error) {
@@ -218,11 +250,12 @@ export class GmailHttpApi implements GmailApi {
     }
   }
 
-  batchModify(ids: string[], addLabelIds: string[], removeLabelIds: string[]): Promise<void> {
-    return this.#call('/messages/batchModify', {
+  modifyMessage(id: string, addLabelIds: string[], removeLabelIds: string[]) {
+    return this.#call<GmailMessageState>(`/messages/${encodeURIComponent(id)}/modify`, {
       method: 'POST',
-      body: { ids, addLabelIds, removeLabelIds },
-      cost: 'batchModify',
+      params: { fields: 'labelIds,historyId' },
+      body: { addLabelIds, removeLabelIds },
+      cost: 'modify',
       urgent: true,
       writeback: true,
     })
@@ -232,6 +265,7 @@ export class GmailHttpApi implements GmailApi {
     const action = trashed ? 'trash' : 'untrash'
     return this.#call<GmailMessageState>(`/messages/${encodeURIComponent(id)}/${action}`, {
       method: 'POST',
+      params: { fields: 'labelIds,historyId' },
       cost: action,
       urgent: true,
       writeback: true,

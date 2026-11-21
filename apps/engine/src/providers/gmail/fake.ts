@@ -32,6 +32,7 @@ export class FakeGmail implements GmailApi {
   >()
   /** History older than this id is "expired" (Gmail answers 404). */
   oldestHistory = 0
+  historyPageSize = 500
   calls = { getMessage: 0, list: 0 }
   trashFailure: { afterWrite: boolean; error: Error } | undefined
   batchFailure: { applied: number; error: Error } | undefined
@@ -194,6 +195,13 @@ export class FakeGmail implements GmailApi {
     return snapshot
   }
 
+  async modifyMessage(id: string, addLabelIds: string[], removeLabelIds: string[]) {
+    // Capture the acknowledgement at commit, before test hooks can interleave owner edits.
+    const result = await this.batchModify([id], addLabelIds, removeLabelIds)
+    if (!result) throw new GmailHttpError(404, 'notFound', 'Message no longer exists')
+    return result
+  }
+
   async batchModify(ids: string[], addLabelIds: string[], removeLabelIds: string[]) {
     this.beforeWrite?.({ kind: 'batch', ids, add: addLabelIds, remove: removeLabelIds })
     const failure = this.batchFailure
@@ -208,6 +216,8 @@ export class FakeGmail implements GmailApi {
         )
     }
     if (failure) throw failure.error
+    const message = this.messages.get(ids[0] ?? '')
+    return message && { labelIds: [...(message.labelIds ?? [])], historyId: message.historyId }
   }
 
   async setTrashed(id: string, trashed: boolean): Promise<GmailMessageState> {
@@ -226,14 +236,28 @@ export class FakeGmail implements GmailApi {
 
   async createLabel(name: string): Promise<GmailLabel> {
     const label = { id: `Label_${this.labelList.length}`, name, type: 'user' as const }
+    if (this.labelList.some((existing) => existing.name === name))
+      throw new GmailHttpError(409, 'conflict', 'Label already exists')
     this.labelList.push(label)
     return label
   }
 
-  async history(startHistoryId: string): Promise<GmailHistoryList | null> {
-    if (Number(startHistoryId) < this.oldestHistory) return null
+  async history(
+    startHistoryId: string,
+    pageToken?: string,
+    writeback = false,
+  ): Promise<GmailHistoryList | null> {
+    if (BigInt(startHistoryId) < BigInt(this.oldestHistory)) return null
+    const records = this.#history.filter(
+      (record) =>
+        BigInt(record.id) > BigInt(startHistoryId) &&
+        (!writeback || record.labelsAdded || record.labelsRemoved || record.messagesDeleted),
+    )
+    const offset = Number(pageToken ?? 0)
+    const end = offset + this.historyPageSize
     return {
-      history: this.#history.filter((h) => Number(h.id) > Number(startHistoryId)),
+      history: records.slice(offset, end),
+      ...(end < records.length ? { nextPageToken: String(end) } : {}),
       historyId: String(this.#historyId),
     }
   }

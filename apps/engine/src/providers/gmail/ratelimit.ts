@@ -97,6 +97,7 @@ export const QUOTA_COST = {
   draftUpdate: 15,
   draftDelete: 10,
   batchModify: 50,
+  modify: 5,
   trash: 20,
   untrash: 5,
   labelCreate: 5,

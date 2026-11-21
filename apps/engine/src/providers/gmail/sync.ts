@@ -1,3 +1,4 @@
+import { SNOOZED_LABEL } from '@amc/protocol'
 import type { Logger } from '../../log.ts'
 import { type MailStore, messageId } from '../../mail/store.ts'
 import { fromGmail } from './mapping.ts'
@@ -101,6 +102,18 @@ export class GmailAccountSync {
   async syncLabels(): Promise<void> {
     const labels = await this.#api.labels()
     this.#store.syncLabels(this.#state.accountId, labels.map(toIncomingLabel))
+    if (!labels.some(({ name }) => name === SNOOZED_LABEL)) {
+      try {
+        const label = await this.#api.createLabel(SNOOZED_LABEL)
+        this.#store.putLabel(this.#state.accountId, toIncomingLabel(label))
+      } catch (error) {
+        // A lost create or a name conflict is recovered by the next label sync.
+        this.#log.warn(
+          { account: this.#state.accountId, err: error },
+          'Gmail Snooze label unavailable',
+        )
+      }
+    }
   }
 
   get backfillDone(): boolean {

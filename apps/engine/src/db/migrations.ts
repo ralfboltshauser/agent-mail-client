@@ -253,6 +253,7 @@ export const MIGRATIONS: readonly Migration[] = [
         message_id  TEXT NOT NULL,
         patch       TEXT NOT NULL,
         before      TEXT NOT NULL,
+        revisions   TEXT NOT NULL DEFAULT '{}',
         PRIMARY KEY (mutation_id, message_id)
       ) STRICT;
       CREATE INDEX mutation_message_by_message ON mutation_message (message_id, mutation_id);

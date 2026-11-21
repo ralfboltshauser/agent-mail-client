@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import {
   actionLabels,
-  applyLabelPatch,
   type LabelPatch,
   type MutationMessageResult,
   type MutationRequest,
@@ -13,7 +12,7 @@ import { transaction } from '../db/database.ts'
 import type { Logger } from '../log.ts'
 import { GmailHttpError } from '../providers/gmail/http.ts'
 import { OAuthError } from '../providers/gmail/oauth.ts'
-import type { GmailApi, GmailMessage } from '../providers/gmail/types.ts'
+import type { GmailApi, GmailMessage, GmailMessageState } from '../providers/gmail/types.ts'
 import { labelId, type MailStore, messageId } from './store.ts'
 
 const INTERNAL = 'engine'
@@ -62,12 +61,14 @@ interface PatchRow {
   message_id: string
   patch: string
   before: string
+  revisions: string
 }
 
 interface Change {
   message_id: string
   before: Record<string, boolean | null>
   after: LabelPatch
+  revisions?: Record<string, string>
 }
 
 interface JournalEntry {
@@ -79,11 +80,23 @@ interface JournalEntry {
   uncertain?: Change[]
   error?: string
   pending?: { change: Change; historyId?: string }
+  wakeConsumed?: boolean
 }
 
 interface ProviderObservation {
   labels: string[]
   historyId: string | undefined
+}
+
+interface LabelEvent {
+  revision: string
+  label: string
+  present: boolean
+}
+
+interface MessageHistory {
+  events: LabelEvent[]
+  deleted: boolean
 }
 
 interface Step {
@@ -164,16 +177,22 @@ function fromPatch(row: PatchRow): Change {
     message_id: row.message_id,
     before: JSON.parse(row.before),
     after: JSON.parse(row.patch),
+    revisions: JSON.parse(row.revisions),
   }
 }
 
 function combine(changes: Change[]): Change[] {
   const combined = new Map<string, Change>()
-  for (const { message_id, before, after } of changes) {
-    const entry = combined.get(message_id) ?? { message_id, before: {}, after: {} }
+  for (const { message_id, before, after, revisions } of changes) {
+    const entry = combined.get(message_id) ?? { message_id, before: {}, after: {}, revisions: {} }
     for (const [key, present] of Object.entries(after)) {
       if (!(key in entry.before)) entry.before[key] = Boolean(before[key])
       entry.after[key] = present
+      const revision = revisions?.[key]
+      if (revision) {
+        entry.revisions ??= {}
+        entry.revisions[key] = revision
+      }
     }
     combined.set(message_id, entry)
   }
@@ -181,9 +200,10 @@ function combine(changes: Change[]): Change[] {
 }
 
 function inverse(changes: Change[]): Change[] {
-  return combine(changes).map(({ message_id, before, after }) => ({
+  return combine(changes).map(({ message_id, before, after, revisions }) => ({
     message_id,
     before: after,
+    revisions,
     after: Object.fromEntries(
       Object.entries(before).map(([label, value]) => [label, Boolean(value)]),
     ),
@@ -429,7 +449,9 @@ export class Mutations {
         )
         .run(row.id)
       this.#db
-        .prepare('INSERT INTO mutation_message VALUES (?, ?, ?, ?)')
+        .prepare(
+          'INSERT INTO mutation_message (mutation_id, message_id, patch, before) VALUES (?, ?, ?, ?)',
+        )
         .run(id, row.id, JSON.stringify(patch), JSON.stringify(before))
       this.#store.refreshMessageLabels(row.id)
     }
@@ -530,9 +552,6 @@ export class Mutations {
   async #prepare(api: GmailApi, row: MutationRow, original: MutationRow | undefined) {
     const account = row.account_id
     const inbox = labelId(account, 'INBOX')
-    // Resolve the reserved label before converting Gmail IDs into AMC labels.
-    if (row.principal === INTERNAL || original || 'snoozedUntil' in JSON.parse(row.state_patch))
-      await this.#snoozedLabel(api, account, false)
     const messages = await this.#gmailThread(api, row)
     transaction(this.#db, () => {
       const state = this.#committedState(row.thread_id)
@@ -579,7 +598,7 @@ export class Mutations {
         (!original && JSON.parse(row.request).kind === 'archive')
       const projected = this.#patches(row.id)
       this.#db.prepare('DELETE FROM mutation_message WHERE mutation_id = ?').run(row.id)
-      const insert = this.#db.prepare('INSERT INTO mutation_message VALUES (?, ?, ?, ?)')
+      const insert = this.#db.prepare('INSERT INTO mutation_message VALUES (?, ?, ?, ?, ?)')
       const muteCursor = muteSweep ? this.#historyCursor(account) : null
       this.#bumpEpoch(account)
       const found = new Set<string>()
@@ -617,13 +636,28 @@ export class Mutations {
               ]),
             ),
           }
-          insert.run(row.id, id, JSON.stringify(patch), JSON.stringify(before))
+          const revisions = original
+            ? undo.get(id)?.revisions
+            : this.#revisions(before, observed.historyId)
+          insert.run(
+            row.id,
+            id,
+            JSON.stringify(patch),
+            JSON.stringify(before),
+            JSON.stringify(revisions ?? {}),
+          )
         }
       }
       for (const [id, change] of undo) {
         if (found.has(id) || !Object.keys(change.after).length) continue
         // A Trash message may be omitted from the thread response. Verify it individually.
-        insert.run(row.id, id, JSON.stringify(change.after), JSON.stringify(change.before))
+        insert.run(
+          row.id,
+          id,
+          JSON.stringify(change.after),
+          JSON.stringify(change.before),
+          JSON.stringify(change.revisions ?? {}),
+        )
       }
       for (const patch of projected) this.#store.refreshMessageLabels(patch.message_id)
       row.prepared = 1
@@ -756,21 +790,58 @@ export class Mutations {
     await Promise.all(started)
   }
 
-  async #snoozedLabel(api: GmailApi, account: string, creating: boolean): Promise<string | null> {
+  #snoozedLabel(account: string): string | undefined {
     const stored = this.#db
       .prepare('SELECT provider_id FROM label WHERE account_id = ? AND name = ?')
       .get(account, SNOOZED_LABEL) as { provider_id: string } | undefined
-    if (stored) return stored.provider_id
-    const existing = (await api.labels()).find((label) => label.name === SNOOZED_LABEL)
-    const label = existing ?? (creating ? await api.createLabel(SNOOZED_LABEL) : null)
-    if (!label) return null
-    this.#store.putLabel(account, {
-      providerId: label.id,
-      name: label.name,
-      kind: label.type,
-      color: null,
-    })
-    return label.id
+    return stored?.provider_id
+  }
+
+  #revisions(labels: Record<string, boolean | null>, historyId: string | undefined) {
+    return historyId ? Object.fromEntries(Object.keys(labels).map((key) => [key, historyId])) : {}
+  }
+
+  async #messageHistory(
+    api: GmailApi,
+    account: string,
+    id: string,
+    start: string,
+    observed: ProviderObservation | undefined,
+    snoozedId: string | undefined,
+  ): Promise<MessageHistory | null> {
+    if (start === observed?.historyId) return { events: [], deleted: false }
+    const raw = id.slice(account.length + 1)
+    const events: LabelEvent[] = []
+    let pageToken: string | undefined
+    let watermark = start
+    do {
+      const page = await api.history(start, pageToken, true)
+      if (!page) return null
+      for (const record of page.history ?? []) {
+        if (record.messagesDeleted?.some(({ message }) => message.id === raw))
+          return { events, deleted: true }
+        for (const [type, present] of [
+          ['labelsAdded', true],
+          ['labelsRemoved', false],
+        ] as const) {
+          for (const { message, labelIds } of record[type] ?? []) {
+            if (message.id !== raw) continue
+            for (const label of labelIds) {
+              events.push({
+                revision: record.id,
+                label: labelId(account, label === snoozedId ? SNOOZED_LABEL : label),
+                present,
+              })
+            }
+          }
+        }
+      }
+      pageToken = page.nextPageToken
+      watermark = page.historyId
+    } while (pageToken)
+    if (observed?.historyId && !this.#historyIncludes(watermark, observed.historyId))
+      throw new Error('Gmail history has not caught up with the message')
+    return { events, deleted: false }
   }
 
   #saveJournal(row: MutationRow, journal: JournalEntry[]) {
@@ -857,10 +928,13 @@ export class Mutations {
     const handlesMute = (change: Change) =>
       (muteSweep || explicitMute) && change.after[inbox] === false
     const save = () => this.#saveJournal(row, journal)
-    const snoozedId =
-      snoozed in step.patch
-        ? await this.#snoozedLabel(api, account, Boolean(step.patch[snoozed]))
-        : null
+    const snoozedId = this.#snoozedLabel(account)
+    if (step.patch[snoozed] && !snoozedId) {
+      entry.error = 'Gmail Snooze label is unavailable. Try again after the Account syncs.'
+      entry.failed = step.changes
+      save()
+      return true
+    }
 
     while (true) {
       const thread = replan ? await this.#gmailThread(api, row) : undefined
@@ -870,21 +944,75 @@ export class Mutations {
           : []
         : step.changes.map((change) => change.message_id)
       const current = await this.#observe(api, row, ids, thread)
-      const changes = replan && thread ? replan(thread, current) : step.changes
+      const histories = new Map<string, Promise<MessageHistory | null>>()
+      const history = (id: string, start: string) => {
+        const key = JSON.stringify([id, start])
+        let request = histories.get(key)
+        if (!request) {
+          request = this.#messageHistory(api, account, id, start, current.get(id), snoozedId)
+          histories.set(key, request)
+        }
+        return request
+      }
+
       const muteCursor = muteSweep ? this.#historyCursor(account) : null
       const pending = entry.pending
       if (pending) {
-        const observed = current.get(pending.change.message_id)
-        // A lost acknowledgement could hide a commit followed by an owner's edit.
-        // Replay only when the provider revision still matches the dispatch read.
-        if (!pending.historyId || observed?.historyId !== pending.historyId) {
-          if (handlesMute(pending.change))
-            this.#store.markMuteSuppressionHandled(pending.change.message_id)
-          if (step.trash !== undefined) entry.uncertain = [pending.change]
-          else entry.superseded = combine([...entry.superseded, pending.change])
+        const { change, historyId } = pending
+        const messageHistory = historyId ? await history(change.message_id, historyId) : null
+        const uncertain: LabelPatch = {}
+        const superseded: LabelPatch = {}
+        for (const [key, value] of Object.entries(change.after)) {
+          const events = messageHistory?.events.filter(({ label }) => key === label) ?? []
+          // Gmail history has no actor. A matching transition settles the retry,
+          // but only an acknowledged write can supply an Undo revision.
+          const matchesDispatch = events[0]?.present === value
+          if (replan && key === inbox && value && (matchesDispatch || !messageHistory))
+            entry.wakeConsumed = true
+          if (!messageHistory || messageHistory.deleted || events.length) {
+            if (step.trash !== undefined || (matchesDispatch && events.length === 1))
+              uncertain[key] = value
+            else superseded[key] = value
+          }
+        }
+        if (Object.keys(uncertain).length || Object.keys(superseded).length) {
+          if (handlesMute(change)) this.#store.markMuteSuppressionHandled(change.message_id)
+          if (Object.keys(uncertain).length)
+            entry.uncertain = combine([...(entry.uncertain ?? []), { ...change, after: uncertain }])
+          if (Object.keys(superseded).length)
+            entry.superseded = combine([...entry.superseded, { ...change, after: superseded }])
           delete entry.pending
           save()
         }
+      }
+      const changes = replan && thread ? replan(thread, current) : step.changes
+      const acknowledged = new Set(
+        journal.flatMap(({ applied }) =>
+          applied.flatMap(({ message_id, revisions }) =>
+            Object.entries(revisions ?? {}).map(([label, revision]) =>
+              JSON.stringify([message_id, label, revision]),
+            ),
+          ),
+        ),
+      )
+      const touched = async (change: Change, key: string, start = change.revisions?.[key]) => {
+        if (!start) return true
+        const { message_id } = change
+        const oldest = Object.values(change.revisions ?? {}).reduce(
+          (min, revision) => (this.#historyIncludes(min, revision) ? revision : min),
+          start,
+        )
+        const changes = await history(message_id, oldest)
+        return (
+          !changes ||
+          changes.deleted ||
+          changes.events.some(
+            ({ label, revision }) =>
+              label === key &&
+              !this.#historyIncludes(start, revision) &&
+              !acknowledged.has(JSON.stringify([message_id, label, revision])),
+          )
+        )
       }
 
       const resolved = new Map(
@@ -907,9 +1035,17 @@ export class Mutations {
           !this.#canSuppressMute(message_id, current.get(message_id)?.historyId, muteCursor)
         for (const [key, value] of Object.entries(change.after)) {
           if (key in done || (key === snoozed && !snoozedId)) continue
+          const revision = change.revisions?.[key]
           if (
             muteConflict ||
             !labels ||
+            (await touched(change, key)) ||
+            (key === trash && (await touched(change, inbox, revision))) ||
+            (replan &&
+              row.principal === INTERNAL &&
+              key === inbox &&
+              value &&
+              (await touched(change, snoozed))) ||
             labels.includes(key) !== before[key] ||
             (key === inbox && value && (labels.includes(trash) || labels.includes(spam))) ||
             (key === trash && labels.includes(inbox) !== before[inbox])
@@ -936,25 +1072,27 @@ export class Mutations {
       const historyId = current.get(message_id)?.historyId
       entry.pending = { change: candidate, historyId }
       save()
-      const acknowledge = () => {
-        if (handlesMute(candidate)) this.#store.markMuteSuppressionHandled(message_id)
-        entry.applied = combine([...entry.applied, candidate])
-        delete entry.pending
-        save()
+      const acknowledge = (message: GmailMessageState) => {
+        transaction(this.#db, () => {
+          this.#bumpEpoch(account)
+          this.#store.putProviderLabels(
+            account,
+            rawId(message_id),
+            message.labelIds ?? [],
+            message.historyId,
+          )
+          if (handlesMute(candidate)) this.#store.markMuteSuppressionHandled(message_id)
+          entry.applied = combine([
+            ...entry.applied,
+            { ...candidate, revisions: this.#revisions(after, message.historyId) },
+          ])
+          delete entry.pending
+          save()
+        })
       }
       try {
         if (step.trash !== undefined) {
-          const message = await api.setTrashed(rawId(message_id), step.trash)
-          transaction(this.#db, () => {
-            this.#bumpEpoch(account)
-            this.#store.putProviderLabels(
-              account,
-              rawId(message_id),
-              message.labelIds ?? [],
-              message.historyId,
-            )
-            acknowledge()
-          })
+          acknowledge(await api.setTrashed(rawId(message_id), step.trash))
         } else {
           const add: string[] = []
           const remove: string[] = []
@@ -962,25 +1100,7 @@ export class Mutations {
             const label = key === snoozed ? snoozedId : rawId(key)
             if (label) (present ? add : remove).push(label)
           }
-          await api.batchModify([rawId(message_id)], add, remove)
-          transaction(this.#db, () => {
-            this.#bumpEpoch(account)
-            const provider = this.#db
-              .prepare(
-                'SELECT provider_label_ids FROM message WHERE id = ? AND provider_history_id IS ?',
-              )
-              .get(message_id, historyId ?? null) as
-              | { provider_label_ids: string | null }
-              | undefined
-            if (provider) {
-              const labels = JSON.parse(provider.provider_label_ids ?? '[]') as string[]
-              this.#db
-                .prepare('UPDATE message SET provider_label_ids = ? WHERE id = ?')
-                .run(JSON.stringify(applyLabelPatch(labels, after)), message_id)
-              this.#store.refreshMessageLabels(message_id)
-            }
-            acknowledge()
-          })
+          acknowledge(await api.modifyMessage(rawId(message_id), add, remove))
         }
       } catch (error) {
         const ambiguous =
@@ -1039,6 +1159,7 @@ export class Mutations {
       // A confirmed wake is complete. An ambiguous response also needs no replay
       // while the target is already in Inbox. A vanished target can be replaced.
       const alreadyWoke =
+        entry.wakeConsumed ||
         entry.applied.some(({ after }) => after[inbox]) ||
         [
           ...entry.failed,
@@ -1105,7 +1226,12 @@ export class Mutations {
         ...this.#before(account, { [inbox]: false, [marker]: false }, labels),
         ...original?.before,
       }
-      const change = { message_id: id, before, after }
+      const change = {
+        message_id: id,
+        before,
+        after,
+        revisions: original?.revisions ?? this.#revisions(before, current.get(id)?.historyId),
+      }
       if (!original) {
         baseline.set(id, change)
         entry.observations ??= []
@@ -1262,7 +1388,7 @@ export class Mutations {
         delete entry.pending
       }
     }
-    if (journal.some((entry) => entry.uncertain?.length)) {
+    if (journal.some((entry) => entry.uncertain?.some(({ after }) => trash in after))) {
       const uncertainty = 'A change to Trash may have been applied'
       error = error ? `${uncertainty}. ${error}` : uncertainty
     }
