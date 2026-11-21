@@ -167,19 +167,25 @@ async function main(argv: string[]) {
         },
         mail: { db, store, queries, blobs, sealer, sync, oauthClient, drafts, log },
       })
-      const server = serve({
-        createServer,
-        fetch: app.fetch,
-        hostname: config.listen.host,
-        port: config.listen.port,
-      })
+      const server = serve(
+        {
+          createServer,
+          fetch: app.fetch,
+          hostname: config.listen.host,
+          port: config.listen.port,
+        },
+        () =>
+          log.info(
+            { version: VERSION, schemaVersion: version, ...config.listen },
+            'engine listening',
+          ),
+      )
       const closeComposer = serveComposerSocket(
         server as ReturnType<typeof createServer>,
         config,
         db,
         drafts,
       )
-      log.info({ version: VERSION, schemaVersion: version, ...config.listen }, 'engine listening')
       sync.start()
       mutations.start()
       const sends = setInterval(() => {

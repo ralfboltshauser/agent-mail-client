@@ -4,7 +4,9 @@ import { writeFileSync } from 'node:fs'
 import type { AddressInfo } from 'node:net'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
+import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
+import { Health } from '@amc/protocol'
 import { expect, it } from 'vitest'
 import { issueToken } from './auth/tokens.ts'
 import { databasePath } from './config.ts'
@@ -29,7 +31,7 @@ it('exits zero on SIGTERM with a replica event stream still open', async () => {
     env: { ...process.env, AMC_CONFIG: configPath },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
-  const exited = once(child, 'exit')
+  const exited = once(child, 'close')
   let output = ''
   child.stdout.on('data', (chunk) => {
     output += chunk
@@ -37,19 +39,28 @@ it('exits zero on SIGTERM with a replica event stream still open', async () => {
   child.stderr.on('data', (chunk) => {
     output += chunk
   })
+  const lines = createInterface({ input: child.stdout })
+  const ready = async () => {
+    for await (const line of lines) {
+      if (JSON.parse(line).msg === 'engine listening') return
+    }
+    await exited
+    throw new Error(`Engine exited before listening:\n${output}`)
+  }
   try {
     const url = `http://127.0.0.1:${port}`
-    await expect
-      .poll(async () =>
-        fetch(`${url}/health`).then(
-          (r) => r.ok,
-          () => false,
-        ),
-      )
-      .toBe(true)
-    const response = await fetch(`${url}/v1/sync/events`, {
-      headers: { Authorization: `Bearer ${secret}` },
+    await ready()
+    const headers = { Authorization: `Bearer ${secret}` }
+    const health = await fetch(`${url}/v1/health`, { headers })
+    expect(health.status).toBe(200)
+    expect(Health.parse(await health.json()).gmailPubSub).toEqual({
+      enabled: false,
+      pullHealthy: false,
+      lastNotificationAt: null,
+      pullErrorCount: 0,
+      lastPullError: null,
     })
+    const response = await fetch(`${url}/v1/sync/events`, { headers })
     expect(response.status).toBe(200)
     const reader = response.body?.getReader()
     expect(new TextDecoder().decode((await reader?.read())?.value)).toContain('event: hello')
@@ -57,7 +68,8 @@ it('exits zero on SIGTERM with a replica event stream still open', async () => {
     expect(await exited, output).toEqual([0, null])
     expect((await reader?.read())?.done).toBe(true)
   } finally {
-    if (child.exitCode === null) child.kill('SIGKILL')
+    lines.close()
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
     await exited
   }
 }, 15_000)

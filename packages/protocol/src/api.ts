@@ -35,6 +35,15 @@ export const Health = PublicHealth.extend({
   schemaVersion: z.number(),
   database: z.object({ path: z.string(), bytes: z.number() }),
   lastBackup: z.object({ at: z.number(), bytes: z.number() }).nullable().optional(),
+  gmailPubSub: z
+    .object({
+      enabled: z.boolean(),
+      pullHealthy: z.boolean(),
+      lastNotificationAt: z.number().nullable(),
+      pullErrorCount: z.number(),
+      lastPullError: z.object({ at: z.number(), message: z.string() }).nullable(),
+    })
+    .optional(),
   accounts: z
     .array(
       z.object({
@@ -42,6 +51,13 @@ export const Health = PublicHealth.extend({
         status: z.enum(ACCOUNT_STATUSES),
         syncLagSeconds: z.number().nullable(),
         lastError: z.string().nullable(),
+        gmailPush: z
+          .object({
+            watchExpiresAt: z.number().nullable(),
+            lastNotificationAt: z.number().nullable(),
+            pollIntervalMs: z.number().nullable(),
+          })
+          .optional(),
       }),
     )
     .optional(),
