@@ -21,7 +21,13 @@ export function useHotkeys(map: HotkeyMap, enabled = true): void {
     const onKey = (event: KeyboardEvent) => {
       const inDialog = event.target instanceof Element && event.target.closest('[role="dialog"]')
       if (event.isComposing || event.defaultPrevented || inDialog) return
-      const key = event.key.toLowerCase()
+      const key = event.key === ' ' ? 'space' : event.key.toLowerCase()
+      if (
+        key === 'space' &&
+        event.target instanceof Element &&
+        event.target.closest('button, a, [role="button"], [role="menuitem"]')
+      )
+        return
       const combo = [
         event.metaKey ? 'mod' : '',
         event.ctrlKey ? 'ctrl' : '',

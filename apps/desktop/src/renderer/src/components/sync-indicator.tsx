@@ -1,4 +1,5 @@
 import type { AccountSummary } from '@amc/protocol'
+import { TriangleAlert } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
@@ -52,7 +53,8 @@ export function SyncIndicator({
     text = `Fetching history · ${a?.messageCount.toLocaleString()}${a?.backfill.estimatedTotal ? ` of ${a.backfill.estimatedTotal.toLocaleString()}` : ''}`
   }
 
-  const warnings = status.healthWarnings ?? []
+  const healthUnavailable = status.healthRefreshFailed === true
+  const warnings = healthUnavailable ? [] : (status.healthWarnings ?? [])
   const detail = [
     ...warnings,
     status.error,
@@ -65,24 +67,26 @@ export function SyncIndicator({
     <Tooltip>
       <TooltipTrigger asChild>
         <div
-          tabIndex={warnings.length ? 0 : undefined}
-          className="flex items-center gap-2 px-2 py-1.5 text-xs text-muted-foreground"
+          tabIndex={tooltip ? 0 : undefined}
+          className="grid gap-1 rounded-md px-2 py-1.5 text-[11px] text-muted-foreground"
         >
-          <span
-            className={cn(
-              'size-1.5 shrink-0 rounded-full',
-              tone === 'ok' && 'bg-emerald-500',
-              tone === 'busy' && 'animate-pulse bg-amber-500',
-              tone === 'bad' && 'bg-destructive',
-            )}
-          />
-          <span className="truncate tabular-nums">{text}</span>
-          {warnings.length > 0 && (
+          <div className="flex items-center gap-2">
             <span
-              className="size-1.5 shrink-0 rounded-full bg-amber-500"
-              role="img"
-              aria-label="Engine warning"
+              aria-hidden
+              className={cn(
+                'size-1.5 shrink-0 rounded-full',
+                tone === 'ok' && 'bg-emerald-500',
+                tone === 'busy' && 'motion-safe:animate-pulse bg-star',
+                tone === 'bad' && 'bg-destructive',
+              )}
             />
+            <span className="truncate tabular-nums">{text}</span>
+          </div>
+          {(healthUnavailable || warnings.length > 0) && (
+            <output className="flex items-center gap-1.5 text-star">
+              <TriangleAlert aria-hidden className="size-3 shrink-0" />
+              {healthUnavailable ? 'Engine health unavailable' : 'Engine health warning'}
+            </output>
           )}
         </div>
       </TooltipTrigger>

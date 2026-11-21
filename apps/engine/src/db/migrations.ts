@@ -552,4 +552,9 @@ export const MIGRATIONS: readonly Migration[] = [
       DELETE FROM handoff WHERE t3_thread_id IS NULL;
     `,
   },
+  {
+    version: 16,
+    name: 'Track the provider revision written by AMC',
+    sql: 'ALTER TABLE draft ADD COLUMN mirror_written_hash TEXT',
+  },
 ]

@@ -13,9 +13,9 @@ export function loadRenderer(
   let retried = false
   let scheduled = false
   let reporting = false
-  window.webContents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
-    if (!isMainFrame || code === -3 || scheduled || reporting || window.isDestroyed()) return
-    console.error(`AMC renderer load failed: ${description} (${code})`)
+  const recover = (reason: string) => {
+    if (scheduled || reporting || window.isDestroyed()) return
+    console.error(`AMC renderer failed: ${reason}`)
     if (!retried) {
       retried = true
       scheduled = true
@@ -27,11 +27,16 @@ export function loadRenderer(
       return
     }
     reporting = true
-    void showError(reload)
-      .catch((error: unknown) => console.error('Could not show renderer load error', error))
-      .finally(() => {
-        reporting = false
-      })
+    void showError(() => {
+      reporting = false
+      reload()
+    }).catch((error: unknown) => console.error('Could not show renderer load error', error))
+  }
+  window.webContents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
+    if (isMainFrame && code !== -3) recover(`${description} (${code})`)
+  })
+  window.webContents.on('render-process-gone', (_event, details) => {
+    recover(`${details.reason} (${details.exitCode})`)
   })
   reload()
 }

@@ -273,7 +273,8 @@ function registerComposeIpc() {
   })
   ipcMain.handle('amc:discardDraft', async (_e, id: string) => {
     const client = requireEngine()
-    const result = await client.discardDraft(id)
+    // Use the guarded delete endpoint, which older Engines do not expose.
+    const result = await client.request<{ warning?: string }>(draftPath(id), { method: 'DELETE' })
     if (engine === client) {
       openReplica().draftUpdates.discard(id)
       void sync?.pull().catch(() => {}) // Normal sync retries if this pull fails.
@@ -464,7 +465,7 @@ function createWindow() {
       current.show()
       const { response } = await dialog.showMessageBox(current, {
         type: 'error',
-        message: 'AMC couldn’t load.',
+        message: 'AMC is starting…',
         buttons: ['Reload', 'Close'],
         cancelId: 1,
       })

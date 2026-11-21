@@ -20,7 +20,7 @@ describe('migrate', () => {
     try {
       expect(migrate(db, { migrations: MIGRATIONS.filter(({ version }) => version <= 7) })).toBe(7)
       expect(MIGRATIONS.filter(({ version }) => version > 7).map(({ version }) => version)).toEqual(
-        [8, 9, 10, 11, 12, 13, 14, 15],
+        [8, 9, 10, 11, 12, 13, 14, 15, 16],
       )
       db.exec(`
         INSERT INTO account (id, kind, address, credentials, created_at)
@@ -40,7 +40,7 @@ describe('migrate', () => {
         VALUES ('i', 'INBOX', '1', 2, 'i:m', 'i:INBOX', 1, 1, 'fixture-source');
       `)
       const backupDir = join(dir, 'backups')
-      expect(migrate(db, { backupDir })).toBe(15)
+      expect(migrate(db, { backupDir })).toBe(16)
       expect(db.prepare('SELECT bucket FROM thread WHERE id = ?').get('a:t')).toEqual({
         bucket: null,
       })
@@ -72,7 +72,10 @@ describe('migrate', () => {
       expect(db.prepare("SELECT body_parts FROM message WHERE id = 'i:m'").get()).toEqual({
         body_parts: null,
       })
-      expect(db.prepare('SELECT subject FROM draft').get()).toEqual({ subject: 'Existing draft' })
+      expect(db.prepare('SELECT subject, mirror_written_hash FROM draft').get()).toEqual({
+        subject: 'Existing draft',
+        mirror_written_hash: null,
+      })
       db.exec(`
         INSERT INTO mutation (id, principal, account_id, thread_id, request, status)
         VALUES ('mutation', 'owner', 'a', 'a:t', '{}', 'partial');
@@ -102,7 +105,7 @@ describe('migrate', () => {
     if (!compose) throw new Error('Compose migration missing')
     expect(migrate(db, { migrations: MIGRATIONS.filter(({ version }) => version <= 8) })).toBe(8)
     db.exec('DROP TABLE schema_migration')
-    expect(migrate(db)).toBe(15)
+    expect(migrate(db)).toBe(16)
     expect(db.prepare('SELECT * FROM organise_intent').all()).toEqual([])
     expect(db.prepare('SELECT * FROM outbox').all()).toEqual([])
 

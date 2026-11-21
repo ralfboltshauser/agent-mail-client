@@ -1,6 +1,4 @@
 import type { ApiError } from '@amc/protocol'
-import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 
 export class EngineError extends Error {
   readonly status: number
@@ -54,27 +52,6 @@ export class EngineClient {
       throw new EngineError(res.status, body.error ?? 'error', body.message ?? res.statusText)
     }
     return (await res.json()) as T
-  }
-
-  async discardDraft(id: string): Promise<{ warning?: string }> {
-    // Use the Engine's existing draft deletion tool so installed Engines need no update.
-    const client = new Client({ name: 'AMC Desktop', version: '1.0.0' })
-    const transport = new StreamableHTTPClientTransport(new URL('/mcp', this.baseUrl), {
-      requestInit: { headers: { Authorization: `Bearer ${this.#token}` } },
-    })
-    try {
-      await client.connect(transport)
-      const result = await client.callTool({ name: 'delete_draft', arguments: { draft_id: id } })
-      const text = Array.isArray(result.content)
-        ? result.content.find((entry) => entry.type === 'text')?.text
-        : undefined
-      if (result.isError) throw new Error(text || 'Could not discard draft')
-      const discarded = JSON.parse(text ?? 'null') as { deleted?: string; warning?: string } | null
-      if (discarded?.deleted !== id) throw new Error('The Engine did not confirm draft deletion')
-      return { warning: discarded.warning }
-    } finally {
-      await transport.close()
-    }
   }
 
   async bytes(path: string): Promise<Buffer> {

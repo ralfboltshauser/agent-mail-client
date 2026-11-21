@@ -7,7 +7,7 @@ function startRenderer() {
   const webContents = new EventEmitter()
   const window = { webContents, isDestroyed: () => false } as unknown as BrowserWindow
   const load = vi.fn().mockResolvedValue(undefined)
-  const showError = vi.fn().mockResolvedValue(undefined)
+  const showError = vi.fn<(reload: () => void) => Promise<void>>().mockResolvedValue(undefined)
   loadRenderer(window, load, showError)
   const fail = (code = -6, isMainFrame = true) =>
     webContents.emit(
@@ -18,7 +18,9 @@ function startRenderer() {
       'file:///index.html',
       isMainFrame,
     )
-  return { load, showError, fail }
+  const crash = () =>
+    webContents.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 1 })
+  return { load, showError, fail, crash }
 }
 
 it('retries a main-frame load failure once and offers recovery for a second failure', async () => {
@@ -41,4 +43,22 @@ it('ignores subframe failures and superseded loads', async () => {
   await new Promise<void>((resolve) => setImmediate(resolve))
   expect(load).toHaveBeenCalledOnce()
   expect(showError).not.toHaveBeenCalled()
+})
+
+it('shares the automatic retry between crashes and load failures', async () => {
+  const { load, showError, fail, crash } = startRenderer()
+  crash()
+  fail()
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  expect(load).toHaveBeenCalledTimes(2)
+
+  crash()
+  expect(showError).toHaveBeenCalledOnce()
+  showError.mock.calls[0]?.[0]()
+  expect(load).toHaveBeenCalledTimes(3)
+
+  fail()
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  expect(load).toHaveBeenCalledTimes(3)
+  expect(showError).toHaveBeenCalledTimes(2)
 })

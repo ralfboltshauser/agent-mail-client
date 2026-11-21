@@ -1,7 +1,6 @@
 import {
   BucketInput,
   hasScope,
-  ORIGINAL_DRAFT_LEFT,
   type OrganiseAction,
   type Scope,
   UntriagedLimit,
@@ -490,14 +489,12 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
       server.registerTool(
         'delete_draft',
         {
-          description: 'Discard a draft (also removes it from Gmail).',
+          description:
+            'Discard a draft and remove the provider copy if it still matches what AMC last wrote.',
           inputSchema: { draft_id: z.string() },
           annotations: { destructiveHint: true },
         },
-        async ({ draft_id }) => {
-          const left = await drafts.delete(draft_id)
-          return json({ deleted: draft_id, ...(left ? { warning: ORIGINAL_DRAFT_LEFT } : {}) })
-        },
+        async ({ draft_id }) => json(await drafts.delete(draft_id)),
       )
   }
 

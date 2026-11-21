@@ -28,6 +28,7 @@ import { Bold, Italic, List, Minus, Paperclip, Trash2, X } from 'lucide-react'
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import * as Y from 'yjs'
+import { getAmc } from '@/lib/amc'
 import { DiscardDraftDialog } from './discard-draft-dialog'
 import { RecipientField } from './recipient-field'
 import { Button } from './ui/button'
@@ -61,7 +62,7 @@ function InlinePreview({ draftId, src, alt }: { draftId: string; src: string; al
     let active = true
     setUrl('')
     if (src.startsWith('cid:')) {
-      void window.amc
+      void getAmc()
         .composeImage(draftId, src.slice(4))
         .then(({ mimeType, content }) => {
           if (active && INLINE_IMAGE_TYPES.includes(mimeType))
@@ -198,7 +199,7 @@ export function Composer({
     const onUpdate = (_update: Uint8Array, origin: unknown) => {
       if (origin === remote) return
       try {
-        window.amc.stageComposeBody(draft.id, {
+        getAmc().stageComposeBody(draft.id, {
           baseRevision: baseline.current.revision,
           update: base64(Y.encodeStateAsUpdate(doc)),
         })
@@ -213,7 +214,7 @@ export function Composer({
     const timer = window.setInterval(() => {
       if (running || submitting.current || request.current) return
       running = true
-      void window.amc
+      void getAmc()
         .composeDraft(draft.id)
         .then((next) => {
           if (
@@ -262,7 +263,7 @@ export function Composer({
       .then(async () => {
         const started = versionRef.current
         const before = baseline.current
-        const updated = await window.amc.saveCompose(draft.id, edits(before.revision))
+        const updated = await getAmc().saveCompose(draft.id, edits(before.revision))
         apply(doc, updated.update)
         baseline.current = updated
         if (versionRef.current === started) adopt(updated)
@@ -300,7 +301,7 @@ export function Composer({
         throw new Error('Attachments must total 18 MB or less.')
       for (const file of files) {
         const inline = paste && INLINE_IMAGE_TYPES.includes(file.type)
-        const part = await window.amc.addComposeAttachment(
+        const part = await getAmc().addComposeAttachment(
           draft.id,
           file.name || 'attachment',
           file.type || 'application/octet-stream',
@@ -349,7 +350,7 @@ export function Composer({
     setBusy(true)
     try {
       await saveChain.current.catch(() => {})
-      const { warning } = await window.amc.discardDraft(draft.id)
+      const { warning } = await getAmc().discardDraft(draft.id)
       if (warning) toast.warning(warning)
       onDiscarded()
     } finally {
@@ -392,7 +393,7 @@ export function Composer({
           ...(schedule ? { sendAt: new Date(sendAt).getTime() } : {}),
         }
       }
-      const item = await window.amc.sendDraft(request.current)
+      const item = await getAmc().sendDraft(request.current)
       onQueued(item)
     } catch (cause) {
       const message = (cause as Error).message
@@ -401,7 +402,7 @@ export function Composer({
         setError(DRAFT_CHANGED)
         setConflict(true)
         try {
-          const next = await window.amc.composeDraft(draft.id)
+          const next = await getAmc().composeDraft(draft.id)
           apply(doc, next.update)
           adopt(next)
           setConflict(false)
@@ -436,6 +437,15 @@ export function Composer({
         className="flex max-h-[90dvh] max-w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl"
         onPointerDownOutside={(event) => event.preventDefault()}
         onKeyDownCapture={(event) => {
+          const target = event.target
+          if (target instanceof Element) {
+            const editingHost = target.closest('[contenteditable]')
+            if (
+              target.closest('input, textarea') ||
+              (editingHost && editingHost.getAttribute('contenteditable') !== 'false')
+            )
+              return
+          }
           if (
             !event.nativeEvent.isComposing &&
             event.metaKey &&
@@ -457,8 +467,8 @@ export function Composer({
           }
         }}
       >
-        <header className="flex shrink-0 items-center justify-between gap-3 border-b px-4 py-3">
-          <DialogTitle className="text-sm">Compose</DialogTitle>
+        <header className="flex shrink-0 items-center justify-between gap-3 border-b bg-muted/35 px-5 py-3">
+          <DialogTitle className="text-[15px] tracking-tight">Compose</DialogTitle>
           <Button
             size="icon-sm"
             variant="ghost"
@@ -576,7 +586,7 @@ export function Composer({
                 <List />
               </Button>
             </fieldset>
-            <div inert={locked} className="px-4 py-2 text-sm leading-relaxed">
+            <div inert={locked} className="px-5 py-3 text-sm leading-[1.65]">
               <EditorContent editor={editor} />
             </div>
             {draftSignature && (
@@ -644,7 +654,7 @@ export function Composer({
                     size="sm"
                     variant="outline"
                     onClick={() => {
-                      void window.amc
+                      void getAmc()
                         .saveSignature(fields.accountId, signature)
                         .then(() => setSignature(null))
                         .catch((cause: Error) => setError(cause.message))
@@ -668,7 +678,7 @@ export function Composer({
               size="sm"
               variant="outline"
               onClick={() => {
-                void window.amc
+                void getAmc()
                   .composeDraft(draft.id)
                   .then((next) => {
                     apply(doc, next.update)
@@ -699,7 +709,7 @@ export function Composer({
             Saved in AMC. Waiting to sync to the Account’s Drafts.
           </output>
         )}
-        <footer className="flex shrink-0 flex-wrap items-center gap-2 border-t px-4 py-3">
+        <footer className="flex shrink-0 flex-wrap items-center gap-2 border-t bg-muted/35 px-5 py-3">
           <Button size="sm" onClick={() => void send()} disabled={busy || uploading || !editor}>
             {request.current ? 'Confirm send' : schedule ? 'Schedule send' : 'Send'} <Kbd>⌘↵</Kbd>
           </Button>
@@ -740,7 +750,7 @@ export function Composer({
               onClick={() => {
                 if (signature !== null) setSignature(null)
                 else
-                  void window.amc
+                  void getAmc()
                     .signature(fields.accountId)
                     .then(({ signature }) => setSignature(signature))
                     .catch((cause: Error) => setError(cause.message))

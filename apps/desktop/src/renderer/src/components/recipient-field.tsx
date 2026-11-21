@@ -1,6 +1,7 @@
 import type { Address, Contact } from '@amc/protocol'
 import { X } from 'lucide-react'
 import { useEffect, useId, useState } from 'react'
+import { getAmc } from '@/lib/amc'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 
@@ -27,7 +28,7 @@ export function RecipientField({
     if (!query.trim() || !open) return
     let stale = false
     const timer = window.setTimeout(() => {
-      void window.amc
+      void getAmc()
         .contacts(query)
         .then((contacts) => {
           if (!stale) setMatches(contacts)
