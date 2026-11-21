@@ -446,4 +446,9 @@ export const MIGRATIONS: readonly Migration[] = [
         WHERE status IN ('queued','dispatching','uncertain','sent') AND released_at IS NULL;
     `,
   },
+  {
+    version: 10,
+    name: 'IMAP body blobs',
+    sql: 'ALTER TABLE message ADD COLUMN body_parts TEXT',
+  },
 ]

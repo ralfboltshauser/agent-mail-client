@@ -61,7 +61,7 @@ async function main(argv: string[]) {
       const blobs = new BlobStore(config.blobDir)
       const snoozeEnabled = config.features.snooze
       const store = new MailStore(db, blobs, { snoozeEnabled })
-      const queries = new MailQueries(db, snoozeEnabled)
+      const queries = new MailQueries(db, snoozeEnabled, blobs)
       let oauth: OAuthClient | null = null
       const oauthClient = () => {
         oauth ??= loadOAuthClient(config.secretsDir)

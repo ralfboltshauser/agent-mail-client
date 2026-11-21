@@ -237,10 +237,9 @@ export function mailRoutes(deps: MailDeps) {
   })
 
   r.get('/messages/:id/html', requireScope('read'), (c) => {
-    const hash = queries.messageHtmlBlob(c.req.param('id'))
-    const html = hash ? deps.blobs.get(hash) : null
+    const html = queries.messageHtml(c.req.param('id'), deps.blobs)
     if (!html) return c.json({ error: 'not_found', message: 'This message has no HTML body' }, 404)
-    return c.json({ html: html.toString('utf8') })
+    return c.json({ html })
   })
 
   r.get('/attachments/:id', requireScope('read'), async (c) => {

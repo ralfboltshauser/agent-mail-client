@@ -9,7 +9,9 @@ import type {
   ThreadList,
   ThreadSummary,
 } from '@amc/protocol'
+import type { BlobStore } from '../blobs.ts'
 import type { Db } from '../db/database.ts'
+import { type BodyParts, readBodyParts, readTextBody } from './body-blobs.ts'
 
 interface ThreadRow {
   id: string
@@ -42,6 +44,7 @@ interface MessageRow {
   subject: string
   snippet: string
   body_text: string
+  body_parts: string | null
   body_search_truncated: number
   html_blob: string | null
   sent_at: number
@@ -104,7 +107,10 @@ export class MailQueries {
   readonly #inbox: string
   readonly #threadColumns: string
 
-  constructor(db: Db, snoozeEnabled = false) {
+  readonly #blobs?: BlobStore
+
+  constructor(db: Db, snoozeEnabled = false, blobs?: BlobStore) {
+    this.#blobs = blobs
     this.db = db
     // Old Gmail summaries may have suppressed Inbox membership while Snooze was enabled.
     this.#inbox = snoozeEnabled
@@ -287,7 +293,7 @@ export class MailQueries {
     const rows = this.db
       .prepare(
         `SELECT m.id, m.thread_id, m.account_id, m.rfc_message_id, m.in_reply_to, m.from_json, m.to_json,
-                m.cc_json, m.bcc_json, m.reply_to_json, m.subject, m.snippet, m.body_text, m.html_blob,
+                m.cc_json, m.bcc_json, m.reply_to_json, m.subject, m.snippet, m.body_text, m.body_parts, m.html_blob,
                 coalesce(length(m.body_text) > m.body_search_limit, 0) AS body_search_truncated,
                 m.sent_at, m.unread, m.starred, m.label_ids, m.list_unsubscribe
          FROM message m WHERE ${where}`,
@@ -296,8 +302,9 @@ export class MailQueries {
     const attachments = this.db.prepare(
       'SELECT id, filename, mime_type, size, inline, content_id FROM attachment WHERE message_id = ? ORDER BY id',
     )
-    return rows.map(
-      (m): MessageDetail => ({
+    return rows.map((m): MessageDetail => {
+      const bodyParts = m.body_parts ? (JSON.parse(m.body_parts) as BodyParts) : null
+      return {
         id: m.id,
         threadId: m.thread_id,
         accountId: m.account_id,
@@ -310,9 +317,11 @@ export class MailQueries {
         replyTo: JSON.parse(m.reply_to_json) as Address[],
         subject: m.subject,
         snippet: m.snippet,
-        bodyText: m.body_text,
-        bodySearchTruncated: Boolean(m.body_search_truncated),
-        hasHtml: m.html_blob !== null,
+        bodyText:
+          (bodyParts && this.#blobs ? readTextBody(this.#blobs, bodyParts) : undefined) ??
+          m.body_text,
+        bodySearchTruncated: Boolean(bodyParts?.searchTruncated || m.body_search_truncated),
+        hasHtml: m.html_blob !== null || Boolean(bodyParts?.html),
         sentAt: m.sent_at,
         unread: m.unread === 1,
         starred: m.starred === 1,
@@ -328,15 +337,17 @@ export class MailQueries {
             contentId: a.content_id,
           }),
         ),
-      }),
-    )
+      }
+    })
   }
 
-  messageHtmlBlob(messageId: string): string | null {
-    const row = this.db.prepare('SELECT html_blob FROM message WHERE id = ?').get(messageId) as
-      | { html_blob: string | null }
-      | undefined
-    return row?.html_blob ?? null
+  messageHtml(messageId: string, blobs: BlobStore): string | null {
+    const row = this.db
+      .prepare('SELECT html_blob, body_parts FROM message WHERE id = ?')
+      .get(messageId) as { html_blob: string | null; body_parts: string | null } | undefined
+    if (row?.html_blob) return blobs.get(row.html_blob)?.toString('utf8') ?? null
+    const parts = row?.body_parts ? (JSON.parse(row.body_parts) as BodyParts).html : undefined
+    return parts ? (readBodyParts(blobs, parts) ?? null) : null
   }
 
   /** Full-text search over the entire history, best matches first, one hit per Thread. */

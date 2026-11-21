@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events'
 import { type Address, applyLabelPatch, type LabelPatch, SNOOZED_LABEL } from '@amc/protocol'
 import type { BlobStore } from '../blobs.ts'
 import { type Db, transaction } from '../db/database.ts'
+import type { BodyParts } from './body-blobs.ts'
 
 /** A message as any provider connector hands it to the store. */
 export interface IncomingMessage {
@@ -19,6 +20,8 @@ export interface IncomingMessage {
   snippet: string
   bodyText: string
   bodySearchLimit?: number
+  bodyParts?: BodyParts | null
+  bodyHtmlBlob?: string | null
   bodyHtml: string | null
   sentAt: number
   size: number
@@ -187,7 +190,7 @@ export class MailStore extends EventEmitter<{ change: [] }> {
       ? (JSON.parse(previous.provider_label_ids) as string[])
       : this.providerLabels(accountId, msg.labels)
     const labels = this.projectLabels(mid, providerLabels)
-    const htmlBlob = msg.bodyHtml ? this.blobs.put(msg.bodyHtml) : null
+    const htmlBlob = msg.bodyHtmlBlob ?? (msg.bodyHtml ? this.blobs.put(msg.bodyHtml) : null)
 
     this.db
       .prepare(
@@ -201,16 +204,16 @@ export class MailStore extends EventEmitter<{ change: [] }> {
         `INSERT INTO message (
            id, account_id, thread_id, provider_id, rfc_message_id, in_reply_to, refs,
            from_json, to_json, cc_json, bcc_json, reply_to_json, subject, snippet, body_text, body_search_limit,
-           html_blob, sent_at, size, label_ids, unread, starred, list_unsubscribe, provider_label_ids,
+           body_parts, html_blob, sent_at, size, label_ids, unread, starred, list_unsubscribe, provider_label_ids,
            first_seen_at, provider_history_id, provider_delivery_history_id
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            thread_id = excluded.thread_id, rfc_message_id = excluded.rfc_message_id,
            in_reply_to = excluded.in_reply_to, refs = excluded.refs, from_json = excluded.from_json,
            to_json = excluded.to_json, cc_json = excluded.cc_json, bcc_json = excluded.bcc_json,
            reply_to_json = excluded.reply_to_json, subject = excluded.subject,
            snippet = excluded.snippet, body_text = excluded.body_text,
-           body_search_limit = excluded.body_search_limit, html_blob = excluded.html_blob,
+           body_search_limit = excluded.body_search_limit, body_parts = excluded.body_parts, html_blob = excluded.html_blob,
            sent_at = excluded.sent_at, size = excluded.size, label_ids = excluded.label_ids,
            unread = excluded.unread, starred = excluded.starred,
            list_unsubscribe = excluded.list_unsubscribe, provider_label_ids = excluded.provider_label_ids,
@@ -234,6 +237,7 @@ export class MailStore extends EventEmitter<{ change: [] }> {
         msg.snippet,
         msg.bodyText,
         msg.bodySearchLimit ?? null,
+        msg.bodyParts ? JSON.stringify(msg.bodyParts) : null,
         htmlBlob,
         msg.sentAt,
         msg.size,
