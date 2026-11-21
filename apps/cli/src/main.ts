@@ -7,6 +7,7 @@ import type {
   GmailAuthStartResponse,
   Health,
   Me,
+  MessageDetail,
   MutationResponse,
   OrganiseAction,
   PairResponse,
@@ -158,10 +159,15 @@ program
   .argument('<id>', 'Thread id')
   .option('--json', 'print JSON')
   .action(async (id: string, opts: { json?: boolean }) => {
-    const t = await authed(requireConfig())<ThreadDetail>(`/v1/threads/${encodeURIComponent(id)}`)
-    if (opts.json) return printJson(t)
-    console.log(`# ${t.subject || '(no subject)'}\n`)
+    const api = authed(requireConfig())
+    const t = await api<ThreadDetail>(`/v1/threads/${encodeURIComponent(id)}?deferBodies=1`)
+    if (!opts.json) console.log(`# ${t.subject || '(no subject)'}\n`)
     for (const m of t.messages) {
+      if (m.bodyText === null) {
+        const detail = await api<MessageDetail>(`/v1/messages/${encodeURIComponent(m.id)}`)
+        m.bodyText = detail.bodyText
+      }
+      if (opts.json) continue
       const from = m.from
         ? m.from.name
           ? `${m.from.name} <${m.from.address}>`
@@ -174,6 +180,7 @@ program
         console.log(`📎    ${a.filename} (${formatBytes(a.size)})`)
       console.log(`\n${m.bodyText}\n\n${'─'.repeat(60)}\n`)
     }
+    if (opts.json) printJson(t)
   })
 
 program

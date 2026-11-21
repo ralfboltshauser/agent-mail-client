@@ -7,11 +7,11 @@ import type {
   Contact,
   Draft,
   Label,
-  MessageDetail,
   OrganiseAction,
   OutboxItem,
   SearchHit,
   SendRequest,
+  ThreadMessage,
   ThreadSummary,
 } from '@amc/protocol'
 
@@ -34,9 +34,11 @@ export interface ThreadQuery {
   limit?: number
 }
 
+export type ReplicaThreadMessage = ThreadMessage & { bodyRevision: string }
+
 export interface ThreadWithMessages {
   thread: ThreadSummary
-  messages: MessageDetail[]
+  messages: ReplicaThreadMessage[]
   drafts: Draft[]
 }
 
@@ -114,6 +116,7 @@ export interface AmcApi {
   saveSignature(accountId: string, signature: string): Promise<{ signature: string }>
   sendSettings(): Promise<{ undoSendSeconds: number }>
   saveSendSettings(undoSendSeconds: number): Promise<{ undoSendSeconds: number }>
+  messageText(messageId: string): Promise<string | null>
   messageHtml(messageId: string): Promise<string | null>
   inlineAttachment(attachmentId: string): Promise<string>
   openAttachment(attachmentId: string, filename: string): Promise<void>
