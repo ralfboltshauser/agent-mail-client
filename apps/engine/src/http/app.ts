@@ -11,6 +11,7 @@ import type { Logger } from '../log.ts'
 import { buildMcpServer } from '../mcp/server.ts'
 import { VERSION } from '../version.ts'
 import { type MailDeps, mailRoutes } from './mail.ts'
+import { syncRoutes } from './sync.ts'
 import { tokenRoutes } from './tokens.ts'
 
 export interface AppEnv {
@@ -93,6 +94,7 @@ export function createApp({ db, config, log, startedAt = Date.now(), mail }: App
   v1.route('/', tokenRoutes(db))
   if (mail) {
     v1.route('/', mailRoutes(mail))
+    v1.route('/', syncRoutes(mail))
 
     // MCP over Streamable HTTP, stateless: one server per request, built from the token's scopes.
     app.all('/mcp', requireAuth(db), async (c) => {

@@ -1,0 +1,263 @@
+import type { SearchHit, ThreadSummary } from '@amc/protocol'
+import { Loader2, Search, X } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { Counts, ThreadWithMessages, View } from '../../shared/api'
+import { AppSidebar, SYSTEM_VIEWS } from './components/app-sidebar'
+import { CommandPalette } from './components/command-palette'
+import { PairScreen } from './components/pair-screen'
+import { ThreadList } from './components/thread-list'
+import { ThreadView } from './components/thread-view'
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from './components/ui/resizable'
+import { SidebarInset, SidebarProvider } from './components/ui/sidebar'
+import { Toaster } from './components/ui/sonner'
+import { TooltipProvider } from './components/ui/tooltip'
+import { useReplica, useSyncStatus } from './hooks/use-amc'
+import { useHotkeys } from './hooks/use-hotkeys'
+import { useTheme } from './hooks/use-theme'
+
+const NO_COUNTS: Counts = { inbox: 0, inboxUnread: 0, starred: 0, drafts: 0 }
+
+export function App() {
+  const status = useSyncStatus()
+  useTheme()
+  if (!status) return null
+  return (
+    <TooltipProvider delayDuration={400}>
+      {status.phase === 'unpaired' ? <PairScreen /> : <MailApp />}
+      <Toaster position="bottom-center" />
+    </TooltipProvider>
+  )
+}
+
+type SearchState = { text: string; hits: SearchHit[] | null; loading: boolean } | null
+
+function MailApp() {
+  const status = useSyncStatus()
+  const { theme, setTheme } = useTheme()
+  const [accountId, setAccountId] = useState<string | null>(null)
+  const [view, setView] = useState<View>({ kind: 'inbox' })
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [filterText, setFilterText] = useState('')
+  const [search, setSearch] = useState<SearchState>(null)
+  const searchInput = useRef<HTMLInputElement>(null)
+  const readerScroll = useRef<HTMLDivElement>(null)
+
+  const accounts = useReplica(() => window.amc.accounts(), [], [])
+  const labels = useReplica(() => window.amc.labels(accountId), [accountId], [])
+  const counts = useReplica(() => window.amc.counts(accountId), [accountId], NO_COUNTS)
+  const viewThreads = useReplica(
+    () => window.amc.threads({ view, accountId }),
+    [view, accountId],
+    [] as ThreadSummary[],
+  )
+  const filtered = useReplica(
+    () => (filterText.trim() ? window.amc.filter(filterText, accountId) : Promise.resolve(null)),
+    [filterText, accountId],
+    null as ThreadSummary[] | null,
+  )
+  const thread = useReplica(
+    () => (selectedId ? window.amc.thread(selectedId) : Promise.resolve(null)),
+    [selectedId],
+    null as ThreadWithMessages | null,
+  )
+
+  const self = useMemo(() => new Set(accounts.map((a) => a.address.toLowerCase())), [accounts])
+  const labelNames = useMemo(() => new Map(labels.map((l) => [l.id, l.name])), [labels])
+  const threads: ThreadSummary[] = search?.hits ?? filtered ?? viewThreads
+  const matchSnippets = useMemo(
+    () => (search?.hits ? new Map(search.hits.map((h) => [h.id, h.matchSnippet])) : undefined),
+    [search],
+  )
+
+  // Keep a selection whenever there is something to select.
+  useEffect(() => {
+    if (threads.length === 0) return
+    if (!selectedId || !threads.some((t) => t.id === selectedId))
+      setSelectedId(threads[0]?.id ?? null)
+  }, [threads, selectedId])
+
+  const title = search
+    ? `Search: ${search.text}`
+    : view.kind === 'label'
+      ? (labelNames.get(view.labelId) ?? 'Label')
+      : (SYSTEM_VIEWS.find((v) => v.view.kind === view.kind)?.title ?? 'Mail')
+
+  const goTo = useCallback((next: View) => {
+    setSearch(null)
+    setFilterText('')
+    setView(next)
+    setSelectedId(null)
+  }, [])
+
+  const runSearch = useCallback(
+    async (text: string) => {
+      if (!text) return
+      setSearch({ text, hits: null, loading: true })
+      try {
+        const hits = await window.amc.search(text, accountId)
+        setSearch({ text, hits, loading: false })
+        setSelectedId(hits[0]?.id ?? null)
+      } catch {
+        setSearch({ text, hits: [], loading: false })
+      }
+    },
+    [accountId],
+  )
+
+  const clearSearch = () => {
+    setSearch(null)
+    setFilterText('')
+    searchInput.current?.blur()
+  }
+
+  const move = (delta: number) => {
+    if (threads.length === 0) return
+    const index = Math.max(
+      0,
+      threads.findIndex((t) => t.id === selectedId),
+    )
+    const next = threads[Math.min(threads.length - 1, Math.max(0, index + delta))]
+    if (next) setSelectedId(next.id)
+  }
+
+  const dark = document.documentElement.classList.contains('dark')
+  useHotkeys({
+    j: () => move(1),
+    arrowdown: () => move(1),
+    k: () => move(-1),
+    arrowup: () => move(-1),
+    space: () =>
+      readerScroll.current?.scrollBy({
+        top: readerScroll.current.clientHeight * 0.8,
+        behavior: 'smooth',
+      }),
+    '/': () => searchInput.current?.focus(),
+    'mod+f': () => searchInput.current?.focus(),
+    'mod+k': () => setPaletteOpen((o) => !o),
+    escape: () => clearSearch(),
+    'g i': () => goTo({ kind: 'inbox' }),
+    'g u': () => goTo({ kind: 'unread' }),
+    'g s': () => goTo({ kind: 'starred' }),
+    'g d': () => goTo({ kind: 'drafts' }),
+    'g t': () => goTo({ kind: 'sent' }),
+    'g a': () => goTo({ kind: 'all' }),
+    'mod+0': () => setAccountId(null),
+    ...Object.fromEntries(
+      accounts.slice(0, 9).map((a, i) => [`mod+${i + 1}`, () => setAccountId(a.id)]),
+    ),
+  })
+
+  return (
+    <SidebarProvider
+      className="h-full"
+      style={{ '--sidebar-width': '15rem' } as React.CSSProperties}
+    >
+      <AppSidebar
+        accounts={accounts}
+        accountId={accountId}
+        onAccount={(id) => {
+          setAccountId(id)
+          setSelectedId(null)
+        }}
+        view={view}
+        onView={goTo}
+        counts={counts}
+        labels={labels}
+        status={status}
+      />
+      <SidebarInset className="overflow-hidden">
+        <ResizablePanelGroup orientation="horizontal" className="h-full">
+          <ResizablePanel defaultSize="40%" minSize="25%" maxSize="60%">
+            <div className="flex h-full flex-col">
+              <header className="app-drag flex h-12 shrink-0 items-center gap-2 border-b px-4">
+                <h2 className="truncate text-sm font-semibold">{title}</h2>
+                {!search && view.kind === 'inbox' && counts.inbox > 0 && (
+                  <span className="text-xs text-muted-foreground tabular-nums">
+                    {counts.inbox.toLocaleString()}
+                  </span>
+                )}
+                <div className="relative ml-auto w-56">
+                  {search?.loading ? (
+                    <Loader2 className="absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 animate-spin text-muted-foreground" />
+                  ) : (
+                    <Search className="absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                  )}
+                  <input
+                    ref={searchInput}
+                    value={search ? search.text : filterText}
+                    onChange={(e) => {
+                      setSearch(null)
+                      setFilterText(e.target.value)
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') void runSearch((search?.text ?? filterText).trim())
+                      if (e.key === 'ArrowDown') {
+                        e.preventDefault()
+                        searchInput.current?.blur()
+                        move(1)
+                      }
+                    }}
+                    placeholder="Filter · ↵ searches everything"
+                    className="h-7 w-full rounded-md border border-transparent bg-muted pr-7 pl-8 text-xs outline-none placeholder:text-muted-foreground focus:border-ring/50 focus:bg-background"
+                  />
+                  {(search || filterText) && (
+                    <button
+                      type="button"
+                      onClick={clearSearch}
+                      className="absolute top-1/2 right-2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    >
+                      <X className="size-3.5" />
+                    </button>
+                  )}
+                </div>
+              </header>
+              <div className="min-h-0 flex-1">
+                <ThreadList
+                  threads={threads}
+                  selectedId={selectedId}
+                  onSelect={setSelectedId}
+                  self={self}
+                  matchSnippets={matchSnippets}
+                  empty={
+                    search?.loading
+                      ? 'Searching your entire history…'
+                      : search
+                        ? 'Nothing found.'
+                        : filterText
+                          ? 'No matches here. Press ↵ to search all mail.'
+                          : view.kind === 'inbox'
+                            ? 'Inbox zero.'
+                            : 'Nothing here.'
+                  }
+                />
+              </div>
+            </div>
+          </ResizablePanel>
+          <ResizableHandle />
+          <ResizablePanel defaultSize="60%" minSize="35%">
+            <div className="flex h-full flex-col">
+              <div className="app-drag h-12 shrink-0 border-b" />
+              <div className="min-h-0 flex-1">
+                <ThreadView data={thread} labelNames={labelNames} scrollRef={readerScroll} />
+              </div>
+            </div>
+          </ResizablePanel>
+        </ResizablePanelGroup>
+      </SidebarInset>
+      <CommandPalette
+        open={paletteOpen}
+        onOpenChange={setPaletteOpen}
+        accounts={accounts}
+        labels={labels}
+        onView={goTo}
+        onAccount={setAccountId}
+        onSearch={(text) => void runSearch(text)}
+        onToggleTheme={() =>
+          setTheme(dark ? 'light' : theme === 'system' && !dark ? 'dark' : dark ? 'light' : 'dark')
+        }
+        dark={dark}
+      />
+    </SidebarProvider>
+  )
+}

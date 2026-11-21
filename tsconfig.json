@@ -1,4 +1,17 @@
 {
   "files": [],
-  "references": [{ "path": "packages/protocol" }, { "path": "apps/engine" }, { "path": "apps/cli" }]
+  "references": [
+    {
+      "path": "packages/protocol"
+    },
+    {
+      "path": "apps/engine"
+    },
+    {
+      "path": "apps/cli"
+    },
+    {
+      "path": "apps/desktop"
+    }
+  ]
 }
