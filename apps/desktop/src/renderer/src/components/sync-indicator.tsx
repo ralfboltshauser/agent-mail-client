@@ -52,18 +52,22 @@ export function SyncIndicator({
     text = `Fetching history · ${a?.messageCount.toLocaleString()}${a?.backfill.estimatedTotal ? ` of ${a.backfill.estimatedTotal.toLocaleString()}` : ''}`
   }
 
+  const warnings = status.healthWarnings ?? []
   const detail = [
+    ...warnings,
     status.error,
     ...broken.map((a) => `${a.address}: ${a.lastError ?? a.status}`),
     status.engineUrl,
-  ]
-    .filter(Boolean)
-    .join('\n')
+  ].filter(Boolean)
+  const tooltip = [...new Set(detail)].join('\n')
 
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-muted-foreground">
+        <div
+          tabIndex={warnings.length ? 0 : undefined}
+          className="flex items-center gap-2 px-2 py-1.5 text-xs text-muted-foreground"
+        >
           <span
             className={cn(
               'size-1.5 shrink-0 rounded-full',
@@ -73,11 +77,18 @@ export function SyncIndicator({
             )}
           />
           <span className="truncate tabular-nums">{text}</span>
+          {warnings.length > 0 && (
+            <span
+              className="size-1.5 shrink-0 rounded-full bg-amber-500"
+              role="img"
+              aria-label="Engine warning"
+            />
+          )}
         </div>
       </TooltipTrigger>
-      {detail && (
+      {tooltip && (
         <TooltipContent side="top" className="max-w-80 whitespace-pre-line">
-          {detail}
+          {tooltip}
         </TooltipContent>
       )}
     </Tooltip>

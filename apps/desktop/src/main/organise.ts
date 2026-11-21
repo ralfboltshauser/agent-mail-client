@@ -4,12 +4,12 @@ import {
   actionLabels,
   applyLabelPatch,
   type LabelPatch,
-  type MessageDetail,
   type MutationRequest,
   MutationResponse,
   type MutationResult,
   OrganiseAction,
   SNOOZED_LABEL,
+  type ThreadMessage,
   type ThreadSummary,
 } from '@amc/protocol'
 import type { OrganiseNotice } from '../shared/api'
@@ -52,7 +52,7 @@ export const ORGANISE_SCHEMA = `
 
 function applyPatch(
   thread: ThreadSummary,
-  messages: MessageDetail[],
+  messages: ThreadMessage[],
   patch: Patch,
   kind: OrganiseAction['kind'],
 ) {
@@ -101,7 +101,7 @@ function applyPatch(
 function patchesFor(
   action: Exclude<OrganiseAction, { kind: 'undo' }>,
   thread: ThreadSummary,
-  messages: MessageDetail[],
+  messages: ThreadMessage[],
 ) {
   const patch: Patch = { labels: {} }
   const inverse: Patch = { labels: {} }
@@ -222,7 +222,7 @@ export class LocalOrganise {
     return id
   }
 
-  messages(thread: ThreadSummary, base: MessageDetail[]): MessageDetail[] {
+  messages(thread: ThreadSummary, base: ThreadMessage[]): ThreadMessage[] {
     const rows = this.#db
       .prepare(
         `SELECT patch, json_extract(request, '$.action.kind') AS kind FROM organise_queue

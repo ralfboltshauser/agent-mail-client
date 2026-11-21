@@ -21,6 +21,7 @@ const toAddresses = (list: z.infer<typeof AddressInput>[] | undefined) =>
   list?.map((a) => ({ name: a.name ?? null, address: a.address }))
 
 const MAX_BODY = 20_000
+const MAX_THREAD_TEXT = 100_000
 
 function json(value: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(value, null, 1) }] }
@@ -47,6 +48,8 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
   )
   const can = (scope: Scope) => hasScope(principal.scopes, scope)
   const { queries, drafts, db } = deps
+  const accountId = principal.kind === 'agent' ? principal.accountId : undefined
+  const withinAccount = (id: string) => !accountId || id === accountId
 
   server.registerTool(
     'whoami',
@@ -105,24 +108,32 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
       'get_thread',
       {
         description:
-          'Read a whole Thread: every message with sender, recipients, date, plain-text body and attachments.',
+          'Read a Thread with every message, including sender, recipients, date, plain-text body and attachments. Text is capped at 20,000 characters per message and 100,000 per Thread, prioritizing newer messages. Use get_message when […truncated] marks omitted text.',
         inputSchema: { thread_id: z.string() },
         annotations: { readOnlyHint: true },
       },
       async ({ thread_id }) => {
-        const thread = queries.thread(thread_id)
-        if (!thread) return failure(`No Thread ${thread_id}`)
+        const thread = queries.agentThread(thread_id, MAX_BODY, MAX_THREAD_TEXT)
+        if (!thread || !withinAccount(thread.accountId)) return failure(`No Thread ${thread_id}`)
         return json({
           ...thread,
-          messages: thread.messages.map((m) => ({
-            ...m,
-            bodyText:
-              m.bodyText.length > MAX_BODY
-                ? `${m.bodyText.slice(0, MAX_BODY)}\n[…truncated]`
-                : m.bodyText,
-          })),
           drafts: drafts.list({ threadId: thread_id }),
         })
+      },
+    )
+
+    server.registerTool(
+      'get_message',
+      {
+        description: 'Read one message. Text beyond 20,000 characters is marked with […truncated].',
+        inputSchema: { messageId: z.string() },
+        annotations: { readOnlyHint: true },
+      },
+      async ({ messageId }) => {
+        const message = queries.agentMessage(messageId, MAX_BODY)
+        return message && withinAccount(message.accountId)
+          ? json(message)
+          : failure(`No message ${messageId}`)
       },
     )
 

@@ -41,6 +41,7 @@ const api: AmcApi = {
   saveSignature: invoke('saveSignature') as AmcApi['saveSignature'],
   sendSettings: invoke('sendSettings') as AmcApi['sendSettings'],
   saveSendSettings: invoke('saveSendSettings') as AmcApi['saveSendSettings'],
+  messageText: invoke('messageText') as AmcApi['messageText'],
   messageHtml: invoke('messageHtml') as AmcApi['messageHtml'],
   inlineAttachment: invoke('inlineAttachment') as AmcApi['inlineAttachment'],
   openAttachment: invoke('openAttachment') as AmcApi['openAttachment'],

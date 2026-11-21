@@ -305,6 +305,7 @@ function registerReadIpc() {
       )
     ).contacts
   })
+  ipcMain.handle('amc:messageText', (_e, messageId: string) => openReplica().messageText(messageId))
   ipcMain.handle('amc:messageHtml', async (_e, messageId: string) => {
     const cached = openReplica().html(messageId)
     if (cached !== null) return cached
