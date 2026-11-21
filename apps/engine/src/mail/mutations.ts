@@ -37,6 +37,7 @@ import type { ImapAccountSync } from '../providers/imap/sync.ts'
 import { labelId, type MailStore, messageId } from './store.ts'
 
 const INTERNAL = 'engine'
+const IMAP_SNOOZE_INBOX = 'Snooze is only available for IMAP threads in the Inbox'
 const CLEAR_SNOOZE = { snoozedUntil: null, noReply: false, startedAt: null, snoozeIntent: null }
 
 interface ThreadState {
@@ -449,7 +450,8 @@ export class Mutations {
   #state(thread: ThreadRow): ThreadState {
     const rows = this.#db
       .prepare(
-        "SELECT state_patch FROM mutation WHERE thread_id = ? AND status = 'pending' ORDER BY seq",
+        `SELECT state_patch FROM mutation WHERE thread_id = ? AND status = 'pending'
+         AND json_extract(request, '$.work') IS NOT 'wake' ORDER BY seq`,
       )
       .all(thread.id) as { state_patch: string }[]
     return Object.assign(
@@ -558,6 +560,14 @@ export class Mutations {
         imapMoves,
       )
       if (error) throw new MutationError(error)
+      if (action.kind === 'snooze') {
+        const inbox = this.#db
+          .prepare(
+            'SELECT 1 FROM message m, json_each(m.label_ids) l WHERE m.thread_id = ? AND l.value = ?',
+          )
+          .get(thread.id, labelId(thread.account_id, 'INBOX'))
+        if (!inbox) throw new MutationError(IMAP_SNOOZE_INBOX)
+      }
     }
     if (action.kind === 'label') {
       if (
@@ -641,11 +651,7 @@ export class Mutations {
       const labels = JSON.parse(row.label_ids) as string[]
       if (labels.includes(labelId(thread.account_id, 'DRAFT'))) continue
       const patch = patchFor(row.id, labels)
-      if (
-        !Object.keys(patch).length &&
-        !(thread.kind === 'imap' && JSON.parse(body).kind === 'snooze')
-      )
-        continue
+      if (!Object.keys(patch).length) continue
       if (thread.kind === 'imap') {
         const locations = this.#db
           .prepare('SELECT * FROM imap_location WHERE message_id = ?')
@@ -795,8 +801,10 @@ export class Mutations {
     const startsIntent = action.kind === 'mute' && action.value
     // Take the action's checkpoint before its first read. Acknowledgements later
     // identify our exact changes without hiding an intervening edit on a sibling.
-    const checkpoint = startsIntent ? (await api.profile()).historyId : undefined
-    if (startsIntent && !checkpoint) throw new Error('Gmail did not provide a history checkpoint')
+    const needsCheckpoint = startsIntent || action.kind === 'snooze'
+    const checkpoint = needsCheckpoint ? (await api.profile()).historyId : undefined
+    if (needsCheckpoint && !checkpoint)
+      throw new Error('Gmail did not provide a history checkpoint')
     const messages = await this.#gmailThread(api, row)
     transaction(this.#db, () => {
       const state = this.#committedState(row.thread_id)
@@ -804,7 +812,7 @@ export class Mutations {
       let patchFor: (id: string, labels: string[]) => LabelPatch
       const undo = new Map<string, Change>()
       if (this.#isSnoozeExit(row)) {
-        statePatch = CLEAR_SNOOZE
+        statePatch = this.#isWake(row) ? {} : CLEAR_SNOOZE
         patchFor = () => ({})
       } else if (original) {
         statePatch = this.#undoState(original, state)
@@ -887,10 +895,12 @@ export class Mutations {
             'INSERT INTO organise_intent (id, account_id, history_id, checked_history_id) VALUES (?, ?, ?, ?)',
           )
           .run(row.id, account, checkpoint, checkpoint)
-        const seen = this.#db.prepare(
-          "INSERT INTO organise_intent_message VALUES (?, ?, 'suppress', 'done')",
-        )
-        for (const id of found) seen.run(row.id, id)
+        if (startsIntent) {
+          const seen = this.#db.prepare(
+            "INSERT INTO organise_intent_message VALUES (?, ?, 'suppress', 'done')",
+          )
+          for (const id of found) seen.run(row.id, id)
+        }
       }
       for (const patch of projected) this.#store.refreshMessageLabels(patch.message_id)
       row.prepared = 1
@@ -906,8 +916,12 @@ export class Mutations {
     })
   }
 
+  #isWake(row: MutationRow): boolean {
+    return JSON.parse(row.request).work === 'wake'
+  }
+
   #isSnoozeExit(row: MutationRow): boolean {
-    return JSON.parse(row.request).work === 'wake' || (row.undo_of !== null && this.#isSnooze(row))
+    return this.#isWake(row) || (row.undo_of !== null && this.#isSnooze(row))
   }
 
   #archives(row: MutationRow): boolean {
@@ -951,7 +965,12 @@ export class Mutations {
         AND NOT EXISTS (
           SELECT 1 FROM mutation p WHERE p.thread_id = t.id AND p.status = 'pending'
         )
-        AND (t.snoozed_until <= ? OR (t.snooze_no_reply = 1 AND EXISTS (
+        AND NOT EXISTS (
+          SELECT 1 FROM mutation w WHERE w.thread_id = t.id AND w.status IN ('failed', 'partial')
+            AND w.next_attempt > ?1 AND json_extract(w.request, '$.work') = 'wake'
+            AND json_extract(w.request, '$.intent') IS json_extract(t.organise_state, '$.snoozeIntent')
+        )
+        AND (t.snoozed_until <= ?1 OR (t.snooze_no_reply = 1 AND EXISTS (
           SELECT 1 FROM message m WHERE m.thread_id = t.id
             AND m.first_seen_at >= t.snooze_started_at AND m.sent_at >= t.snooze_started_at
             AND lower(json_extract(m.from_json, '$.address')) != lower(a.address)
@@ -970,7 +989,7 @@ export class Mutations {
         INTERNAL,
         JSON.stringify({ work: 'wake', intent: snoozeIntent }),
         thread,
-        CLEAR_SNOOZE,
+        {},
         () => ({}),
       )
     }
@@ -1056,8 +1075,10 @@ export class Mutations {
     const rows = this.#db
       .prepare(
         `SELECT m.*, a.kind, a.status AS account_status FROM mutation m JOIN account a ON a.id = m.account_id JOIN (
-        SELECT MIN(seq) AS seq FROM mutation WHERE status = 'pending' GROUP BY account_id
-       ) head ON head.seq = m.seq WHERE m.next_attempt <= ?`,
+        SELECT MIN(seq) AS seq FROM mutation WHERE status = 'pending'
+          AND (next_attempt <= ?1 OR json_extract(request, '$.work') IS NOT 'wake')
+          GROUP BY account_id
+       ) head ON head.seq = m.seq WHERE m.next_attempt <= ?1`,
       )
       .all(now) as unknown as (MutationRow & { kind: string; account_status: string })[]
     const started: Promise<void>[] = []
@@ -1075,6 +1096,7 @@ export class Mutations {
         this.#stopAgentWrite(row, readJournal(row))
         continue
       }
+      if (this.#isWake(row) && row.account_status === 'auth_expired') continue
       if (row.kind === 'imap') {
         if (row.account_status === 'auth_expired') {
           this.#finish(row, 'failed', 'Sign in to IMAP again to organise this Account')
@@ -1124,6 +1146,7 @@ export class Mutations {
       }
     }
     const waking = this.#isSnoozeExit(row)
+    const snoozing = JSON.parse(row.request).kind === 'snooze'
     const changes: ImapChange[] = waking
       ? []
       : original
@@ -1156,11 +1179,12 @@ export class Mutations {
         const ran = await this.#imap?.(row.account_id, async (sync) =>
           executeImap(
             sync,
-            waking && !entry.pending ? await this.#imapWakeChanges(row, sync) : changes,
+            waking ? await this.#imapWakeChanges(row, sync) : changes,
             entry,
             () => this.#saveJournal(row, journal),
             allowTrash,
             beforeWrite,
+            snoozing,
           ),
         )
         if (!ran) return
@@ -1207,6 +1231,7 @@ export class Mutations {
         ),
       )
     }
+    if (snoozing && !entry.applied.length) entry.error ??= IMAP_SNOOZE_INBOX
     transaction(this.#db, () => {
       this.#db.prepare('UPDATE mutation SET prepared = 1 WHERE id = ?').run(row.id)
       if (original) {
@@ -1229,34 +1254,39 @@ export class Mutations {
   async #imapWakeChanges(row: MutationRow, sync: ImapAccountSync): Promise<ImapChange[]> {
     const source = this.#snoozeSource(row)
     if (!source) return []
-    const { account_id: account, thread_id: thread } = row
-    const folders = mapFolders(await sync.client.list())
-    const relevant = new Set(['INBOX', 'ARCHIVE', 'TRASH', 'SPAM'])
-    for (const folder of folders) {
-      if (relevant.has(folder.label.providerId) || folder.trash)
-        await sync.refreshOrganiseFolder(folder)
-    }
+    const account = row.account_id
     const inbox = labelId(account, 'INBOX')
     const archive = labelId(account, 'ARCHIVE')
-    const blocked = this.#imapTrashLabels(account)
-    blocked.add(inbox)
-    blocked.add(labelId(account, 'SPAM'))
-    const original = new Set(this.#patches(source.id).map(({ message_id }) => message_id))
-    const locations = this.#db
-      .prepare(`
-      SELECT l.* FROM imap_location l JOIN message m ON m.id = l.message_id
-      WHERE m.thread_id = ?
-    `)
-      .all(thread) as unknown as MessageLocation[]
-    if (locations.some(({ label_id }) => blocked.has(label_id))) return []
-    return locations
-      .filter(({ label_id, message_id }) => label_id === archive && original.has(message_id))
-      .map((location) => ({
-        message_id: location.message_id,
-        before: { [archive]: true, [inbox]: false },
-        after: { [archive]: false, [inbox]: true },
-        revisions: { [archive]: imapLocationRevision(location) },
-      }))
+    const folder = mapFolders(await sync.client.list()).find(
+      ({ label }) => label.providerId === 'ARCHIVE',
+    )
+    if (!folder) return []
+    await sync.refreshOrganiseFolder(folder)
+    return readJournal(source).flatMap(({ applied }) =>
+      applied.flatMap(({ message_id, revisions }) => {
+        const revision = revisions?.[archive]
+        if (
+          !revision ||
+          !sync.locations
+            .forMessage(message_id)
+            .some(
+              (location) =>
+                location.label_id === archive &&
+                location.path_key === encodeURIComponent(folder.path) &&
+                imapLocationRevision(location) === revision,
+            )
+        )
+          return []
+        return [
+          {
+            message_id,
+            before: { [archive]: true, [inbox]: false },
+            after: { [archive]: false, [inbox]: true },
+            revisions: { [archive]: revision },
+          },
+        ]
+      }),
+    )
   }
 
   #stopAgentWrite(row: MutationRow, journal: JournalEntry[], detail = row.error) {
@@ -1294,11 +1324,11 @@ export class Mutations {
   #messageHistory(
     account: string,
     id: string,
-    observed: ProviderObservation | undefined,
+    observedHistoryId: string | undefined,
     history: HistorySnapshot | null,
   ): MessageHistory | null {
     if (!history) return null
-    if (observed?.historyId && !this.#historyIncludes(history.watermark, observed.historyId))
+    if (observedHistoryId && !this.#historyIncludes(history.watermark, observedHistoryId))
       throw new Error('Gmail history has not caught up with the message')
     const raw = id.slice(account.length + 1)
     const events: LabelEvent[] = []
@@ -1396,7 +1426,22 @@ export class Mutations {
     const intent = row.intent_id ? this.#intent(row.intent_id) : undefined
     const automatic = intent ? (JSON.parse(row.request) as AutomaticRequest) : undefined
     const waking = this.#isSnoozeExit(row)
-    const sourceJournals = intent ? this.#intentJournals(intent.id, row.id) : []
+    const snoozeSource = waking ? this.#snoozeSource(row) : undefined
+    const snoozeMessages = snoozeSource ? this.#patches(snoozeSource.id) : []
+    const snoozeCheckpoint =
+      snoozeSource &&
+      (this.#intent(snoozeSource.id)?.history_id ??
+        snoozeMessages.map(fromPatch).reduce<string | undefined>((oldest, change) => {
+          const revision = change.revisions?.[inbox]
+          return revision && (!oldest || this.#historyIncludes(oldest, revision))
+            ? revision
+            : oldest
+        }, undefined))
+    const sourceJournals = intent
+      ? this.#intentJournals(intent.id, row.id)
+      : snoozeSource
+        ? readJournal(snoozeSource)
+        : []
     const save = () => this.#saveJournal(row, journal)
     while (true) {
       const thread = replan ? await this.#gmailThread(api, row) : undefined
@@ -1406,10 +1451,9 @@ export class Mutations {
           : []
         : step.changes.map((change) => change.message_id)
       if (waking && thread?.length) {
-        const source = this.#snoozeSource(row)
         // A thread response can omit a trashed message. Check missing originals
         // individually before using a surviving message as the wake target.
-        if (source) ids.push(...this.#patches(source.id).map(({ message_id }) => message_id))
+        ids.push(...snoozeMessages.map(({ message_id }) => message_id))
       }
       const current = await this.#observe(api, row, [...new Set(ids)], thread)
       const pages = new Map<string, Promise<HistorySnapshot | null>>()
@@ -1425,7 +1469,7 @@ export class Mutations {
         const observed = current.get(id)
         if (!force && start === observed?.historyId)
           return { events: [], deleted: false, delivered: false }
-        return this.#messageHistory(account, id, observed, await snapshot(start))
+        return this.#messageHistory(account, id, observed?.historyId, await snapshot(start))
       }
 
       const pending = entry.pending
@@ -1439,13 +1483,13 @@ export class Mutations {
           // Gmail history has no actor. A matching transition settles the retry,
           // but only an acknowledged write can supply an Undo revision.
           const matchesDispatch = events[0]?.present === value
-          if (
-            this.#isSnoozeExit(row) &&
-            key === inbox &&
-            value &&
-            (matchesDispatch || !messageHistory)
-          )
+          if (waking && key === inbox && value && matchesDispatch) entry.wakeConsumed = true
+          if (waking && !messageHistory) {
+            const labels = current.get(change.message_id)?.labels
+            if (labels && ![inbox, trash, spam].some((label) => labels.includes(label)))
+              throw new Error('Could not verify the previous Snooze wake with Gmail')
             entry.wakeConsumed = true
+          }
           if (!messageHistory || messageHistory.deleted || events.length) {
             if (
               !messageHistory ||
@@ -1468,7 +1512,29 @@ export class Mutations {
       const acknowledged = acknowledgedLabels([...sourceJournals, ...journal])
       const ownerChanged = (id: string, event: Pick<LabelEvent, 'label' | 'revision'>) =>
         !acknowledged.has(JSON.stringify([id, event.label, event.revision]))
-      const changes = replan && thread ? replan(thread, current) : step.changes
+      let changes = replan && thread ? replan(thread, current) : step.changes
+      if (changes.length && snoozeCheckpoint) {
+        let historyUnavailable = false
+        for (const id of current.keys()) {
+          const found = await history(id, snoozeCheckpoint, true)
+          if (!found) {
+            const revision = current.get(id)?.historyId
+            // An unchanged message revision proves that nothing followed the
+            // checkpoint or AMC's last acknowledged Snooze write to this message.
+            historyUnavailable ||=
+              !this.#historyIncludes(snoozeCheckpoint, revision) &&
+              (!revision || ownerChanged(id, { label: inbox, revision }))
+          } else if (
+            found.events.some((event) => event.label === inbox && ownerChanged(id, event))
+          ) {
+            entry.wakeConsumed = true
+            changes = []
+            break
+          }
+        }
+        if (historyUnavailable && !entry.wakeConsumed)
+          throw new Error('Could not verify Inbox changes since Snooze')
+      }
       const touched = async (change: Change, key: string, start = change.revisions?.[key]) => {
         if (!start) return true
         const { message_id } = change
@@ -1579,7 +1645,31 @@ export class Mutations {
       const historyId = current.get(message_id)?.historyId
       entry.pending = { change: candidate, historyId }
       save()
-      const acknowledge = (message: GmailMessageState) => {
+      const acknowledge = async (message: GmailMessageState) => {
+        let revisions = this.#revisions(after, message.historyId)
+        if (!message.historyId && historyId && JSON.parse(row.request).kind === 'snooze') {
+          // Gmail may omit the revision from its write response. Attribute only
+          // an unambiguous transition between dispatch and the next message read.
+          try {
+            const observed = await api.getMessageState(rawId(message_id), true)
+            if (observed?.historyId) {
+              const found = this.#messageHistory(
+                account,
+                message_id,
+                observed.historyId,
+                await this.#readHistory(api, historyId),
+              )
+              const events = found?.events.filter(
+                ({ label, revision }) =>
+                  label === inbox && this.#historyIncludes(observed.historyId ?? null, revision),
+              )
+              if (!found?.deleted && events?.length === 1 && events[0]?.present === false)
+                revisions = { [inbox]: events[0].revision }
+            }
+          } catch {
+            // Keep the acknowledged write even when history cannot identify its revision.
+          }
+        }
         transaction(this.#db, () => {
           this.#bumpEpoch(account)
           this.#store.putProviderLabels(
@@ -1588,17 +1678,14 @@ export class Mutations {
             message.labelIds ?? [],
             message.historyId,
           )
-          entry.applied = combine([
-            ...entry.applied,
-            { ...candidate, revisions: this.#revisions(after, message.historyId) },
-          ])
+          entry.applied = combine([...entry.applied, { ...candidate, revisions }])
           delete entry.pending
           save()
         })
       }
       try {
         if (step.trash !== undefined) {
-          acknowledge(await api.setTrashed(rawId(message_id), step.trash))
+          await acknowledge(await api.setTrashed(rawId(message_id), step.trash))
         } else {
           const add: string[] = []
           const remove: string[] = []
@@ -1606,7 +1693,7 @@ export class Mutations {
             const destination = present ? add : remove
             destination.push(rawId(key))
           }
-          acknowledge(
+          await acknowledge(
             beforeDispatch
               ? await api.modifyMessage(rawId(message_id), add, remove, beforeDispatch)
               : await api.modifyMessage(rawId(message_id), add, remove),
@@ -1902,7 +1989,7 @@ export class Mutations {
           error.status === 429 ||
           error.status >= 500 ||
           /rateLimitExceeded|quotaExceeded|backendError/i.test(error.reason)))
-    if (!transient || row.attempts >= 8) return false
+    if (!this.#isWake(row) && (!transient || row.attempts >= 8)) return false
     const delay = Math.min(300_000, 2000 * 2 ** row.attempts)
     const retryAfter = error instanceof GmailHttpError ? error.retryAfterMs : 0
     this.#db
@@ -1955,7 +2042,7 @@ export class Mutations {
       const patch = discard
         ? {}
         : this.#isSnoozeExit(row)
-          ? this.#snoozeSource(row)
+          ? status === 'applied' && this.#snoozeSource(row)
             ? CLEAR_SNOOZE
             : {}
           : status === 'applied'

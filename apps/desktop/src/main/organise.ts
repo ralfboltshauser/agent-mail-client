@@ -224,6 +224,8 @@ export class LocalOrganise {
         const folders = new Set(this.replica.labels(account.id).map(({ id }) => id))
         const error = imapActionError(action, account.id, folders, account.imapMoves)
         if (error) throw new Error(error)
+        if (action.kind === 'snooze' && !thread.thread.labelIds.includes(`${account.id}:INBOX`))
+          throw new Error('Snooze is only available for IMAP threads in the Inbox')
       }
       const projected = patchesFor(action, thread.thread, thread.messages, imap)
       patch = projected.patch

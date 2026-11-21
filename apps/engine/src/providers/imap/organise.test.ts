@@ -434,3 +434,66 @@ it('refuses IMAP Snooze without a designated Archive folder', async () => {
   )
   expect(imap.writes).toEqual([])
 })
+
+it('refuses IMAP Snooze in a custom folder', async () => {
+  const { imap, enqueue, run, now, view } = await fixture()
+  const result = await run({ kind: 'label', labelId: 'a:folder:Project', value: true })
+  expect(result?.status).toBe('applied')
+  expect(() => enqueue({ kind: 'snooze', until: now() + 1000 })).toThrow(
+    'Snooze is only available for IMAP threads in the Inbox',
+  )
+  expect(view()?.snoozedUntil).toBeNull()
+  expect(imap.folder('Project').messages.size).toBe(1)
+})
+
+it.each(['uid', 'validity'] as const)(
+  'consumes IMAP Snooze after the Archive %s changes',
+  async (mode) => {
+    const { imap, run, now, advance, queue, view } = await fixture()
+    const until = now() + 1000
+    expect(await run({ kind: 'snooze', until })).toMatchObject({ status: 'applied' })
+    const archive = imap.folder('Filed mail')
+    if (mode === 'uid') {
+      const [uid] = archive.messages.keys()
+      if (uid === undefined) throw new Error('Missing archived message')
+      imap.expunge('Filed mail', uid)
+      imap.add('Filed mail', 'Message-ID: <example@example.com>\r\nSubject: Organise me')
+    } else {
+      archive.validity++
+    }
+    advance(1000)
+    await queue.tick()
+    expect(view()?.snoozedUntil ?? null).toBeNull()
+    expect(imap.folder('INBOX').messages.size).toBe(0)
+    expect(archive.messages.size).toBe(1)
+    expect(imap.writes.map(({ command }) => command)).toEqual(['UID MOVE'])
+  },
+)
+
+it('keeps the IMAP schedule when a wake move fails and retries it', async () => {
+  const { imap, view, run, queue, now, advance } = await fixture()
+  const until = now() + 1000
+  expect(await run({ kind: 'snooze', until })).toMatchObject({ status: 'applied' })
+  const move = vi.spyOn(imap, 'uidMove').mockResolvedValueOnce(false)
+  advance(1000)
+  await queue.tick()
+  expect(view()).toMatchObject({ inInbox: false, snoozedUntil: until })
+  await queue.tick()
+  expect(move).toHaveBeenCalledTimes(1)
+  advance(60_000)
+  await queue.tick()
+  expect(view()).toMatchObject({ inInbox: true, snoozedUntil: null })
+  expect(move).toHaveBeenCalledTimes(2)
+})
+
+it('wakes an IMAP Snooze using the COPYUID when MOVE is unavailable', async () => {
+  const { imap, view, run, queue, now, advance } = await fixture({ capability: 'UIDPLUS' })
+  const until = now() + 1000
+  expect(await run({ kind: 'snooze', until })).toMatchObject({ status: 'applied' })
+  advance(1000)
+  await queue.tick()
+  expect(view()).toMatchObject({ inInbox: true, snoozedUntil: null })
+  expect(
+    imap.writes.map(({ command }) => command).filter((command) => command === 'UID COPY'),
+  ).toHaveLength(2)
+})

@@ -128,7 +128,12 @@ export function useOrganise(
         icon: Archive,
         run: () => void run({ kind: 'archive', threadId }, 'Archived'),
       })
-    if (!trashed && snoozeEnabled && (!imap || (canMove && has('ARCHIVE'))))
+    if (
+      !trashed &&
+      snoozeEnabled &&
+      (!imap ||
+        (canMove && has('ARCHIVE') && thread.labelIds.includes(`${thread.accountId}:INBOX`)))
+    )
       controls.push({
         name: 'Snooze',
         key: 'h',

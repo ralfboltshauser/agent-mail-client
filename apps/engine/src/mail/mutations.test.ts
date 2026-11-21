@@ -582,6 +582,81 @@ describe('Gmail Organise writeback', () => {
     })
   })
 
+  it('consumes a Snooze after the owner restores and archives it before the deadline', async () => {
+    await withFixture(async ({ gmail, queue, sync, thread, submit, advance, now }) => {
+      submit({ kind: 'snooze', threadId: THREAD, until: now() + 1000 })
+      await queue.tick()
+      gmail.setLabels('m1', ['INBOX', 'UNREAD'])
+      await sync.incremental()
+      gmail.setLabels('m1', ['UNREAD'])
+      await sync.incremental()
+      const write = vi.spyOn(gmail, 'modifyMessage')
+      advance(1000)
+      await queue.tick()
+      expect(thread()).toMatchObject({ inInbox: false, snoozedUntil: null })
+      expect(write).not.toHaveBeenCalled()
+    })
+  })
+
+  it('keeps a throttled wake across restart and reauthentication', async () => {
+    await withFixture(async ({ db, gmail, store, queue, thread, submit, advance, now }) => {
+      const until = now() + 1000
+      submit({ kind: 'snooze', threadId: THREAD, until })
+      await queue.tick()
+      advance(1000)
+      gmail.batchFailure = { applied: 0, error: new GmailHttpError(429, '', 'retry later') }
+      await queue.tick()
+      db.prepare("UPDATE account SET status = 'auth_expired' WHERE id = 'a'").run()
+      let authenticated = false
+      const restarted = new Mutations(store, () => (authenticated ? gmail : null), silentLog, {
+        now,
+        snoozeEnabled: true,
+      })
+      advance(2000)
+      await restarted.tick()
+      expect(thread()).toMatchObject({ inInbox: false, snoozedUntil: until })
+      authenticated = true
+      db.prepare("UPDATE account SET status = 'ready' WHERE id = 'a'").run()
+      await restarted.tick()
+      expect(thread()).toMatchObject({ inInbox: true, snoozedUntil: null })
+    })
+  })
+
+  it('wakes when Gmail recovers after nine pre-commit throttles', async () => {
+    await withFixture(async ({ gmail, queue, thread, submit, advance, now }) => {
+      const until = now() + 1000
+      submit({ kind: 'snooze', threadId: THREAD, until })
+      await queue.tick()
+      advance(1000)
+      const write = vi.spyOn(gmail, 'modifyMessage')
+      for (let i = 0; i < 9; i++) {
+        gmail.batchFailure = { applied: 0, error: new GmailHttpError(429, '', 'retry later') }
+        await queue.tick()
+        expect(thread()).toMatchObject({ inInbox: false, snoozedUntil: until })
+        await queue.tick()
+        expect(write).toHaveBeenCalledTimes(i + 1)
+        advance(300_000)
+      }
+      await queue.tick()
+      expect(thread()).toMatchObject({ inInbox: true, snoozedUntil: null })
+    })
+  })
+
+  it('wakes when Snooze was acknowledged without a Gmail revision', async () => {
+    await withFixture(async ({ gmail, queue, thread, submit, advance, now }) => {
+      const modify = gmail.modifyMessage.bind(gmail)
+      vi.spyOn(gmail, 'modifyMessage').mockImplementationOnce(async (...args) => ({
+        labelIds: (await modify(...args)).labelIds,
+        historyId: undefined,
+      }))
+      submit({ kind: 'snooze', threadId: THREAD, until: now() + 1000 })
+      await queue.tick()
+      advance(1000)
+      await queue.tick()
+      expect(thread()).toMatchObject({ inInbox: true, snoozedUntil: null })
+    })
+  })
+
   it('preserves an independent archive between the Trash guard and a rejected request', async () => {
     const { gmail, queue, submit, lookup, thread } = await setup()
     const call = gmail.setTrashed.bind(gmail)
