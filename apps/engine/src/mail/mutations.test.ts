@@ -1158,6 +1158,7 @@ describe('seeded Gmail writeback interleavings', () => {
                 return checkWakeInboxEdit(fixture, retry)
             }
           })
+          scenarios.push((fixture) => checkReplacementSnooze(fixture, Boolean(targeted(2))))
           const scenario = targeted(scenarios.length)
           trace.push(`targeted interleaving ${scenario}`)
           const runScenario = scenarios[scenario]
@@ -1828,52 +1829,91 @@ it('cleans untouched Snoozed markers after a user action without waking the thre
   })
 })
 
-it('leaves the marker for a replacement Snooze queued ahead of cancellation cleanup', async () => {
-  await withFixture(async ({ gmail, queue, submit, lookup, now, advance, thread }) => {
-    submit({ kind: 'snooze', threadId: THREAD, until: now() + 1000 })
-    await queue.tick()
-    const marker = gmail.labelList.find(({ name }) => name === SNOOZED_LABEL)?.id
-    const archive = submit({ kind: 'archive', threadId: THREAD })
-    const deadline = now() + 60_000
-    const replacement = submit({ kind: 'snooze', threadId: THREAD, until: deadline })
-    const writes = vi.spyOn(gmail, 'modifyMessage')
+it.each([false, true])(
+  'retires old marker cleanup when a replacement Snooze runs first (then cancelled: %s)',
+  async (cancelReplacement) => {
+    await withFixture(async ({ gmail, queue, submit, lookup, now, advance, thread }) => {
+      submit({ kind: 'snooze', threadId: THREAD, until: now() + 1000 })
+      await queue.tick()
+      const marker = gmail.labelList.find(({ name }) => name === SNOOZED_LABEL)?.id
+      const archive = submit({ kind: 'archive', threadId: THREAD })
+      const deadline = now() + 60_000
+      const replacement = submit({ kind: 'snooze', threadId: THREAD, until: deadline })
+      if (cancelReplacement) submit({ kind: 'star', threadId: THREAD, value: true })
+      const writes = vi.spyOn(gmail, 'modifyMessage')
 
-    await queue.tick()
-    await queue.tick()
-    await queue.tick()
-    expect(lookup(archive.id)?.status).toBe('applied')
-    expect(lookup(replacement.id)?.status).toBe('applied')
-    expect(thread()?.snoozedUntil).toBe(deadline)
-    expect(await gmail.getMessageLabels('m1')).toContain(marker)
-    expect(writes).not.toHaveBeenCalled()
+      await queue.tick() // Archive
+      await queue.tick() // Replacement
+      if (cancelReplacement) await queue.tick() // Star
+      await queue.tick() // First Snooze's cancellation cleanup
+      expect(lookup(archive.id)?.status).toBe('applied')
+      expect(lookup(replacement.id)?.status).toBe('applied')
+      expect(thread()?.snoozedUntil).toBe(cancelReplacement ? null : deadline)
 
-    advance(60_000)
-    await queue.tick()
-    expect(await gmail.getMessageLabels('m1')).not.toContain(marker)
-    expect(thread()).toMatchObject({ inInbox: true, snoozedUntil: null })
+      advance(60_000)
+      await queue.tick() // Replacement's wake or cancellation cleanup
+      expect(writes.mock.calls.filter(([, , remove]) => remove.includes(marker ?? ''))).toEqual([])
+      expect(await gmail.getMessageLabels('m1')).toContain(marker)
+      expect(thread()).toMatchObject({ inInbox: !cancelReplacement, snoozedUntil: null })
+    })
+  },
+)
+
+async function checkReplacementSnooze(
+  { db, gmail, queue, submit, lookup, now, advance, sync, store, thread }: OrganiseFixture,
+  staleReads: boolean,
+) {
+  const marker = gmail.labelList.find(({ name }) => name === SNOOZED_LABEL)?.id
+  if (!marker) throw new Error('Missing Snoozed label')
+  const start = (await gmail.profile()).historyId
+  const snooze = submit({ kind: 'snooze', threadId: THREAD, until: now() + 30_000 })
+  await queue.tick()
+  expect(lookup(snooze.id)?.status).toBe('applied')
+
+  gmail.add('m3', { threadId: 'thread', labels: ['INBOX', 'UNREAD'] })
+  const staleThread = await gmail.getThreadMessages('thread')
+  const staleHistory = await gmail.history(start, undefined, true)
+  flipAwayAndBack(gmail, 'm1', marker)
+  await sync.incremental()
+  const ownerRevision = (await gmail.profile()).historyId
+  expect(db.prepare("SELECT provider_history_id FROM message WHERE id = 'a:m1'").get()).toEqual({
+    provider_history_id: ownerRevision,
   })
-})
+  expect(gmail.lastWriter.get('m1')?.get(marker)?.writer).toBe('owner')
 
-it('inherits only untouched AMC markers when replacing a Snooze', async () => {
-  await withFixture(async ({ gmail, queue, submit, lookup, now, advance, sync, store }) => {
-    submit({ kind: 'snooze', threadId: THREAD, until: now() + 30_000 })
-    await queue.tick()
-    const marker = gmail.labelList.find(({ name }) => name === SNOOZED_LABEL)?.id
-    if (!marker) throw new Error('Missing Snoozed label')
-    flipAwayAndBack(gmail, 'm1', marker)
-    await sync.incremental()
+  // In re-check 9, only the replacement's ownership reads lagged the owner edit.
+  const threadRead = staleReads
+    ? vi.spyOn(gmail, 'getThreadMessages').mockResolvedValueOnce(staleThread)
+    : undefined
+  const historyRead = staleReads
+    ? vi.spyOn(gmail, 'history').mockResolvedValueOnce(staleHistory)
+    : undefined
+  const replacement = submit({ kind: 'snooze', threadId: THREAD, until: now() + 60_000 })
+  await queue.tick()
+  threadRead?.mockRestore()
+  historyRead?.mockRestore()
+  expect(lookup(replacement.id)?.status).toBe('applied')
+  expect(await gmail.getMessageLabels('m3')).toContain(marker)
 
-    const replacement = submit({ kind: 'snooze', threadId: THREAD, until: now() + 60_000 })
-    await queue.tick()
-    expect(lookup(replacement.id)?.status).toBe('applied')
+  advance(60_000)
+  const writes = vi.spyOn(gmail, 'modifyMessage')
+  const restarted = new Mutations(store, () => gmail, silentLog, now)
+  await restarted.tick()
+  const markerRemovals = writes.mock.calls
+    .filter(([, , remove]) => remove.includes(marker))
+    .map(([id]) => id)
+  expect(markerRemovals).toEqual(['m3'])
+  for (const id of ['m1', 'm2']) expect(await gmail.getMessageLabels(id)).toContain(marker)
+  expect(await gmail.getMessageLabels('m3')).not.toContain(marker)
+  expect(thread()).toMatchObject({ inInbox: true, snoozedUntil: null })
+}
 
-    advance(60_000)
-    const restarted = new Mutations(store, () => gmail, silentLog, now)
-    await restarted.tick()
-    expect(await gmail.getMessageLabels('m1')).toContain(marker)
-    expect(await gmail.getMessageLabels('m2')).not.toContain(marker)
-  })
-})
+it.each([false, true])(
+  'scopes marker ownership to the replacement Snooze when the owner holds the marker (stale reads: %s)',
+  async (staleReads) => {
+    await withFixture((fixture) => checkReplacementSnooze(fixture, staleReads))
+  },
+)
 
 async function checkSnoozeMarkerEdit(
   { gmail, queue, submit, sync, now, advance, thread }: OrganiseFixture,

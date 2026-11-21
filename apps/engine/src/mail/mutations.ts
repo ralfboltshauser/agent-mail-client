@@ -98,7 +98,6 @@ interface Change {
 }
 
 interface JournalEntry {
-  inheritedMarkers?: string[]
   archiveScope?: string[]
   observations?: Change[]
   applied: Change[]
@@ -613,8 +612,6 @@ export class Mutations {
     const checkpoint = startsIntent ? (await api.profile()).historyId : undefined
     if (startsIntent && !checkpoint) throw new Error('Gmail did not provide a history checkpoint')
     const messages = await this.#gmailThread(api, row)
-    const inheritedMarkers =
-      action.kind === 'snooze' ? await this.#inheritSnoozeMarkers(api, row, messages) : []
     transaction(this.#db, () => {
       const state = this.#committedState(row.thread_id)
       let statePatch: Partial<ThreadState>
@@ -640,9 +637,11 @@ export class Mutations {
           (a, b) =>
             Number(b.internalDate ?? 0) - Number(a.internalDate ?? 0) || b.id.localeCompare(a.id),
         )
-        const markers = exiting
-          ? this.#markerMessages(account, this.#intentJournals(row.intent_id, row.id))
-          : new Set<string>()
+        const intent = this.#intent(row.intent_id)
+        const markers =
+          exiting && intent
+            ? this.#markerMessages(account, intent, this.#intentJournals(intent.id, row.id))
+            : new Set<string>()
         patchFor = (id, labels) => (exiting || scoped.has(id) ? sweep(labels, markers.has(id)) : {})
       } else {
         const { startedAt } = JSON.parse(row.state_patch) as Partial<ThreadState>
@@ -730,10 +729,7 @@ export class Mutations {
       }
       for (const patch of projected) this.#store.refreshMessageLabels(patch.message_id)
       row.prepared = 1
-      const journal: JournalEntry[] = inheritedMarkers.length
-        ? [{ inheritedMarkers, applied: [], superseded: [], failed: [] }]
-        : []
-      row.write_journal = JSON.stringify(journal)
+      row.write_journal = '[]'
       row.state_patch = JSON.stringify(statePatch)
       row.state_before = JSON.stringify(stateBefore)
       this.#db
@@ -827,7 +823,7 @@ export class Mutations {
       }[]
       const patches = new Map<string, LabelPatch>()
       const markers = exiting
-        ? this.#markerMessages(thread.account_id, this.#intentJournals(intent.id))
+        ? this.#markerMessages(thread.account_id, intent, this.#intentJournals(intent.id))
         : new Set<string>()
       let checkThrough = intent.checked_history_id
       for (const row of rows) {
@@ -1009,69 +1005,29 @@ export class Mutations {
 
   #intentJournals(intentId: string, excludeId = ''): JournalEntry[] {
     const rows = this.#db
-      .prepare(
-        `SELECT * FROM mutation
-         WHERE id != ? AND (id = ? OR intent_id = ? OR id IN (
-           SELECT undo_of FROM mutation WHERE status = 'applied'
-             AND json_extract(state_patch, '$.snoozeIntent') = ?
-         ) OR (undo_of IS NOT NULL AND status = 'applied'
-             AND json_extract(state_patch, '$.snoozeIntent') = ?))`,
-      )
-      .all(excludeId, intentId, intentId, intentId, intentId) as unknown as MutationRow[]
+      .prepare('SELECT * FROM mutation WHERE id != ? AND (id = ? OR intent_id = ?)')
+      .all(excludeId, intentId, intentId) as unknown as MutationRow[]
     return rows.flatMap(readJournal)
   }
 
-  #markerMessages(account: string, journal: JournalEntry[]): Set<string> {
+  #markerMessages(account: string, intent: Intent, journal: JournalEntry[]): Set<string> {
     const marker = labelId(account, SNOOZED_LABEL)
     const messages = new Set<string>()
-    for (const { applied, inheritedMarkers } of journal) {
-      for (const id of inheritedMarkers ?? []) messages.add(id)
-      // Only a Gmail acknowledgement with a revision can establish ownership.
+    for (const { applied } of journal) {
       for (const change of applied) {
-        if (change.after[marker] && change.revisions?.[marker]) messages.add(change.message_id)
+        const revision = change.revisions?.[marker]
+        // A marker belongs to this intent only if Gmail acknowledged its addition
+        // after the checkpoint and the dispatch baseline showed it was absent.
+        if (
+          change.before[marker] === false &&
+          change.after[marker] &&
+          revision &&
+          !this.#historyIncludes(intent.history_id, revision)
+        )
+          messages.add(change.message_id)
       }
     }
     return messages
-  }
-
-  async #inheritSnoozeMarkers(api: GmailApi, row: MutationRow, messages: GmailMessage[]) {
-    const account = row.account_id
-    const markerId = this.#snoozedLabel(account)
-    if (!markerId) return []
-    // A user action may have queued cleanup behind this replacement.
-    const queued = this.#db
-      .prepare(
-        `SELECT intent_id FROM mutation WHERE thread_id = ? AND status = 'pending'
-       AND json_extract(request, '$.cancelled') = 1 ORDER BY seq DESC LIMIT 1`,
-      )
-      .get(row.thread_id) as { intent_id: string } | undefined
-    const previous = this.#committedState(row.thread_id).snoozeIntent ?? queued?.intent_id
-    const intent = previous ? this.#intent(previous) : undefined
-    if (intent?.status !== 'active' || intent.marker_id !== markerId) return []
-
-    const journals = this.#intentJournals(intent.id)
-    const marked = this.#markerMessages(account, journals)
-    const live = messages.filter(
-      ({ id, labelIds }) => marked.has(messageId(account, id)) && labelIds?.includes(markerId),
-    )
-    if (!live.length) return []
-
-    const history = await this.#readHistory(api, intent.history_id)
-    const marker = labelId(account, SNOOZED_LABEL)
-    const acknowledged = acknowledgedLabels(journals)
-    return live.flatMap((message) => {
-      const id = messageId(account, message.id)
-      const observed = { labels: [], historyId: message.historyId }
-      const changes = this.#messageHistory(account, id, observed, markerId, history)
-      return changes &&
-        !changes.deleted &&
-        changes.events.every(
-          ({ label, revision }) =>
-            label !== marker || acknowledged.has(JSON.stringify([id, label, revision])),
-        )
-        ? [id]
-        : []
-    })
   }
 
   async #step(
@@ -1095,13 +1051,26 @@ export class Mutations {
     const intent = row.intent_id ? this.#intent(row.intent_id) : undefined
     const automatic = intent ? (JSON.parse(row.request) as AutomaticRequest) : undefined
     const sourceJournals = intent ? this.#intentJournals(intent.id, row.id) : []
-    const markers = this.#markerMessages(account, sourceJournals)
+    const markers = intent
+      ? this.#markerMessages(account, intent, sourceJournals)
+      : new Set<string>()
     const save = () => this.#saveJournal(row, journal)
     const snoozedId = this.#snoozedLabel(account)
     const startsSnooze = JSON.parse(row.request).kind === 'snooze' && this.#intent(row.id)
     const mayWriteMarker = automatic?.snooze || startsSnooze
-    // A queued replacement Snooze can claim the marker before cleanup reaches the head.
-    if (automatic?.cancelled && this.#committedState(row.thread_id).snoozeIntent) return true
+    // Retire queued cleanup if a replacement took effect, even if it has since been cancelled.
+    if (
+      intent &&
+      automatic?.cancelled &&
+      this.#db
+        .prepare(
+          `SELECT 1 FROM mutation WHERE thread_id = ? AND status = 'applied'
+           AND seq > (SELECT seq FROM mutation WHERE id = ?)
+           AND json_extract(request, '$.kind') = 'snooze' LIMIT 1`,
+        )
+        .get(row.thread_id, intent.id)
+    )
+      return true
     if (journal.some((item) => item.intentSuperseded)) return true
     if (mayWriteMarker && step.patch[snoozed] && !snoozedId && !automatic) {
       entry.error = 'Gmail Snooze label is unavailable. Try again after the Account syncs.'
