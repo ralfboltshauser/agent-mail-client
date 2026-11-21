@@ -88,6 +88,8 @@ export class FakeImap extends EventEmitter {
     this.folders.set(path, folder)
   }
 
+  async noop(): Promise<void> {}
+
   async idle(): Promise<void> {
     if (!this.mailbox) return
     this.idles.push(this.mailbox.path)

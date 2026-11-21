@@ -50,7 +50,7 @@ export function syncState(db: Db): SyncState {
  * The replica sync protocol (plan §5): snapshot at a modseq, then changes since it, with a
  * Server-Sent Events stream that nudges Clients when something changed.
  */
-export function syncRoutes(deps: SyncDeps, queue?: Mutations) {
+export function syncRoutes(deps: SyncDeps, queue?: Mutations, shutdownSignal?: AbortSignal) {
   const { db } = deps
   const r = new Hono<AppEnv>()
 
@@ -145,7 +145,7 @@ export function syncRoutes(deps: SyncDeps, queue?: Mutations) {
 
   r.get('/sync/events', requireScope('read'), (c) => {
     const principal = c.get('principal')
-    return streamSSE(c, async (stream) => {
+    const response = streamSSE(c, async (stream) => {
       const authorized = () => {
         if (
           principal.kind === 'agent' &&
@@ -169,6 +169,9 @@ export function syncRoutes(deps: SyncDeps, queue?: Mutations) {
         }, 150)
       }
       const done = new Promise<void>((resolve) => stream.onAbort(resolve))
+      const shutdown = () => stream.abort()
+      shutdownSignal?.addEventListener('abort', shutdown, { once: true })
+      if (shutdownSignal?.aborted) shutdown()
       const grantTimer = principal.kind === 'agent' ? setInterval(authorized, 1000) : undefined
       const heartbeat = setInterval(() => {
         if (authorized()) void stream.writeSSE({ event: 'ping', data: '' })
@@ -179,12 +182,16 @@ export function syncRoutes(deps: SyncDeps, queue?: Mutations) {
           await stream.writeSSE({ event: 'hello', data: JSON.stringify(syncState(db)) })
         await done
       } finally {
+        shutdownSignal?.removeEventListener('abort', shutdown)
         deps.store.off('change', notify)
         clearTimeout(pending)
         clearInterval(grantTimer)
         clearInterval(heartbeat)
       }
     })
+    // End the HTTP connection with the event stream so draining does not wait for keep-alive.
+    response.headers.set('Connection', 'close')
+    return response
   })
 
   return r

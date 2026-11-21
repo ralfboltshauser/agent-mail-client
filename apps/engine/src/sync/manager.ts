@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import { ImapFlowErrorCode } from 'imapflow/lib/errors'
 import {
   DbAccountState,
   getAccountRow,
@@ -28,13 +29,42 @@ import {
   type ImapCredentials,
 } from '../providers/imap/client.ts'
 import { ImapProvider } from '../providers/imap/provider.ts'
-import { ImapAccountSync } from '../providers/imap/sync.ts'
+import { ImapAccountSync, ImapIdleFailure, ImapSyncFailure } from '../providers/imap/sync.ts'
 
 const WATCH_RENEW_MS = 24 * 60 * 60_000
 const WATCH_RETRY_MS = 60_000
 const PUSH_POLL_MS = 60_000
 const NOTIFICATION_DEBOUNCE_MS = 250
 const GMAIL_REPLACEMENT_WAIT_MS = 5_000
+
+// Server errors can include credentials, MIME literals or addresses. Keep only known codes and
+// class names alongside the Engine's own operation-specific message.
+const IMAP_ERROR_CODES = new Set<string>([
+  ...Object.values(ImapFlowErrorCode),
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ETIMEDOUT',
+  'EPIPE',
+  'CERT_HAS_EXPIRED',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+  'ERR_SQLITE_ERROR',
+  'ENOSPC',
+  'EACCES',
+])
+
+function imapErrorDetails(error: unknown) {
+  const types = [ImapAuthError, ImapIdleFailure, TypeError, SyntaxError, RangeError, Error]
+  const cause = error instanceof ImapSyncFailure ? (error.cause ?? error) : error
+  const code = cause instanceof Error && 'code' in cause ? cause.code : undefined
+  return {
+    errorClass: types.find((type) => cause instanceof type)?.name ?? 'UnknownError',
+    errorCode: typeof code === 'string' && IMAP_ERROR_CODES.has(code) ? code : undefined,
+  }
+}
 
 export interface SyncManagerOptions {
   db: Db
@@ -460,73 +490,148 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
     const controller = new AbortController()
     const signal = controller.signal
     let active: ImapAccountSync | undefined
+    let useIdle = true
+    const report = (failure: ImapSyncFailure, socketError?: Error) => {
+      const details = imapErrorDetails(socketError ?? failure)
+      const folder = failure.folder ? ` (${JSON.stringify(failure.folder).slice(1, -1)})` : ''
+      const code = details.errorCode ? ` [${details.errorCode}]` : ''
+      const message = `IMAP ${failure.phase}${folder}: ${failure.summary}${code}`
+      const authExpired = failure.cause instanceof ImapAuthError
+      const context = {
+        account: row.id,
+        phase: failure.phase,
+        folder: failure.folder,
+        ...details,
+        errorMessage: failure.summary,
+      }
+      if (authExpired || failure instanceof ImapIdleFailure) log.warn(context, 'IMAP sync failed')
+      else log.error(context, 'IMAP sync failed')
+      setAccountStatus(db, store, row.id, authExpired ? 'auth_expired' : 'error', message)
+      this.emit('change')
+      return authExpired
+    }
+
     const done = (async () => {
       await previous?.done
-      let retryMs = 5_000
-      while (!signal.aborted) {
-        try {
-          const credentials = sealer.open<ImapCredentials>(row.credentials)
-          const client = (this.#o.imapClient ?? createImapClient)(credentials.imap)
-          const close = () => client.close()
-          signal.addEventListener('abort', close, { once: true })
+      if (signal.aborted) return
+      log.info({ account: row.id, phase: 'start', folder: null }, 'IMAP runner started')
+      try {
+        let retryMs = 5_000
+        while (!signal.aborted) {
+          let phase = 'credentials'
+          let summary = 'Could not open stored IMAP credentials'
+          let socketError: Error | undefined
+          let folder: string | null = null
           try {
-            await connectImap(client)
-            if (signal.aborted) return
-            const sync = new ImapAccountSync(client, store, row.id, row.address)
-            active = sync
-            let idleTime = 0
-            let nextPoll = 0
-            let backfilled = false
-            const wait = async (ms: number) => {
-              idleTime += await sync.waitForInbox(ms, signal)
-              if (idleTime >= 60_000) retryMs = 5_000
+            const credentials = sealer.open<ImapCredentials>(row.credentials)
+            phase = 'connect'
+            summary = 'Could not connect to the IMAP server over TLS'
+            const client = (this.#o.imapClient ?? createImapClient)(credentials.imap)
+            let closed = false
+            const close = () => {
+              if (closed) return
+              closed = true
+              client.close()
             }
-            const inboxWindow = async () => {
-              await wait(200)
-              if (signal.aborted || !client.usable) throw new Error('IMAP connection closed')
-              if (sync.inboxChanged) await sync.step('inbox')
-            }
+            signal.addEventListener('abort', close, { once: true })
             try {
-              await wait(200)
-              while (client.usable && !signal.aborted) {
-                if (await sync.runQueuedOrganise()) nextPoll = 0
-                if (signal.aborted || !client.usable) break
-                const mode =
-                  Date.now() >= nextPoll ? 'all' : sync.inboxChanged ? 'inbox' : 'backfill'
-                if (mode !== 'backfill' || !backfilled) {
-                  backfilled = await sync.step(mode, inboxWindow)
-                  if (signal.aborted) return
-                  if (mode === 'all') nextPoll = Date.now() + imapPollMs
-                  touchAccountSync(db, row.id)
-                  setAccountStatus(db, store, row.id, backfilled ? 'ready' : 'backfilling')
-                  this.emit('change')
-                }
-                const remaining = Math.max(0, nextPoll - Date.now())
-                await wait(Math.min(backfilled ? 60_000 : 200, remaining))
-              }
+              await connectImap(client, (error) => {
+                socketError ??= error
+              })
               if (signal.aborted) return
-              throw new Error('IMAP connection closed')
+              phase = 'initialize'
+              summary = 'Could not load IMAP sync state'
+              const sync = new ImapAccountSync(client, store, row.id, row.address)
+              active = sync
+              let idleTime = 0
+              let nextPoll = 0
+              let backfilled = false
+              const wait = async (ms: number) => {
+                try {
+                  if (useIdle) idleTime += await sync.waitForInbox(ms, signal)
+                  else {
+                    const start = Date.now()
+                    await sleep(ms, signal)
+                    idleTime += Date.now() - start
+                  }
+                  if (idleTime >= 60_000) retryMs = 5_000
+                } catch (error) {
+                  // A server that fails the IDLE handshake can still serve ordinary commands.
+                  // Retry on a fresh connection with polling for the rest of this runner.
+                  if (error instanceof ImapSyncFailure) {
+                    if (error instanceof ImapIdleFailure && client.usable) useIdle = false
+                    throw error
+                  }
+                  throw new ImapIdleFailure('Could not wait for Inbox changes', error)
+                }
+              }
+              const inboxWindow = async () => {
+                await wait(200)
+                if (signal.aborted || !client.usable) {
+                  throw new ImapSyncFailure(
+                    'idle',
+                    'INBOX',
+                    'Connection closed while waiting for Inbox changes',
+                  )
+                }
+                if (sync.inboxChanged) await sync.step('inbox')
+              }
+              try {
+                phase = 'idle'
+                folder = 'INBOX'
+                await wait(200)
+                while (client.usable && !signal.aborted) {
+                  phase = 'organise'
+                  folder = null
+                  summary = 'Could not process queued IMAP work'
+                  if (await sync.runQueuedOrganise()) nextPoll = 0
+                  if (signal.aborted || !client.usable) break
+                  const mode =
+                    Date.now() >= nextPoll ? 'all' : sync.inboxChanged ? 'inbox' : 'backfill'
+                  if (mode !== 'backfill' || !backfilled) {
+                    phase = mode
+                    folder = mode === 'inbox' ? 'INBOX' : null
+                    summary = 'Could not finish the sync pass'
+                    backfilled = await sync.step(mode, useIdle ? inboxWindow : undefined)
+                    if (signal.aborted) return
+                    if (mode === 'all') nextPoll = Date.now() + imapPollMs
+                    touchAccountSync(db, row.id)
+                    setAccountStatus(db, store, row.id, backfilled ? 'ready' : 'backfilling')
+                    this.emit('change')
+                  }
+                  const remaining = Math.max(0, nextPoll - Date.now())
+                  phase = useIdle ? 'idle' : 'poll'
+                  folder = useIdle ? 'INBOX' : null
+                  await wait(Math.min(backfilled ? 60_000 : 200, remaining))
+                }
+                if (signal.aborted) return
+                throw new ImapSyncFailure(phase, folder, 'IMAP connection closed')
+              } finally {
+                active = undefined
+                sync.dispose()
+              }
             } finally {
-              active = undefined
-              sync.dispose()
+              signal.removeEventListener('abort', close)
+              close()
             }
-          } finally {
-            signal.removeEventListener('abort', close)
-            close()
+          } catch (error) {
+            if (signal.aborted) return
+            const failure =
+              error instanceof ImapSyncFailure
+                ? error
+                : new ImapSyncFailure(
+                    phase,
+                    folder,
+                    error instanceof ImapAuthError ? error.message : summary,
+                    error,
+                  )
+            if (report(failure, socketError)) return
+            await sleep(retryMs, signal)
+            retryMs = Math.min(retryMs * 2, 5 * 60_000)
           }
-        } catch (error) {
-          if (signal.aborted) return
-          if (error instanceof ImapAuthError) {
-            setAccountStatus(db, store, row.id, 'auth_expired', error.message)
-            this.emit('change')
-            return
-          }
-          log.warn({ account: row.id }, 'IMAP sync failed')
-          setAccountStatus(db, store, row.id, 'error', 'IMAP sync failed. The Engine will retry.')
-          this.emit('change')
-          await sleep(retryMs, signal)
-          retryMs = Math.min(retryMs * 2, 5 * 60_000)
         }
+      } finally {
+        log.info({ account: row.id, phase: 'stop', folder: null }, 'IMAP runner stopped')
       }
     })()
     this.#runners.set(row.id, { stop: () => controller.abort(), done, imap: () => active })

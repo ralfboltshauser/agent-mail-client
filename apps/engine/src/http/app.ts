@@ -38,6 +38,7 @@ export interface AppDeps {
   config: Config
   log: Logger
   startedAt?: number
+  shutdownSignal?: AbortSignal
   mail?: MailDeps
   mutations?: Mutations
   outbox?: Outbox
@@ -49,6 +50,7 @@ export function createApp({
   config,
   log,
   startedAt = Date.now(),
+  shutdownSignal,
   mail,
   mutations,
   outbox,
@@ -173,7 +175,7 @@ export function createApp({
       )
     v1.route('/', mailRoutes(mail))
     v1.route('/', bucketRoutes(mail.store))
-    v1.route('/', syncRoutes(mail, mutations))
+    v1.route('/', syncRoutes(mail, mutations, shutdownSignal))
 
     // MCP over Streamable HTTP, stateless: one server per request, built from the token's scopes.
     app.all('/mcp', requireAuth(db), async (c) => {
