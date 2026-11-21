@@ -535,4 +535,21 @@ export const MIGRATIONS: readonly Migration[] = [
       END;
     `,
   },
+  {
+    version: 15,
+    name: 'Close ended and unconfirmed handoffs',
+    sql: `
+      CREATE TABLE closed_handoff (
+        id TEXT PRIMARY KEY,
+        state TEXT NOT NULL CHECK (state IN ('ended', 'failed'))
+      ) STRICT;
+      CREATE TRIGGER record_closed_handoff AFTER DELETE ON handoff BEGIN
+        INSERT OR IGNORE INTO closed_handoff (id, state) VALUES (OLD.id, 'ended');
+      END;
+      -- Older desktop versions did not persist pending request IDs.
+      INSERT INTO closed_handoff (id, state)
+        SELECT id, 'failed' FROM handoff WHERE t3_thread_id IS NULL;
+      DELETE FROM handoff WHERE t3_thread_id IS NULL;
+    `,
+  },
 ]

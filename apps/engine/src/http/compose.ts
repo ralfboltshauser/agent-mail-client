@@ -3,7 +3,7 @@ import { type Context, Hono } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
 import { HTTPException } from 'hono/http-exception'
 import { z } from 'zod'
-import { startHandoff } from '../auth/handoff.ts'
+import { closeHandoff, startHandoff } from '../auth/handoff.ts'
 import { MAX_ATTACHMENT_BYTES } from '../mail/drafts.ts'
 import { type Outbox, requireDesktopSend } from '../mail/outbox.ts'
 import { getSetting, setSetting } from '../settings.ts'
@@ -86,13 +86,29 @@ export function composeRoutes(deps: MailDeps, outbox: Outbox, composerOrigin?: s
   r.put('/handoff/:id', async (c) => {
     const input = await body(c, z.object({ t3ThreadId: id }))
     const saved = deps.db
-      .prepare('UPDATE handoff SET t3_thread_id = ? WHERE id = ?')
-      .run(input.t3ThreadId, c.req.param('id'))
+      .prepare(
+        'UPDATE handoff SET t3_thread_id = ? WHERE id = ? AND (t3_thread_id IS NULL OR t3_thread_id = ?)',
+      )
+      .run(input.t3ThreadId, c.req.param('id'), input.t3ThreadId)
     if (!saved.changes) throw new HTTPException(404, { message: 'Handoff does not exist' })
     return c.json({ saved: true })
   })
+  r.get('/handoff', (c) => {
+    const threadId = id.safeParse(c.req.query('threadId'))
+    if (!threadId.success) throw new HTTPException(400, { message: 'Invalid Thread ID' })
+    const active = deps.db
+      .prepare(
+        `SELECT h.id, t.expires_at AS expiresAt FROM handoff h JOIN token t ON t.id = h.agent_id
+       WHERE h.thread_id = ? AND h.t3_thread_id IS NOT NULL
+         AND t.revoked_at IS NULL AND t.expires_at > ?`,
+      )
+      .get(threadId.data, Date.now())
+    return c.json({ active: active ?? null })
+  })
   r.delete('/handoff/:id', (c) => {
-    deps.db.prepare('DELETE FROM handoff WHERE id = ?').run(c.req.param('id'))
+    const parsed = z.uuid().safeParse(c.req.param('id'))
+    if (!parsed.success) throw new HTTPException(400, { message: 'Invalid handoff ID' })
+    closeHandoff(deps.db, parsed.data, c.req.query('pending') === '1')
     return c.json({ cancelled: true })
   })
   r.post('/drafts', async (c) =>
