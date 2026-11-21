@@ -449,6 +449,139 @@ describe('Gmail Organise writeback', () => {
     expect(await gmail.getMessageLabels('m1')).toContain('INBOX')
   })
 
+  it('undo compensates for Inbox added by untrash to a previously archived message', async () => {
+    const { gmail, queue, submit } = await setup()
+    gmail.setLabels('m1', ['UNREAD'])
+    const call = gmail.setTrashed.bind(gmail)
+    vi.spyOn(gmail, 'setTrashed').mockImplementation(async (id, value) => {
+      const labels = await call(id, value)
+      if (value) return labels
+      const restored = [...labels, 'INBOX']
+      gmail.setLabels(id, restored)
+      return restored
+    })
+    const trash = submit({ kind: 'trash', threadId: THREAD, value: true })
+    await queue.tick()
+    submit({ kind: 'undo', mutationId: trash.id })
+    await queue.tick()
+    expect(await gmail.getMessageLabels('m1')).toEqual(['UNREAD'])
+  })
+
+  it('preserves an independent archive between the Trash guard and a rejected request', async () => {
+    const { gmail, queue, submit, lookup, thread } = await setup()
+    const call = gmail.setTrashed.bind(gmail)
+    const trash = vi.spyOn(gmail, 'setTrashed').mockImplementation(async (id, value) => {
+      if (id === 'm1' && value) {
+        gmail.setLabels(id, ['UNREAD'])
+        throw new GmailHttpError(403, 'forbidden', 'refused')
+      }
+      return call(id, value)
+    })
+    const mutation = submit({ kind: 'trash', threadId: THREAD, value: true })
+    await queue.tick()
+    expect(trash.mock.calls).toEqual([['m1', true]])
+    expect(await gmail.getMessageLabels('m1')).toEqual(['UNREAD'])
+    expect(thread()?.inInbox).toBe(false)
+    expect(lookup(mutation.id)).toMatchObject({
+      status: 'failed',
+      error: 'Gmail refused the change (HTTP 403)',
+      superseded: ['a:m1'],
+    })
+  })
+
+  it('preserves Inbox restored independently while saved compensation waits for restart', async () => {
+    const { gmail, queue, store, submit, lookup, advance, now, thread } = await setup()
+    gmail.setLabels('m1', ['UNREAD'])
+    const original = gmail.setTrashed.bind(gmail)
+    const trash = vi
+      .spyOn(gmail, 'setTrashed')
+      .mockImplementationOnce(original)
+      .mockRejectedValueOnce(new GmailHttpError(403, 'forbidden', 'refused'))
+      .mockRejectedValueOnce(new GmailHttpError(429, 'rateLimitExceeded', 'quota'))
+    const mutation = submit({ kind: 'trash', threadId: THREAD, value: true })
+    await queue.tick()
+    expect(lookup(mutation.id)?.status).toBe('pending')
+    await original('m1', false)
+    gmail.setLabels('m1', ['UNREAD', 'INBOX'])
+    advance(2000)
+    await new Mutations(store, () => gmail, silentLog, now).tick()
+    expect(trash.mock.calls).toEqual([
+      ['m1', true],
+      ['m2', true],
+      ['m1', false],
+    ])
+    expect(await gmail.getMessageLabels('m1')).toEqual(['UNREAD', 'INBOX'])
+    expect(thread()?.inInbox).toBe(true)
+    expect(lookup(mutation.id)).toMatchObject({
+      status: 'failed',
+      error: 'Gmail refused the change (HTTP 403)',
+      superseded: ['a:m1'],
+    })
+  })
+
+  it('does not record an Inbox inverse for an archive superseded after preparation', async () => {
+    const { gmail, queue, submit, lookup, thread } = await setup()
+    const get = gmail.getThreadMessages.bind(gmail)
+    vi.spyOn(gmail, 'getThreadMessages').mockImplementationOnce(async (id) => {
+      const snapshot = await get(id)
+      gmail.setLabels('m1', ['UNREAD'])
+      return snapshot
+    })
+    const batch = vi.spyOn(gmail, 'batchModify')
+    const archive = submit({ kind: 'archive', threadId: THREAD })
+    await queue.tick()
+    expect(lookup(archive.id)).toMatchObject({
+      status: 'applied',
+      error: null,
+      superseded: ['a:m1'],
+    })
+    submit({ kind: 'undo', mutationId: archive.id })
+    await queue.tick()
+    expect(batch).not.toHaveBeenCalled()
+    expect(thread()?.inInbox).toBe(false)
+    expect(await gmail.getMessageLabels('m1')).toEqual(['UNREAD'])
+  })
+
+  it('undo skips a change made after preparation and still inverts other messages', async () => {
+    const { gmail, queue, submit, lookup } = await setup()
+    const label = submit({ kind: 'label', labelId: 'a:Label_work', value: true, threadId: THREAD })
+    await queue.tick()
+    const get = gmail.getThreadMessages.bind(gmail)
+    vi.spyOn(gmail, 'getThreadMessages').mockImplementationOnce(async (id) => {
+      const snapshot = await get(id)
+      gmail.setLabels('m1', ['INBOX', 'UNREAD', 'STARRED'])
+      return snapshot
+    })
+    const batch = vi.spyOn(gmail, 'batchModify')
+    const undo = submit({ kind: 'undo', mutationId: label.id })
+    await queue.tick()
+    expect(batch.mock.calls).toEqual([[['m2'], [], ['Label_work']]])
+    expect(lookup(undo.id)).toMatchObject({ status: 'applied', error: null, superseded: ['a:m1'] })
+    expect(await gmail.getMessageLabels('m1')).toEqual(['INBOX', 'UNREAD', 'STARRED'])
+    expect(await gmail.getMessageLabels('m2')).toEqual(['SENT', 'STARRED'])
+  })
+
+  it('leaves a reply delivered between the final read and the batch in Gmail Inbox', async () => {
+    const { gmail, queue, sync, submit, lookup, thread } = await setup()
+    const call = gmail.batchModify.bind(gmail)
+    const batch = vi
+      .spyOn(gmail, 'batchModify')
+      .mockImplementationOnce(async (ids, add, remove) => {
+        gmail.add('m3', { threadId: 'thread' })
+        return call(ids, add, remove)
+      })
+    const archive = submit({ kind: 'archive', threadId: THREAD })
+    await queue.tick()
+    expect(lookup(archive.id)).toMatchObject({ status: 'applied', superseded: [] })
+    expect(thread()).toMatchObject({ inInbox: false, messageCount: 2 })
+    await sync.incremental()
+    await queue.tick()
+    expect(thread()).toMatchObject({ inInbox: true, messageCount: 3 })
+    expect(await gmail.getMessageLabels('m1')).toEqual(['UNREAD'])
+    expect(await gmail.getMessageLabels('m3')).toEqual(['INBOX', 'UNREAD'])
+    expect(batch.mock.calls).toEqual([[['m1'], [], ['INBOX']]])
+  })
+
   it('ends a no-reply Snooze when an incoming reply arrives', async () => {
     const { gmail, queue, sync, thread, submit, advance, now } = await setup()
     submit({ kind: 'snooze', threadId: THREAD, until: now() + 60_000, noReply: true })

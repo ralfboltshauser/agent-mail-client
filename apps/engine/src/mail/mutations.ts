@@ -54,6 +54,8 @@ interface MutationRow {
   rollback_error: string | null
   rollback_progress: number
   rollback_plan: string | null
+  write_journal: string | null
+  superseded: string
   next_attempt: number
   state_patch: string
   state_before: string
@@ -66,10 +68,21 @@ interface PatchRow {
   before: string
 }
 
+interface Change {
+  message_id: string
+  before: LabelPatch
+  after: LabelPatch
+}
+
+interface JournalEntry {
+  attempted: Change[]
+  applied: Change[]
+}
+
 interface Step {
-  ids: string[]
   patch: LabelPatch
   trash?: boolean
+  changes: Change[]
 }
 
 function result(row: MutationRow): MutationResult {
@@ -79,41 +92,90 @@ function result(row: MutationRow): MutationResult {
     status: row.status,
     error: row.error,
     modseq: row.modseq,
+    superseded: JSON.parse(row.superseded) as string[],
   }
 }
 
-function stepsFor(accountId: string, patches: PatchRow[]): Step[] {
+function stepsFor(accountId: string, changes: Change[]): Step[] {
   const trash = labelId(accountId, 'TRASH')
+  const inbox = labelId(accountId, 'INBOX')
   const groups = new Map<string, Step>()
   const steps: Step[] = []
-  for (const row of patches) {
-    const patch = JSON.parse(row.patch) as LabelPatch
+  for (const change of changes) {
+    const patch = { ...change.after }
     if (trash in patch) {
-      const previous = JSON.parse(row.before) as LabelPatch
-      if (patch[trash] !== previous[trash]) {
-        steps.push({
-          ids: [row.message_id],
-          patch: { [trash]: Boolean(patch[trash]) },
-          trash: patch[trash],
-        })
+      const value = Boolean(patch[trash])
+      const after: LabelPatch = { [trash]: value }
+      if (value && patch[inbox] === false) {
+        after[inbox] = false // The Trash endpoint itself removes Inbox.
+        delete patch[inbox]
       }
+      steps.push({
+        patch: after,
+        trash: value,
+        changes: [{ ...change, after }],
+      })
       delete patch[trash]
     }
     if (Object.keys(patch).length === 0) continue
     const key = JSON.stringify(Object.entries(patch).sort())
     let group = groups.get(key)
     if (!group) {
-      group = { ids: [], patch }
+      group = { patch, changes: [] }
       groups.set(key, group)
     }
-    group.ids.push(row.message_id)
+    group.changes.push({ ...change, after: patch })
   }
   for (const group of groups.values()) {
-    for (let start = 0; start < group.ids.length; start += 1000) {
-      steps.push({ ids: group.ids.slice(start, start + 1000), patch: group.patch })
+    for (let start = 0; start < group.changes.length; start += 1000) {
+      steps.push({
+        patch: group.patch,
+        changes: group.changes.slice(start, start + 1000),
+      })
     }
   }
   return steps
+}
+
+function fromPatch(row: PatchRow): Change {
+  return {
+    message_id: row.message_id,
+    before: JSON.parse(row.before),
+    after: JSON.parse(row.patch),
+  }
+}
+
+function combine(changes: Change[]): Change[] {
+  const combined = new Map<string, Change>()
+  for (const { message_id, before, after } of changes) {
+    const entry = combined.get(message_id) ?? { message_id, before: {}, after: {} }
+    for (const [key, present] of Object.entries(after)) {
+      if (!(key in entry.before)) entry.before[key] = Boolean(before[key])
+      entry.after[key] = present
+    }
+    combined.set(message_id, entry)
+  }
+  return [...combined.values()]
+}
+
+function inverse(account: string, changes: Change[]): Change[] {
+  const inbox = labelId(account, 'INBOX')
+  const trash = labelId(account, 'TRASH')
+  return combine(changes).map(({ message_id, before, after }) => {
+    const patch = Object.fromEntries(
+      Object.entries(before).filter(([key, value]) => value !== after[key]),
+    )
+    // Untrash may itself change Inbox. Carry the original value through to a
+    // guarded follow-up, even if the original Trash left it unchanged.
+    if (patch[trash] === false && inbox in after) patch[inbox] = Boolean(before[inbox])
+    return { message_id, before: after, after: patch }
+  })
+}
+
+function advanceExpected(expected: LabelPatch, change: Change) {
+  for (const [key, value] of Object.entries(change.after)) {
+    if (expected[key] === change.before[key]) expected[key] = value
+  }
 }
 
 export class MutationError extends Error {}
@@ -248,7 +310,9 @@ export class Mutations {
         throw new MutationError('This action predates verified Gmail undo')
       const thread = this.#thread(target.thread_id)
       const state = this.#undoState(target)
-      const inverses = this.#undoPatches(target, state)
+      const inverses = new Map(
+        this.#undoChanges(target, state).map((change) => [change.message_id, change.after]),
+      )
       return this.#insert(
         request.id,
         principal,
@@ -400,20 +464,25 @@ export class Mutations {
     return state
   }
 
-  #undoPatches(original: MutationRow, state: Partial<ThreadState>): Map<string, LabelPatch> {
+  #undoChanges(original: MutationRow, state: Partial<ThreadState>): Change[] {
     const snoozed = labelId(original.account_id, SNOOZED_LABEL)
     const inbox = labelId(original.account_id, 'INBOX')
     const trash = labelId(original.account_id, 'TRASH')
-    return new Map(
-      this.#patches(original.id).map((row) => {
-        const inverse = JSON.parse(row.before) as LabelPatch
-        if (inverse[snoozed] && !state.snoozedUntil) delete inverse[snoozed]
-        const applied = JSON.parse(row.patch) as LabelPatch
-        // Trash cannot remove Inbox from a message that was already archived.
-        if (applied[trash] && !inverse[inbox]) delete inverse[inbox]
-        return [row.message_id, inverse]
-      }),
-    )
+    const journal = JSON.parse(original.write_journal ?? '[]') as JournalEntry[]
+    const applied =
+      original.write_journal === null
+        ? this.#patches(original.id)
+            .map(fromPatch)
+            .map((change) => {
+              // v5 did not store the Trash response. It did know that Trash removes Inbox.
+              if (change.after[trash]) change.after[inbox] = false
+              return change
+            })
+        : journal.flatMap((entry) => entry.applied)
+    return inverse(original.account_id, applied).map((change) => {
+      if (change.after[snoozed] && !state.snoozedUntil) delete change.after[snoozed]
+      return change
+    })
   }
 
   #snoozeSweep(
@@ -449,7 +518,6 @@ export class Mutations {
 
   async #prepare(api: GmailApi, row: MutationRow, original: MutationRow | undefined) {
     const account = row.account_id
-    const snoozed = labelId(account, SNOOZED_LABEL)
     const inbox = labelId(account, 'INBOX')
     const trash = labelId(account, 'TRASH')
     // Resolve the reserved label before converting Gmail IDs into AMC labels.
@@ -463,22 +531,12 @@ export class Mutations {
       const state = { ...EMPTY_STATE, ...JSON.parse(thread?.organise_state ?? '{}') } as ThreadState
       let statePatch: Partial<ThreadState>
       let patchFor: (id: string, labels: string[]) => LabelPatch
+      const undo = new Map<string, Change>()
       if (original) {
         statePatch = this.#undoState(original)
-        const inverses = this.#undoPatches(original, statePatch)
-        patchFor = (id, labels) => {
-          const patch = inverses.get(id) ?? {}
-          if (statePatch.snoozedUntil === null && labels.includes(snoozed)) patch[snoozed] = false
-          if (patch[trash] === false && labels.includes(trash) && !(inbox in patch))
-            patch[inbox] = false
-          if (
-            patch[inbox] &&
-            patch[trash] !== false &&
-            (labels.includes(trash) || labels.includes(labelId(account, 'SPAM')))
-          )
-            delete patch[inbox]
-          return patch
-        }
+        for (const change of this.#undoChanges(original, statePatch))
+          undo.set(change.message_id, change)
+        patchFor = (id) => undo.get(id)?.after ?? {}
       } else if (row.principal === INTERNAL) {
         const { replied } = JSON.parse(row.request) as { replied?: boolean }
         const isReply = Boolean(state.noReply && replied)
@@ -511,30 +569,43 @@ export class Mutations {
       this.#db.prepare('DELETE FROM mutation_message WHERE mutation_id = ?').run(row.id)
       const insert = this.#db.prepare('INSERT INTO mutation_message VALUES (?, ?, ?, ?)')
       this.#bumpEpoch(account)
+      const found = new Set<string>()
       for (const message of messages) {
         const raw = message.labelIds ?? []
         if (raw.includes('DRAFT')) continue
         const id = messageId(account, message.id)
+        found.add(id)
         const labels = this.#store.providerLabels(account, raw)
         const requested = patchFor(id, labels)
         const changesTrash = trash in requested && requested[trash] !== labels.includes(trash)
         const patch = Object.fromEntries(
           Object.entries(requested).filter(
-            ([key, present]) => present !== labels.includes(key) || (changesTrash && key === inbox),
+            ([key, present]) =>
+              key in (undo.get(id)?.after ?? {}) ||
+              present !== labels.includes(key) ||
+              (changesTrash && key === inbox),
           ),
         )
         if (Object.keys(patch).length) {
-          const before = this.#before(account, patch, labels)
+          const before = { ...this.#before(account, patch, labels), ...undo.get(id)?.before }
           insert.run(row.id, id, JSON.stringify(patch), JSON.stringify(before))
         }
         this.#store.putProviderLabels(account, message.id, raw)
       }
+      for (const [id, change] of undo) {
+        if (found.has(id) || !Object.keys(change.after).length) continue
+        // A Trash message may be omitted from the thread response. Verify it individually.
+        insert.run(row.id, id, JSON.stringify(change.after), JSON.stringify(change.before))
+      }
       for (const patch of projected) this.#store.refreshMessageLabels(patch.message_id)
       row.prepared = 1
+      row.write_journal = '[]'
       row.state_patch = JSON.stringify(statePatch)
       row.state_before = JSON.stringify(stateBefore)
       this.#db
-        .prepare('UPDATE mutation SET prepared = 1, state_patch = ?, state_before = ? WHERE id = ?')
+        .prepare(
+          "UPDATE mutation SET prepared = 1, write_journal = '[]', state_patch = ?, state_before = ? WHERE id = ?",
+        )
         .run(row.state_patch, row.state_before, row.id)
       this.#refreshThread(row.thread_id, row.id)
     })
@@ -658,49 +729,176 @@ export class Mutations {
     return label.id
   }
 
-  async #step(api: GmailApi, account: string, step: Step, checkpoint: () => void): Promise<void> {
-    const prefix = `${account}:`
-    const ids = step.ids.map((id) => id.slice(prefix.length))
-    if (step.trash !== undefined) {
-      const id = ids[0] as string
-      const labels = await api.setTrashed(id, step.trash)
-      transaction(this.#db, () => {
-        this.#bumpEpoch(account)
-        this.#store.putProviderLabels(account, id, labels)
-        checkpoint()
-      })
-      return
-    }
-    const add: string[] = []
-    const remove: string[] = []
-    for (const [key, present] of Object.entries(step.patch)) {
-      const raw = key.slice(prefix.length)
-      const label = raw === SNOOZED_LABEL ? await this.#snoozedLabel(api, account, present) : raw
-      if (label) (present ? add : remove).push(label)
-    }
-    if (add.length || remove.length) await api.batchModify(ids, add, remove)
-    transaction(this.#db, () => {
-      this.#bumpEpoch(account)
-      for (const id of step.ids) {
-        const row = this.#db
-          .prepare('SELECT provider_label_ids FROM message WHERE id = ?')
-          .get(id) as { provider_label_ids: string | null } | undefined
-        if (!row) continue
-        const labels = applyLabelPatch(
-          JSON.parse(row.provider_label_ids ?? '[]') as string[],
-          step.patch,
-        )
-        this.#db
-          .prepare('UPDATE message SET provider_label_ids = ? WHERE id = ?')
-          .run(JSON.stringify(labels), id)
-        this.#store.refreshMessageLabels(id)
-      }
-      checkpoint()
-    })
+  #recordSuperseded(row: MutationRow, id: string) {
+    const ids = JSON.parse(row.superseded) as string[]
+    if (ids.includes(id)) return
+    row.superseded = JSON.stringify([...ids, id])
+    this.#db.prepare('UPDATE mutation SET superseded = ? WHERE id = ?').run(row.superseded, row.id)
+  }
+
+  #saveJournal(row: MutationRow, journal: JournalEntry[]) {
+    row.write_journal = JSON.stringify(journal)
+    this.#db
+      .prepare('UPDATE mutation SET write_journal = ? WHERE id = ?')
+      .run(row.write_journal, row.id)
   }
 
   #bumpEpoch(accountId: string) {
     this.#db.prepare('UPDATE account SET write_epoch = write_epoch + 1 WHERE id = ?').run(accountId)
+  }
+
+  async #observe(api: GmailApi, row: MutationRow, ids: string[]) {
+    const account = row.account_id
+    if (!ids.length) return new Map<string, string[]>()
+    const messages = new Map(
+      (await this.#gmailThread(api, row)).map((message) => [message.id, message.labelIds ?? []]),
+    )
+    const observed = new Map<string, string[]>()
+    for (const id of ids) {
+      const rawId = id.slice(account.length + 1)
+      const labels = messages.get(rawId) ?? (await api.getMessageLabels(rawId, true))
+      if (labels) observed.set(id, labels)
+    }
+    return transaction(this.#db, () => {
+      this.#bumpEpoch(account)
+      return new Map(
+        Array.from(observed, ([id, labels]) => {
+          this.#store.putProviderLabels(account, id.slice(account.length + 1), labels)
+          return [id, this.#store.providerLabels(account, labels)]
+        }),
+      )
+    })
+  }
+
+  // All paths use the same guard. Compare the fresh Gmail value with the value this
+  // mutation observed or wrote, then send only the remaining delta. Gmail has no
+  // compare-and-swap. We accept the window between this read and the provider write,
+  // including same-value edits that cannot be attributed to either writer.
+  #delta(row: MutationRow, change: Change, labels: string[] | undefined): LabelPatch {
+    const patch: LabelPatch = {}
+    for (const [key, value] of Object.entries(change.after)) {
+      if (labels && labels.includes(key) === change.before[key]) {
+        if (value !== change.before[key]) patch[key] = value
+      } else {
+        this.#recordSuperseded(row, change.message_id)
+      }
+    }
+    return patch
+  }
+
+  async #step(
+    api: GmailApi,
+    row: MutationRow,
+    step: Step,
+    attempting: (changes: Change[]) => void,
+    completed: (changes: Change[]) => void,
+  ) {
+    const account = row.account_id
+    const inbox = labelId(account, 'INBOX')
+    const trash = labelId(account, 'TRASH')
+    const spam = labelId(account, 'SPAM')
+    const snoozed = labelId(account, SNOOZED_LABEL)
+    const rawId = (id: string) => id.slice(account.length + 1)
+    const snoozedId =
+      snoozed in step.patch
+        ? await this.#snoozedLabel(api, account, Boolean(step.patch[snoozed]))
+        : null
+
+    // Recheck each actual request, including subgroups created by per-message conflicts.
+    // Keep the candidate list fixed so replies delivered after preparation stay in Gmail Inbox.
+    let remaining = step.changes
+    while (remaining.length) {
+      const current = await this.#observe(
+        api,
+        row,
+        remaining.map((change) => change.message_id),
+      )
+      const candidates: Change[] = []
+      let signature: string | undefined
+      const deferred: Change[] = []
+      for (const change of remaining) {
+        const labels = current.get(change.message_id)
+        const before = { ...change.before }
+        const after = this.#delta(row, change, labels)
+        if (!labels) continue
+        if (step.trash !== undefined) {
+          if (!(trash in after)) continue
+          // Gmail can change Inbox implicitly. Never send Trash over an Inbox
+          // value the mutation did not authorize the endpoint to remove.
+          before[inbox] = labels.includes(inbox)
+          if (step.trash && labels.includes(inbox) && !(inbox in after)) {
+            this.#recordSuperseded(row, change.message_id)
+            continue
+          }
+        } else if (after[inbox] && (labels.includes(trash) || labels.includes(spam))) {
+          delete after[inbox]
+          this.#recordSuperseded(row, change.message_id)
+        }
+        if (!snoozedId) delete after[snoozed]
+        if (!Object.keys(after).length) continue
+        const key = JSON.stringify(Object.entries(after).sort())
+        signature ??= key
+        if (key !== signature) deferred.push(change)
+        else candidates.push({ ...change, before, after })
+      }
+      remaining = deferred
+      const first = candidates[0]
+      if (!first) continue
+      attempting(candidates)
+      if (step.trash !== undefined) {
+        const labels = await api.setTrashed(rawId(first.message_id), step.trash)
+        const actual = this.#store.providerLabels(account, labels)
+        const after = { [trash]: actual.includes(trash), [inbox]: actual.includes(inbox) }
+        transaction(this.#db, () => {
+          this.#bumpEpoch(account)
+          this.#store.putProviderLabels(account, rawId(first.message_id), labels)
+          completed([{ ...first, after }])
+        })
+        continue
+      }
+      const add: string[] = []
+      const remove: string[] = []
+      for (const [key, present] of Object.entries(first.after)) {
+        const label = key === snoozed ? snoozedId : rawId(key)
+        if (label) (present ? add : remove).push(label)
+      }
+      await api.batchModify(
+        candidates.map((change) => rawId(change.message_id)),
+        add,
+        remove,
+      )
+      transaction(this.#db, () => {
+        this.#bumpEpoch(account)
+        for (const change of candidates) {
+          const provider = this.#db
+            .prepare('SELECT provider_label_ids FROM message WHERE id = ?')
+            .get(change.message_id) as { provider_label_ids: string | null } | undefined
+          if (!provider) continue
+          const labels = applyLabelPatch(
+            JSON.parse(provider.provider_label_ids ?? '[]') as string[],
+            change.after,
+          )
+          this.#db
+            .prepare('UPDATE message SET provider_label_ids = ? WHERE id = ?')
+            .run(JSON.stringify(labels), change.message_id)
+          this.#store.refreshMessageLabels(change.message_id)
+        }
+        completed(candidates)
+      })
+    }
+  }
+
+  #afterPrior(step: Step, prior: Change[]): Step {
+    const previous = new Map(combine(prior).map((change) => [change.message_id, change]))
+    return {
+      ...step,
+      changes: step.changes.map((change) => {
+        const last = previous.get(change.message_id)
+        const before = { ...change.before }
+        if (last) advanceExpected(before, last)
+        return { ...change, before }
+      }),
+    }
   }
 
   async #write(api: GmailApi, row: MutationRow) {
@@ -718,18 +916,54 @@ export class Mutations {
         return
       }
     }
-    const patches = this.#patches(row.id)
-    const steps = stepsFor(row.account_id, patches)
-    if (row.rollback_error) {
-      await this.#rollback(api, row, patches, steps)
+    if (
+      row.write_journal === null &&
+      (row.progress || row.rollback_error || row.attempts || row.prepared === 2)
+    ) {
+      // Older checkpoints cannot establish what Gmail acknowledged or guard a saved inverse.
+      // A preparation retry leaves prepared unset and can still safely start a new plan.
+      await this.#observe(
+        api,
+        row,
+        this.#patches(row.id).map((patch) => patch.message_id),
+      ).catch(() => {})
+      this.#finish(row, 'failed', `Gmail writeback predates guarded replay. ${PARTIAL_WARNING}`)
       return
     }
+    const journal = JSON.parse(row.write_journal ?? '[]') as JournalEntry[]
+    if (row.rollback_error) {
+      await this.#rollback(api, row, journal)
+      return
+    }
+    const steps = stepsFor(row.account_id, this.#patches(row.id).map(fromPatch))
     let progress = row.progress
     try {
       for (; progress < steps.length; progress++) {
         const step = steps[progress]
         if (!step) break
-        await this.#step(api, row.account_id, step, () => {
+        const prior = journal.slice(0, progress).flatMap((entry) => entry.applied)
+        const entry = journal[progress] ?? { attempted: [], applied: [] }
+        journal[progress] = entry
+        const completedIds = new Set(entry.applied.map((change) => change.message_id))
+        const remaining = {
+          ...step,
+          changes: step.changes.filter((change) => !completedIds.has(change.message_id)),
+        }
+        await this.#step(
+          api,
+          row,
+          this.#afterPrior(remaining, prior),
+          (changes) => {
+            entry.attempted = combine([...entry.attempted, ...changes])
+            this.#saveJournal(row, journal)
+          },
+          (changes) => {
+            entry.applied = combine([...entry.applied, ...changes])
+            this.#saveJournal(row, journal)
+          },
+        )
+        transaction(this.#db, () => {
+          this.#saveJournal(row, journal)
           this.#db
             .prepare('UPDATE mutation SET progress = ? WHERE id = ?')
             .run(progress + 1, row.id)
@@ -743,20 +977,17 @@ export class Mutations {
           : error instanceof OAuthError && error.needsReauth
             ? 'Sign in to Gmail again to organise this Account'
             : 'Could not write the change to Gmail'
-      // The failed call may have committed fully or partially before losing its response.
+      row.rollback_error = message
+      row.attempts = 0
       this.#db
         .prepare(
           'UPDATE mutation SET rollback_error = ?, attempts = 0, next_attempt = 0 WHERE id = ?',
         )
         .run(message, row.id)
-      await this.#rollback(
-        api,
-        { ...row, progress, rollback_error: message, attempts: 0 },
-        patches,
-        steps,
-      )
+      await this.#rollback(api, row, journal)
       return
     }
+    this.#saveJournal(row, journal)
     this.#finish(row, 'applied', null)
   }
 
@@ -778,107 +1009,89 @@ export class Mutations {
     return true
   }
 
-  async #observedLabels(
-    api: GmailApi,
-    row: MutationRow,
-    touched: ReadonlyMap<string, Set<string>>,
-  ) {
-    const account = row.account_id
-    const messages = new Map(
-      (await this.#gmailThread(api, row)).map((message) => [message.id, message.labelIds ?? []]),
-    )
-    const observed = new Map<string, string[]>()
-    for (const mid of touched.keys()) {
-      const id = mid.slice(account.length + 1)
-      // Only an individual lookup can confirm that a missing thread member is gone.
-      const labels = messages.get(id) ?? (await api.getMessageLabels(id, true))
-      if (labels) observed.set(id, labels)
-    }
-    return transaction(this.#db, () => {
-      this.#bumpEpoch(account)
-      return new Map(
-        Array.from(observed, ([id, labels]) => {
-          this.#store.putProviderLabels(account, id, labels)
-          return [messageId(account, id), this.#store.providerLabels(account, labels)]
-        }),
-      )
-    })
-  }
-
-  async #rollback(api: GmailApi, row: MutationRow, patches: PatchRow[], steps: Step[]) {
-    const inbox = labelId(row.account_id, 'INBOX')
+  async #rollback(api: GmailApi, row: MutationRow, journal: JournalEntry[]) {
     const trash = labelId(row.account_id, 'TRASH')
-    const touched = new Map<string, Set<string>>()
-    for (const step of steps.slice(0, row.progress + 1)) {
-      for (const id of step.ids) {
-        const keys = touched.get(id) ?? new Set<string>()
-        for (const key of Object.keys(step.patch)) keys.add(key)
-        if (step.trash !== undefined) keys.add(inbox)
-        touched.set(id, keys)
-      }
-    }
-    const baseline = patches.flatMap((patch) => {
-      const keys = touched.get(patch.message_id)
-      if (!keys) return []
-      const before = JSON.parse(patch.before) as LabelPatch
-      return [
-        {
-          id: patch.message_id,
-          labels: Object.fromEntries(Object.entries(before).filter(([key]) => keys.has(key))),
-        },
-      ]
-    })
-    const differences = (current: Map<string, string[]>) =>
-      baseline.flatMap(({ id, labels }) => {
-        const observed = current.get(id)
-        if (!observed) return []
-        const changesTrash = trash in labels && labels[trash] !== observed.includes(trash)
-        const patch = Object.fromEntries(
-          Object.entries(labels).filter(
-            ([key, present]) =>
-              present !== observed.includes(key) || (changesTrash && key === inbox),
-          ),
-        )
-        return Object.keys(patch).length
-          ? [
-              {
-                message_id: id,
-                patch: JSON.stringify(patch),
-                before: JSON.stringify(this.#before(row.account_id, patch, observed)),
-              },
-            ]
-          : []
-      })
+    const inbox = labelId(row.account_id, 'INBOX')
     let message = row.rollback_error ?? 'Gmail writeback failed'
     try {
-      let rollback: Step[]
+      let rollback: Change[]
       if (row.rollback_plan === null) {
-        rollback = stepsFor(
-          row.account_id,
-          differences(await this.#observedLabels(api, row, touched)),
-        )
-        this.#db
-          .prepare('UPDATE mutation SET rollback_plan = ?, rollback_progress = 0 WHERE id = ?')
-          .run(JSON.stringify(rollback), row.id)
-        row.rollback_progress = 0
-      } else {
-        rollback = JSON.parse(row.rollback_plan) as Step[]
-      }
-      for (const [index, step] of rollback.entries()) {
-        if (index < row.rollback_progress) continue
-        await this.#step(api, row.account_id, step, () => {
-          this.#db
-            .prepare('UPDATE mutation SET rollback_progress = ? WHERE id = ?')
-            .run(index + 1, row.id)
+        const attempted = journal.flatMap((entry) => entry.attempted)
+        const current = await this.#observe(api, row, [
+          ...new Set(attempted.map((change) => change.message_id)),
+        ])
+        const applied = journal.flatMap((entry) => {
+          const acknowledged = new Map(entry.applied.map((change) => [change.message_id, change]))
+          return entry.attempted.flatMap((change) => {
+            const known = acknowledged.get(change.message_id)
+            if (known) return [known]
+            const labels = current.get(change.message_id)
+            if (!labels) {
+              this.#recordSuperseded(row, change.message_id)
+              return []
+            }
+            // A lost response may hide a successful write. Infer only the sent
+            // delta and require the primary Trash transition before inferring Inbox.
+            const after: LabelPatch = {}
+            for (const [key, value] of Object.entries(change.after)) {
+              if (labels.includes(key) === change.before[key]) continue
+              if (key === inbox && trash in change.after && !labels.includes(trash)) {
+                this.#recordSuperseded(row, change.message_id)
+                continue
+              }
+              if (labels.includes(key) === value) after[key] = value
+            }
+            if (after[trash] && !labels.includes(inbox)) after[inbox] = false
+            return [{ ...change, after }]
+          })
         })
+        rollback = inverse(row.account_id, applied)
+        row.rollback_plan = JSON.stringify(rollback)
+        this.#db
+          .prepare('UPDATE mutation SET rollback_plan = ? WHERE id = ?')
+          .run(row.rollback_plan, row.id)
+      } else {
+        rollback = JSON.parse(row.rollback_plan) as Change[]
       }
-      if (rollback.length && differences(await this.#observedLabels(api, row, touched)).length)
-        message += `. ${PARTIAL_WARNING}`
+      const steps = stepsFor(row.account_id, rollback)
+      for (let index = row.rollback_progress; index < steps.length; index++) {
+        const step = steps[index]
+        if (!step) break
+        await this.#step(
+          api,
+          row,
+          step,
+          () => {},
+          (changes) => {
+            // Persist provider side effects as the expectations for subsequent steps.
+            for (const change of changes) {
+              const target = rollback.find((entry) => entry.message_id === change.message_id)
+              if (target) advanceExpected(target.before, change)
+            }
+            this.#db
+              .prepare('UPDATE mutation SET rollback_plan = ? WHERE id = ?')
+              .run(JSON.stringify(rollback), row.id)
+          },
+        )
+        // Keep the step layout stable. The guards neutralize completed subgroups
+        // if the process stops between their response and the step checkpoint.
+        for (const next of steps.slice(index + 1)) {
+          for (const change of next.changes) {
+            Object.assign(
+              change.before,
+              rollback.find((entry) => entry.message_id === change.message_id)?.before,
+            )
+          }
+        }
+        this.#db
+          .prepare('UPDATE mutation SET rollback_progress = ? WHERE id = ?')
+          .run(index + 1, row.id)
+      }
     } catch (error) {
       if (this.#retry(row, error)) return
-      // A failed compensation may also have committed before its response was lost.
-      const current = await this.#observedLabels(api, row, touched).catch(() => null)
-      if (!current || differences(current).length) message += `. ${PARTIAL_WARNING}`
+      message += `. ${PARTIAL_WARNING}`
+      const ids = journal.flatMap((entry) => entry.attempted.map((change) => change.message_id))
+      await this.#observe(api, row, [...new Set(ids)]).catch(() => {})
     }
     this.#finish(row, 'failed', message)
   }

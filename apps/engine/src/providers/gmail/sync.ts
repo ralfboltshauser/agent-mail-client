@@ -227,7 +227,7 @@ export class GmailAccountSync {
       this.#reconcileTrusted = true
       this.#seen.clear()
     } else {
-      await this.#finishAllPhase(state, generation, changed)
+      if (!(await this.#finishAllPhase(state, generation, changed))) return true
       if (generation !== this.#scanGeneration) return true
       next.phase = 'done'
       next.pageToken = null
@@ -291,33 +291,43 @@ export class GmailAccountSync {
   }
 
   /**
-   * Deletes local messages that Gmail no longer lists, but only when this process saw the whole
-   * `all` pass itself (after a restart mid-pass, the seen-set is incomplete and nothing is deleted).
+   * Reconciles messages that Gmail omitted from listing after a complete in-process scan.
+   * A restart mid-pass leaves the seen-set incomplete.
    */
   async #finishAllPhase(
     state: BackfillState,
     generation: number,
     changed: Set<string>,
-  ): Promise<void> {
-    if (!state.reconcile || !this.#reconcileTrusted) return
+  ): Promise<boolean> {
+    if (!state.reconcile || !this.#reconcileTrusted) return true
     const local = this.#store.db
       .prepare('SELECT provider_id FROM message WHERE account_id = ?')
       .all(this.#state.accountId) as { provider_id: string }[]
     // List pagination can miss messages when the mailbox changes during the scan.
-    // Confirm absence with Gmail before deleting anything from the replica.
+    // Verify both existence and labels. The replacement cursor may already cover these edits.
+    const epoch = this.#store.writeEpoch(this.#state.accountId)
     const missing = local.map((row) => row.provider_id).filter((id) => !this.#seen.has(id))
     const current = await mapLimit(missing, FETCH_CONCURRENCY, (id) =>
       this.#api.getMessageLabels(id),
     )
-    if (generation !== this.#scanGeneration) return
+    if (
+      generation !== this.#scanGeneration ||
+      epoch !== this.#store.writeEpoch(this.#state.accountId)
+    )
+      return false
     let removed = 0
     for (const [index, id] of missing.entries()) {
-      if (current[index] === null && !changed.has(id)) {
+      // Incremental history already applied a more recent read for these messages.
+      if (changed.has(id)) continue
+      const labels = current[index]
+      if (labels) this.#store.setMessageLabels(this.#state.accountId, id, labels)
+      else if (labels === null) {
         this.#store.deleteMessage(this.#state.accountId, id)
         removed++
       }
     }
     this.#log.info({ account: this.#state.accountId, removed }, 'reconciled after resync')
     this.#seen.clear()
+    return true
   }
 }

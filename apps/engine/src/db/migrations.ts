@@ -267,4 +267,12 @@ export const MIGRATIONS: readonly Migration[] = [
         AND (progress > 0 OR attempts > 0 OR rollback_error IS NOT NULL);
     `,
   },
+  {
+    version: 6,
+    name: 'Guarded Gmail write journal',
+    sql: `
+      ALTER TABLE mutation ADD COLUMN write_journal TEXT;
+      ALTER TABLE mutation ADD COLUMN superseded TEXT NOT NULL DEFAULT '[]';
+    `,
+  },
 ]

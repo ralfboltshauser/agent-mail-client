@@ -109,6 +109,20 @@ The root NVMe disk is at **97%** (7.5 GB free), and `/srv` is a 1.8 TB spinning 
 3. A per-Account writeback queue applies it at the provider (Gmail `modify`; IMAP `STORE`/`MOVE`), with retries and backoff.
 4. If the provider refuses permanently, a compensating change reverts the local state and the error shows in the desktop app. Nothing fails silently.
 
+Every Gmail label write uses a fresh read immediately before dispatch. Forward writes,
+undo, and compensation send only the label changes whose current values match what
+that mutation last observed or wrote. A mismatched label is left alone and the
+message ID appears in the mutation result as superseded. Supersession itself does
+not produce an error toast. The write journal records attempted and acknowledged
+deltas. Saved compensation keeps its expected values and rechecks them after a
+restart. Checkpoints from before the journal that may have sent a write require
+reconciliation with Gmail before any further action on that mutation.
+
+Gmail has no compare-and-swap for labels. AMC accepts the read-to-write latency
+window, including the case where an independent edit sets the same value and Gmail
+cannot attribute the change to either writer. A reply delivered after the thread
+read keeps its Inbox label. Normal history sync brings the reply into the replica.
+
 Engine-side features that providers lack:
 - **Snooze:** remove from Inbox, add the `AMC/Snoozed` Label, return at the chosen time or on the "no reply by" condition.
 - **Mute:** new replies skip the Inbox and Interrupts.

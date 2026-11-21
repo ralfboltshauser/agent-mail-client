@@ -40,6 +40,8 @@ export const MutationResult = z.object({
   status: z.enum(['pending', 'applied', 'failed']),
   error: z.string().nullable(),
   modseq: z.number().int().nonnegative(),
+  // Message IDs whose Gmail labels changed independently during the mutation.
+  superseded: z.array(id).optional(),
 })
 export type MutationResult = z.infer<typeof MutationResult>
 
