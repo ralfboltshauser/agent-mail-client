@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { Readable } from 'node:stream'
+import { Parser } from 'htmlparser2'
 import type { BlobStore } from '../../blobs.ts'
 import {
   type BodyBlob,
@@ -9,7 +10,7 @@ import {
   decodeBodyPart,
   readBodyParts,
 } from '../../mail/body-blobs.ts'
-import { collapseWhitespace, htmlToText } from '../../mail/text.ts'
+import { collapseWhitespace, htmlToText, normalizeWhitespace } from '../../mail/text.ts'
 
 export const BODY_SEARCH_LIMIT = 256 * 1024
 // A Unicode character can occupy two UTF-16 code units. Keep one extra character to
@@ -20,6 +21,31 @@ function searchPrefix(text: string): string {
   return text.length <= BODY_SEARCH_LIMIT
     ? text
     : Array.from(text).slice(0, BODY_SEARCH_LIMIT).join('')
+}
+
+function clippedHtmlToText(prefix: string): string {
+  const hidden = /^(script|style|head|title)$/
+  let hiddenDepth = 0
+  let text = ''
+  const parser = new Parser({
+    onopentag(name) {
+      if (hidden.test(name)) hiddenDepth++
+      if (!hiddenDepth) text += name === 'br' ? '\n' : name === 'li' ? '• ' : ' '
+    },
+    onclosetag(name) {
+      if (hidden.test(name)) hiddenDepth--
+      if (!hiddenDepth) text += /^(p|div|tr|li|h[1-6]|blockquote|table)$/.test(name) ? '\n' : ' '
+    },
+    ontext(value) {
+      if (!hiddenDepth) text += value
+    },
+    oncomment() {
+      if (!hiddenDepth) text += ' '
+    },
+  })
+  // The tokenizer drops incomplete tags and honors quotes around attributes.
+  parser.end(prefix.replace(/<[!/]?$/, ''))
+  return normalizeWhitespace(text)
 }
 
 // Canonicalize CRLF like MailParser, including pairs split across chunks.
@@ -115,7 +141,11 @@ export class ImapBodyParts {
       // When a part needed a bounded charset or flowed sample, stop before later parts.
       if (partial) break
     }
-    const full = html ? htmlToText(prefix) : prefix.trimEnd()
+    const full = html
+      ? partial
+        ? clippedHtmlToText(prefix)
+        : htmlToText(prefix)
+      : prefix.trimEnd()
     const bodyText = searchPrefix(full)
     return { bodyText, partial: partial || bodyText !== full }
   }
