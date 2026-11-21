@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto'
+import type { DatabaseSync } from 'node:sqlite'
 import type { ComposeDraft } from '@amc/protocol'
+import type { ActiveHandoff } from '../shared/api'
 import { composeDraftPath } from './draft-updates'
 import type { EngineClient } from './engine'
 
@@ -66,6 +68,55 @@ export class Handoff {
     string,
     { id: string; request?: T3Launch; draftId?: string; launched?: T3Thread }
   >()
+  readonly #recovering = new Map<string, Promise<void>>()
+  readonly #db: DatabaseSync
+
+  constructor(db: DatabaseSync) {
+    this.#db = db
+    db.exec(`CREATE TABLE IF NOT EXISTS pending_handoff (
+      id TEXT PRIMARY KEY,
+      engine_url TEXT NOT NULL
+    )`)
+  }
+
+  recover(engine: EngineClient): Promise<void> {
+    const existing = this.#recovering.get(engine.baseUrl)
+    if (existing) return existing
+    const recovering = this.#recover(engine).finally(() => this.#recovering.delete(engine.baseUrl))
+    this.#recovering.set(engine.baseUrl, recovering)
+    return recovering
+  }
+
+  async #recover(engine: EngineClient): Promise<void> {
+    const live = new Set(Array.from(this.#pending.values(), (attempt) => attempt.id))
+    const rows = this.#db
+      .prepare('SELECT id FROM pending_handoff WHERE engine_url = ?')
+      .all(engine.baseUrl) as { id: string }[]
+    for (const { id } of rows) {
+      if (live.has(id)) continue
+      await engine.request(`/v1/compose/handoff/${id}?pending=1`, {
+        method: 'DELETE',
+        signal: AbortSignal.timeout(10_000),
+      })
+      this.#forget(id)
+    }
+  }
+
+  #forget(id: string): void {
+    this.#db.prepare('DELETE FROM pending_handoff WHERE id = ?').run(id)
+  }
+
+  async active(engine: EngineClient, threadId: string): Promise<ActiveHandoff | null> {
+    const result = await engine.get<{ active: ActiveHandoff | null }>(
+      `/v1/compose/handoff?${new URLSearchParams({ threadId })}`,
+    )
+    return result.active
+  }
+
+  async end(engine: EngineClient, id: string): Promise<void> {
+    await engine.request(`/v1/compose/handoff/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    this.#forget(id)
+  }
 
   async launch(
     engine: EngineClient,
@@ -73,9 +124,16 @@ export class Handoff {
     threadId: string,
     launchThread: LaunchThread,
   ): Promise<{ draft: ComposeDraft; thread: T3Thread }> {
+    await this.recover(engine)
     const key = JSON.stringify([engine.baseUrl, projectId, threadId])
-    const attempt = this.#pending.get(key) ?? { id: randomUUID() }
-    this.#pending.set(key, attempt)
+    let attempt = this.#pending.get(key)
+    if (!attempt) {
+      attempt = { id: randomUUID() }
+      this.#db
+        .prepare('INSERT INTO pending_handoff (id, engine_url) VALUES (?, ?)')
+        .run(attempt.id, engine.baseUrl)
+      this.#pending.set(key, attempt)
+    }
     if (!attempt.request || !attempt.draftId) {
       const { draftId, composerUrl, agentToken } = await engine.request<{
         draftId: string
@@ -98,6 +156,7 @@ export class Handoff {
       method: 'PUT',
       body: { t3ThreadId: attempt.launched.threadId },
     })
+    this.#forget(attempt.id)
     const draft = await engine.get<ComposeDraft>(composeDraftPath(attempt.draftId))
     this.#pending.delete(key)
     return { draft, thread: attempt.launched }
@@ -107,7 +166,7 @@ export class Handoff {
     const key = JSON.stringify([engine.baseUrl, projectId, threadId])
     const attempt = this.#pending.get(key)
     if (!attempt) return
-    await engine.request(`/v1/compose/handoff/${attempt.id}`, { method: 'DELETE' })
+    await this.end(engine, attempt.id)
     this.#pending.delete(key)
   }
 }

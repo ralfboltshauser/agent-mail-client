@@ -30,30 +30,41 @@ export function handoffGrant(db: Db, principal: Principal) {
 }
 
 export async function startHandoff(db: Db, drafts: Drafts, threadId: string, id: string) {
-  const recorded = db.prepare('SELECT thread_id, draft_id FROM handoff WHERE id = ?').get(id) as
-    | { thread_id: string; draft_id: string }
-    | undefined
+  const getRecorded = () =>
+    db
+      .prepare('SELECT thread_id, draft_id, agent_id, t3_thread_id FROM handoff WHERE id = ?')
+      .get(id)
+  const recorded = getRecorded()
   if (recorded && recorded.thread_id !== threadId)
     throw new DraftError('Handoff ID is already in use', 409)
+  if (recorded?.t3_thread_id) throw new DraftError('Handoff already launched', 409)
 
   const accountId = db.prepare('SELECT account_id FROM thread WHERE id = ?').get(threadId)
     ?.account_id as string | undefined
   if (!accountId) throw new DraftError('Thread unavailable')
-  const existing =
-    recorded?.draft_id ?? drafts.list({ accountId, threadId, editable: true, limit: 1 })[0]?.id
+  const existing = recorded
+    ? String(recorded.draft_id)
+    : drafts.list({ accountId, threadId, editable: true, limit: 1 })[0]?.id
   const draft = existing
     ? drafts.openCompose(existing)
     : await drafts.startCompose({ mode: 'reply', threadId }, async () => null)
   if (!draft || draft.accountId !== accountId) throw new DraftError('Draft unavailable', 409)
 
   return transaction(db, () => {
+    if (db.prepare('SELECT 1 FROM closed_handoff WHERE id = ?').get(id))
+      throw new DraftError('Handoff is closed', 409)
+    // Reply creation can yield. Refuse a stale request if another request got here first.
+    if (getRecorded()?.agent_id !== recorded?.agent_id)
+      throw new DraftError('Handoff changed. Retry the request.', 409)
     const now = Date.now()
+    db.prepare('DELETE FROM handoff WHERE thread_id = ? AND id != ?').run(threadId, id)
+    // A lost Engine reply can be retried before T3 sees the payload. Replace both secrets.
     db.prepare(
       `UPDATE token SET revoked_at = ? WHERE revoked_at IS NULL AND id IN (
-         SELECT agent_id FROM handoff WHERE thread_id = ?
-         UNION ALL SELECT composer_id FROM handoff WHERE thread_id = ?
+         SELECT agent_id FROM handoff WHERE id = ?
+         UNION ALL SELECT composer_id FROM handoff WHERE id = ?
        )`,
-    ).run(now, threadId, threadId)
+    ).run(now, id, id)
     const agent = issueToken(
       db,
       {
@@ -84,5 +95,21 @@ export async function startHandoff(db: Db, drafts: Drafts, threadId: string, id:
        ON CONFLICT(id) DO UPDATE SET composer_id = excluded.composer_id, agent_id = excluded.agent_id`,
     ).run(id, draft.id, threadId, agent.id, composer.id)
     return { draftId: draft.id, composerToken: composer.secret, agentToken: agent.secret }
+  })
+}
+
+export function closeHandoff(db: Db, id: string, pendingOnly: boolean): void {
+  transaction(db, () => {
+    if (
+      pendingOnly &&
+      db.prepare('SELECT 1 FROM handoff WHERE id = ? AND t3_thread_id IS NOT NULL').get(id)
+    )
+      return
+    // Record the ID even if the original POST has yet to reach the Engine.
+    db.prepare('INSERT OR IGNORE INTO closed_handoff (id, state) VALUES (?, ?)').run(
+      id,
+      pendingOnly ? 'failed' : 'ended',
+    )
+    db.prepare('DELETE FROM handoff WHERE id = ?').run(id)
   })
 }
