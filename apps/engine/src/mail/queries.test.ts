@@ -57,6 +57,29 @@ describe('MailQueries', () => {
     expect(queries.threads({ inbox: true }).threads.map((t) => t.id)).toEqual(['a:t-m1'])
   })
 
+  it('ignores saved Snooze state in the Inbox when disabled', () => {
+    const { db, store, queries } = setup()
+    const enabled = new MailStore(db, store.blobs, { snoozeEnabled: true })
+    enabled.putMessage('a', [], msg('m1'))
+    enabled.putMessage('a', [], msg('m2', { labels: ['INBOX', 'SPAM'] }))
+    db.prepare('UPDATE thread SET snoozed_until = 2000').run()
+    enabled.refreshThread('a:t-m1')
+    enabled.refreshThread('a:t-m2')
+    expect(new MailQueries(db, true).thread('a:t-m1')).toMatchObject({
+      inInbox: false,
+      snoozedUntil: 2000,
+    })
+
+    expect(queries.threads({ inbox: true }).threads).toMatchObject([
+      { id: 'a:t-m1', inInbox: true, snoozedUntil: null },
+    ])
+    store.putMessage('a', [], msg('reply', { providerThreadId: 't-m1', sentAt: 3000 }))
+    expect(
+      db.prepare("SELECT in_inbox, snoozed_until FROM thread WHERE id = 'a:t-m1'").get(),
+    ).toEqual({ in_inbox: 1, snoozed_until: 2000 })
+    expect(queries.thread('a:t-m1')).toMatchObject({ inInbox: true, snoozedUntil: null })
+  })
+
   it('searches the body, people and attachment names, accent-insensitive', () => {
     const { store, queries } = setup()
     store.putMessage('a', [], msg('m1', { bodyText: 'Das Angebot für Zürich', subject: 'Offer' }))

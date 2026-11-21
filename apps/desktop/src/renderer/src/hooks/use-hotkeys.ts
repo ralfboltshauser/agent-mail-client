@@ -11,20 +11,22 @@ function isTyping(target: EventTarget | null): boolean {
  * Global keyboard shortcuts. Keys look like "j", "shift+3", "mod+k" (mod = ⌘), and
  * two-key sequences like "g i". Plain keys are ignored while typing; "mod+…" and "escape" are not.
  */
-export function useHotkeys(map: HotkeyMap): void {
+export function useHotkeys(map: HotkeyMap, enabled = true): void {
   const mapRef = useRef(map)
   mapRef.current = map
   useEffect(() => {
+    if (!enabled) return
     let pending: string | null = null
     let pendingTimer: number | undefined
     const onKey = (event: KeyboardEvent) => {
-      if (event.isComposing) return
-      const key = event.key.length === 1 ? event.key.toLowerCase() : event.key.toLowerCase()
+      const inDialog = event.target instanceof Element && event.target.closest('[role="dialog"]')
+      if (event.isComposing || event.defaultPrevented || inDialog) return
+      const key = event.key.toLowerCase()
       const combo = [
         event.metaKey ? 'mod' : '',
         event.ctrlKey ? 'ctrl' : '',
         event.altKey ? 'alt' : '',
-        event.shiftKey && key.length > 1 ? 'shift' : '',
+        event.shiftKey && (key.length > 1 || /^[a-z]$/.test(key)) ? 'shift' : '',
         key,
       ]
         .filter(Boolean)
@@ -58,6 +60,9 @@ export function useHotkeys(map: HotkeyMap): void {
       }
     }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [])
+    return () => {
+      window.clearTimeout(pendingTimer)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [enabled])
 }

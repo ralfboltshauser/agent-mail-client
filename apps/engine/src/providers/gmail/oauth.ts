@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 export const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.modify'
+export const GMAIL_TIMEOUT_MS = 30_000
 const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
 const TOKEN_URL = 'https://oauth2.googleapis.com/token'
 
@@ -87,10 +88,17 @@ async function tokenRequest(
 ): Promise<TokenResponse> {
   const res = await fetchImpl(TOKEN_URL, {
     method: 'POST',
+    signal: AbortSignal.timeout(GMAIL_TIMEOUT_MS),
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams(params),
   })
-  const body = (await res.json().catch(() => ({}))) as Partial<TokenResponse> & {
+  const body = (await res.text().then((text) => {
+    try {
+      return JSON.parse(text) ?? {}
+    } catch {
+      return {}
+    }
+  })) as Partial<TokenResponse> & {
     error?: string
     error_description?: string
   }

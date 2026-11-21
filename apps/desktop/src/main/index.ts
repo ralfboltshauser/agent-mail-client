@@ -6,6 +6,7 @@ import { app, BrowserWindow, ipcMain, Menu, nativeTheme, shell } from 'electron'
 import type { SyncStatus, ThreadQuery } from '../shared/api'
 import { clearPairing, loadPairing, savePairing } from './auth'
 import { EngineClient, EngineError } from './engine'
+import { OrganiseSync } from './organise'
 import { Replica } from './replica'
 import { SyncLoop } from './sync'
 
@@ -13,6 +14,7 @@ let window: BrowserWindow | null = null
 let replica: Replica | null = null
 let engine: EngineClient | null = null
 let sync: SyncLoop | null = null
+let organise: OrganiseSync | null = null
 
 const UNPAIRED: SyncStatus = {
   phase: 'unpaired',
@@ -33,8 +35,12 @@ function openReplica(): Replica {
 
 function connect(engineUrl: string, token: string) {
   sync?.stop()
+  organise?.stop()
   engine = new EngineClient(engineUrl, token)
   sync = new SyncLoop(engine, openReplica())
+  const activeSync = sync
+  organise = new OrganiseSync(openReplica().organise, engine, () => activeSync.pull())
+  organise.on('changed', () => broadcast('amc:changed'))
   let changedTimer: NodeJS.Timeout | null = null
   sync.on('status', (status) => broadcast('amc:status', status))
   sync.on('changed', () => {
@@ -46,6 +52,7 @@ function connect(engineUrl: string, token: string) {
     }, 120)
   })
   sync.start()
+  organise.start()
 }
 
 function requireEngine(): EngineClient {
@@ -57,12 +64,23 @@ function registerIpc() {
   ipcMain.handle('amc:pair', (_e, engineUrl: string, code: string) => pair(engineUrl, code))
   ipcMain.handle('amc:unpair', () => {
     sync?.stop()
+    organise?.stop()
+    organise = null
     sync = null
     engine = null
     clearPairing()
     openReplica().clear()
+    openReplica().organise.clear()
     broadcast('amc:status', UNPAIRED)
   })
+  ipcMain.handle('amc:organise', (_event, input: unknown) => {
+    if (!organise) throw new Error('Pair with the Engine first')
+    const id = organise.enqueue(input, sync?.status.snoozeEnabled)
+    broadcast('amc:changed')
+    void organise.flush()
+    return id
+  })
+  ipcMain.handle('amc:organiseErrors', () => openReplica().organise.errors())
   registerReadIpc()
 }
 
@@ -95,6 +113,7 @@ function registerReadIpc() {
   ipcMain.handle('amc:counts', (_e, accountId: string | null) => openReplica().counts(accountId))
   ipcMain.handle('amc:threads', (_e, query: ThreadQuery) => openReplica().threads(query))
   ipcMain.handle('amc:thread', (_e, id: string) => openReplica().thread(id))
+  ipcMain.handle('amc:summaries', (_e, ids: string[]) => openReplica().summaries(ids))
   ipcMain.handle('amc:filter', (_e, text: string, accountId: string | null) =>
     openReplica().filter(text, accountId),
   )

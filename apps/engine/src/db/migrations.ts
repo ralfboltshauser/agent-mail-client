@@ -313,4 +313,76 @@ export const MIGRATIONS: readonly Migration[] = [
         (SELECT id FROM message WHERE imap_fingerprint GLOB 'email-id:*');
     `,
   },
+  {
+    version: 8,
+    name: 'organise',
+    sql: `
+      ALTER TABLE message ADD COLUMN provider_label_ids TEXT;
+      ALTER TABLE message ADD COLUMN provider_history_id TEXT;
+      ALTER TABLE message ADD COLUMN provider_delivery_history_id TEXT;
+      ALTER TABLE message ADD COLUMN first_seen_at INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE thread ADD COLUMN snoozed_until INTEGER;
+      ALTER TABLE thread ADD COLUMN muted INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE thread ADD COLUMN snooze_no_reply INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE thread ADD COLUMN snooze_started_at INTEGER;
+      ALTER TABLE thread ADD COLUMN organise_state TEXT NOT NULL DEFAULT '{}';
+      ALTER TABLE account ADD COLUMN write_epoch INTEGER NOT NULL DEFAULT 0;
+      CREATE INDEX thread_snooze ON thread (snoozed_until) WHERE snoozed_until IS NOT NULL;
+      CREATE INDEX thread_muted ON thread (muted) WHERE muted = 1;
+
+      CREATE TABLE organise_intent (
+        id                 TEXT PRIMARY KEY,
+        account_id         TEXT NOT NULL REFERENCES account (id) ON DELETE CASCADE,
+        history_id         TEXT NOT NULL,
+        checked_history_id TEXT NOT NULL,
+        marker_id          TEXT,
+        status             TEXT NOT NULL DEFAULT 'active'
+                           CHECK (status IN ('active', 'done', 'superseded'))
+      ) STRICT;
+      CREATE TABLE organise_intent_message (
+        intent_id  TEXT NOT NULL REFERENCES organise_intent (id) ON DELETE CASCADE,
+        message_id TEXT NOT NULL,
+        work       TEXT NOT NULL CHECK (work IN ('suppress', 'wake')),
+        status     TEXT NOT NULL CHECK (status IN ('pending', 'done', 'superseded')),
+        PRIMARY KEY (intent_id, message_id, work)
+      ) STRICT;
+
+      CREATE TABLE mutation (
+        seq           INTEGER PRIMARY KEY AUTOINCREMENT,
+        id            TEXT NOT NULL UNIQUE,
+        principal     TEXT NOT NULL,
+        account_id    TEXT NOT NULL REFERENCES account (id) ON DELETE CASCADE,
+        thread_id     TEXT NOT NULL,
+        request       TEXT NOT NULL,
+        status        TEXT NOT NULL DEFAULT 'pending'
+                      CHECK (status IN ('pending', 'applied', 'partial', 'failed')),
+        error         TEXT,
+        modseq        INTEGER NOT NULL DEFAULT 0,
+        attempts      INTEGER NOT NULL DEFAULT 0,
+        next_attempt  INTEGER NOT NULL DEFAULT 0,
+        progress      INTEGER NOT NULL DEFAULT 0,
+        prepared      INTEGER NOT NULL DEFAULT 0,
+        write_journal TEXT,
+        state_patch   TEXT NOT NULL DEFAULT '{}',
+        state_before  TEXT NOT NULL DEFAULT '{}',
+        intent_id     TEXT REFERENCES organise_intent (id),
+        undo_of       TEXT REFERENCES mutation (id)
+      ) STRICT;
+      CREATE INDEX mutation_intent ON mutation (intent_id);
+      CREATE INDEX mutation_pending ON mutation (account_id, seq) WHERE status = 'pending';
+      CREATE INDEX mutation_thread_queue ON mutation (thread_id, status, seq);
+      CREATE INDEX mutation_undo ON mutation (principal, thread_id, seq);
+      CREATE INDEX mutation_failures ON mutation (principal, modseq) WHERE status IN ('failed', 'partial');
+      CREATE UNIQUE INDEX mutation_undo_once ON mutation (undo_of) WHERE status != 'failed';
+      CREATE TABLE mutation_message (
+        mutation_id TEXT NOT NULL REFERENCES mutation (id) ON DELETE CASCADE,
+        message_id  TEXT NOT NULL,
+        patch       TEXT NOT NULL,
+        before      TEXT NOT NULL,
+        revisions   TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (mutation_id, message_id)
+      ) STRICT;
+      CREATE INDEX mutation_message_by_message ON mutation_message (message_id, mutation_id);
+    `,
+  },
 ]

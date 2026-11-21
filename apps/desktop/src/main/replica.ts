@@ -10,6 +10,7 @@ import type {
   ThreadSummary,
 } from '@amc/protocol'
 import type { Counts, ThreadQuery, ThreadWithMessages } from '../shared/api'
+import { LocalOrganise, ORGANISE_SCHEMA } from './organise'
 
 /**
  * The local copy of the owner's mail on the Mac (plan §5). Every read in the UI comes from
@@ -17,6 +18,7 @@ import type { Counts, ThreadQuery, ThreadWithMessages } from '../shared/api'
  */
 export class Replica {
   readonly db: DatabaseSync
+  readonly organise: LocalOrganise
 
   constructor(path: string) {
     this.db = new DatabaseSync(path)
@@ -38,6 +40,21 @@ export class Replica {
       CREATE TABLE IF NOT EXISTS draft (id TEXT PRIMARY KEY, thread_id TEXT, updated_at INTEGER NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS html (message_id TEXT PRIMARY KEY, html TEXT NOT NULL);
     `)
+    this.db.exec(ORGANISE_SCHEMA)
+    const columns = this.db.prepare('PRAGMA table_info(organise_queue)').all()
+    if (!columns.some((column) => column.name === 'messages')) {
+      this.db.exec('ALTER TABLE organise_queue ADD COLUMN messages TEXT')
+    }
+    if (!columns.some((column) => column.name === 'superseded')) {
+      this.db.exec("ALTER TABLE organise_queue ADD COLUMN superseded TEXT NOT NULL DEFAULT '[]'")
+    }
+    if (!columns.some((column) => column.name === 'supersession_notified')) {
+      this.db.exec(
+        'ALTER TABLE organise_queue ADD COLUMN supersession_notified INTEGER NOT NULL DEFAULT 0',
+      )
+    }
+    this.organise = new LocalOrganise(this)
+    this.organise.rebuild()
   }
 
   get modseq(): number | null {
@@ -58,6 +75,7 @@ export class Replica {
   }
 
   clear(): void {
+    this.db.exec('DELETE FROM organise_thread')
     this.db.exec(
       'DELETE FROM account; DELETE FROM label; DELETE FROM thread; DELETE FROM message; DELETE FROM draft; DELETE FROM html; DELETE FROM meta;',
     )
@@ -187,6 +205,12 @@ export class Replica {
       case 'starred':
         where.push('starred = 1')
         break
+      case 'snoozed':
+        where.push("json_extract(data, '$.snoozedUntil') IS NOT NULL")
+        break
+      case 'trash':
+        hasLabel('TRASH')
+        break
       case 'sent':
         hasLabel('SENT')
         break
@@ -205,7 +229,7 @@ export class Replica {
     }
     const rows = this.db
       .prepare(
-        `SELECT data FROM thread ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+        `SELECT data FROM effective_thread ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
          ORDER BY last_message_at DESC LIMIT ?`,
       )
       .all(...params, query.limit ?? 5000) as { data: string }[]
@@ -213,6 +237,12 @@ export class Replica {
   }
 
   thread(id: string): ThreadWithMessages | null {
+    const base = this.baseThread(id)
+    if (base) this.organise.messages(base.thread, base.messages)
+    return base
+  }
+
+  baseThread(id: string): ThreadWithMessages | null {
     const row = this.db.prepare('SELECT data FROM thread WHERE id = ?').get(id) as
       | { data: string }
       | undefined
@@ -230,6 +260,14 @@ export class Replica {
     return { thread: JSON.parse(row.data), messages, drafts }
   }
 
+  summaries(ids: string[]): ThreadSummary[] {
+    const get = this.db.prepare('SELECT data FROM effective_thread WHERE id = ?')
+    return ids.slice(0, 100).flatMap((id) => {
+      const row = get.get(id) as { data: string } | undefined
+      return row ? [JSON.parse(row.data) as ThreadSummary] : []
+    })
+  }
+
   counts(accountId: string | null): Counts {
     const row = this.db
       .prepare(
@@ -237,7 +275,7 @@ export class Replica {
            sum(in_inbox) AS inbox,
            sum(CASE WHEN in_inbox = 1 AND unread_count > 0 THEN 1 ELSE 0 END) AS inbox_unread,
            sum(starred) AS starred
-         FROM thread WHERE (?1 IS NULL OR account_id = ?1)`,
+         FROM effective_thread WHERE (?1 IS NULL OR account_id = ?1)`,
       )
       .get(accountId) as {
       inbox: number | null
@@ -246,7 +284,7 @@ export class Replica {
     }
     const drafts = this.db
       .prepare(
-        `SELECT count(*) AS n FROM thread WHERE (?1 IS NULL OR account_id = ?1)
+        `SELECT count(*) AS n FROM effective_thread WHERE (?1 IS NULL OR account_id = ?1)
          AND EXISTS (SELECT 1 FROM json_each(label_ids) WHERE value LIKE '%:DRAFT')`,
       )
       .get(accountId) as { n: number }
@@ -263,7 +301,7 @@ export class Replica {
     if (words.length === 0) return []
     const rows = this.db
       .prepare(
-        `SELECT data FROM thread WHERE (?1 IS NULL OR account_id = ?1)
+        `SELECT data FROM effective_thread WHERE (?1 IS NULL OR account_id = ?1)
          ${words.map(() => 'AND haystack LIKE ?').join(' ')}
          ORDER BY last_message_at DESC LIMIT 200`,
       )

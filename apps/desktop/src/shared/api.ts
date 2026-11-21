@@ -4,6 +4,7 @@ import type {
   Draft,
   Label,
   MessageDetail,
+  OrganiseAction,
   SearchHit,
   ThreadSummary,
 } from '@amc/protocol'
@@ -16,6 +17,8 @@ export type View =
   | { kind: 'sent' }
   | { kind: 'drafts' }
   | { kind: 'all' }
+  | { kind: 'snoozed' }
+  | { kind: 'trash' }
   | { kind: 'label'; labelId: string }
 
 export interface ThreadQuery {
@@ -41,6 +44,7 @@ export type SyncPhase = 'unpaired' | 'connecting' | 'bootstrapping' | 'live' | '
 
 export interface SyncStatus {
   phase: SyncPhase
+  snoozeEnabled?: boolean
   engineUrl: string | null
   /** Bootstrap progress, 0..1. */
   progress: number | null
@@ -49,17 +53,27 @@ export interface SyncStatus {
 }
 
 /** Everything the renderer may ask of the main process. Exposed as `window.amc`. */
+export interface OrganiseNotice {
+  id: string
+  message: string
+  quiet?: boolean
+  undo?: Extract<OrganiseAction, { kind: 'undo' }>
+}
+
 export interface AmcApi {
   pair(engineUrl: string, code: string): Promise<void>
   unpair(): Promise<void>
   status(): Promise<SyncStatus>
   syncNow(): Promise<void>
+  organise(action: OrganiseAction): Promise<string>
+  organiseErrors(): Promise<OrganiseNotice[]>
 
   accounts(): Promise<AccountSummary[]>
   labels(accountId: string | null): Promise<Label[]>
   counts(accountId: string | null): Promise<Counts>
   threads(query: ThreadQuery): Promise<ThreadSummary[]>
   thread(id: string): Promise<ThreadWithMessages | null>
+  summaries(ids: string[]): Promise<ThreadSummary[]>
   /** Instant local filter over subject, people and snippet. */
   filter(text: string, accountId: string | null): Promise<ThreadSummary[]>
   /** Full-text search over the entire history, on the Engine. */

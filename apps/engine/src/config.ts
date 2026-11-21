@@ -22,6 +22,7 @@ export const Config = z.object({
    * Requests carrying a different `Tailscale-User-Login` are refused even with a valid token.
    */
   allowedTailscaleLogins: z.array(z.string()).default([]),
+  features: z.object({ snooze: z.boolean().default(false) }).prefault({}),
   logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 })
 export type Config = z.infer<typeof Config>

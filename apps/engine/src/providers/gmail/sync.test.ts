@@ -99,6 +99,66 @@ describe('Gmail sync', () => {
     ).toEqual(['a:t-m2', 'a:t-m3'])
   })
 
+  it('refreshes labels for a Gmail message skipped when list pages shift', async () => {
+    const { gmail, sync, queries, state, backfillAll } = setup(1)
+    gmail.add('m1')
+    gmail.add('m2')
+    await sync.start()
+    await backfillAll()
+    gmail.oldestHistory = Number(state.cursor().historyId) + 1
+    gmail.setLabels('m1', ['STARRED'])
+    await sync.incremental()
+    await sync.backfillStep() // The first offset page contains m2.
+    gmail.remove('m2') // m1 shifts onto that page and will be omitted by the next page.
+    await sync.incremental()
+    await backfillAll()
+    expect(await sync.incremental()).toBe(0)
+    expect(queries.thread('a:t-m1')).toMatchObject({
+      inInbox: false,
+      labelIds: ['a:STARRED'],
+    })
+    expect(queries.thread('a:t-m2')).toBeNull()
+  })
+
+  it('keeps newer history labels when the final reconciliation read was already in flight', async () => {
+    const { gmail, sync, queries, state, backfillAll } = setup(1)
+    gmail.add('m1')
+    gmail.add('m2')
+    await sync.start()
+    await backfillAll()
+
+    gmail.oldestHistory = Number(state.cursor().historyId) + 1
+    gmail.setLabels('m1', ['STARRED'])
+    await sync.incremental()
+    await sync.backfillStep()
+    gmail.remove('m2')
+
+    let read!: () => void
+    let release!: () => void
+    const reading = new Promise<void>((resolve) => {
+      read = resolve
+    })
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    gmail.afterLabelRead = async () => {
+      read()
+      await held
+    }
+    const finalPage = sync.backfillStep()
+    await reading
+    gmail.setLabels('m1', ['INBOX', 'UNREAD'])
+    await sync.incremental()
+    release()
+    await finalPage
+
+    expect(await sync.incremental()).toBe(0)
+    expect(queries.thread('a:t-m1')).toMatchObject({
+      inInbox: true,
+      labelIds: ['a:INBOX', 'a:UNREAD'],
+    })
+  })
+
   it('records every change in the change log', async () => {
     const { db, gmail, sync, backfillAll } = setup()
     gmail.add('m1')

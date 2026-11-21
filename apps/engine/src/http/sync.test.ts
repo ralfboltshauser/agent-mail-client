@@ -33,7 +33,7 @@ function setup() {
   }
   const add = (id: string, date: number) =>
     store.putMessage('a', ['me@x.com'], fromGmail(gmail.add(id, { date })))
-  return { db, store, get, add }
+  return { db, store, get, add, gmail }
 }
 
 describe('sync protocol', () => {
@@ -49,11 +49,13 @@ describe('sync protocol', () => {
   })
 
   it('returns collapsed changes since a modseq, deletes included', async () => {
-    const { get, add, store } = setup()
+    const { get, add, store, gmail } = setup()
     add('m1', 1000)
     const state = await get<{ modseq: number }>('/v1/sync/state')
     add('m2', 2000)
-    store.setMessageLabels('a', 'm2', ['STARRED'])
+    gmail.setLabels('m2', ['STARRED'])
+    const message = await gmail.getMessageState('m2')
+    store.setMessageLabels('a', 'm2', message?.labelIds ?? [], message?.historyId)
     store.deleteMessage('a', 'm1')
     const res = await get<SyncChanges>(`/v1/sync/changes?since=${state.body.modseq}`)
     const byKey = Object.fromEntries(res.body.changes.map((c) => [`${c.entity}:${c.id}`, c]))
