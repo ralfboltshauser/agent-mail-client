@@ -10,6 +10,7 @@ import type {
   ThreadSummary,
 } from '@amc/protocol'
 import type { Counts, ThreadQuery, ThreadWithMessages } from '../shared/api'
+import { LocalDraftUpdates } from './draft-updates'
 import { LocalOrganise, ORGANISE_SCHEMA } from './organise'
 
 /**
@@ -19,6 +20,7 @@ import { LocalOrganise, ORGANISE_SCHEMA } from './organise'
 export class Replica {
   readonly db: DatabaseSync
   readonly organise: LocalOrganise
+  readonly draftUpdates: LocalDraftUpdates
 
   constructor(path: string) {
     this.db = new DatabaseSync(path)
@@ -53,6 +55,7 @@ export class Replica {
         'ALTER TABLE organise_queue ADD COLUMN supersession_notified INTEGER NOT NULL DEFAULT 0',
       )
     }
+    this.draftUpdates = new LocalDraftUpdates(this.db)
     this.organise = new LocalOrganise(this)
     this.organise.rebuild()
   }

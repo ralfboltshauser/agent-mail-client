@@ -7,10 +7,12 @@ import {
   Inbox,
   Mail,
   Send,
+  SquarePen,
   Star,
   Tag,
   Trash2,
 } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -42,6 +44,7 @@ const SYSTEM_VIEWS: { view: View; title: string; icon: typeof Inbox; keys: strin
   { view: { kind: 'unread' }, title: 'Unread', icon: Mail, keys: 'G U' },
   { view: { kind: 'starred' }, title: 'Starred', icon: Star, keys: 'G S' },
   { view: { kind: 'drafts' }, title: 'Drafts', icon: FileText, keys: 'G D' },
+  { view: { kind: 'outbox' }, title: 'Outbox', icon: Clock3, keys: 'G O' },
   { view: { kind: 'sent' }, title: 'Sent', icon: Send, keys: 'G T' },
   { view: { kind: 'all' }, title: 'All Mail', icon: Archive, keys: 'G A' },
   { view: { kind: 'snoozed' }, title: 'Snoozed', icon: Clock3, keys: 'G H' },
@@ -75,6 +78,8 @@ interface Props {
   onAccount: (id: string | null) => void
   view: View
   onView: (view: View) => void
+  onCompose: () => void
+  composing: boolean
   counts: Counts
   labels: Label[]
   status: SyncStatus | null
@@ -99,6 +104,8 @@ export function AppSidebar({
   onAccount,
   view,
   onView,
+  onCompose,
+  composing,
   counts,
   labels,
   status,
@@ -158,6 +165,15 @@ export function AppSidebar({
             ))}
           </DropdownMenuContent>
         </DropdownMenu>
+        <Button
+          className="mt-1 justify-start"
+          size="sm"
+          variant="outline"
+          onClick={onCompose}
+          disabled={composing}
+        >
+          <SquarePen /> Compose <span className="ml-auto text-xs text-muted-foreground">C</span>
+        </Button>
       </SidebarHeader>
 
       <SidebarContent>

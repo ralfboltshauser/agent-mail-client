@@ -222,10 +222,21 @@ export class FakeImap extends EventEmitter {
     }
   }
 
-  async append(folder: string, raw: Buffer, flags: string[]): Promise<{ path: string } | false> {
+  async messageDelete(range: string): Promise<boolean> {
+    return this.#selected?.messages.delete(Number(range)) ?? false
+  }
+
+  async append(
+    folder: string,
+    raw: Buffer,
+    flags: string[],
+  ): Promise<{ path: string; uid: number; uidValidity: bigint } | false> {
     if (this.failAppend) return false
     this.appended.push({ folder, raw, flags })
-    return { path: folder }
+    const target = this.folder(folder)
+    const uid = target.nextUid++
+    target.messages.set(uid, { source: raw, flags: new Set(flags), modseq: ++target.modseq })
+    return { path: folder, uid, uidValidity: target.validity }
   }
 
   async download(range: string, part: string | undefined, options: DownloadOptions) {

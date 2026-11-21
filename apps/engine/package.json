@@ -8,14 +8,19 @@
     "dev": "node --watch src/main.ts serve"
   },
   "dependencies": {
+    "@amc/composer": "workspace:*",
     "@amc/protocol": "workspace:*",
     "@hono/node-server": "^1.19.5",
     "@modelcontextprotocol/sdk": "^1.32.2",
+    "@tiptap/core": "^3.35.0",
+    "@tiptap/html": "^3.35.0",
+    "@tiptap/y-tiptap": "^3.3.1",
     "hono": "^4.10.1",
     "imapflow": "^2.12.2",
     "mailparser": "^3.15.0",
     "nodemailer": "^10.6.1",
     "pino": "^10.0.0",
+    "yjs": "^13.6.33",
     "zod": "^4.1.12"
   },
   "devDependencies": {

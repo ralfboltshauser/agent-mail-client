@@ -385,4 +385,65 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX mutation_message_by_message ON mutation_message (message_id, mutation_id);
     `,
   },
+  {
+    version: 9,
+    name: 'Compose documents and durable outbox',
+    sql: `
+      ALTER TABLE draft ADD COLUMN yjs BLOB;
+      ALTER TABLE draft ADD COLUMN signature TEXT NOT NULL DEFAULT '';
+      ALTER TABLE draft ADD COLUMN quote TEXT NOT NULL DEFAULT '';
+      ALTER TABLE draft ADD COLUMN mirror_error INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE draft ADD COLUMN mirror_hash TEXT;
+      ALTER TABLE draft ADD COLUMN mirror_conflict INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE draft ADD COLUMN queued_send_id TEXT;
+      ALTER TABLE draft ADD COLUMN mirror_dirty INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE account ADD COLUMN signature TEXT NOT NULL DEFAULT '';
+
+      CREATE INDEX draft_provider ON draft (account_id, provider_draft_id);
+
+      CREATE TABLE draft_attachment (
+        id TEXT PRIMARY KEY,
+        draft_id TEXT NOT NULL REFERENCES draft (id) ON DELETE CASCADE,
+        filename TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        blob TEXT NOT NULL,
+        content_id TEXT,
+        active INTEGER NOT NULL DEFAULT 1
+      ) STRICT;
+      CREATE INDEX draft_attachment_draft ON draft_attachment (draft_id, active);
+
+      CREATE TABLE draft_mirror_removal (
+        account_id TEXT NOT NULL REFERENCES account (id) ON DELETE CASCADE,
+        provider_draft_id TEXT NOT NULL,
+        mirror_hash TEXT,
+        draft_id TEXT NOT NULL,
+        PRIMARY KEY (account_id, provider_draft_id)
+      ) STRICT;
+
+      CREATE TABLE outbox (
+        id TEXT PRIMARY KEY,
+        draft_id TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        rfc_id TEXT NOT NULL UNIQUE,
+        snapshot TEXT,
+        subject TEXT NOT NULL,
+        to_json TEXT NOT NULL,
+        released_at INTEGER,
+        send_at INTEGER NOT NULL,
+        undo_until INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('queued','dispatching','sent','cancelled','uncertain','failed')),
+        next_at INTEGER NOT NULL,
+        reconciles INTEGER NOT NULL DEFAULT 0,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        provider_id TEXT,
+        thread_id TEXT,
+        detail TEXT
+      ) STRICT;
+      CREATE INDEX outbox_due ON outbox (status, next_at);
+      CREATE UNIQUE INDEX outbox_active_draft ON outbox (draft_id)
+        WHERE status IN ('queued','dispatching','uncertain','sent') AND released_at IS NULL;
+    `,
+  },
 ]

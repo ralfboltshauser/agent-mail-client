@@ -1,3 +1,4 @@
+import { INLINE_IMAGE_TYPES } from '@amc/composer'
 import { type MessageDetail, SNOOZED_LABEL } from '@amc/protocol'
 import { FileText, Paperclip, Star } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
@@ -81,12 +82,43 @@ function Message({ message: m, defaultOpen }: { message: MessageDetail; defaultO
     let cancelled = false
     window.amc
       .messageHtml(m.id)
-      .then((h) => !cancelled && setHtml(h))
+      .then(async (h) => {
+        if (!h || !/src=["']cid:/i.test(h)) {
+          if (!cancelled) setHtml(h)
+          return
+        }
+        const parts = m.attachments.filter(
+          (a) =>
+            a.inline &&
+            a.contentId &&
+            a.size <= 5 * 1024 * 1024 &&
+            INLINE_IMAGE_TYPES.includes(a.mimeType) &&
+            h.includes(`cid:${a.contentId}`),
+        )
+        const embedded = new Map(
+          await Promise.all(
+            parts.map(async (part) => {
+              const content = await window.amc.inlineAttachment(part.id).catch(() => '')
+              return [
+                part.contentId,
+                content ? `data:${part.mimeType};base64,${content}` : '',
+              ] as const
+            }),
+          ),
+        )
+        if (!cancelled)
+          setHtml(
+            h.replace(/(\bsrc=["'])cid:([^"']+)/gi, (original, prefix, id) => {
+              const data = embedded.get(id)
+              return data ? prefix + data : original
+            }),
+          )
+      })
       .catch(() => !cancelled && setHtml(null))
     return () => {
       cancelled = true
     }
-  }, [open, m.hasHtml, m.id, html])
+  }, [open, m.hasHtml, m.id, m.attachments, html])
 
   const hue = hueFor(m.from?.address ?? '')
   const ref = useRef<HTMLDivElement>(null)

@@ -243,53 +243,58 @@ export function mailRoutes(deps: MailDeps) {
     return c.json({ html: html.toString('utf8') })
   })
 
-  // Attachments are fetched from the provider on first open, then kept in the blob store.
   r.get('/attachments/:id', requireScope('read'), async (c) => {
-    const row = db
-      .prepare(
-        `SELECT a.filename, a.mime_type, a.blob, a.provider_attachment, m.provider_id, m.account_id, acc.kind
-         FROM attachment a JOIN message m ON m.id = a.message_id
-         JOIN account acc ON acc.id = m.account_id WHERE a.id = ?`,
-      )
-      .get(c.req.param('id')) as
-      | {
-          kind: 'gmail' | 'imap'
-          filename: string
-          mime_type: string
-          blob: string | null
-          provider_attachment: string | null
-          provider_id: string
-          account_id: string
-        }
-      | undefined
-    if (!row) return c.json({ error: 'not_found', message: 'No such attachment' }, 404)
-    let hash = row.blob
-    if (!hash && row.kind === 'imap') {
-      hash = await deps.sync.imapAttachment(row.account_id, c.req.param('id'))
-    } else if (!hash) {
-      const api = deps.sync.gmailApi(row.account_id)
-      if (api && row.provider_attachment) {
-        const data = await api.attachment(row.provider_id, row.provider_attachment)
-        hash = deps.blobs.put(data)
-        db.prepare('UPDATE attachment SET blob = ? WHERE id = ?').run(hash, c.req.param('id'))
-      }
-    }
-    if (!hash) {
+    const attachment = await getAttachment(deps, c.req.param('id'))
+    if (!attachment) return c.json({ error: 'not_found', message: 'No such attachment' }, 404)
+    if (!attachment.hash) {
       return c.json(
         { error: 'unavailable', message: 'Attachment is unavailable from the Account' },
         503,
       )
     }
-    const path = deps.blobs.path(hash)
+    const path = deps.blobs.path(attachment.hash)
     const stats = statSync(path, { throwIfNoEntry: false })
     if (!stats) return c.json({ error: 'not_found', message: 'Attachment data is missing' }, 404)
     return c.body(Readable.toWeb(createReadStream(path)) as ReadableStream<Uint8Array>, 200, {
       'Content-Length': String(stats.size),
-      'Content-Type': row.mime_type,
-      'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(row.filename || 'attachment')}`,
+      'Content-Type': attachment.mime_type,
+      'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(attachment.filename || 'attachment')}`,
       'X-Content-Type-Options': 'nosniff',
     })
   })
 
   return r
+}
+
+/** Fetches uncached attachments through the Account that owns the original message. */
+export async function getAttachment(deps: MailDeps, id: string) {
+  const { db } = deps
+  const row = db
+    .prepare(
+      `SELECT a.filename, a.mime_type, a.blob, a.provider_attachment, m.provider_id, m.account_id, acc.kind
+     FROM attachment a JOIN message m ON m.id = a.message_id
+     JOIN account acc ON acc.id = m.account_id WHERE a.id = ?`,
+    )
+    .get(id) as
+    | {
+        kind: 'gmail' | 'imap'
+        filename: string
+        mime_type: string
+        blob: string | null
+        provider_attachment: string | null
+        provider_id: string
+        account_id: string
+      }
+    | undefined
+  if (!row) return null
+  let hash = row.blob
+  if (!hash && row.kind === 'imap') hash = await deps.sync.imapAttachment(row.account_id, id)
+  else if (!hash && row.provider_attachment) {
+    const api = deps.sync.gmailApi(row.account_id)
+    if (api) {
+      hash = deps.blobs.put(await api.attachment(row.provider_id, row.provider_attachment))
+      db.prepare('UPDATE attachment SET blob = ? WHERE id = ?').run(hash, id)
+    }
+  }
+  return { ...row, hash }
 }

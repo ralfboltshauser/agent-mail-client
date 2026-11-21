@@ -1,0 +1,13 @@
+{
+  "name": "@amc/composer",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@tiptap/core": "^3.35.0",
+    "@tiptap/starter-kit": "^3.35.0"
+  }
+}

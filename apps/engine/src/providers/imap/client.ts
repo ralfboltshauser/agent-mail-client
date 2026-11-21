@@ -23,6 +23,7 @@ export type ImapClient = Pick<
   | 'append'
   | 'messageMove'
   | 'messageFlagsSet'
+  | 'messageDelete'
 >
 
 export type ImapClientFactory = (credentials: ImapCredentials['imap']) => ImapClient

@@ -1,11 +1,17 @@
 import type {
   AccountSummary,
+  ComposeAttachment,
+  ComposeDraft,
+  ComposePatch,
+  ComposeStart,
   Contact,
   Draft,
   Label,
   MessageDetail,
   OrganiseAction,
+  OutboxItem,
   SearchHit,
+  SendRequest,
   ThreadSummary,
 } from '@amc/protocol'
 
@@ -15,6 +21,7 @@ export type View =
   | { kind: 'unread' }
   | { kind: 'starred' }
   | { kind: 'sent' }
+  | { kind: 'outbox' }
   | { kind: 'drafts' }
   | { kind: 'all' }
   | { kind: 'snoozed' }
@@ -86,7 +93,29 @@ export interface AmcApi {
   /** Full-text search over the entire history, on the Engine. */
   search(text: string, accountId: string | null): Promise<SearchHit[]>
   contacts(text: string): Promise<Contact[]>
+  startCompose(input: ComposeStart): Promise<ComposeDraft>
+  composeDrafts(): Promise<Draft[]>
+  composeDraft(id: string): Promise<ComposeDraft>
+  stageComposeBody(id: string, patch: ComposePatch): void
+  saveCompose(id: string, patch: ComposePatch): Promise<ComposeDraft>
+  addComposeAttachment(
+    id: string,
+    name: string,
+    type: string,
+    bytes: Uint8Array,
+    inline?: boolean,
+  ): Promise<ComposeAttachment>
+  composeImage(id: string, contentId: string): Promise<{ content: string; mimeType: string }>
+  sendDraft(request: SendRequest): Promise<OutboxItem>
+  outbox(): Promise<OutboxItem[]>
+  resolveSend(id: string, action: 'check' | 'reopen'): Promise<{ draftId: string }>
+  cancelSend(id: string): Promise<void>
+  signature(accountId: string): Promise<{ signature: string }>
+  saveSignature(accountId: string, signature: string): Promise<{ signature: string }>
+  sendSettings(): Promise<{ undoSendSeconds: number }>
+  saveSendSettings(undoSendSeconds: number): Promise<{ undoSendSeconds: number }>
   messageHtml(messageId: string): Promise<string | null>
+  inlineAttachment(attachmentId: string): Promise<string>
   openAttachment(attachmentId: string, filename: string): Promise<void>
   openExternal(url: string): Promise<void>
 
