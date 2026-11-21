@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from 'react'
 import { toast } from 'sonner'
 import { getAmc } from '@/lib/amc'
 import type { NotificationSettings } from '../../../shared/api'
+import { AutoTriageSetting } from './triage-status'
 import { Button } from './ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
 import { Input } from './ui/input'
@@ -30,8 +31,10 @@ export function MailSettings({
         className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-sm"
       >
         <DialogHeader>
-          <DialogTitle>Mail settings</DialogTitle>
-          <DialogDescription>Manage undo send and Mac notifications.</DialogDescription>
+          <DialogTitle>Settings</DialogTitle>
+          <DialogDescription>
+            Manage undo send, auto-triage and Mac notifications.
+          </DialogDescription>
         </DialogHeader>
         <form
           className="grid gap-4"
@@ -73,6 +76,9 @@ export function MailSettings({
             {saving ? 'Saving…' : 'Save undo send'}
           </Button>
         </form>
+        <div className="border-t pt-4">
+          <AutoTriageSetting />
+        </div>
         <NotificationPreferences />
       </DialogContent>
     </Dialog>

@@ -86,9 +86,10 @@ export function fromGmail(message: GmailMessage): IncomingMessage {
   const html = collected.html.filter(Boolean).join('\n<hr>\n') || null
   const plain = normalizeWhitespace(collected.plain.join('\n\n'))
   const bodyText = plain || (html ? htmlToText(html) : '')
-  const internalDate = message.internalDate ? Number(message.internalDate) : NaN
-  const deliveredAt = Number.isFinite(internalDate) ? internalDate : undefined
-  const sentAt = deliveredAt ?? (Date.parse(header(headers, 'Date') ?? '') || 0)
+  const internalDate = Number(message.internalDate)
+  const deliveredAt =
+    Number.isSafeInteger(internalDate) && internalDate > 0 ? internalDate : undefined
+  const sentAt = deliveredAt || Date.parse(header(headers, 'Date') ?? '') || 0
 
   return {
     providerId: message.id,
@@ -107,7 +108,7 @@ export function fromGmail(message: GmailMessage): IncomingMessage {
     bodyText,
     bodyHtml: html,
     sentAt,
-    deliveredAt,
+    ...(deliveredAt === undefined ? {} : { deliveredAt }),
     size: message.sizeEstimate ?? 0,
     labels: message.labelIds ?? [],
     listUnsubscribe: header(headers, 'List-Unsubscribe'),

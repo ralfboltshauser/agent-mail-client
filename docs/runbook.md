@@ -39,6 +39,22 @@ across restarts. **Launch at Login** is enabled on first run. If macOS requests
 approval, use the AMC menu to open Login Items settings or cancel the pending
 registration. Desktop upgrades move the previous app bundle to the Trash.
 
+### Mail triage
+
+Automatic desktop triage selects unbucketed Inbox threads whose latest
+provider-recorded delivery is within 24 hours. It uses Gmail's internalDate
+and IMAP's INTERNALDATE. Messages with no recorded delivery time do not count.
+Use `amc triage --recent` for the same selection on the CLI.
+
+The desktop and CLI share one Engine lease. A second client skips a run while
+the lease is held. The client releases the lease when it finishes, and the
+Engine expires leases after ten minutes if release fails.
+
+Desktop main revokes the run's grant by name after the worker exits, including
+on crash or timeout. On quit it stops the worker and allows up to three
+seconds for cleanup. If revocation cannot reach the Engine, the grant expires
+five minutes after minting.
+
 ## Layout
 
 | Path | What | Owner |
@@ -75,7 +91,7 @@ journalctl -u amc-engine -f        # JSON logs; pipe through `npx pino-pretty` t
 
 The Engine listens on `127.0.0.1:4410`. `tailscale serve` publishes it on the tailnet only at `https://<host>.<tailnet>.ts.net:4443`. It is never on Funnel. Requests through `tailscale serve` must come from a login listed in `allowedTailscaleLogins`.
 
-M3 ships with Snooze disabled. The Engine reads `features.snooze` from its config at startup. The default is `false`.
+Snooze is enabled by default. Set `features.snooze` to `false` to disable it. The Engine keeps the schedule in its database and uses the Account’s archive and Inbox operations. IMAP Accounts need a server-designated Archive folder.
 
 ## Gmail notifications
 

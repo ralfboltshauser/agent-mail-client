@@ -20,7 +20,7 @@ describe('migrate', () => {
     try {
       expect(migrate(db, { migrations: MIGRATIONS.filter(({ version }) => version <= 7) })).toBe(7)
       expect(MIGRATIONS.filter(({ version }) => version > 7).map(({ version }) => version)).toEqual(
-        [8, 9, 10, 11, 12, 13, 14, 15, 16],
+        [8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
       )
       db.exec(`
         INSERT INTO account (id, kind, address, credentials, created_at)
@@ -40,7 +40,7 @@ describe('migrate', () => {
         VALUES ('i', 'INBOX', '1', 2, 'i:m', 'i:INBOX', 1, 1, 'fixture-source');
       `)
       const backupDir = join(dir, 'backups')
-      expect(migrate(db, { backupDir })).toBe(16)
+      expect(migrate(db, { backupDir })).toBe(17)
       expect(db.prepare('SELECT bucket FROM thread WHERE id = ?').get('a:t')).toEqual({
         bucket: null,
       })
@@ -102,7 +102,7 @@ describe('migrate', () => {
     if (!compose) throw new Error('Compose migration missing')
     expect(migrate(db, { migrations: MIGRATIONS.filter(({ version }) => version <= 8) })).toBe(8)
     db.exec('DROP TABLE schema_migration')
-    expect(migrate(db)).toBe(16)
+    expect(migrate(db)).toBe(17)
     expect(db.prepare('SELECT * FROM organise_intent').all()).toEqual([])
     expect(db.prepare('SELECT * FROM outbox').all()).toEqual([])
 
@@ -115,6 +115,48 @@ describe('migrate', () => {
     wrong.exec('DROP TABLE schema_migration')
     expect(() => migrate(wrong)).toThrow(/Schema migration v8 mismatch.*organise/)
     wrong.close()
+  })
+
+  it('retires marker-based Snooze and restores provider labels in the replica', () => {
+    const db = openDatabase(':memory:')
+    try {
+      migrate(db, { migrations: MIGRATIONS.filter(({ version }) => version <= 16) })
+      db.exec(`
+        INSERT INTO account (id, kind, address, credentials, created_at)
+        VALUES ('a', 'gmail', 'fixture@example.com', x'00', 0);
+        INSERT INTO thread (id, account_id, provider_thread_id, snoozed_until, organise_state)
+        VALUES ('a:t', 'a', 't', 9000, '{"snoozeIntent":"old","snoozedUntil":9000}');
+        INSERT INTO message (id, account_id, thread_id, provider_id, sent_at, label_ids, provider_label_ids)
+        VALUES ('a:m1', 'a', 'a:t', 'm1', 1, '["a:AMC/Snoozed"]', '["a:INBOX"]'),
+               ('a:m2', 'a', 'a:t', 'm2', 2, '[]', '["a:AMC/Snoozed"]');
+        INSERT INTO organise_intent (id, account_id, history_id, checked_history_id, marker_id)
+        VALUES ('old', 'a', '1', '1', 'Label_existing');
+        INSERT INTO mutation (id, principal, account_id, thread_id, request, next_attempt, state_patch)
+        VALUES ('old', 'owner', 'a', 'a:t', '{"kind":"snooze"}', 9000, '{"snoozedUntil":9000}'),
+               ('later', 'owner', 'a', 'a:t', '{"kind":"star"}', 0, '{"snoozeIntent":null}');
+        INSERT INTO mutation_message (mutation_id, message_id, patch, before)
+        VALUES ('old', 'a:m1', '{"a:INBOX":false,"a:AMC/Snoozed":true}', '{"a:INBOX":true}');
+      `)
+      expect(migrate(db)).toBe(17)
+      expect(db.prepare('SELECT label_ids FROM message ORDER BY id').all()).toEqual([
+        { label_ids: '["a:INBOX"]' },
+        { label_ids: '["a:AMC/Snoozed"]' },
+      ])
+      expect(
+        db.prepare('SELECT snoozed_until, organise_state, in_inbox FROM thread').get(),
+      ).toEqual({ snoozed_until: null, organise_state: '{}', in_inbox: 1 })
+      expect(
+        db.prepare('SELECT status, next_attempt, state_patch FROM mutation ORDER BY seq').all(),
+      ).toEqual([
+        { status: 'failed', next_attempt: 0, state_patch: '{}' },
+        { status: 'pending', next_attempt: 0, state_patch: '{}' },
+      ])
+      expect(db.prepare("SELECT entity_id FROM change_log WHERE entity = 'thread'").all()).toEqual([
+        { entity_id: 'a:t' },
+      ])
+    } finally {
+      db.close()
+    }
   })
 
   it('backs up an existing database before applying new migrations', () => {

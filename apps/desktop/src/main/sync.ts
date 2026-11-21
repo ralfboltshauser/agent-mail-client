@@ -35,6 +35,7 @@ export class SyncLoop extends EventEmitter<{
   status: [SyncStatus]
   changed: []
   newMail: [ReturnType<typeof newInboxMessages>]
+  arrivals: [Map<string, string>]
 }> {
   readonly #engine: EngineClient
   readonly #replica: Replica
@@ -210,17 +211,19 @@ export class SyncLoop extends EventEmitter<{
       )
       signal.throwIfAborted()
       if (res.changes.length > 0 || res.modseq !== since) {
-        const arrivals =
+        const notifications =
           cursor !== null && this.#status.phase !== 'bootstrapping' && this.listenerCount('newMail')
             ? newInboxMessages(this.#replica, res.changes)
             : []
+        let arrivals: Map<string, string> | undefined
         this.#replica.transaction(() => {
-          this.#replica.apply(res.changes)
+          arrivals = this.#replica.apply(res.changes)
           this.#replica.modseq = res.modseq
           if (res.organiseFailures) this.#replica.organise.notice(res.organiseFailures)
           this.#replica.organise.rebuild()
         })
-        if (arrivals.length) this.emit('newMail', arrivals)
+        if (notifications.length) this.emit('newMail', notifications)
+        if (arrivals?.size) this.emit('arrivals', arrivals)
         if (res.changes.length > 0 || res.organiseFailures?.length) this.emit('changed')
       }
       this.#set({ lastSyncAt: Date.now() })

@@ -54,6 +54,8 @@ it.each(['resolves', 'rejects'] as const)(
       status: async () => ({ phase: 'live' }),
       onStatus: () => () => {},
       onChanged: () => () => {},
+      onTriageStatus: () => () => {},
+      triageStatus: async () => ({ enabled: true, running: false, lastRun: null, notice: null }),
       onOpenThread: (callback: typeof openThread) => {
         openThread = callback
         return () => {}

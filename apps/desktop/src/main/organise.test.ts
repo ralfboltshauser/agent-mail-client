@@ -286,7 +286,7 @@ describe('desktop Organise outbox', () => {
     }
   })
 
-  it('ends the projected Snooze and preserves the provider marker when archiving and undoing offline', () => {
+  it('preserves the projected Snooze and the provider marker when archiving and undoing offline', () => {
     const replica = new Replica(':memory:')
     try {
       seed(replica)
@@ -299,7 +299,7 @@ describe('desktop Organise outbox', () => {
       replica.put('message', message('1', ['account:AMC/Snoozed']))
       const archive = replica.organise.enqueue({ kind: 'archive', threadId: THREAD.id })
       const projected = () => replica.thread(THREAD.id)?.thread
-      expect(projected()?.snoozedUntil).toBeNull()
+      expect(projected()?.snoozedUntil).toBeGreaterThan(Date.now())
       expect(projected()?.labelIds).toContain('account:AMC/Snoozed')
 
       // Reopening an older outbox can restore a prepared patch that removed the marker.
@@ -312,7 +312,7 @@ describe('desktop Organise outbox', () => {
       expect(projected()?.labelIds).toContain('account:AMC/Snoozed')
 
       replica.organise.enqueue({ kind: 'undo', threadId: THREAD.id })
-      expect(projected()?.snoozedUntil).toBeNull()
+      expect(projected()?.snoozedUntil).toBeGreaterThan(Date.now())
       expect(projected()?.labelIds).toContain('account:AMC/Snoozed')
     } finally {
       replica.db.close()

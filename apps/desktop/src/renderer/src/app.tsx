@@ -460,7 +460,7 @@ function MailApp({
   ]
   const appActions = [
     { name: 'Agent activity', icon: Activity, run: () => setAgentOpen(true) },
-    { name: 'Mail settings', icon: Settings2, run: openSendSettings },
+    { name: 'Settings', icon: Settings2, run: openSendSettings },
     {
       name: 'Keyboard shortcuts',
       icon: CircleHelp,

@@ -53,6 +53,9 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@amc/cli':
+        specifier: workspace:*
+        version: link:../cli
       '@amc/composer':
         specifier: workspace:*
         version: link:../../packages/composer
