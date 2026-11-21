@@ -14,6 +14,8 @@ const api: AmcApi = {
   syncNow: invoke('syncNow') as AmcApi['syncNow'],
   organise: invoke('organise') as AmcApi['organise'],
   organiseErrors: invoke('organiseErrors') as AmcApi['organiseErrors'],
+  agentActivity: invoke('agentActivity') as AmcApi['agentActivity'],
+  undoAgentAction: invoke('undoAgentAction') as AmcApi['undoAgentAction'],
   accounts: invoke('accounts') as AmcApi['accounts'],
   labels: invoke('labels') as AmcApi['labels'],
   counts: invoke('counts') as AmcApi['counts'],

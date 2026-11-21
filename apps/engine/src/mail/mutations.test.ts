@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { type MutationRequest, type OrganiseAction, SNOOZED_LABEL } from '@amc/protocol'
 import { describe, expect, it, vi } from 'vitest'
 import { DbAccountState } from '../accounts.ts'
-import { issueToken } from '../auth/tokens.ts'
+import { DAY_MS, issueToken } from '../auth/tokens.ts'
 import { BlobStore } from '../blobs.ts'
 import { Config } from '../config.ts'
 import { migrate, openDatabase } from '../db/database.ts'
@@ -166,7 +166,12 @@ describe('Snooze disabled', () => {
 describe('Gmail Organise writeback', () => {
   it('applies a batch atomically and idempotently under the organize scope', async () => {
     const { db, queue, request, thread } = await setup()
-    const reader = issueToken(db, { kind: 'agent', name: 'Reader', scopes: ['read'] })
+    const reader = issueToken(db, {
+      kind: 'agent',
+      expiresAt: Date.now() + DAY_MS,
+      name: 'Reader',
+      scopes: ['read'],
+    })
     const writer = issueToken(db, { kind: 'cli', name: 'CLI', scopes: ['organize'] })
     vi.spyOn(queue, 'kick').mockImplementation(() => {})
     const app = createApp({
@@ -202,9 +207,14 @@ describe('Gmail Organise writeback', () => {
     ).toBe(409)
   })
 
-  it('rejects Organise for legacy Agent tokens and reserves Trash for owner Clients', async () => {
+  it('rejects Agent access to the owner Organise endpoint and reserves Trash for owner Clients', async () => {
     const { db, gmail, queue, request } = await setup()
-    const agent = issueToken(db, { kind: 'agent', name: 'Legacy Agent', scopes: ['organize'] })
+    const agent = issueToken(db, {
+      kind: 'agent',
+      expiresAt: Date.now() + DAY_MS,
+      name: 'Legacy Agent',
+      scopes: ['organize'],
+    })
     const limited = issueToken(db, { kind: 'cli', name: 'Limited CLI', scopes: ['organize'] })
     const owner = issueToken(db, {
       kind: 'desktop',

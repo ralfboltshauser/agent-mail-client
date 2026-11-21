@@ -92,3 +92,24 @@ export function actionLabels(
       return { [action.labelId]: action.value }
   }
 }
+
+export type AgentMutationResult = Omit<MutationResult, 'messages'> & {
+  messages: Array<
+    Omit<MutationMessageResult, 'status'> & {
+      status: MutationMessageResult['status'] | 'pending' | 'unchanged'
+    }
+  >
+  undo: MutationResult | null
+}
+
+export interface AgentAction {
+  id: string
+  tokenName: string
+  tool: string
+  threads: string[]
+  createdAt: number
+  status: 'pending' | 'applied' | 'partial' | 'failed' | 'rejected'
+  error: string | null
+  draftId: string | null
+  mutations: AgentMutationResult[]
+}

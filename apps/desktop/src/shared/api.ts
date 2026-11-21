@@ -1,5 +1,6 @@
 import type {
   AccountSummary,
+  AgentAction,
   ComposeAttachment,
   ComposeDraft,
   ComposePatch,
@@ -81,6 +82,8 @@ export interface AmcApi {
   syncNow(): Promise<void>
   organise(action: OrganiseAction): Promise<string>
   organiseErrors(): Promise<OrganiseNotice[]>
+  agentActivity(before?: number): Promise<{ actions: AgentAction[]; nextBefore: number | null }>
+  undoAgentAction(id: string): Promise<void>
 
   accounts(): Promise<AccountSummary[]>
   labels(accountId: string | null): Promise<Label[]>

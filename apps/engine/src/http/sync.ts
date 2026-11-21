@@ -53,6 +53,15 @@ export function syncRoutes(deps: SyncDeps, queue?: Mutations) {
   const { db } = deps
   const r = new Hono<AppEnv>()
 
+  r.use('/sync/*', async (c, next) => {
+    if (c.get('principal').accountId)
+      return c.json(
+        { error: 'forbidden', message: 'Replica sync requires access to all Accounts' },
+        403,
+      )
+    await next()
+  })
+
   r.get('/sync/state', requireScope('read'), (c) => c.json(syncState(db)))
 
   r.get('/sync/snapshot', requireScope('read'), (c) => {

@@ -13,6 +13,7 @@ import type { BlobStore } from '../blobs.ts'
 import type { Sealer } from '../crypto.ts'
 import type { Db } from '../db/database.ts'
 import type { Logger } from '../log.ts'
+import { draftAsAgent, threadAccount } from '../mail/agent-actions.ts'
 import { DraftError, type Drafts, searchContacts } from '../mail/drafts.ts'
 import type { MailQueries } from '../mail/queries.ts'
 import type { MailStore } from '../mail/store.ts'
@@ -56,7 +57,11 @@ export function mailRoutes(deps: MailDeps) {
   const { db, queries, log } = deps
   const r = new Hono<AppEnv>()
 
-  r.get('/accounts', requireScope('read'), (c) => c.json({ accounts: queries.accounts() }))
+  r.get('/accounts', requireScope('read'), (c) => {
+    const { accountId } = c.get('principal')
+    const account = accountId ? queries.account(accountId) : null
+    return c.json({ accounts: accountId ? (account ? [account] : []) : queries.accounts() })
+  })
 
   r.post('/accounts/imap', requireScope('admin'), async (c) => {
     const parsed = ImapAccountInput.safeParse(await c.req.json().catch(() => null))
@@ -176,26 +181,48 @@ export function mailRoutes(deps: MailDeps) {
     }
   })
 
-  r.get('/contacts', requireScope('read'), (c) =>
-    c.json({
+  r.get('/contacts', requireScope('read'), (c) => {
+    if (c.get('principal').accountId)
+      return c.json({ error: 'forbidden', message: 'Contacts are shared across Accounts' }, 403)
+    return c.json({
       contacts: searchContacts(db, c.req.query('q') ?? '', intParam(c.req.query('limit')) ?? 10),
-    }),
-  )
+    })
+  })
 
   r.get('/drafts', requireScope('read'), (c) => {
     const threadId = c.req.query('threadId')
-    return c.json({ drafts: deps.drafts.list(threadId ? { threadId } : {}) })
+    const { accountId } = c.get('principal')
+    return c.json({
+      drafts: deps.drafts.list({
+        ...(threadId ? { threadId } : {}),
+        ...(accountId ? { accountId } : {}),
+      }),
+    })
   })
 
   r.post('/drafts', requireScope('draft'), async (c) => {
     try {
-      const body = (await c.req.json()) as Parameters<Drafts['create']>[0]
-      return c.json(
-        await deps.drafts.create(
-          body,
-          c.get('principal').kind === 'agent' ? c.get('principal').name : 'owner',
-        ),
-      )
+      const body = (await c.req.json().catch(() => null)) as Parameters<Drafts['create']>[0] | null
+      if (!body || typeof body !== 'object' || Array.isArray(body))
+        return c.json({ error: 'bad_request', message: 'Expected a draft object' }, 400)
+      const principal = c.get('principal')
+      if (principal.kind !== 'agent') return c.json(await deps.drafts.create(body, 'owner'))
+      const threadId =
+        typeof body.threadId === 'string' && body.threadId.length <= 512 ? body.threadId : null
+      const write = () => {
+        if (body.threadId !== undefined && threadId === null)
+          throw new DraftError('Invalid Thread ID')
+        const target = threadId
+          ? threadAccount(db, threadId)
+          : (body.accountId ?? principal.accountId)
+        if (principal.accountId && target !== principal.accountId)
+          throw new DraftError('Account unavailable to this Agent')
+        return deps.drafts.create(
+          { ...body, ...(target ? { accountId: target } : {}) },
+          principal.name,
+        )
+      }
+      return c.json(await draftAsAgent(db, principal, 'create_draft', threadId, write))
     } catch (error) {
       if (error instanceof DraftError)
         return c.json({ error: 'bad_request', message: error.message }, 400)
@@ -204,14 +231,14 @@ export function mailRoutes(deps: MailDeps) {
   })
 
   r.get('/labels', requireScope('read'), (c) =>
-    c.json({ labels: queries.labels(c.req.query('accountId')) }),
+    c.json({ labels: queries.labels(c.get('principal').accountId ?? c.req.query('accountId')) }),
   )
 
   r.get('/threads', requireScope('read'), (c) => {
     const q = c.req.query()
     return c.json(
       queries.threads({
-        accountId: q.accountId,
+        accountId: c.get('principal').accountId ?? q.accountId,
         labelId: q.labelId,
         inbox: q.inbox === '1' || q.inbox === 'true',
         unread: q.unread === '1' || q.unread === 'true',
@@ -222,7 +249,9 @@ export function mailRoutes(deps: MailDeps) {
   })
 
   r.get('/threads/:id', requireScope('read'), (c) => {
-    const thread = queries.thread(c.req.param('id'))
+    const id = c.req.param('id')
+    const { accountId } = c.get('principal')
+    const thread = !accountId || threadAccount(db, id) === accountId ? queries.thread(id) : null
     return thread ? c.json(thread) : c.json({ error: 'not_found', message: 'No such Thread' }, 404)
   })
 
@@ -230,21 +259,26 @@ export function mailRoutes(deps: MailDeps) {
     const text = c.req.query('q') ?? ''
     return c.json({
       hits: queries.search(text, {
-        accountId: c.req.query('accountId'),
+        accountId: c.get('principal').accountId ?? c.req.query('accountId'),
         limit: intParam(c.req.query('limit')),
       }),
     })
   })
 
   r.get('/messages/:id/html', requireScope('read'), (c) => {
-    const hash = queries.messageHtmlBlob(c.req.param('id'))
+    const id = c.req.param('id')
+    const { accountId } = c.get('principal')
+    const allowed =
+      !accountId ||
+      db.prepare('SELECT 1 FROM message WHERE id = ? AND account_id = ?').get(id, accountId)
+    const hash = allowed ? queries.messageHtmlBlob(id) : null
     const html = hash ? deps.blobs.get(hash) : null
     if (!html) return c.json({ error: 'not_found', message: 'This message has no HTML body' }, 404)
     return c.json({ html: html.toString('utf8') })
   })
 
   r.get('/attachments/:id', requireScope('read'), async (c) => {
-    const attachment = await getAttachment(deps, c.req.param('id'))
+    const attachment = await getAttachment(deps, c.req.param('id'), c.get('principal').accountId)
     if (!attachment) return c.json({ error: 'not_found', message: 'No such attachment' }, 404)
     if (!attachment.hash) {
       return c.json(
@@ -267,7 +301,7 @@ export function mailRoutes(deps: MailDeps) {
 }
 
 /** Fetches uncached attachments through the Account that owns the original message. */
-export async function getAttachment(deps: MailDeps, id: string) {
+export async function getAttachment(deps: MailDeps, id: string, accountId?: string) {
   const { db } = deps
   const row = db
     .prepare(
@@ -286,7 +320,7 @@ export async function getAttachment(deps: MailDeps, id: string) {
         account_id: string
       }
     | undefined
-  if (!row) return null
+  if (!row || (accountId && row.account_id !== accountId)) return null
   let hash = row.blob
   if (!hash && row.kind === 'imap') hash = await deps.sync.imapAttachment(row.account_id, id)
   else if (!hash && row.provider_attachment) {

@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { SCOPES } from '@amc/protocol'
 import { describe, expect, it, vi } from 'vitest'
-import { issueToken } from '../auth/tokens.ts'
+import { DAY_MS, issueToken } from '../auth/tokens.ts'
 import { BlobStore } from '../blobs.ts'
 import { Sealer } from '../crypto.ts'
 import { gmailDelivery, publishSent } from '../mail/delivery.ts'
@@ -71,7 +71,12 @@ function setup(
     },
   })
   const admin = issueToken(db, { kind: 'cli', name: 'mac', scopes: ['read', 'admin'] }).secret
-  const reader = issueToken(db, { kind: 'agent', name: 'agent', scopes: ['read'] }).secret
+  const reader = issueToken(db, {
+    kind: 'agent',
+    expiresAt: Date.now() + DAY_MS,
+    name: 'agent',
+    scopes: ['read'],
+  }).secret
   const call = (path: string, token: string, body?: unknown) =>
     app.request(path, {
       method: body === undefined ? 'GET' : 'POST',
@@ -422,17 +427,16 @@ it('has no SMTP submission dispatch through Agent tokens, HTTP, MCP or the CLI (
     .spyOn(ImapProvider.prototype, 'send')
     .mockRejectedValue(new Error('Unexpected send'))
   const gmailSend = vi.spyOn(gmail, 'sendMessage')
-  const limited = issueToken(db, {
-    kind: 'agent',
-    name: 'agent',
-    scopes: SCOPES.filter((scope) => scope !== 'send'),
-  }).secret
   setSetting(db, 'dangerouslyAllowSend', true)
-  const agent = issueToken(db, {
+  const grant = issueToken(db, {
     kind: 'agent',
-    name: 'agent with send scope',
-    scopes: SCOPES,
-  }).secret
+    name: 'agent fixture',
+    scopes: ['read'],
+    expiresAt: Date.now() + DAY_MS,
+  })
+  const combinations = Array.from({ length: 2 ** SCOPES.length }, (_, mask) =>
+    SCOPES.filter((_scope, index) => mask & (1 << index)),
+  )
   try {
     expect((await call('/v1/accounts/imap', admin, login)).status).toBe(200)
     const account = db.prepare('SELECT id FROM account').get()?.id
@@ -442,7 +446,11 @@ it('has no SMTP submission dispatch through Agent tokens, HTTP, MCP or the CLI (
       subject: 'Synthetic',
       text: 'Synthetic',
     }
-    for (const token of [limited, agent, admin]) {
+    for (const scopes of [null, ...combinations]) {
+      // Simulate restored grants with obsolete send or admin scopes.
+      const token = scopes ? grant.secret : admin
+      if (scopes)
+        db.prepare('UPDATE token SET scopes = ? WHERE id = ?').run(JSON.stringify(scopes), grant.id)
       for (const path of [
         '/v1/send',
         '/v1/messages/send',
@@ -487,7 +495,7 @@ it('has no SMTP submission dispatch through Agent tokens, HTTP, MCP or the CLI (
           ...process.env,
           XDG_CONFIG_HOME: tempDir(),
           AMC_ENGINE_URL: 'http://127.0.0.1:1',
-          AMC_TOKEN: agent,
+          AMC_TOKEN: grant.secret,
         },
       })
       expect(processResult.status).toBe(1)
