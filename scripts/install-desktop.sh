@@ -41,6 +41,7 @@ cleanup() {
 trap cleanup EXIT
 
 ditto "apps/desktop/dist/mac-arm64/AMC.app" "$staging/AMC.app"
+/usr/bin/codesign --verify --deep --strict "$staging/AMC.app"
 check_destination
 if [[ -e "$app" ]]; then
   # Reserve a unique Trash location before moving the installed app.
