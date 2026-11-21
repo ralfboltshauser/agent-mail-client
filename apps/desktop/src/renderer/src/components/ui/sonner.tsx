@@ -1,11 +1,11 @@
 import { Toaster as Sonner, type ToasterProps } from 'sonner'
 
 function Toaster(props: ToasterProps) {
-  const dark =
-    typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
   return (
     <Sonner
-      theme={dark ? 'dark' : 'light'}
+      visibleToasts={3}
+      closeButton
+      toastOptions={{ classNames: { toast: 'mail-toast', description: 'mail-toast-description' } }}
       className="toaster group"
       style={
         {
