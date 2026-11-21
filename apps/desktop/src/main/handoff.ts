@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import type { ComposeDraft } from '@amc/protocol'
-import type { ActiveHandoff } from '../shared/api'
+import type { ActiveHandoff, T3Project } from '../shared/api'
 import { composeDraftPath } from './draft-updates'
 import type { EngineClient } from './engine'
 
@@ -36,6 +36,11 @@ export function t3NavigationLink(value: string): string | null {
 }
 
 export type LaunchThread = (request: T3Launch) => Promise<T3Thread>
+
+export interface T3Launcher {
+  projects(): Promise<T3Project[]>
+  launch: LaunchThread
+}
 
 export function handoffRequest(
   projectId: string,
