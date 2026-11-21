@@ -1,13 +1,13 @@
 import type { ThreadSummary } from '@amc/protocol'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { Paperclip, Star } from 'lucide-react'
-import { useEffect, useRef } from 'react'
+import { useEffect, useId, useRef } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { listDate, participantsLine } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
-const ROW = 72
+const ROW = 74
 
 interface Props {
   threads: ThreadSummary[]
@@ -15,11 +15,21 @@ interface Props {
   onSelect: (id: string) => void
   self: Set<string>
   empty: React.ReactNode
+  onMove: (delta: number) => void
   /** Search hits carry a highlighted match line. */
   matchSnippets?: Map<string, string>
 }
 
-export function ThreadList({ threads, selectedId, onSelect, self, empty, matchSnippets }: Props) {
+export function ThreadList({
+  threads,
+  selectedId,
+  onSelect,
+  self,
+  empty,
+  onMove,
+  matchSnippets,
+}: Props) {
+  const listId = useId()
   const scrollRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
     count: threads.length,
@@ -34,20 +44,21 @@ export function ThreadList({ threads, selectedId, onSelect, self, empty, matchSn
     if (selectedIndex >= 0) virtualizer.scrollToIndex(selectedIndex, { align: 'auto' })
   }, [selectedIndex, virtualizer])
 
-  if (threads.length === 0) {
-    return (
-      <div className="flex h-full items-center justify-center p-8 text-center text-sm text-muted-foreground">
-        {empty}
-      </div>
-    )
-  }
+  if (threads.length === 0) return empty
 
   return (
     <div
       ref={scrollRef}
-      className="h-full overflow-y-auto overscroll-contain"
+      className="mail-list h-full overflow-y-auto overscroll-contain p-1.5"
       role="listbox"
       aria-label="Threads"
+      aria-activedescendant={selectedIndex >= 0 ? `${listId}-${selectedIndex}` : undefined}
+      tabIndex={0}
+      onKeyDown={(event) => {
+        if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+        event.preventDefault()
+        onMove(event.key === 'ArrowDown' ? 1 : -1)
+      }}
     >
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
         {virtualizer.getVirtualItems().map((item) => {
@@ -57,31 +68,38 @@ export function ThreadList({ threads, selectedId, onSelect, self, empty, matchSn
           const unread = t.unreadCount > 0
           const match = matchSnippets?.get(t.id)
           return (
+            // biome-ignore lint/a11y/useFocusableInteractive: DOM focus stays on the listbox with aria-activedescendant.
+            // biome-ignore lint/a11y/useKeyWithClickEvents: Each option is selected by the listbox keyboard handler.
             <div
               key={t.id}
               role="option"
-              tabIndex={-1}
+              id={`${listId}-${item.index}`}
+              aria-posinset={item.index + 1}
+              aria-setsize={threads.length}
               aria-selected={selected}
-              onMouseDown={() => onSelect(t.id)}
+              onClick={() => {
+                onSelect(t.id)
+                scrollRef.current?.focus({ preventScroll: true })
+              }}
               className={cn(
-                'absolute inset-x-0 flex gap-2.5 border-b border-border/60 px-4 py-2.5',
-                selected ? 'bg-accent' : 'hover:bg-muted/60',
+                'mail-row absolute inset-x-0 flex cursor-default gap-2.5 rounded-md border-b border-border/60 px-3 py-2',
+                selected ? 'bg-accent' : 'hover:bg-muted/70',
               )}
               style={{ height: ROW, transform: `translateY(${item.start}px)` }}
             >
               <div className="flex w-2 shrink-0 justify-center pt-1.5">
                 {unread && (
-                  <span className="size-2 rounded-full bg-unread">
+                  <span className="size-1.5 rounded-full bg-unread">
                     <span className="sr-only">Unread</span>
                   </span>
                 )}
               </div>
               <div className="min-w-0 flex-1">
-                <div className="flex items-baseline gap-2">
+                <div className="flex h-[19px] items-center gap-1.5">
                   <span
                     className={cn(
                       'truncate text-[13px]',
-                      unread ? 'font-semibold text-foreground' : 'text-foreground/85',
+                      unread ? 'font-semibold text-foreground' : 'font-medium text-foreground/85',
                     )}
                   >
                     {participantsLine(t.participants, self)}
@@ -92,15 +110,27 @@ export function ThreadList({ threads, selectedId, onSelect, self, empty, matchSn
                     </span>
                   )}
                   <span className="ml-auto flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground tabular-nums">
-                    {t.hasAttachments && <Paperclip className="size-3" />}
-                    {t.starred && <Star className="size-3 fill-amber-400 text-amber-400" />}
-                    {listDate(t.lastMessageAt)}
+                    {t.hasAttachments && (
+                      <>
+                        <Paperclip aria-hidden className="size-3" />
+                        <span className="sr-only">Attachment</span>
+                      </>
+                    )}
+                    {t.starred && (
+                      <>
+                        <Star aria-hidden className="size-3 fill-current text-star" />
+                        <span className="sr-only">Starred</span>
+                      </>
+                    )}
+                    <time dateTime={new Date(t.lastMessageAt).toISOString()}>
+                      {listDate(t.lastMessageAt)}
+                    </time>
                   </span>
                 </div>
                 <div
                   className={cn(
                     'truncate text-[13px]',
-                    unread ? 'font-medium text-foreground' : 'text-foreground/80',
+                    unread ? 'font-semibold text-foreground' : 'text-foreground/85',
                   )}
                 >
                   {t.subject || '(no subject)'}
@@ -112,8 +142,11 @@ export function ThreadList({ threads, selectedId, onSelect, self, empty, matchSn
                   {t.bucket && (
                     <Tooltip>
                       <TooltipTrigger asChild>
-                        <Badge variant="secondary" className="h-4 shrink-0 text-[10px]">
-                          {t.bucket.bucket}
+                        <Badge
+                          variant="secondary"
+                          className="h-[18px] max-w-[45%] shrink text-[10px] text-muted-foreground"
+                        >
+                          <span className="truncate">{t.bucket.bucket}</span>
                         </Badge>
                       </TooltipTrigger>
                       <TooltipContent className="max-w-64 break-words">

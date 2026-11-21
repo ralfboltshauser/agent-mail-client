@@ -1,12 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useState } from 'react'
 
 export type Theme = 'light' | 'dark' | 'system'
 
-function apply(theme: Theme) {
-  const dark =
-    theme === 'dark' || (theme === 'system' && matchMedia('(prefers-color-scheme: dark)').matches)
-  document.documentElement.classList.toggle('dark', dark)
-}
+const SYSTEM_DARK = '(prefers-color-scheme: dark)'
 
 function stored(): Theme {
   try {
@@ -17,19 +13,23 @@ function stored(): Theme {
   }
 }
 
-/** Light, dark or follow macOS. */
 export function useTheme() {
   const [theme, setTheme] = useState<Theme>(stored)
+  const [systemDark, setSystemDark] = useState(() => matchMedia(SYSTEM_DARK).matches)
+  const dark = theme === 'dark' || (theme === 'system' && systemDark)
+  useLayoutEffect(() => {
+    document.documentElement.classList.toggle('dark', dark)
+  }, [dark])
   useEffect(() => {
-    apply(theme)
     try {
       localStorage.setItem('amc.theme', theme)
     } catch {}
-    if (theme !== 'system') return
-    const media = matchMedia('(prefers-color-scheme: dark)')
-    const onChange = () => apply('system')
+  }, [theme])
+  useEffect(() => {
+    const media = matchMedia(SYSTEM_DARK)
+    const onChange = () => setSystemDark(media.matches)
     media.addEventListener('change', onChange)
     return () => media.removeEventListener('change', onChange)
-  }, [theme])
-  return { theme, setTheme }
+  }, [])
+  return { dark, setTheme }
 }

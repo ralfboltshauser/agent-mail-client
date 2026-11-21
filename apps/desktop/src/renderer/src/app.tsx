@@ -8,18 +8,37 @@ import {
   type SearchHit,
   type ThreadSummary,
 } from '@amc/protocol'
-import { Forward, Loader2, Reply, ReplyAll, Search, SquarePen, X } from 'lucide-react'
+import {
+  Activity,
+  CircleAlert,
+  CircleHelp,
+  Forward,
+  Inbox,
+  Layers,
+  Loader2,
+  Reply,
+  ReplyAll,
+  Search,
+  Settings2,
+  SquarePen,
+  X,
+} from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
-import type { Counts, ThreadWithMessages, View } from '../../shared/api'
+import { getAmc } from '@/lib/amc'
+import type { Counts, SyncStatus, ThreadWithMessages, View } from '../../shared/api'
+import { AgentActivity } from './components/agent-activity'
 import { AppSidebar, systemViews } from './components/app-sidebar'
 import { BucketPicker } from './components/bucket-picker'
 import { CommandPalette } from './components/command-palette'
 import { DraftsView, OutboxView } from './components/compose-views'
 import { Composer } from './components/composer'
 import { HandoffDialog } from './components/handoff-dialog'
+import { MailSettings } from './components/mail-settings'
+import { MailLoading, MailState } from './components/mail-state'
 import { OrganisePicker, OrganiseToolbar, useOrganise } from './components/organise'
 import { PairScreen } from './components/pair-screen'
+import { ShortcutsDialog } from './components/shortcuts-dialog'
 import { ThreadList } from './components/thread-list'
 import { ThreadView } from './components/thread-view'
 import { Button } from './components/ui/button'
@@ -27,7 +46,7 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from './componen
 import { SidebarInset, SidebarProvider } from './components/ui/sidebar'
 import { Toaster } from './components/ui/sonner'
 import { TooltipProvider } from './components/ui/tooltip'
-import { useReplica, useSyncStatus } from './hooks/use-amc'
+import { useReplica, useReplicaQuery, useSyncStatus } from './hooks/use-amc'
 import { useHotkeys } from './hooks/use-hotkeys'
 import { useTheme } from './hooks/use-theme'
 
@@ -36,25 +55,40 @@ const NO_COUNTS: Counts = { inbox: 0, inboxUnread: 0, starred: 0, drafts: 0, buc
 
 export function App() {
   const status = useSyncStatus()
-  useTheme()
-  if (!status) return null
+  const { dark, setTheme } = useTheme()
+  if (!status) return <MailLoading label="Opening AMC" />
   return (
     <TooltipProvider delayDuration={400}>
       {status.phase === 'unpaired' ? (
         <PairScreen savedEngineUrl={status.engineUrl} recoveryMessage={status.error} />
       ) : (
-        <MailApp />
+        <MailApp
+          status={status}
+          dark={dark}
+          onToggleTheme={() => setTheme(dark ? 'light' : 'dark')}
+        />
       )}
-      <Toaster position="bottom-center" />
+      <Toaster theme={dark ? 'dark' : 'light'} position="bottom-center" />
     </TooltipProvider>
   )
 }
 
-type SearchState = { text: string; hits: SearchHit[] | null; loading: boolean } | null
+type SearchState = {
+  text: string
+  hits: SearchHit[] | null
+  loading: boolean
+  failed?: boolean
+} | null
 
-function MailApp() {
-  const status = useSyncStatus()
-  const { theme, setTheme } = useTheme()
+function MailApp({
+  status,
+  dark,
+  onToggleTheme,
+}: {
+  status: SyncStatus
+  dark: boolean
+  onToggleTheme: () => void
+}) {
   const [accountId, setAccountId] = useState<string | null>(null)
   const snoozeEnabled = status?.snoozeEnabled === true
   const [selectedView, setView] = useState<View>(INBOX)
@@ -66,6 +100,17 @@ function MailApp() {
   const [notificationThread, setNotificationThread] = useState<ThreadSummary | null>(null)
   const [bucketPickerId, setBucketPickerId] = useState<string | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const [agentOpen, setAgentOpen] = useState(false)
+  const [sendSettings, setSendSettings] = useState<number | null>(null)
+  const openSendSettings = () => {
+    void getAmc()
+      .sendSettings()
+      .then(({ undoSendSeconds }) => setSendSettings(undoSendSeconds))
+      .catch((cause: Error) =>
+        toast.error('Could not open settings', { description: cause.message }),
+      )
+  }
   const [filterText, setFilterText] = useState('')
   const [search, setSearch] = useState<SearchState>(null)
   const paletteInvoker = useRef<HTMLElement | null>(null)
@@ -78,30 +123,33 @@ function MailApp() {
   const searchInput = useRef<HTMLInputElement>(null)
   const readerScroll = useRef<HTMLDivElement>(null)
 
-  const accounts = useReplica(() => window.amc.accounts(), [], [])
-  const labels = useReplica(() => window.amc.labels(accountId), [accountId], [])
-  const counts = useReplica(() => window.amc.counts(accountId), [accountId], NO_COUNTS)
-  const viewThreads = useReplica(
-    () => (view.kind === 'outbox' ? Promise.resolve([]) : window.amc.threads({ view, accountId })),
+  const accounts = useReplica(() => getAmc().accounts(), [], [])
+  const labels = useReplica(() => getAmc().labels(accountId), [accountId], [])
+  const counts = useReplica(() => getAmc().counts(accountId), [accountId], NO_COUNTS)
+  const listQuery = useReplicaQuery(
+    () => (view.kind === 'outbox' ? Promise.resolve([]) : getAmc().threads({ view, accountId })),
     [view, accountId],
-    [] as ThreadSummary[],
+    null as ThreadSummary[] | null,
   )
-  const filtered = useReplica(
-    () => (filterText.trim() ? window.amc.filter(filterText, accountId) : Promise.resolve(null)),
+  const filterQuery = useReplicaQuery(
+    () => (filterText.trim() ? getAmc().filter(filterText, accountId) : Promise.resolve(null)),
     [filterText, accountId],
     null as ThreadSummary[] | null,
   )
-  const thread = useReplica(
-    () => (selectedId ? window.amc.thread(selectedId) : Promise.resolve(null)),
+  const threadQuery = useReplicaQuery(
+    async () => ({ id: selectedId, data: selectedId ? await getAmc().thread(selectedId) : null }),
     [selectedId],
-    null as ThreadWithMessages | null,
+    null as { id: string | null; data: ThreadWithMessages | null } | null,
   )
+  const viewThreads = listQuery.value
+  const filtered = filterQuery.value
+  const thread = threadQuery.value?.data
 
   const self = useMemo(() => new Set(accounts.map((a) => a.address.toLowerCase())), [accounts])
   const labelNames = useMemo(() => new Map(labels.map((l) => [l.id, l.name])), [labels])
   const searchSummaries = useReplica(
     () =>
-      search?.hits ? window.amc.summaries(search.hits.map((hit) => hit.id)) : Promise.resolve([]),
+      search?.hits ? getAmc().summaries(search.hits.map((hit) => hit.id)) : Promise.resolve([]),
     [search?.hits],
     [] as ThreadSummary[],
   )
@@ -110,12 +158,13 @@ function MailApp() {
     const byId = new Map(searchSummaries.map((summary) => [summary.id, summary]))
     return search.hits.map((hit) => byId.get(hit.id) ?? hit)
   }, [search?.hits, searchSummaries])
-  const listedThreads: ThreadSummary[] =
-    searchThreads ??
-    (filtered && view.kind === 'bucket'
-      ? filtered.filter((item) => item.bucket?.bucket === view.bucket)
-      : filtered) ??
-    viewThreads
+  const listedThreads: ThreadSummary[] = search
+    ? (searchThreads ?? [])
+    : ((filtered && view.kind === 'bucket'
+        ? filtered.filter((item) => item.bucket?.bucket === view.bucket)
+        : filtered) ??
+      viewThreads ??
+      [])
   const threads =
     !search &&
     !filterText.trim() &&
@@ -123,13 +172,14 @@ function MailApp() {
     !listedThreads.some((item) => item.id === notificationThread.id)
       ? [notificationThread, ...listedThreads]
       : listedThreads
+  const activeListQuery = filterText.trim() ? filterQuery : listQuery
   const selected = threads.find((item) => item.id === selectedId)
   const bucketPickerOpen = !!selected && bucketPickerId === selected.id
   const setBucket = async (bucket: Bucket | null) => {
     if (!selected || (selected.bucket?.bucket ?? null) === bucket) return
     setBucketPickerId(null)
     try {
-      await window.amc.setBucket({ threadId: selected.id, bucket, reason: 'Set manually' })
+      await getAmc().setBucket({ threadId: selected.id, bucket, reason: 'Set manually' })
     } catch (error) {
       toast.error('Could not move Thread', { description: (error as Error).message })
     }
@@ -138,7 +188,7 @@ function MailApp() {
   const handoff = useReplica(
     async () =>
       selectedId
-        ? { threadId: selectedId, active: await window.amc.activeHandoff(selectedId) }
+        ? { threadId: selectedId, active: await getAmc().activeHandoff(selectedId) }
         : null,
     [selectedId, status?.engineUrl, status?.phase],
     null,
@@ -160,7 +210,7 @@ function MailApp() {
   const endHandoff = async (id: string) => {
     setEndingHandoff(id)
     try {
-      await window.amc.endHandoff(id)
+      await getAmc().endHandoff(id)
       setInactiveHandoff(id)
       toast.success('Hand-off ended')
     } catch (error) {
@@ -217,7 +267,7 @@ function MailApp() {
 
   useEffect(
     () =>
-      window.amc.onOpenThread((target) => {
+      getAmc().onOpenThread((target) => {
         setAccountId(null)
         goTo(target.inInbox ? INBOX : { kind: 'all' })
         setNotificationThread(target)
@@ -232,12 +282,13 @@ function MailApp() {
       const request = ++searchRequest.current
       setSearch({ text, hits: null, loading: true })
       try {
-        const hits = await window.amc.search(text, accountId)
+        const hits = await getAmc().search(text, accountId)
         if (request !== searchRequest.current) return
         setSearch({ text, hits, loading: false })
         setSelectedId(hits[0]?.id ?? null)
       } catch {
-        if (request === searchRequest.current) setSearch({ text, hits: [], loading: false })
+        if (request === searchRequest.current)
+          setSearch({ text, hits: [], loading: false, failed: true })
       }
     },
     [accountId],
@@ -266,7 +317,7 @@ function MailApp() {
     opening.current = true
     setOpeningComposer(true)
     try {
-      setDraft(await window.amc.composeDraft(id))
+      setDraft(await getAmc().composeDraft(id))
       setMinimised(null)
     } catch (cause) {
       toast.error((cause as Error).message)
@@ -293,7 +344,7 @@ function MailApp() {
     setOpeningComposer(true)
     try {
       setDraft(
-        await window.amc.startCompose({
+        await getAmc().startCompose({
           mode,
           accountId: from,
           threadId: mode === 'new' ? undefined : (selectedId ?? undefined),
@@ -322,7 +373,7 @@ function MailApp() {
         ? {
             label: 'Undo',
             onClick: () => {
-              void window.amc
+              void getAmc()
                 .cancelSend(item.id)
                 .then(async () => {
                   setMinimised({ id: item.draftId, subject: item.subject })
@@ -335,7 +386,88 @@ function MailApp() {
     })
   }
 
-  const dark = document.documentElement.classList.contains('dark')
+  const selectAccount = (id: string | null) => {
+    searchRequest.current++
+    setSearch(null)
+    setSelectedId(null)
+    setAccountId(id)
+  }
+  const rememberFocus = () => {
+    paletteInvoker.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null
+  }
+  const openPalette = () => {
+    rememberFocus()
+    setPaletteOpen(true)
+  }
+  const restoreDialogFocus = (event: Event) => {
+    if (paletteInvoker.current?.isConnected && document.activeElement === document.body) {
+      event.preventDefault()
+      paletteInvoker.current.focus()
+    }
+  }
+  const canHandOff = !ownView && !draft && !openingComposer && !!activeThread
+  const handOff = () => {
+    if (canHandOff && activeThread) setHandoffThread(activeThread.thread.id)
+  }
+  const commandActions = [
+    {
+      name: minimised ? 'Resume draft' : 'Compose message',
+      icon: SquarePen,
+      shortcut: 'C',
+      run: () => void startCompose('new'),
+    },
+    ...(activeThread && !ownView && !openingComposer
+      ? [
+          { name: 'Reply', icon: Reply, shortcut: 'R', run: () => void startCompose('reply') },
+          {
+            name: 'Reply all',
+            icon: ReplyAll,
+            shortcut: 'A',
+            run: () => void startCompose('reply-all'),
+          },
+          {
+            name: 'Forward',
+            icon: Forward,
+            shortcut: 'F',
+            run: () => void startCompose('forward'),
+          },
+        ]
+      : []),
+    ...(selected && !ownView
+      ? [
+          {
+            name: 'Choose a Bucket',
+            icon: Layers,
+            shortcut: 'B',
+            run: () => setBucketPickerId(selected.id),
+          },
+          ...BUCKETS.map((bucket, index) => ({
+            name: `Move to Bucket: ${bucket}`,
+            icon: Layers,
+            shortcut: String(index + 1),
+            run: () => void setBucket(bucket),
+          })),
+          ...(selected.bucket
+            ? [{ name: 'Clear Bucket', icon: X, run: () => void setBucket(null) }]
+            : []),
+        ]
+      : []),
+    ...(canHandOff ? [{ name: 'Hand off', icon: Forward, shortcut: 'T', run: handOff }] : []),
+    ...(activeHandoff && endingHandoff !== activeHandoff.id
+      ? [{ name: 'End hand-off', icon: X, run: () => void endHandoff(activeHandoff.id) }]
+      : []),
+  ]
+  const appActions = [
+    { name: 'Agent activity', icon: Activity, run: () => setAgentOpen(true) },
+    { name: 'Mail settings', icon: Settings2, run: openSendSettings },
+    {
+      name: 'Keyboard shortcuts',
+      icon: CircleHelp,
+      shortcut: '?',
+      run: () => setShortcutsOpen(true),
+    },
+  ]
   useHotkeys(
     {
       ...Object.fromEntries(
@@ -357,9 +489,11 @@ function MailApp() {
         if (!ownView) void startCompose('forward')
       },
       t: (event) => {
-        if (!event.repeat && !ownView && !draft && !openingComposer && activeThread) {
-          setHandoffThread(activeThread.thread.id)
-        }
+        if (!event.repeat) handOff()
+      },
+      '?': () => {
+        rememberFocus()
+        setShortcutsOpen(true)
       },
       'g o': () => goTo({ kind: 'outbox' }),
       b: (event) => {
@@ -380,15 +514,11 @@ function MailApp() {
       space: () =>
         readerScroll.current?.scrollBy({
           top: readerScroll.current.clientHeight * 0.8,
-          behavior: 'smooth',
+          behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
         }),
       '/': () => searchInput.current?.focus(),
       'mod+f': () => searchInput.current?.focus(),
-      'mod+k': () => {
-        paletteInvoker.current =
-          document.activeElement instanceof HTMLElement ? document.activeElement : null
-        setPaletteOpen(true)
-      },
+      'mod+k': openPalette,
       escape: () => clearSearch(),
       'g i': () => goTo({ kind: 'inbox' }),
       'g u': () => goTo({ kind: 'unread' }),
@@ -398,29 +528,42 @@ function MailApp() {
       'g a': () => goTo({ kind: 'all' }),
       ...(snoozeEnabled ? { 'g h': () => goTo({ kind: 'snoozed' }) } : {}),
       'g x': () => goTo({ kind: 'trash' }),
-      'mod+0': () => setAccountId(null),
+      'mod+0': () => selectAccount(null),
       ...Object.fromEntries(
-        accounts.slice(0, 9).map((a, i) => [`mod+${i + 1}`, () => setAccountId(a.id)]),
+        accounts.slice(0, 9).map((a, i) => [`mod+${i + 1}`, () => selectAccount(a.id)]),
       ),
     },
-    !draft && !paletteOpen && !organisePicker && !bucketPickerOpen,
+    !draft &&
+      !paletteOpen &&
+      !shortcutsOpen &&
+      !agentOpen &&
+      sendSettings === null &&
+      !handoffThread &&
+      !organisePicker &&
+      !bucketPickerOpen,
   )
 
   return (
     <SidebarProvider
       className="h-full"
-      style={{ '--sidebar-width': '15rem' } as React.CSSProperties}
+      style={{ '--sidebar-width': '13.5rem' } as React.CSSProperties}
     >
       <AppSidebar
         accounts={accounts}
         accountId={accountId}
-        onAccount={(id) => {
-          setAccountId(id)
-          setSelectedId(null)
-        }}
+        onAccount={selectAccount}
         view={view}
         onView={goTo}
         onCompose={() => void startCompose('new')}
+        onPalette={openPalette}
+        onAgent={() => {
+          rememberFocus()
+          setAgentOpen(true)
+        }}
+        onShortcuts={() => {
+          rememberFocus()
+          setShortcutsOpen(true)
+        }}
         composing={openingComposer}
         counts={counts}
         labels={labels}
@@ -433,31 +576,36 @@ function MailApp() {
           <OutboxView
             accountId={accountId}
             onRestore={(id) => void openDraft(id)}
+            onSettings={() => {
+              rememberFocus()
+              openSendSettings()
+            }}
             onThread={(id) => {
               goTo({ kind: 'sent' })
               setSelectedId(id)
-              void window.amc.syncNow()
+              void getAmc().syncNow()
             }}
           />
         ) : (
           <ResizablePanelGroup orientation="horizontal" className="h-full">
             <ResizablePanel defaultSize="40%" minSize="25%" maxSize="60%">
               <div className="flex h-full flex-col">
-                <header className="app-drag flex h-12 shrink-0 items-center gap-2 border-b px-4">
-                  <h2 className="truncate text-sm font-semibold">{title}</h2>
+                <header className="app-drag app-toolbar gap-2 px-3.5">
+                  <h2 className="truncate text-[15px] font-semibold tracking-tight">{title}</h2>
                   {!search && view.kind === 'inbox' && counts.inbox > 0 && (
                     <span className="text-xs text-muted-foreground tabular-nums">
                       {counts.inbox.toLocaleString()}
                     </span>
                   )}
-                  <div className="relative ml-auto w-56">
+                  <div className="relative ml-auto min-w-20 max-w-52 flex-1">
                     {search?.loading ? (
-                      <Loader2 className="absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 animate-spin text-muted-foreground" />
+                      <Loader2 className="absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 motion-safe:animate-spin text-muted-foreground" />
                     ) : (
                       <Search className="absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
                     )}
                     <input
                       ref={searchInput}
+                      aria-label="Filter mail or press Enter to search all mail"
                       value={search ? search.text : filterText}
                       onChange={(e) => {
                         searchRequest.current++
@@ -472,46 +620,86 @@ function MailApp() {
                           move(1)
                         }
                       }}
-                      placeholder="Filter · ↵ searches everything"
-                      className="h-7 w-full rounded-md border border-transparent bg-muted pr-7 pl-8 text-xs outline-none placeholder:text-muted-foreground focus:border-ring/50 focus:bg-background"
+                      placeholder="Filter mail"
+                      className="h-8 w-full rounded-md border border-transparent bg-muted pr-8 pl-8 text-xs outline-none placeholder:text-muted-foreground focus:border-ring/50 focus:bg-background"
                     />
                     {(search || filterText) && (
                       <button
                         type="button"
+                        aria-label="Clear search"
                         onClick={clearSearch}
-                        className="absolute top-1/2 right-2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                        className="absolute top-1/2 right-1 flex size-6 -translate-y-1/2 items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
                       >
                         <X className="size-3.5" />
                       </button>
                     )}
+                    {!search && !filterText && (
+                      <kbd className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 text-xs text-muted-foreground">
+                        /
+                      </kbd>
+                    )}
                   </div>
                 </header>
                 <div className="min-h-0 flex-1">
-                  <ThreadList
-                    threads={threads}
-                    selectedId={selectedId}
-                    onSelect={setSelectedId}
-                    self={self}
-                    matchSnippets={matchSnippets}
-                    empty={
-                      search?.loading
-                        ? 'Searching your entire history…'
-                        : search
-                          ? 'Nothing found.'
-                          : filterText
-                            ? 'No matches here. Press ↵ to search all mail.'
-                            : view.kind === 'inbox'
-                              ? 'Inbox zero.'
-                              : 'Nothing here.'
-                    }
-                  />
+                  {!search && activeListQuery.failed ? (
+                    <MailState icon={CircleAlert} title="Could not load threads" error>
+                      <Button variant="outline" size="sm" onClick={activeListQuery.refresh}>
+                        Retry
+                      </Button>
+                    </MailState>
+                  ) : (
+                    <ThreadList
+                      threads={threads}
+                      selectedId={selectedId}
+                      onSelect={setSelectedId}
+                      onMove={move}
+                      self={self}
+                      matchSnippets={matchSnippets}
+                      empty={
+                        search?.failed ? (
+                          <MailState icon={CircleAlert} title="Could not search all mail" error>
+                            <p>Check your connection to the Engine and try again.</p>
+                            <Button
+                              className="mt-2"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => void runSearch(search.text)}
+                            >
+                              Retry search
+                            </Button>
+                          </MailState>
+                        ) : search?.loading ||
+                          (status.phase === 'bootstrapping' && threads.length === 0) ||
+                          viewThreads === null ? (
+                          <MailLoading
+                            label={search?.loading ? 'Searching mail' : 'Loading mail'}
+                          />
+                        ) : search || filterText ? (
+                          <MailState icon={Search} title="No matching threads">
+                            {search
+                              ? 'Try a different search.'
+                              : 'Press Enter to search your full mail history.'}
+                          </MailState>
+                        ) : view.kind === 'inbox' ? (
+                          <MailState icon={Inbox} title="Inbox is clear">
+                            New mail will appear here.
+                          </MailState>
+                        ) : (
+                          <MailState
+                            icon={view.kind === 'bucket' ? Layers : Inbox}
+                            title="No threads here"
+                          />
+                        )
+                      }
+                    />
+                  )}
                 </div>
               </div>
             </ResizablePanel>
             <ResizableHandle />
             <ResizablePanel defaultSize="60%" minSize="35%">
               <div className="flex h-full flex-col">
-                <div className="app-drag flex h-12 shrink-0 items-center gap-1 border-b px-3">
+                <div className="app-drag app-toolbar gap-0.5 overflow-x-auto px-3">
                   {organise.controls.length > 0 && <OrganiseToolbar controls={organise.controls} />}
                   {activeThread &&
                     organiseAccount?.kind === 'imap' &&
@@ -588,6 +776,15 @@ function MailApp() {
                 <div className="min-h-0 flex-1">
                   <ThreadView
                     data={activeThread}
+                    loading={Boolean(
+                      selected && !activeThread && threadQuery.value?.id !== selectedId,
+                    )}
+                    unavailable={Boolean(
+                      selected &&
+                        (threadQuery.failed ||
+                          (threadQuery.value?.id === selectedId && !activeThread)),
+                    )}
+                    onRetry={threadQuery.refresh}
                     snoozeEnabled={snoozeEnabled}
                     labelNames={labelNames}
                     scrollRef={readerScroll}
@@ -639,17 +836,36 @@ function MailApp() {
           run={organise.run}
         />
       )}
+      <ShortcutsDialog
+        open={shortcutsOpen}
+        onOpenChange={setShortcutsOpen}
+        onCloseAutoFocus={restoreDialogFocus}
+        snoozeEnabled={snoozeEnabled}
+      />
+      <AgentActivity
+        open={agentOpen}
+        onOpenChange={setAgentOpen}
+        onCloseAutoFocus={restoreDialogFocus}
+      />
+      {sendSettings !== null && (
+        <MailSettings
+          initial={sendSettings}
+          onClose={() => setSendSettings(null)}
+          onCloseAutoFocus={restoreDialogFocus}
+        />
+      )}
       <CommandPalette
         open={paletteOpen}
         onOpenChange={setPaletteOpen}
         accounts={accounts}
         labels={labels}
         onView={goTo}
-        onAccount={setAccountId}
+        onAccount={selectAccount}
         onSearch={(text) => void runSearch(text)}
-        onToggleTheme={() =>
-          setTheme(dark ? 'light' : theme === 'system' && !dark ? 'dark' : dark ? 'light' : 'dark')
-        }
+        onToggleTheme={onToggleTheme}
+        onCloseAutoFocus={restoreDialogFocus}
+        actions={commandActions}
+        appActions={appActions}
         dark={dark}
         snoozeEnabled={snoozeEnabled}
         organise={organise.controls.map((control) => ({

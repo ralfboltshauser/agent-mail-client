@@ -42,6 +42,7 @@ export class SyncLoop extends EventEmitter<{
   #status: SyncStatus
   #pulling: Promise<void> | null = null
   #pullAgain = false
+  #healthRefresh = 0
 
   constructor(engine: EngineClient, replica: Replica) {
     super()
@@ -106,10 +107,13 @@ export class SyncLoop extends EventEmitter<{
   }
 
   async #refreshHealth(signal: AbortSignal): Promise<void> {
+    const refresh = ++this.#healthRefresh
     const health = await this.#engine
       .get<Health>('/v1/health', { signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]) })
       .catch(() => null)
-    if (health && !signal.aborted) this.#set({ healthWarnings: doctorWarnings(health) })
+    if (signal.aborted || refresh !== this.#healthRefresh) return
+    if (health) this.#set({ healthWarnings: doctorWarnings(health), healthRefreshFailed: false })
+    else this.#set({ healthRefreshFailed: true })
   }
 
   async #run(): Promise<void> {
