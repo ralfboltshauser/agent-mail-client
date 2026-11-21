@@ -242,10 +242,18 @@ async function organise(action: OrganiseAction) {
     result = (await post('/v1/mutations/status', { ids: [id] })).mutations[0]
   }
   if (!result) throw new Error(`Mutation status missing for ${id}`)
-  if (result.status === 'failed') throw new Error(result.error ?? 'Gmail writeback failed')
+  if (result.status === 'failed') throw new Error(result.error ?? 'Organise writeback failed')
   if (result.status === 'partial') {
     printJson(result)
     process.exitCode = 1
+    return
+  }
+  if (result.status === 'applied' && result.superseded?.length) {
+    console.log(`Skipped ${result.superseded.length} changed message(s) · ${id}`)
+    return
+  }
+  if (result.status === 'pending' && result.error) {
+    console.log(`${result.error} · cleanup queued · ${id}`)
     return
   }
   console.log(`${result.status === 'applied' ? 'Applied' : 'Queued'} · ${id}`)
@@ -269,7 +277,7 @@ for (const kind of ['archive', 'trash', 'read', 'unread', 'star', 'mute', 'undo'
 program
   .command('label')
   .argument('<thread>', 'Thread id')
-  .argument('<label>', 'Label id')
+  .argument('<label>', 'Label id or IMAP destination folder id')
   .option('--remove', 'remove the Label')
   .action((threadId: string, labelId: string, opts: { remove?: boolean }) =>
     organise({ kind: 'label', threadId, labelId, value: !opts.remove }),

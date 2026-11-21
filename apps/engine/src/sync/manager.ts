@@ -48,6 +48,7 @@ interface Runner {
   stop: () => void
   done: Promise<void>
   api?: GmailApi
+  imap?: () => ImapAccountSync | undefined
 }
 
 const sleep = (ms: number, signal: AbortSignal) =>
@@ -95,6 +96,13 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
   /** The Gmail API client of a running Account (for lazy attachment fetches). */
   gmailApi(accountId: string): GmailApi | null {
     return this.#runners.get(accountId)?.api ?? null
+  }
+
+  organiseImap(
+    accountId: string,
+    work: (sync: ImapAccountSync) => Promise<void>,
+  ): Promise<boolean> {
+    return this.#runners.get(accountId)?.imap?.()?.queueOrganise(work) ?? Promise.resolve(false)
   }
 
   imapProvider(accountId: string): ImapProvider | null {
@@ -336,6 +344,7 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
     const { db, store, log, sealer, imapPollMs } = this.#o
     const controller = new AbortController()
     const signal = controller.signal
+    let active: ImapAccountSync | undefined
     const done = (async () => {
       await previous?.done
       let retryMs = 5_000
@@ -349,6 +358,7 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
             await connectImap(client)
             if (signal.aborted) return
             const sync = new ImapAccountSync(client, store, row.id, row.address)
+            active = sync
             let idleTime = 0
             let nextPoll = 0
             let backfilled = false
@@ -364,6 +374,8 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
             try {
               await wait(200)
               while (client.usable && !signal.aborted) {
+                if (await sync.runQueuedOrganise()) nextPoll = 0
+                if (signal.aborted || !client.usable) break
                 const mode =
                   Date.now() >= nextPoll ? 'all' : sync.inboxChanged ? 'inbox' : 'backfill'
                 if (mode !== 'backfill' || !backfilled) {
@@ -380,6 +392,7 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
               if (signal.aborted) return
               throw new Error('IMAP connection closed')
             } finally {
+              active = undefined
               sync.dispose()
             }
           } finally {
@@ -401,7 +414,7 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
         }
       }
     })()
-    this.#runners.set(row.id, { stop: () => controller.abort(), done })
+    this.#runners.set(row.id, { stop: () => controller.abort(), done, imap: () => active })
   }
 
   async stop(): Promise<void> {

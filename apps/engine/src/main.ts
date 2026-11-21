@@ -138,6 +138,7 @@ async function main(argv: string[]) {
       )
       const mutations = new Mutations(store, (accountId) => sync.gmailApi(accountId), log, {
         snoozeEnabled,
+        imap: (accountId, work) => sync.organiseImap(accountId, work),
       })
       let editorScript: Promise<string> | undefined
       const app = createApp({

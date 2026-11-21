@@ -124,14 +124,17 @@ describe('desktop Organise outbox', () => {
     }
   })
 
-  it('leaves IMAP threads out of the Gmail writeback queue', () => {
+  it('queues IMAP flags and requires a special-use Archive folder', () => {
     const replica = new Replica(':memory:')
     try {
       seed(replica, 'imap')
       expect(() => replica.organise.enqueue({ kind: 'archive', threadId: THREAD.id })).toThrow(
-        'Organise is available for Gmail Accounts',
+        'This IMAP Account has no Archive folder',
       )
       expect(replica.organise.unsent()).toBeNull()
+      replica.organise.enqueue({ kind: 'read', threadId: THREAD.id, value: true })
+      expect(replica.organise.unsent()?.action.kind).toBe('read')
+      expect(replica.thread(THREAD.id)?.thread.unreadCount).toBe(0)
       expect(replica.threads(inbox)).toHaveLength(1)
     } finally {
       replica.db.close()

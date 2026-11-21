@@ -155,7 +155,7 @@ export class MailQueries {
   accounts(): AccountSummary[] {
     const rows = this.db
       .prepare(
-        `SELECT a.id, a.kind, a.address, a.display_name, a.status, a.last_sync_at, a.last_error, a.backfill,
+        `SELECT a.id, a.kind, a.address, a.display_name, a.status, a.last_sync_at, a.last_error, a.backfill, a.cursor,
                 (SELECT count(*) FROM message m WHERE m.account_id = a.id) AS messages
          FROM account a ORDER BY a.created_at`,
       )
@@ -168,6 +168,7 @@ export class MailQueries {
       last_sync_at: number | null
       last_error: string | null
       backfill: string
+      cursor: string
       messages: number
     }[]
     return rows.map((r) => {
@@ -176,7 +177,10 @@ export class MailQueries {
         fetched?: number
         estimatedTotal?: number
       }
+      const { imapMoves } =
+        r.kind === 'imap' ? (JSON.parse(r.cursor) as { imapMoves?: boolean }) : {}
       return {
+        ...(imapMoves !== undefined ? { imapMoves } : {}),
         id: r.id,
         kind: r.kind,
         address: r.address,

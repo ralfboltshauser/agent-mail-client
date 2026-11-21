@@ -387,6 +387,23 @@ describe('Gmail Organise writeback', () => {
     )
   })
 
+  it('refuses Gmail Mute Undo after another owner sets a newer Mute', async () => {
+    const { gmail, queue, submit, request, thread, db } = await setup()
+    try {
+      const first = submit({ kind: 'mute', value: true, threadId: THREAD })
+      await queue.tick()
+      queue.submit('other-owner', [request({ kind: 'mute', value: true, threadId: THREAD })])
+      await queue.tick()
+      expect(() => submit({ kind: 'undo', mutationId: first.id })).toThrow(
+        'Mute has changed since this action',
+      )
+      expect(thread()?.muted).toBe(true)
+      expect(await gmail.getMessageLabels('m1')).not.toContain('INBOX')
+    } finally {
+      db.close()
+    }
+  })
+
   it('keeps other Gmail edits when reconciling a permanent refusal', async () => {
     const { gmail, queue, sync, thread, submit, lookup } = await setup()
     const archive = submit({ kind: 'archive', threadId: THREAD })
@@ -1187,7 +1204,11 @@ describe('seeded Gmail writeback interleavings', () => {
                 if (
                   action.kind !== 'undo' ||
                   !(error instanceof Error) ||
-                  error.message !== 'There is no matching action to undo'
+                  ![
+                    'There is no matching action to undo',
+                    'Undo unavailable: Mute has changed since this action',
+                    'Undo unavailable: Snooze has changed since this action',
+                  ].includes(error.message)
                 )
                   throw error
               }

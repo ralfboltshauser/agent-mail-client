@@ -167,6 +167,37 @@ describe('MCP tools', () => {
     expect(queries.threadSummary(input.threadId)?.bucket?.bucket).toBe('Reply')
   })
 
+  it('refuses Bucket Undo and keeps a newer owner assignment', async () => {
+    const { client, db, store, mutations, queries } = await connect(['organize'])
+    const threadId = 'a:t-m1'
+    const assignment = await client.callTool({
+      name: 'set_bucket',
+      arguments: { threadId, bucket: 'Reply', reason: 'Agent assignment' },
+    })
+    expect(assignment).not.toHaveProperty('isError', true)
+    const [action] = listAgentActions(db, mutations).actions
+    if (!action) throw new Error('Missing agent action')
+    const revised = { threadId, bucket: 'Later', reason: 'Owner correction' } as const
+    expect(store.setBucket(revised, 'owner')).toBe(true)
+
+    const app = createApp({ db, config: testConfig(), log: silentLog, mutations })
+    const owner = issueToken(db, { kind: 'cli', name: 'Owner', scopes: ['admin', 'organize'] })
+    const response = await app.request(`/v1/agent/log/${action.id}/undo`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${owner.secret}` },
+    })
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({
+      message: 'Bucket Undo is unavailable because its previous assignment was not recorded',
+    })
+    expect(queries.threadSummary(threadId)?.bucket).toMatchObject({
+      bucket: revised.bucket,
+      reason: revised.reason,
+      setBy: 'owner',
+    })
+    await client.close()
+  })
+
   it('reads a Thread and drafts a threaded reply that lands in Gmail', async () => {
     const { client, db, gmail, mutations } = await connect(['read', 'draft'])
     const thread = JSON.parse(

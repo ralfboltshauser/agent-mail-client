@@ -1,8 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import {
+  type AccountSummary,
   actionLabels,
   applyLabelPatch,
+  imapActionError,
+  imapActionLabels,
   type LabelPatch,
   type MutationRequest,
   MutationResponse,
@@ -55,6 +58,7 @@ function applyPatch(
   messages: ThreadMessage[],
   patch: Patch,
   kind: OrganiseAction['kind'],
+  imap: boolean,
 ) {
   const prefix = `${thread.accountId}:`
   const marker = `${prefix}${SNOOZED_LABEL}`
@@ -64,12 +68,14 @@ function applyPatch(
     // Older outbox entries can still carry optimistic marker cleanup.
     const labels = { ...next }
     if (kind !== 'snooze') delete labels[marker]
+    const unreadId = `${prefix}UNREAD`
+    const starredId = `${prefix}STARRED`
     const labelIds = applyLabelPatch(message.labelIds, labels)
     messages[index] = {
       ...message,
-      labelIds,
-      unread: labelIds.includes(`${prefix}UNREAD`),
-      starred: labelIds.includes(`${prefix}STARRED`),
+      labelIds: imap ? labelIds.filter((id) => id !== unreadId && id !== starredId) : labelIds,
+      unread: imap ? (labels[unreadId] ?? message.unread) : labelIds.includes(unreadId),
+      starred: imap ? (labels[starredId] ?? message.starred) : labelIds.includes(starredId),
     }
   }
   if (patch.muted !== undefined) thread.muted = patch.muted
@@ -102,6 +108,7 @@ function patchesFor(
   action: Exclude<OrganiseAction, { kind: 'undo' }>,
   thread: ThreadSummary,
   messages: ThreadMessage[],
+  imap: boolean,
 ) {
   const patch: Patch = { labels: {} }
   const inverse: Patch = { labels: {} }
@@ -117,11 +124,19 @@ function patchesFor(
   }
   for (const message of messages) {
     if (message.labelIds.includes(`${thread.accountId}:DRAFT`)) continue
-    patch.labels[message.id] = state
+    const delta = imap ? imapActionLabels(action, thread.accountId, message.labelIds) : state
+    patch.labels[message.id] = delta
     inverse.labels[message.id] = Object.fromEntries(
-      Object.keys(state)
+      Object.keys(delta)
         .filter((id) => id !== snoozed)
-        .map((id) => [id, message.labelIds.includes(id)]),
+        .map((id) => [
+          id,
+          imap && id === `${thread.accountId}:UNREAD`
+            ? message.unread
+            : imap && id === `${thread.accountId}:STARRED`
+              ? message.starred
+              : message.labelIds.includes(id),
+        ]),
     )
   }
   return { patch, inverse }
@@ -136,6 +151,13 @@ export class LocalOrganise {
 
   get #db() {
     return this.replica.db
+  }
+
+  #account(id: string): AccountSummary | undefined {
+    const row = this.#db.prepare('SELECT data FROM account WHERE id = ?').get(id) as
+      | { data: string }
+      | undefined
+    return row && (JSON.parse(row.data) as AccountSummary)
   }
 
   enqueue(action: OrganiseAction): string {
@@ -162,7 +184,7 @@ export class LocalOrganise {
         if (row.messages && (row.status === 'applied' || row.status === 'partial')) {
           const outcomes = JSON.parse(row.messages) as NonNullable<MutationResult['messages']>
           const forward = JSON.parse(row.patch) as Patch
-          const requested = Object.values(forward.labels)[0] ?? {}
+          const defaultPatch = Object.values(forward.labels)[0] ?? {}
           patch.labels = Object.fromEntries(
             outcomes
               .filter((item) => item.appliedLabels.length)
@@ -170,8 +192,8 @@ export class LocalOrganise {
                 messageId,
                 Object.fromEntries(
                   appliedLabels
-                    .filter((label) => label in requested)
-                    .map((label) => [label, !requested[label]]),
+                    .filter((label) => label in (forward.labels[messageId] ?? defaultPatch))
+                    .map((label) => [label, !(forward.labels[messageId] ?? defaultPatch)[label]]),
                 ),
               ]),
           )
@@ -182,6 +204,8 @@ export class LocalOrganise {
           for (const id of JSON.parse(row.superseded) as string[]) delete patch.labels[id]
         }
         delete patch.snoozedUntil
+        const thread = threadId && this.replica.baseThread(threadId)
+        if (thread && this.#account(thread.thread.accountId)?.kind === 'imap') patch.labels = {}
         target = row.id
       }
       action = { kind: 'undo', threadId, mutationId: target }
@@ -190,17 +214,16 @@ export class LocalOrganise {
       if (!thread) throw new Error('Thread is no longer available')
       if (thread.messages.length !== thread.thread.messageCount)
         throw new Error('Wait for this Thread to finish syncing')
-      const projected = patchesFor(action, thread.thread, thread.messages)
+      const account = this.#account(thread.thread.accountId)
+      const imap = account?.kind === 'imap'
+      if (imap) {
+        const folders = new Set(this.replica.labels(account.id).map(({ id }) => id))
+        const error = imapActionError(action, account.id, folders, account.imapMoves)
+        if (error) throw new Error(error)
+      }
+      const projected = patchesFor(action, thread.thread, thread.messages, imap)
       patch = projected.patch
       inverse = projected.inverse
-    }
-    if (threadId) {
-      const account = this.#db
-        .prepare(
-          "SELECT json_extract(a.data, '$.kind') AS kind FROM thread t JOIN account a ON a.id = t.account_id WHERE t.id = ?",
-        )
-        .get(threadId)
-      if (account?.kind !== 'gmail') throw new Error('Organise is available for Gmail Accounts')
     }
     const id = randomUUID()
     const request: MutationRequest = { id, action }
@@ -226,13 +249,16 @@ export class LocalOrganise {
     const rows = this.#db
       .prepare(
         `SELECT patch, json_extract(request, '$.action.kind') AS kind FROM organise_queue
-         WHERE thread_id = ? AND (modseq IS NULL OR modseq > ?) ORDER BY seq`,
+         WHERE thread_id = ? AND (modseq IS NULL OR modseq > ?)
+           AND (status != 'pending' OR error IS NULL) ORDER BY seq`,
       )
       .all(thread.id, this.replica.modseq ?? -1) as {
       patch: string
       kind: OrganiseAction['kind']
     }[]
-    for (const row of rows) applyPatch(thread, base, JSON.parse(row.patch) as Patch, row.kind)
+    if (!rows.length) return base
+    const imap = this.#account(thread.accountId)?.kind === 'imap'
+    for (const row of rows) applyPatch(thread, base, JSON.parse(row.patch) as Patch, row.kind, imap)
     return base
   }
 
@@ -347,12 +373,14 @@ export class LocalOrganise {
           ).length
         : outcomes.length
       const uncertain = outcomes.some((item) => item.uncertainLabels?.length)
+      const accountId = row.thread_id?.split(':')[0]
+      const imap = accountId && this.#account(accountId)?.kind === 'imap'
       const verb = action.kind === 'archive' ? 'Archived' : 'Changed'
       let message = row.message
       if (trash && total) {
-        const detail = failed && !uncertain ? `${failed} couldn't be changed` : row.message
+        const detail = failed && !uncertain && !imap ? `${failed} couldn't be changed` : row.message
         message = `${verb} ${applied} of ${total}. ${detail}`
-      } else if (failed && !uncertain) {
+      } else if (failed && !uncertain && !imap) {
         message = `${verb} ${applied} of ${total}. ${failed} couldn't be changed`
       }
       return {
@@ -496,7 +524,7 @@ export class OrganiseSync extends EventEmitter<{ changed: [] }> {
         const res = await post('/v1/mutations/status', { ids: pending })
         if (signal.aborted) return
         this.#local.resolve(res.mutations)
-        if (res.mutations.some((row) => row.status !== 'pending')) this.emit('changed')
+        if (res.mutations.some((row) => row.status !== 'pending' || row.error)) this.emit('changed')
       }
       this.#failures = 0
       this.#retryAt = 0

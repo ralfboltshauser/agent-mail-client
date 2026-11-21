@@ -9,6 +9,7 @@ import {
   type ImapClientFactory,
   type ImapCredentials,
   imapEndpoint,
+  imapMoveSupport,
 } from './client.ts'
 import { type Folder, mapFolders } from './mapping.ts'
 
@@ -245,7 +246,10 @@ export class ImapProvider {
           draftSourceHash(draft.source) === sourceHash
       }
       if (!matches || location.endpoint !== currentEndpoint()) return false
-      return client.messageDelete(String(location.uid), { uid: true })
+      return (
+        (await client.messageFlagsAdd(String(location.uid), ['\\Deleted'], { uid: true })) &&
+        (await client.uidExpunge(location.uid))
+      )
     })
   }
 
@@ -276,14 +280,16 @@ export class ImapProvider {
 
   move(location: ImapMessageLocation, destination: string): Promise<boolean> {
     return this.#withMessage(location, async (client) => {
-      const rev2 =
-        client.enabled.has('IMAP4REV2') ||
-        (client.capabilities.has('IMAP4rev2') && !client.capabilities.has('IMAP4rev1'))
-      if (!rev2 && !client.capabilities.has('MOVE') && !client.capabilities.has('UIDPLUS')) {
-        // ImapFlow's fallback would issue a mailbox-wide EXPUNGE.
-        return false
-      }
-      return Boolean(await client.messageMove(String(location.uid), destination, { uid: true }))
+      const { native, available } = imapMoveSupport(client)
+      if (native) return Boolean(await client.uidMove(location.uid, destination))
+      if (!available) return false
+      const uid = String(location.uid)
+      const options = { uid: true }
+      return Boolean(
+        (await client.messageCopy(uid, destination, options)) &&
+          (await client.messageFlagsAdd(uid, ['\\Deleted'], options)) &&
+          (await client.uidExpunge(location.uid)),
+      )
     })
   }
 

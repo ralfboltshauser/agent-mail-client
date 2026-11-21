@@ -86,7 +86,7 @@ it('checks UIDVALIDITY before a write and refuses MOVE with mailbox-wide expunge
   const fake = new FakeImap()
   const move = vi.fn().mockResolvedValue({ path: 'INBOX', destination: 'Archive' })
   const setFlags = vi.fn().mockResolvedValue(true)
-  const client = Object.assign(fake.client, { messageMove: move, messageFlagsSet: setFlags })
+  const client = Object.assign(fake.client, { uidMove: move, messageFlagsSet: setFlags })
   const provider = new ImapProvider(credentials, () => client)
   const location = { folder: 'INBOX', uidValidity: '1', uid: 12 }
   await expect(provider.setFlags({ ...location, uidValidity: '2' }, ['\\Seen'])).rejects.toThrow(
@@ -99,5 +99,5 @@ it('checks UIDVALIDITY before a write and refuses MOVE with mailbox-wide expunge
   expect(move).not.toHaveBeenCalled()
   fake.capabilities.set('MOVE', true)
   expect(await provider.move(location, 'Archive')).toBe(true)
-  expect(move).toHaveBeenCalledWith('12', 'Archive', { uid: true })
+  expect(move).toHaveBeenCalledWith(12, 'Archive')
 })
