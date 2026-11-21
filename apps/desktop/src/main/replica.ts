@@ -16,6 +16,10 @@ import type { Counts, ReplicaThreadMessage, ThreadQuery, ThreadWithMessages } fr
 import { LocalDraftUpdates } from './draft-updates'
 import { LocalOrganise, ORGANISE_SCHEMA } from './organise'
 
+// Triage grants use the same name prefix on the Mac and Host.
+const TRIAGE_BUCKET = "json_extract(data, '$.bucket.setBy') GLOB 'triage-*'"
+const BUCKET_SET_AT = "json_extract(data, '$.bucket.setAt')"
+
 /**
  * The local copy of the owner's mail on the Mac (plan §5). Every read in the UI comes from
  * here, so it is instant; the sync loop keeps it in step with the Engine.
@@ -40,6 +44,7 @@ export class Replica {
       );
       CREATE INDEX IF NOT EXISTS thread_recent ON thread (last_message_at DESC);
       CREATE INDEX IF NOT EXISTS thread_inbox ON thread (in_inbox, last_message_at DESC);
+      CREATE INDEX IF NOT EXISTS thread_triage_bucket ON thread (${BUCKET_SET_AT} DESC) WHERE ${TRIAGE_BUCKET};
       CREATE TABLE IF NOT EXISTS message (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, sent_at INTEGER NOT NULL, data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS message_thread ON message (thread_id, sent_at);
       CREATE TABLE IF NOT EXISTS draft (id TEXT PRIMARY KEY, thread_id TEXT, updated_at INTEGER NOT NULL, data TEXT NOT NULL);
@@ -175,11 +180,50 @@ export class Replica {
     if (entity === 'message') this.db.prepare('DELETE FROM html WHERE message_id = ?').run(id)
   }
 
-  apply(changes: SyncChange[]): void {
+  apply(changes: SyncChange[]): Map<string, string> {
+    const arrivals = new Map<string, string>()
+    const previous = this.db.prepare('SELECT last_message_at FROM thread WHERE id = ?')
     for (const change of changes) {
+      if (change.entity === 'thread') {
+        if (change.op === 'upsert' && change.data.inInbox && !change.data.bucket) {
+          const old = previous.get(change.id)
+          if (!old || Number(old.last_message_at) < change.data.lastMessageAt)
+            arrivals.set(change.id, change.data.accountId)
+        } else arrivals.delete(change.id)
+      }
       if (change.op === 'upsert') this.put(change.entity, change.data)
       else this.remove(change.entity, change.id)
     }
+    return arrivals
+  }
+
+  latestTriageBucketAt(): number | undefined {
+    const row = this.db
+      .prepare(`
+      SELECT ${BUCKET_SET_AT} AS at FROM thread WHERE ${TRIAGE_BUCKET}
+      ORDER BY ${BUCKET_SET_AT} DESC LIMIT 1
+    `)
+      .get()
+    return typeof row?.at === 'number' ? row.at : undefined
+  }
+
+  triageAccount(
+    accountId: string | null,
+    pending?: ReadonlyMap<string, string>,
+  ): string | undefined {
+    const untriaged = "in_inbox = 1 AND json_extract(data, '$.bucket.bucket') IS NULL"
+    if (pending) {
+      const find = this.db.prepare(`SELECT 1 FROM thread WHERE id = ? AND ${untriaged}`)
+      for (const [id, account] of pending) if (find.get(id)) return account
+      return undefined
+    }
+    const row = this.db
+      .prepare(`
+      SELECT account_id FROM thread WHERE ${untriaged} AND (?1 IS NULL OR account_id = ?1)
+      ORDER BY last_message_at DESC LIMIT 1
+    `)
+      .get(accountId)
+    return typeof row?.account_id === 'string' ? row.account_id : undefined
   }
 
   // ── reads ──────────────────────────────────────────────────────────────

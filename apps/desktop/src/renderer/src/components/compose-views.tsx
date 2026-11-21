@@ -7,6 +7,7 @@ import {
 import { Settings2 } from 'lucide-react'
 import { useEffect, useId, useState } from 'react'
 import { toast } from 'sonner'
+import { AutoTriageSetting } from './triage-status'
 import { Button } from './ui/button'
 import { Dialog, DialogContent, DialogTitle } from './ui/dialog'
 import { Input } from './ui/input'
@@ -129,7 +130,7 @@ export function OutboxView({
         <Button
           variant="ghost"
           size="icon-sm"
-          aria-label="Undo send settings"
+          aria-label="Settings"
           onClick={() => {
             void window.amc
               .sendSettings()
@@ -266,7 +267,8 @@ export function OutboxView({
           }}
         >
           <DialogContent aria-describedby={undefined}>
-            <DialogTitle>Undo send</DialogTitle>
+            <DialogTitle>Settings</DialogTitle>
+            <AutoTriageSetting />
             <form
               className="flex flex-col gap-4"
               onSubmit={(event) => {

@@ -30,7 +30,11 @@ const sleep = (ms: number, signal: AbortSignal) =>
  * Keeps the replica in step with the Engine: bootstrap from a snapshot, then pull changes
  * whenever the event stream says something changed (and every minute, in case it says nothing).
  */
-export class SyncLoop extends EventEmitter<{ status: [SyncStatus]; changed: [] }> {
+export class SyncLoop extends EventEmitter<{
+  status: [SyncStatus]
+  changed: []
+  arrivals: [Map<string, string>]
+}> {
   readonly #engine: EngineClient
   readonly #replica: Replica
   readonly #controller = new AbortController()
@@ -197,12 +201,14 @@ export class SyncLoop extends EventEmitter<{ status: [SyncStatus]; changed: [] }
       )
       signal.throwIfAborted()
       if (res.changes.length > 0 || res.modseq !== since) {
+        let arrivals: Map<string, string> | undefined
         this.#replica.transaction(() => {
-          this.#replica.apply(res.changes)
+          arrivals = this.#replica.apply(res.changes)
           this.#replica.modseq = res.modseq
           if (res.organiseFailures) this.#replica.organise.notice(res.organiseFailures)
           this.#replica.organise.rebuild()
         })
+        if (arrivals?.size) this.emit('arrivals', arrivals)
         if (res.changes.length > 0 || res.organiseFailures?.length) this.emit('changed')
       }
       this.#set({ lastSyncAt: Date.now() })

@@ -14,6 +14,8 @@ import { authed, EngineError } from './client.ts'
 import type { CliConfig } from './config.ts'
 import { runClaude } from './triage-claude.ts'
 
+export { ClaudeAuthError } from './triage-claude.ts'
+
 declare const AMC_TRIAGE_PROMPT: string | undefined
 const BATCH_SIZE = 20
 const Decisions = z.object({

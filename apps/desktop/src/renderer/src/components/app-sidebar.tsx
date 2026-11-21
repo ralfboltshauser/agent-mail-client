@@ -39,6 +39,7 @@ import { cn } from '@/lib/utils'
 import type { Counts, SyncStatus, View } from '../../../shared/api'
 import { AgentActivity } from './agent-activity'
 import { SyncIndicator } from './sync-indicator'
+import { LastTriageRun, useTriageStatus } from './triage-status'
 
 const SYSTEM_VIEWS: { view: View; title: string; icon: typeof Inbox; keys: string }[] = [
   { view: { kind: 'inbox' }, title: 'Inbox', icon: Inbox, keys: 'G I' },
@@ -112,6 +113,7 @@ export function AppSidebar({
   labels,
   status,
 }: Props) {
+  const triage = useTriageStatus()
   const current = accounts.find((a) => a.id === accountId) ?? null
   const folderLabels = navigableLabels(labels, accounts).sort((a, b) =>
     a.name.localeCompare(b.name),
@@ -204,7 +206,18 @@ export function AppSidebar({
         </SidebarGroup>
 
         <SidebarGroup>
-          <SidebarGroupLabel>Triage</SidebarGroupLabel>
+          <div className="flex items-center justify-between">
+            <SidebarGroupLabel>Triage</SidebarGroupLabel>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={status?.phase !== 'live' || !triage || triage.running}
+              onClick={() => void window.amc.triageNow(accountId)}
+            >
+              Triage now
+            </Button>
+          </div>
+          <LastTriageRun status={triage} />
           <SidebarGroupContent>
             <SidebarMenu>
               {BUCKETS.map((bucket) => {

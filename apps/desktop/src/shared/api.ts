@@ -94,7 +94,27 @@ export interface T3Project {
   deletedAt?: string | null
 }
 
+export interface TriageResult {
+  assigned: number
+  skipped: number
+}
+
+export interface TriageStatus {
+  enabled: boolean
+  running: boolean
+  lastRun: {
+    at: number
+    result: TriageResult | null
+    error: string | null
+  } | null
+  notice: string | null
+}
+
 export interface AmcApi {
+  triageStatus(): Promise<TriageStatus>
+  setAutoTriage(enabled: boolean): Promise<void>
+  triageNow(accountId: string | null): Promise<void>
+  onTriageStatus(listener: (status: TriageStatus) => void): () => void
   savedT3Url(): Promise<string>
   t3Projects(address: string): Promise<T3Project[]>
   handoff(address: string, projectId: string, threadId: string): Promise<ComposeDraft>
