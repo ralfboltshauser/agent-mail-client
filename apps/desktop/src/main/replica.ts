@@ -218,11 +218,40 @@ export class Replica {
     if (entity === 'message') this.db.prepare('DELETE FROM html WHERE message_id = ?').run(id)
   }
 
-  apply(changes: SyncChange[]): void {
+  apply(changes: SyncChange[]): Map<string, string> {
+    const arrivals = new Map<string, string>()
+    const previous = this.db.prepare('SELECT last_message_at FROM thread WHERE id = ?')
     for (const change of changes) {
+      if (change.entity === 'thread') {
+        if (change.op === 'upsert' && change.data.inInbox && !change.data.bucket) {
+          const old = previous.get(change.id)
+          if (!old || Number(old.last_message_at) < change.data.lastMessageAt)
+            arrivals.set(change.id, change.data.accountId)
+        } else arrivals.delete(change.id)
+      }
       if (change.op === 'upsert') this.put(change.entity, change.data)
       else this.remove(change.entity, change.id)
     }
+    return arrivals
+  }
+
+  triageAccount(
+    accountId: string | null,
+    pending?: ReadonlyMap<string, string>,
+  ): string | undefined {
+    const untriaged = "in_inbox = 1 AND json_extract(data, '$.bucket.bucket') IS NULL"
+    if (pending) {
+      const find = this.db.prepare(`SELECT 1 FROM thread WHERE id = ? AND ${untriaged}`)
+      for (const [id, account] of pending) if (find.get(id)) return account
+      return undefined
+    }
+    const row = this.db
+      .prepare(`
+      SELECT account_id FROM thread WHERE ${untriaged} AND (?1 IS NULL OR account_id = ?1)
+      ORDER BY last_message_at DESC LIMIT 1
+    `)
+      .get(accountId)
+    return typeof row?.account_id === 'string' ? row.account_id : undefined
   }
 
   // ── reads ──────────────────────────────────────────────────────────────

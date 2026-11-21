@@ -554,6 +554,18 @@ export const MIGRATIONS: readonly Migration[] = [
   },
   {
     version: 16,
+    name: 'Provider delivery time and triage lease',
+    sql: `
+      ALTER TABLE message ADD COLUMN delivered_at INTEGER;
+      CREATE TABLE triage_lease (
+        slot INTEGER PRIMARY KEY CHECK (slot = 1),
+        holder TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+      ) STRICT;
+    `,
+  },
+  {
+    version: 17,
     name: 'Retire Gmail marker-based Snooze',
     sql: `
       CREATE TEMP TABLE legacy_snooze_mutation AS
