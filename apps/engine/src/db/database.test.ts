@@ -20,7 +20,7 @@ describe('migrate', () => {
     try {
       expect(migrate(db, { migrations: MIGRATIONS.filter(({ version }) => version <= 7) })).toBe(7)
       expect(MIGRATIONS.filter(({ version }) => version > 7).map(({ version }) => version)).toEqual(
-        [8, 9, 10, 11, 12, 13, 14, 15, 16],
+        [8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
       )
       db.exec(`
         INSERT INTO account (id, kind, address, credentials, created_at)
