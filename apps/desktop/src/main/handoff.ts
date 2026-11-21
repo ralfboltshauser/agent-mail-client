@@ -71,7 +71,7 @@ export function handoffRequest(
 export class Handoff {
   readonly #pending = new Map<
     string,
-    { id: string; request?: T3Launch; draftId?: string; launched?: T3Thread }
+    { id: string; request?: T3Launch; draftId?: string; launching?: Promise<T3Thread> }
   >()
   readonly #recovering = new Map<string, Promise<void>>()
   readonly #db: DatabaseSync
@@ -99,12 +99,16 @@ export class Handoff {
       .all(engine.baseUrl) as { id: string }[]
     for (const { id } of rows) {
       if (live.has(id)) continue
-      await engine.request(`/v1/compose/handoff/${id}?pending=1`, {
-        method: 'DELETE',
-        signal: AbortSignal.timeout(10_000),
-      })
-      this.#forget(id)
+      await this.#revokePending(engine, id)
     }
+  }
+
+  async #revokePending(engine: EngineClient, id: string): Promise<void> {
+    await engine.request(`/v1/compose/handoff/${id}?pending=1`, {
+      method: 'DELETE',
+      signal: AbortSignal.timeout(10_000),
+    })
+    this.#forget(id)
   }
 
   #forget(id: string): void {
@@ -156,15 +160,24 @@ export class Handoff {
         agentToken,
       )
     }
-    attempt.launched ??= await launchThread(attempt.request)
-    await engine.request(`/v1/compose/handoff/${attempt.id}`, {
+    const { id, request, draftId } = attempt
+    attempt.launching ??= Promise.resolve()
+      .then(() => launchThread(request))
+      .catch(async (error) => {
+        // If the Engine is unreachable, keep the SQLite row for recovery.
+        await this.#revokePending(engine, id).catch(() => {})
+        if (this.#pending.get(key)?.id === id) this.#pending.delete(key)
+        throw error
+      })
+    const thread = await attempt.launching
+    await engine.request(`/v1/compose/handoff/${id}`, {
       method: 'PUT',
-      body: { t3ThreadId: attempt.launched.threadId },
+      body: { t3ThreadId: thread.threadId },
     })
-    this.#forget(attempt.id)
-    const draft = await engine.get<ComposeDraft>(composeDraftPath(attempt.draftId))
-    this.#pending.delete(key)
-    return { draft, thread: attempt.launched }
+    this.#forget(id)
+    const draft = await engine.get<ComposeDraft>(composeDraftPath(draftId))
+    if (this.#pending.get(key)?.id === id) this.#pending.delete(key)
+    return { draft, thread }
   }
 
   async cancel(engine: EngineClient, projectId: string, threadId: string): Promise<void> {

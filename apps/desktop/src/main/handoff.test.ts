@@ -1,36 +1,39 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import type { ComposeDraft } from '@amc/protocol'
 import { expect, it, vi } from 'vitest'
 import type { EngineClient } from './engine'
 import { Handoff, t3NavigationLink } from './handoff'
+import { cliLauncher } from './t3-cli'
 
-it('launches the chosen T3 project with scoped context and retries a lost response with the same payload', async () => {
+it('launches the chosen T3 project with scoped context and retries confirmation without launching again', async () => {
   const draft = { id: 'draft-1' } as ComposeDraft
   const composerUrl = 'https://engine.example.test/compose/draft-1#token=synthetic'
   const request = vi
     .fn()
     .mockResolvedValueOnce({ draftId: draft.id, composerUrl, agentToken: 'synthetic-grant' })
+    .mockRejectedValueOnce(new Error('lost confirmation response'))
     .mockResolvedValueOnce({ saved: true })
   const engine = {
     baseUrl: 'https://engine.example.test',
     request,
     get: vi.fn().mockResolvedValue(draft),
   } as unknown as EngineClient
-  const launch = vi
-    .fn()
-    .mockRejectedValueOnce(new Error('lost response'))
-    .mockResolvedValueOnce({ threadId: 'new-t3-thread' })
+  const launch = vi.fn().mockResolvedValue({ threadId: 'new-t3-thread' })
 
   using db = new DatabaseSync(':memory:')
   const handoff = new Handoff(db)
   await expect(handoff.launch(engine, 'project-1', 'mail-thread', launch)).rejects.toThrow(
-    'lost response',
+    'lost confirmation response',
   )
   await expect(handoff.launch(engine, 'project-1', 'mail-thread', launch)).resolves.toEqual({
     draft,
     thread: { threadId: 'new-t3-thread' },
   })
   const payload = launch.mock.calls[0]?.[0]
-  expect(launch.mock.calls[1]?.[0]).toEqual(payload)
+  expect(launch).toHaveBeenCalledTimes(1)
   expect(payload).toMatchObject({
     projectId: 'project-1',
     runtimeMode: 'approval-required',
@@ -41,15 +44,74 @@ it('launches the chosen T3 project with scoped context and retries a lost respon
   expect(payload.message).toContain('https://engine.example.test/mcp')
   expect(payload.message).toContain(composerUrl)
   expect(payload.message).toContain('Authorization: Bearer synthetic-grant')
-  expect(request).toHaveBeenCalledTimes(2)
+  expect(request).toHaveBeenCalledTimes(3)
   expect(request).toHaveBeenLastCalledWith(`/v1/compose/handoff/${payload.clientRequestId}`, {
     method: 'PUT',
     body: { t3ThreadId: 'new-t3-thread' },
   })
 })
 
-it.each(['Engine POST', 'T3 launch', 'Engine confirmation'])(
-  'recovers a lost %s reply after reopening the desktop database',
+it.each([
+  ['the environment ID is missing', null],
+  ['the executable cannot start', { code: 'ENOENT' }],
+  ['thread start exits non-zero', { code: 1 }],
+  ['thread start times out', { killed: true, signal: 'SIGTERM' }],
+] as const)('revokes the pending handoff when %s', async (_failure, cliError) => {
+  const baseDir = mkdtempSync(join(tmpdir(), 'amc-handoff-cli-'))
+  try {
+    using db = new DatabaseSync(':memory:')
+    const response = {
+      draftId: 'draft-1',
+      composerUrl: 'https://engine.example.test/compose/draft-1#token=synthetic',
+      agentToken: 'synthetic-grant',
+    }
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce(response)
+      .mockResolvedValueOnce({ cancelled: true })
+    const draft = { id: response.draftId } as ComposeDraft
+    const engine = {
+      baseUrl: 'https://engine.example.test',
+      request,
+      get: vi.fn().mockResolvedValue(draft),
+    } as unknown as EngineClient
+    const executable = join(baseDir, 'bin', 't3')
+    const run = vi.fn().mockResolvedValueOnce('[]')
+    if (cliError) {
+      mkdirSync(join(baseDir, 'userdata'))
+      writeFileSync(join(baseDir, 'userdata', 'environment-id'), 'local-env')
+      run.mockRejectedValueOnce(Object.assign(new Error('t3 failed'), cliError))
+    }
+    const launch = cliLauncher({ executable, baseDir }, run).launch
+    const handoff = new Handoff(db)
+
+    await expect(handoff.launch(engine, 'project-1', 'mail-thread', launch)).rejects.toThrow(
+      'T3 could not confirm the launch.',
+    )
+
+    const id = request.mock.calls[0]?.[1].body.requestId
+    expect(run.mock.calls.map(([, args]) => args[1])).toEqual(cliError ? ['list', 'start'] : [])
+    expect(request.mock.calls.map(([, init]) => init.method)).toEqual(['POST', 'DELETE'])
+    expect(request).toHaveBeenLastCalledWith(
+      `/v1/compose/handoff/${id}?pending=1`,
+      expect.objectContaining({ method: 'DELETE' }),
+    )
+    expect(db.prepare('SELECT id FROM pending_handoff').all()).toEqual([])
+
+    const retryLaunch = vi.fn().mockResolvedValue({ threadId: 'new-t3-thread' })
+    request.mockResolvedValueOnce(response).mockResolvedValueOnce({ saved: true })
+    await expect(handoff.launch(engine, 'project-1', 'mail-thread', retryLaunch)).resolves.toEqual({
+      draft,
+      thread: { threadId: 'new-t3-thread' },
+    })
+    expect(retryLaunch.mock.calls[0]?.[0].clientRequestId).not.toBe(id)
+  } finally {
+    rmSync(baseDir, { recursive: true, force: true })
+  }
+})
+
+it.each(['Engine POST', 'launch cleanup', 'Engine confirmation'])(
+  'recovers after %s fails and the desktop database is reopened',
   async (lostReply) => {
     const dir = mkdtempSync(join(tmpdir(), 'amc-handoff-'))
     const path = join(dir, 'replica.db')
@@ -66,6 +128,7 @@ it.each(['Engine POST', 'T3 launch', 'Engine confirmation'])(
         return response
       }
       if (init.method === 'PUT') throw new Error('lost response')
+      if (lostReply === 'launch cleanup') throw new Error('offline')
       return { cancelled: true }
     })
     const engine = {
@@ -73,7 +136,7 @@ it.each(['Engine POST', 'T3 launch', 'Engine confirmation'])(
       request,
     } as unknown as EngineClient
     const launch = vi.fn(async () => {
-      if (lostReply === 'T3 launch') throw new Error('lost response')
+      if (lostReply === 'launch cleanup') throw new Error('lost response')
       return { threadId: 't3-thread' }
     })
     try {
@@ -82,6 +145,12 @@ it.each(['Engine POST', 'T3 launch', 'Engine confirmation'])(
         await expect(
           new Handoff(db).launch(engine, 'project-1', 'mail-thread', launch),
         ).rejects.toThrow('lost response')
+        if (lostReply === 'launch cleanup') {
+          expect(request).toHaveBeenLastCalledWith(
+            `/v1/compose/handoff/${id}?pending=1`,
+            expect.objectContaining({ method: 'DELETE' }),
+          )
+        }
         expect(db.prepare('SELECT * FROM pending_handoff').all()).toEqual([
           { id, engine_url: engine.baseUrl },
         ])
@@ -92,6 +161,7 @@ it.each(['Engine POST', 'T3 launch', 'Engine confirmation'])(
         request.mockRejectedValueOnce(new Error('offline'))
         await expect(restarted.recover(engine)).rejects.toThrow('offline')
         expect(db.prepare('SELECT id FROM pending_handoff').all()).toEqual([{ id }])
+        request.mockResolvedValueOnce({ cancelled: true })
         await restarted.recover(engine)
         expect(request).toHaveBeenLastCalledWith(
           `/v1/compose/handoff/${id}?pending=1`,
@@ -130,8 +200,3 @@ it('converts the MCP thread link into an installed T3 deep link', () => {
     't3code://threads/env/mcp%3Alaunch%3A123',
   )
 })
-
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { DatabaseSync } from 'node:sqlite'
