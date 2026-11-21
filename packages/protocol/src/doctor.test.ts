@@ -35,6 +35,12 @@ describe('doctor warnings', () => {
             { ...account, address: 'other@example.com', status: 'error', lastError: 'Sync failed' },
             {
               ...account,
+              address: 'new@example.com',
+              status: 'new',
+              lastError: 'IMAP sync failed',
+            },
+            {
+              ...account,
               address: 'expired@example.com',
               status: 'auth_expired',
               syncLagSeconds: null,
@@ -48,6 +54,7 @@ describe('doctor warnings', () => {
       'Last nightly backup is older than 36 hours.',
       'test@example.com is more than 15 minutes behind on sync.',
       'other@example.com: Sync failed',
+      'new@example.com: IMAP sync failed',
       'expired@example.com: auth_expired',
       '/srv/amc has less than 10% disk space free.',
     ])

@@ -1,3 +1,4 @@
+import { setMaxListeners } from 'node:events'
 import { mkdirSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
@@ -150,6 +151,8 @@ async function main(argv: string[]) {
         snoozeEnabled,
         imap: (accountId, work) => sync.organiseImap(accountId, work),
       })
+      const stopping = new AbortController()
+      setMaxListeners(0, stopping.signal)
       let editorScript: Promise<string> | undefined
       const app = createApp({
         db,
@@ -157,6 +160,7 @@ async function main(argv: string[]) {
         log,
         mutations,
         outbox,
+        shutdownSignal: stopping.signal,
         composerScript: () => {
           editorScript ??= composerScript()
           return editorScript
@@ -206,19 +210,41 @@ async function main(argv: string[]) {
         })
       }, 30_000)
       const shutdown = (signal: string) => {
+        if (stopping.signal.aborted) return
         log.info({ signal }, 'shutting down')
         clearInterval(sends)
         clearInterval(mirrors)
         clearInterval(imports)
         closeComposer()
-        server.close(async () => {
-          await Promise.all([outbox.waitForIdle(), mirroring, pullingDrafts])
-          await Promise.all([mutations.stop(), sync.stop()])
-          db.close()
-          guard.close()
-          process.exit(0)
+        const httpClosed = new Promise<void>((resolve, reject) => {
+          server.close((error) => (error ? reject(error) : resolve()))
         })
-        setTimeout(() => process.exit(1), 10_000).unref()
+        stopping.abort()
+        const timeout = setTimeout(() => {
+          log.error({ signal }, 'Engine shutdown timed out')
+          process.exit(1)
+        }, 10_000)
+        void Promise.allSettled([
+          httpClosed.finally(() => mutations.stop()),
+          sync.stop(),
+          outbox.waitForIdle(),
+          mirroring,
+          pullingDrafts,
+        ])
+          .then((results) => {
+            clearTimeout(timeout)
+            if (results.some((result) => result.status === 'rejected')) {
+              log.error({ signal }, 'Could not drain Engine work during shutdown')
+              process.exit(1)
+            }
+            db.close()
+            guard.close()
+            process.exit(0)
+          })
+          .catch(() => {
+            log.error({ signal }, 'Could not close the Engine database during shutdown')
+            process.exit(1)
+          })
       }
       process.on('SIGTERM', () => shutdown('SIGTERM'))
       process.on('SIGINT', () => shutdown('SIGINT'))

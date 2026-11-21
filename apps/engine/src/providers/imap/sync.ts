@@ -7,6 +7,40 @@ import { type Folder, mapFolders, messageFlags, parseMessage } from './mapping.t
 
 const RECONCILE_PAGE = 512
 const INBOX_WINDOW_INTERVAL = 1000
+const IDLE_FINISH_TIMEOUT_MS = 5_000
+
+export class ImapSyncFailure extends Error {
+  readonly phase: string
+  readonly folder: string | null
+  readonly summary: string
+
+  constructor(phase: string, folder: string | null, summary: string, cause?: unknown) {
+    super(cause instanceof Error ? cause.message : summary, { cause })
+    this.phase = phase
+    this.folder = folder
+    this.summary = summary
+  }
+}
+
+export class ImapIdleFailure extends ImapSyncFailure {
+  constructor(summary: string, cause?: unknown) {
+    super('idle', 'INBOX', summary, cause)
+  }
+}
+
+async function imapOperation<T>(
+  phase: string,
+  folder: string | null,
+  summary: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await run()
+  } catch (error) {
+    if (error instanceof ImapSyncFailure) throw error
+    throw new ImapSyncFailure(phase, folder, summary, error)
+  }
+}
 
 interface FolderCursor {
   path: string
@@ -85,7 +119,7 @@ export class ImapAccountSync {
   }
 
   async refreshOrganiseFolder(folder: Folder): Promise<void> {
-    await this.#syncFolder(folder, true)
+    await this.#syncFolderWithContext(folder, true)
   }
 
   dispose(): void {
@@ -108,13 +142,17 @@ export class ImapAccountSync {
     serviceInbox?: () => Promise<void>,
   ): Promise<boolean> {
     if (mode !== 'backfill') this.#inboxChanged = false
-    if (mode === 'all') await this.#listFolders()
+    if (mode === 'all') {
+      await imapOperation('list', null, 'Could not refresh the folder list', () =>
+        this.#listFolders(),
+      )
+    }
     let processed = false
     for (const folder of this.#folders) {
       if (mode === 'inbox' && folder.path !== 'INBOX') continue
       if (mode === 'backfill' && !this.#cursor.get(folder.path)?.before) continue
       if (processed || (mode === 'backfill' && folder.path !== 'INBOX')) await serviceInbox?.()
-      await this.#syncFolder(folder, mode !== 'backfill', serviceInbox)
+      await this.#syncFolderWithContext(folder, mode !== 'backfill', serviceInbox)
       processed = true
     }
     const done = !this.#folders.some((folder) => this.#cursor.get(folder.path)?.before)
@@ -133,7 +171,7 @@ export class ImapAccountSync {
     if (signal.aborted || this.#inboxChanged || this.#organise || !this.client.usable) return 0
     const selected = this.client.mailbox
     if (!selected || selected.path !== 'INBOX') {
-      const box = await this.client.mailboxOpen('INBOX', { readOnly: true })
+      const box = await this.#openFolder('INBOX')
       const previous = this.#inboxSnapshot
       if (
         previous &&
@@ -148,8 +186,9 @@ export class ImapAccountSync {
     if (signal.aborted || this.#inboxChanged || this.#organise || !this.client.usable) return 0
 
     const start = Date.now()
-    await new Promise<void>((resolve, reject) => {
-      const wake = () => {
+    let wake: () => void = () => {}
+    const pause = new Promise<void>((resolve) => {
+      wake = () => {
         clearTimeout(timer)
         signal.removeEventListener('abort', wake)
         this.#wake = undefined
@@ -158,30 +197,59 @@ export class ImapAccountSync {
       const timer = setTimeout(wake, ms)
       signal.addEventListener('abort', wake, { once: true })
       this.#wake = wake
-      // IDLE stays active until the next command. Attach a rejection handler even when the
-      // timer or an Inbox event wakes the runner before that command ends the IDLE.
-      void this.client.idle({ whenFree: true }).then(
-        (result) => {
-          if (result === false && this.#wake === wake) {
-            reject(new Error('IMAP IDLE failed'))
-            wake()
-          }
-        },
-        (error: Error) => {
-          if (this.#wake === wake) {
-            reject(error)
-            wake()
-          }
-        },
-      )
     })
-    return Date.now() - start
+    let pending = true
+    const idle = this.client.idle({ whenFree: true }).then(
+      (result) => {
+        pending = false
+        if (result === false) throw new ImapIdleFailure('Server did not accept IDLE')
+      },
+      (error: unknown) => {
+        pending = false
+        throw new ImapIdleFailure('IDLE failed', error)
+      },
+    )
+    try {
+      await Promise.race([pause, idle.then(() => pause)])
+      if (pending && !signal.aborted && this.client.usable) {
+        // The next mailbox command would otherwise wait behind IDLE with the socket timeout.
+        // NOOP makes ImapFlow send DONE. Bound that handshake before opening another folder.
+        let timer: ReturnType<typeof setTimeout> | undefined
+        try {
+          await Promise.race([
+            Promise.all([idle, this.client.noop()]),
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(
+                () => reject(new ImapIdleFailure('Server did not finish IDLE')),
+                IDLE_FINISH_TIMEOUT_MS,
+              )
+            }),
+          ])
+        } catch (error) {
+          if (error instanceof ImapIdleFailure) throw error
+          throw new ImapIdleFailure('Could not finish IDLE', error)
+        } finally {
+          clearTimeout(timer)
+        }
+      } else if (!pending) {
+        await idle
+      }
+      return Date.now() - start
+    } finally {
+      wake()
+    }
+  }
+
+  #openFolder(path: string): Promise<MailboxObject> {
+    return imapOperation('select', path, 'Could not open the folder', () =>
+      this.client.mailboxOpen(path, { readOnly: true }),
+    )
   }
 
   async #listFolders(): Promise<void> {
     const folders = mapFolders(await this.client.list())
     if (!folders.some((folder) => folder.path === 'INBOX')) {
-      throw new Error('The IMAP server did not list INBOX')
+      throw new ImapSyncFailure('list', 'INBOX', 'Server did not list INBOX')
     }
     const paths = new Set(folders.map((folder) => folder.path))
     const missing = [...this.#cursor.values()].filter(({ path }) => !paths.has(path))
@@ -192,7 +260,7 @@ export class ImapAccountSync {
       const matchCounts = new Map<string, number>()
       for (const folder of folders) {
         if (this.#cursor.has(folder.path)) continue
-        const box = await this.client.mailboxOpen(folder.path, { readOnly: true })
+        const box = await this.#openFolder(folder.path)
         if (!box.mailboxId) continue
         for (const old of identifiable) {
           if (old.mailboxId === box.mailboxId && old.validity === String(box.uidValidity)) {
@@ -249,15 +317,25 @@ export class ImapAccountSync {
       .run(json, this.accountId, json)
   }
 
+  #syncFolderWithContext(
+    folder: Folder,
+    reconcile: boolean,
+    serviceInbox?: () => Promise<void>,
+  ): Promise<void> {
+    return imapOperation('folder', folder.path, 'Could not sync the folder', () =>
+      this.#syncFolder(folder, reconcile, serviceInbox),
+    )
+  }
+
   async #syncFolder(
     folder: Folder,
     reconcile: boolean,
     serviceInbox?: () => Promise<void>,
   ): Promise<void> {
     const { path } = folder
-    const box = await this.client.mailboxOpen(path, { readOnly: true })
+    const box = await this.#openFolder(path)
     if (!box.uidValidity || !Number.isSafeInteger(box.uidNext) || box.uidNext < 1) {
-      throw new Error('IMAP SELECT lacks UIDVALIDITY or UIDNEXT')
+      throw new ImapSyncFailure('select', path, 'Server omitted UIDVALIDITY or UIDNEXT')
     }
     if (path === 'INBOX') {
       this.#inboxSnapshot = {
@@ -272,9 +350,13 @@ export class ImapAccountSync {
       if (path === 'INBOX' || !serviceInbox) return
       if (performance.now() - lastInboxWindow < INBOX_WINDOW_INTERVAL) return
       await serviceInbox()
-      const current = await this.client.mailboxOpen(path, { readOnly: true })
+      const current = await this.#openFolder(path)
       if (String(current.uidValidity) !== validity || current.mailboxId !== box.mailboxId) {
-        throw new Error('IMAP mailbox identity changed during reconciliation')
+        throw new ImapSyncFailure(
+          'reconcile',
+          path,
+          'Mailbox identity changed during reconciliation',
+        )
       }
       lastInboxWindow = performance.now()
     }
@@ -334,9 +416,13 @@ export class ImapAccountSync {
   }
 
   async #search(query: SearchObject): Promise<number[]> {
-    const uids = await this.client.search(query, { uid: true })
-    if (!uids) throw new Error('IMAP UID SEARCH failed')
-    return uids.sort((a, b) => a - b)
+    const mailbox = this.client.mailbox
+    const path = mailbox ? mailbox.path : null
+    return imapOperation('search', path, 'UID SEARCH failed', async () => {
+      const uids = await this.client.search(query, { uid: true })
+      if (!uids) throw new Error('IMAP UID SEARCH failed')
+      return uids.sort((a, b) => a - b)
+    })
   }
 
   async #pageBefore(minimum: number, before: number): Promise<{ uids: number[]; before: number }> {
@@ -394,10 +480,25 @@ export class ImapAccountSync {
   async #fetchMessages(folder: Folder, validity: string, uids: number[]): Promise<void> {
     for (const uid of uids) {
       if (this.locations.get(folder.path, validity, uid)?.verified) continue
-      const item = await this.#metadata(uid)
+      const item = await imapOperation(
+        'fetch',
+        folder.path,
+        'Could not fetch message metadata',
+        () => this.#metadata(uid),
+      )
       if (!item) continue
-      const source = await this.#downloadSource(uid, item.size)
-      const message = await parseMessage(folder, validity, item, this.store.blobs, source)
+      const source = await imapOperation(
+        'download',
+        folder.path,
+        'Could not download message source',
+        () => this.#downloadSource(uid, item.size),
+      )
+      const message = await imapOperation(
+        'parse',
+        folder.path,
+        'Could not parse message source',
+        () => parseMessage(folder, validity, item, this.store.blobs, source),
+      )
       this.locations.put(folder, validity, item, message, source)
     }
   }

@@ -16,6 +16,7 @@ import { HANDOFF_TTL_MS } from '../auth/handoff.ts'
 import { authenticate, COMPOSER_TTL_MS, DAY_MS, issueToken, revokeToken } from '../auth/tokens.ts'
 import { BlobStore } from '../blobs.ts'
 import { Sealer } from '../crypto.ts'
+import { createLogger } from '../log.ts'
 import { gmailDelivery, publishSent } from '../mail/delivery.ts'
 import { Drafts } from '../mail/drafts.ts'
 import { Outbox } from '../mail/outbox.ts'
@@ -34,7 +35,9 @@ import { createApp } from './app.ts'
 import { serveComposerSocket } from './composer-socket.ts'
 
 function setup(
-  options: Pick<ConstructorParameters<typeof SyncManager>[0], 'imapClient' | 'imapPollMs'> = {},
+  options: Partial<
+    Pick<ConstructorParameters<typeof SyncManager>[0], 'imapClient' | 'imapPollMs' | 'log'>
+  > = {},
   configOverrides: Partial<ReturnType<typeof testConfig>> = {},
 ) {
   const config = { ...testConfig(), composerOrigin: 'http://127.0.0.1:4410', ...configOverrides }
@@ -646,6 +649,93 @@ it('processes an Inbox delivery from IDLE before the first Archive backfill page
     expect(imap.idles[0]).toBe('INBOX')
   } finally {
     await sync.stop()
+  }
+})
+
+it('finishes the first sync when a server stops answering IDLE before the next folder', async () => {
+  vi.useFakeTimers()
+  const imap = new FakeImap(['CONDSTORE'])
+  const log = createLogger('silent')
+  const info = vi.spyOn(log, 'info')
+  const warn = vi.spyOn(log, 'warn')
+  const { db, sync, call, admin } = setup({ imapClient: () => imap.client, log })
+  imap.addFolder('Archive', '\\Archive')
+  imap.addFolder('Junk', '\\Junk')
+  imap.add('Archive', 'Subject: Archived mail')
+  const open = imap.mailboxOpen.bind(imap)
+  const idle = imap.idle.bind(imap)
+  const close = imap.close.bind(imap)
+  let blocked = false
+  const pendingCommands = new Set<(error: Error) => void>()
+  const blockedCommand = () =>
+    new Promise<never>((_, reject) => {
+      pendingCommands.add(reject)
+    })
+  imap.onIdle = () => {
+    blocked = imap.downloads.some(({ path }) => path === 'Archive')
+  }
+  imap.idle = async () => {
+    await idle()
+    if (blocked) await blockedCommand()
+  }
+  imap.mailboxOpen = (path) => (blocked ? blockedCommand() : open(path))
+  imap.noop = () => (blocked ? blockedCommand() : Promise.resolve())
+  imap.close = () => {
+    blocked = false
+    for (const reject of pendingCommands) reject(new Error('Socket closed'))
+    pendingCommands.clear()
+    close()
+  }
+
+  try {
+    expect((await call('/v1/accounts/imap', admin, login)).status).toBe(200)
+    await vi.waitFor(() => expect(blocked).toBe(true))
+    expect(db.prepare('SELECT status, last_sync_at FROM account').get()).toMatchObject({
+      status: 'new',
+      last_sync_at: null,
+    })
+    expect(db.prepare('SELECT count(*) AS count FROM message').get()).toEqual({ count: 1 })
+
+    await vi.advanceTimersByTimeAsync(5_200)
+    const { accounts } = await (await call('/v1/accounts', admin)).json()
+    const health = await (await call('/v1/health', admin)).json()
+    expect(accounts[0]).toMatchObject({
+      status: 'error',
+      lastError: 'IMAP idle (INBOX): Server did not finish IDLE',
+    })
+    expect(health.accounts[0].lastError).toBe(accounts[0].lastError)
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        account: accounts[0].id,
+        phase: 'idle',
+        folder: 'INBOX',
+        errorClass: 'ImapIdleFailure',
+        errorMessage: 'Server did not finish IDLE',
+      }),
+      'IMAP sync failed',
+    )
+
+    await vi.advanceTimersByTimeAsync(5_000)
+    await vi.waitFor(() =>
+      expect(
+        db.prepare('SELECT status, last_sync_at, last_error FROM account').get(),
+      ).toMatchObject({
+        status: 'ready',
+        last_sync_at: expect.any(Number),
+        last_error: null,
+      }),
+    )
+    expect(db.prepare('SELECT count(*) AS count FROM message').get()).toEqual({ count: 1 })
+    expect(imap.usable).toBe(true)
+    await sync.stop()
+    expect(imap.usable).toBe(false)
+    expect(info.mock.calls).toEqual([
+      [{ account: accounts[0].id, phase: 'start', folder: null }, 'IMAP runner started'],
+      [{ account: accounts[0].id, phase: 'stop', folder: null }, 'IMAP runner stopped'],
+    ])
+  } finally {
+    await sync.stop()
+    vi.useRealTimers()
   }
 })
 

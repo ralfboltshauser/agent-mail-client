@@ -19,6 +19,7 @@ export type ImapClient = Pick<
   | 'search'
   | 'fetch'
   | 'idle'
+  | 'noop'
   | 'download'
   | 'capabilities'
   | 'enabled'
@@ -99,6 +100,7 @@ export const createImapClient: ImapClientFactory = ({ host, port, tls, username,
     doSTARTTLS: tls === 'starttls',
     auth: { user: username, pass: password },
     logger: false,
+    disableAutoIdle: true,
     qresync: true,
     connectionTimeout: 15_000,
     greetingTimeout: 15_000,
@@ -126,10 +128,13 @@ export class ImapAuthError extends Error {
   }
 }
 
-export async function connectImap(client: ImapClient): Promise<void> {
+export async function connectImap(
+  client: ImapClient,
+  onSocketError: (error: Error) => void = () => {},
+): Promise<void> {
   // ImapFlow emits socket errors even when the command also rejects. Do not forward provider
   // errors to the Engine logger: server response strings can contain credentials or mail data.
-  client.on('error', () => {})
+  client.on('error', onSocketError)
   try {
     await client.connect()
   } catch (error) {

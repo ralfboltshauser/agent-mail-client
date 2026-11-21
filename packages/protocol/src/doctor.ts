@@ -14,7 +14,7 @@ export function doctorWarnings(
     if (account.syncLagSeconds !== null && account.syncLagSeconds > 15 * 60) {
       warnings.push(`${account.address} is more than 15 minutes behind on sync.`)
     }
-    if (account.status === 'error' || account.status === 'auth_expired') {
+    if (account.lastError || account.status === 'error' || account.status === 'auth_expired') {
       warnings.push(`${account.address}: ${account.lastError ?? account.status}`)
     }
   }
