@@ -3,9 +3,10 @@ import type { Db } from './db/database.ts'
 export interface Settings {
   /** ADR 0001: without this, no Agent has any means of sending mail. Changed only from the desktop app. */
   dangerouslyAllowSend: boolean
+  undoSendSeconds: number
 }
 
-const DEFAULTS: Settings = { dangerouslyAllowSend: false }
+const DEFAULTS: Settings = { dangerouslyAllowSend: false, undoSendSeconds: 10 }
 
 export function getSetting<K extends keyof Settings>(db: Db, key: K): Settings[K] {
   const row = db.prepare('SELECT value FROM setting WHERE key = ?').get(key) as

@@ -78,6 +78,17 @@ export class ImapLocations {
           'SELECT id FROM message WHERE account_id = ? AND rfc_message_id IS ? AND imap_fingerprint = ? ORDER BY rowid LIMIT 1',
         )
         .get(this.accountId, message.rfcMessageId, sourceBlob) as { id: string } | undefined
+      // Bind the first real Sent UID to the local copy published after SMTP acceptance.
+      const submitted =
+        folder.label.providerId === 'SENT' && message.rfcMessageId
+          ? (db
+              .prepare(
+                "SELECT m.id FROM outbox o JOIN message m ON m.account_id = o.account_id AND m.provider_id = o.provider_id WHERE o.account_id = ? AND o.rfc_id = ? AND o.status = 'sent' AND m.imap_fingerprint IS NULL",
+              )
+              .get(this.accountId, message.rfcMessageId.replace(/^<|>$/g, '')) as
+              | { id: string }
+              | undefined)
+          : undefined
       let mid: string
       if (duplicate) {
         mid = duplicate.id
@@ -86,7 +97,8 @@ export class ImapLocations {
           old?.source_blob === null &&
           db.prepare('SELECT imap_fingerprint FROM message WHERE id = ?').get(old.message_id)
             ?.imap_fingerprint === null
-        if (legacy) message.providerId = old.message_id.slice(this.accountId.length + 1)
+        if (submitted) message.providerId = submitted.id.slice(this.accountId.length + 1)
+        else if (legacy) message.providerId = old.message_id.slice(this.accountId.length + 1)
         else if (this.store.hasMessage(this.accountId, message.providerId))
           message.providerId = newId('imap')
         mid = messageId(this.accountId, message.providerId)

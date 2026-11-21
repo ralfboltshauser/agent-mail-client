@@ -26,6 +26,7 @@ import {
   type ImapClientFactory,
   type ImapCredentials,
 } from '../providers/imap/client.ts'
+import { ImapProvider } from '../providers/imap/provider.ts'
 import { ImapAccountSync } from '../providers/imap/sync.ts'
 
 export interface SyncManagerOptions {
@@ -102,6 +103,15 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
     work: (sync: ImapAccountSync) => Promise<void>,
   ): Promise<boolean> {
     return this.#runners.get(accountId)?.imap?.()?.queueOrganise(work) ?? Promise.resolve(false)
+  }
+
+  imapProvider(accountId: string): ImapProvider | null {
+    const account = getAccountRow(this.#o.db, accountId)
+    if (account?.kind !== 'imap' || account.status === 'auth_expired') return null
+    return new ImapProvider(
+      this.#o.sealer.open<ImapCredentials>(account.credentials),
+      this.#o.imapClient,
+    )
   }
 
   async withImapPaused<T>(address: string, run: () => Promise<T>): Promise<T> {

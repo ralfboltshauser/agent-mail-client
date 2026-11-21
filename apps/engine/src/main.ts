@@ -7,8 +7,10 @@ import { Sealer } from './crypto.ts'
 import { migrate, openDatabase } from './db/database.ts'
 import { createApp } from './http/app.ts'
 import { createLogger } from './log.ts'
+import { gmailDelivery, imapDelivery, imapDraftMirror, publishSent } from './mail/delivery.ts'
 import { Drafts } from './mail/drafts.ts'
 import { Mutations } from './mail/mutations.ts'
+import { Outbox } from './mail/outbox.ts'
 import { MailQueries } from './mail/queries.ts'
 import { MailStore } from './mail/store.ts'
 import { loadOAuthClient, type OAuthClient } from './providers/gmail/oauth.ts'
@@ -66,7 +68,24 @@ async function main(argv: string[]) {
         return oauth
       }
       const sync = new SyncManager({ db, store, sealer, log, oauthClient, snoozeEnabled })
-      const drafts = new Drafts(db, store, (accountId) => sync.gmailApi(accountId))
+      const drafts = new Drafts(db, store, (accountId) => {
+        const gmail = sync.gmailApi(accountId)
+        if (gmail) return gmail
+        const imap = sync.imapProvider(accountId)
+        return imap ? imapDraftMirror(imap) : null
+      })
+      // The durable claim must reach disk before a provider may accept a send.
+      db.exec('PRAGMA synchronous = FULL')
+      const outbox = new Outbox(
+        db,
+        (accountId) => {
+          const gmail = sync.gmailApi(accountId)
+          if (gmail) return gmailDelivery(gmail)
+          const imap = sync.imapProvider(accountId)
+          return imap ? imapDelivery(imap) : null
+        },
+        (message, id, receipt) => publishSent(store, drafts, message, id, receipt),
+      )
       const mutations = new Mutations(store, (accountId) => sync.gmailApi(accountId), log, {
         snoozeEnabled,
         imap: (accountId, work) => sync.organiseImap(accountId, work),
@@ -76,6 +95,7 @@ async function main(argv: string[]) {
         config,
         log,
         mutations,
+        outbox,
         mail: { db, store, queries, blobs, sealer, sync, oauthClient, drafts, log },
       })
       const server = serve({
@@ -86,9 +106,36 @@ async function main(argv: string[]) {
       log.info({ version: VERSION, schemaVersion: version, ...config.listen }, 'engine listening')
       sync.start()
       mutations.start()
+      const sends = setInterval(() => {
+        void outbox.runDue().catch(() => log.error('Could not advance the Outbox'))
+      }, 500)
+      let mirroring: Promise<void> | undefined
+      const mirrors = setInterval(() => {
+        mirroring ??= drafts
+          .mirrorPending()
+          .catch(() => log.error('Could not mirror drafts'))
+          .finally(() => {
+            mirroring = undefined
+          })
+      }, 3000)
+      let pullingDrafts: Promise<unknown> | undefined
+      const imports = setInterval(() => {
+        pullingDrafts ??= Promise.allSettled(
+          queries.accounts().map(async ({ id }) => {
+            const api = sync.gmailApi(id)
+            if (api) await drafts.pullGmail(id, api)
+          }),
+        ).finally(() => {
+          pullingDrafts = undefined
+        })
+      }, 30_000)
       const shutdown = (signal: string) => {
         log.info({ signal }, 'shutting down')
+        clearInterval(sends)
+        clearInterval(mirrors)
+        clearInterval(imports)
         server.close(async () => {
+          await Promise.all([outbox.waitForIdle(), mirroring, pullingDrafts])
           await Promise.all([mutations.stop(), sync.stop()])
           db.close()
           process.exit(0)

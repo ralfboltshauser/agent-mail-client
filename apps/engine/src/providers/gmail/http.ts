@@ -7,6 +7,7 @@ import type {
   GmailLabel,
   GmailListMessages,
   GmailMessage,
+  GmailMessageRef,
   GmailMessageState,
   GmailProfile,
 } from './types.ts'
@@ -46,6 +47,7 @@ interface CallOptions {
   urgent?: boolean
   /** Durable writeback handles retries for these calls. */
   writeback?: boolean
+  submission?: boolean
 }
 
 /**
@@ -95,7 +97,8 @@ export class GmailHttpApi implements GmailApi {
         const token = await this.#tokens.get()
         res = await this.#fetch(url, {
           method: options.method ?? 'GET',
-          signal: AbortSignal.timeout(this.#timeoutMs),
+          signal: AbortSignal.timeout(options.submission ? 60_000 : this.#timeoutMs),
+          ...(options.submission ? { redirect: 'error' } : {}),
           headers: {
             Authorization: `Bearer ${token}`,
             ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
@@ -134,14 +137,18 @@ export class GmailHttpApi implements GmailApi {
           /rateLimitExceeded|userRateLimitExceeded|quotaExceeded|quota exceeded/i.test(
             `${reason} ${message}`,
           ))
-      const retryAfter = Number(res.headers.get('retry-after'))
-      const retryAfterMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 0
+      const retryHeader = res.headers.get('retry-after')
+      const seconds = Number(retryHeader)
+      const retryMs = Number.isFinite(seconds)
+        ? seconds * 1000
+        : Date.parse(retryHeader ?? '') - Date.now()
+      const retryAfterMs = retryMs > 0 ? retryMs : 0
       const retryable =
         quota ||
         res.status === 408 ||
         res.status >= 500 ||
         (res.status === 403 && reason === 'backendError')
-      if (retryable && attempt < 8 && !options.writeback) {
+      if (retryable && attempt < 8 && !options.writeback && !options.submission) {
         if (quota) this.#limiter.penalize()
         await this.#delay(path, res.status, attempt, quota, retryAfterMs)
         continue
@@ -302,12 +309,45 @@ export class GmailHttpApi implements GmailApi {
           method: 'PUT',
           body: { id: input.draftId, message },
           cost: 'draftUpdate',
+          submission: true,
         })
       : this.#call<GmailDraft>('/drafts', {
           method: 'POST',
           body: { message },
           cost: 'draftCreate',
+          submission: true,
         })
+  }
+
+  listDrafts(pageToken?: string) {
+    return this.#call<{ drafts?: GmailDraft[]; nextPageToken?: string }>('/drafts', {
+      params: { pageToken, maxResults: '100' },
+      cost: 'draftList',
+    })
+  }
+
+  async getDraft(id: string) {
+    try {
+      return await this.#call<GmailDraft>(`/drafts/${encodeURIComponent(id)}`, {
+        params: { format: 'minimal' },
+        cost: 'draftGet',
+      })
+    } catch (error) {
+      if (error instanceof GmailHttpError && error.status === 404) return null
+      throw error
+    }
+  }
+
+  sendMessage(input: { raw: string; threadId?: string }) {
+    return this.#call<GmailMessageRef>('/messages/send', {
+      method: 'POST',
+      submission: true,
+      cost: 'send',
+      body: {
+        raw: Buffer.from(input.raw, 'utf8').toString('base64url'),
+        ...(input.threadId ? { threadId: input.threadId } : {}),
+      },
+    })
   }
 
   async deleteDraft(draftId: string) {
@@ -315,9 +355,11 @@ export class GmailHttpApi implements GmailApi {
       await this.#call<void>(`/drafts/${encodeURIComponent(draftId)}`, {
         method: 'DELETE',
         cost: 'draftDelete',
+        submission: true,
       })
+      return true
     } catch (error) {
-      if (error instanceof GmailHttpError && error.status === 404) return
+      if (error instanceof GmailHttpError && error.status === 404) return false
       throw error
     }
   }

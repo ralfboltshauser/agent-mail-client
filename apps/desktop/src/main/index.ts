@@ -1,10 +1,19 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { PairResponse } from '@amc/protocol'
+import type {
+  ComposeDraft,
+  ComposePatch,
+  ComposeStart,
+  Draft,
+  OutboxItem,
+  PairResponse,
+  SendRequest,
+} from '@amc/protocol'
 import { app, BrowserWindow, ipcMain, Menu, nativeTheme, shell } from 'electron'
 import type { SyncStatus, ThreadQuery } from '../shared/api'
 import { clearPairing, loadPairing, savePairing } from './auth'
+import { composeDraftPath } from './draft-updates'
 import { EngineClient, EngineError } from './engine'
 import { OrganiseSync } from './organise'
 import { Replica } from './replica'
@@ -19,6 +28,7 @@ let organise: OrganiseSync | null = null
 let pausedStatus: SyncStatus | null = null
 let tray: ReturnType<typeof createTray> | null = null
 let changedTimer: NodeJS.Timeout | null = null
+let draftRecovery: Promise<void> | null = null
 
 const UNPAIRED: SyncStatus = {
   phase: 'unpaired',
@@ -74,12 +84,23 @@ function connect(engineUrl: string, token: string) {
 
 function startSync(client: EngineClient) {
   pausedStatus = null
+  const updates = openReplica().draftUpdates
+  const recovering = updates.flush(client)
+  draftRecovery = recovering
   const loop = new SyncLoop(client, openReplica())
   sync = loop
   organise = createOrganise(client, loop)
   broadcast('amc:status', loop.status)
+  let replayOnLive = true
   loop.on('status', (status) => {
-    if (sync === loop) broadcast('amc:status', status)
+    if (sync !== loop) return
+    broadcast('amc:status', status)
+    if (status.phase === 'live' && replayOnLive) {
+      replayOnLive = false
+      draftRecovery = recovering.then(() => {
+        if (sync === loop) return updates.flush(client)
+      })
+    }
   })
   loop.on('changed', () => {
     // Coalesce bursts (backfill pages) into one UI refresh per 120 ms.
@@ -133,6 +154,8 @@ function registerIpc() {
     clearPairing()
     openReplica().clear()
     openReplica().organise.clear()
+    openReplica().draftUpdates.clear()
+    draftRecovery = null
     unpairedStatus = UNPAIRED
     broadcast('amc:status', unpairedStatus)
     refreshTray()
@@ -146,6 +169,7 @@ function registerIpc() {
   })
   ipcMain.handle('amc:organiseErrors', () => openReplica().organise.errors())
   registerReadIpc()
+  registerComposeIpc()
 }
 
 async function pair(engineUrl: string, code: string) {
@@ -171,10 +195,86 @@ async function pair(engineUrl: string, code: string) {
     db.transaction(() => {
       db.clear()
       db.organise.clear()
+      db.draftUpdates.clear()
     })
     broadcast('amc:changed')
   }
   connect(url, body.token)
+}
+
+function registerComposeIpc() {
+  const compose = '/v1/compose'
+  const draftPath = composeDraftPath
+  const signaturePath = (id: string) => `${compose}/signature/${encodeURIComponent(id)}`
+  ipcMain.handle('amc:startCompose', (_e, body: ComposeStart) =>
+    requireEngine().request(`${compose}/drafts`, { method: 'POST', body }),
+  )
+  ipcMain.handle(
+    'amc:composeDrafts',
+    async () => (await requireEngine().get<{ drafts: Draft[] }>(`${compose}/drafts`)).drafts,
+  )
+  ipcMain.handle('amc:composeDraft', async (_e, id: string) => {
+    await draftRecovery
+    return requireEngine().get(draftPath(id))
+  })
+  ipcMain.on('amc:stageComposeBody', (event, id: string, patch: ComposePatch) => {
+    try {
+      openReplica().draftUpdates.stage(id, patch)
+      event.returnValue = null
+    } catch {
+      event.returnValue = 'Could not save the draft locally'
+    }
+  })
+  ipcMain.handle('amc:saveCompose', async (_e, id: string, body: ComposePatch) => {
+    const saved = await requireEngine().request<ComposeDraft>(draftPath(id), {
+      method: 'PUT',
+      body,
+    })
+    openReplica().draftUpdates.acknowledge(id, body.update)
+    return saved
+  })
+  ipcMain.handle(
+    'amc:addComposeAttachment',
+    (_e, id: string, filename: string, mimeType: string, bytes: Uint8Array, inline?: boolean) =>
+      requireEngine().request(`${draftPath(id)}/attachments`, {
+        method: 'POST',
+        body: { filename, mimeType, inline, content: Buffer.from(bytes).toString('base64') },
+      }),
+  )
+  ipcMain.handle('amc:composeImage', (_e, id: string, contentId: string) =>
+    requireEngine().get(`${draftPath(id)}/inline?cid=${encodeURIComponent(contentId)}`),
+  )
+  ipcMain.handle('amc:sendDraft', async (_e, body: SendRequest) => {
+    const item = await requireEngine().request<OutboxItem>(`${compose}/outbox`, {
+      method: 'POST',
+      body,
+    })
+    if (body.edits) openReplica().draftUpdates.acknowledge(body.draftId, body.edits.update)
+    return item
+  })
+  ipcMain.handle(
+    'amc:outbox',
+    async () => (await requireEngine().get<{ items: OutboxItem[] }>(`${compose}/outbox`)).items,
+  )
+  ipcMain.handle('amc:resolveSend', (_e, id: string, action: 'check' | 'reopen') =>
+    requireEngine().request(`${compose}/outbox/${encodeURIComponent(id)}/resolve`, {
+      method: 'POST',
+      body: { action },
+    }),
+  )
+  ipcMain.handle('amc:cancelSend', async (_e, id: string) => {
+    await requireEngine().request(`${compose}/outbox/${encodeURIComponent(id)}/cancel`, {
+      method: 'POST',
+    })
+  })
+  ipcMain.handle('amc:signature', (_e, id: string) => requireEngine().get(signaturePath(id)))
+  ipcMain.handle('amc:saveSignature', (_e, id: string, signature: string) =>
+    requireEngine().request(signaturePath(id), { method: 'PUT', body: { signature } }),
+  )
+  ipcMain.handle('amc:sendSettings', () => requireEngine().get(`${compose}/settings`))
+  ipcMain.handle('amc:saveSendSettings', (_e, undoSendSeconds: number) =>
+    requireEngine().request(`${compose}/settings`, { method: 'PUT', body: { undoSendSeconds } }),
+  )
 }
 
 function registerReadIpc() {
@@ -219,6 +319,10 @@ function registerReadIpc() {
       throw error
     }
   })
+  ipcMain.handle('amc:inlineAttachment', async (_e, attachmentId: string) => {
+    const data = await requireEngine().bytes(`/v1/attachments/${encodeURIComponent(attachmentId)}`)
+    return data.toString('base64')
+  })
   ipcMain.handle('amc:openAttachment', async (_e, attachmentId: string, filename: string) => {
     const data = await requireEngine().bytes(`/v1/attachments/${encodeURIComponent(attachmentId)}`)
     const dir = join(tmpdir(), 'amc-attachments', attachmentId.replace(/[^\w.-]/g, '_'))
@@ -233,6 +337,13 @@ function registerReadIpc() {
       throw new Error('Refusing to open that link')
     await shell.openExternal(parsed.toString())
   })
+}
+
+let quitting = false
+let flushingBeforeQuit = false
+
+async function flushDrafts() {
+  await replica?.draftUpdates.flush(engine)
 }
 
 function createWindow() {
@@ -266,6 +377,19 @@ function createWindow() {
   if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) {
     void window.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else void window.loadFile(join(import.meta.dirname, '../renderer/index.html'))
+  const current = window
+  let closing = false
+  let flushed = false
+  current.on('close', (event) => {
+    if (quitting || flushed) return
+    event.preventDefault()
+    if (closing) return
+    closing = true
+    void flushDrafts().finally(() => {
+      flushed = true
+      if (!current.isDestroyed()) current.close()
+    })
+  })
   window.on('closed', () => {
     window = null
   })
@@ -346,9 +470,17 @@ if (!app.requestSingleInstanceLock()) {
     app.on('activate', openWindow)
     app.on('browser-window-focus', refreshTray)
   })
-  app.on('before-quit', () => {
+  app.on('before-quit', (event) => {
+    if (quitting) return
+    event.preventDefault()
+    if (flushingBeforeQuit) return
+    flushingBeforeQuit = true
     stopSync()
     if (changedTimer) clearTimeout(changedTimer)
+    void flushDrafts().finally(() => {
+      quitting = true
+      app.quit()
+    })
   })
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit()

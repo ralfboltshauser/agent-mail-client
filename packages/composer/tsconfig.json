@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": ".types",
+    "module": "preserve",
+    "moduleResolution": "bundler"
+  },
+  "include": ["src"]
+}

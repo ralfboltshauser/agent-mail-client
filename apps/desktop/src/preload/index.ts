@@ -1,3 +1,4 @@
+import type { ComposePatch } from '@amc/protocol'
 import { contextBridge, ipcRenderer } from 'electron'
 import type { AmcApi, SyncStatus } from '../shared/api'
 
@@ -22,7 +23,26 @@ const api: AmcApi = {
   filter: invoke('filter') as AmcApi['filter'],
   search: invoke('search') as AmcApi['search'],
   contacts: invoke('contacts') as AmcApi['contacts'],
+  startCompose: invoke('startCompose') as AmcApi['startCompose'],
+  composeDrafts: invoke('composeDrafts') as AmcApi['composeDrafts'],
+  composeDraft: invoke('composeDraft') as AmcApi['composeDraft'],
+  stageComposeBody(id: string, patch: ComposePatch) {
+    const error = ipcRenderer.sendSync('amc:stageComposeBody', id, patch)
+    if (error) throw new Error(error)
+  },
+  saveCompose: invoke('saveCompose') as AmcApi['saveCompose'],
+  addComposeAttachment: invoke('addComposeAttachment') as AmcApi['addComposeAttachment'],
+  composeImage: invoke('composeImage') as AmcApi['composeImage'],
+  sendDraft: invoke('sendDraft') as AmcApi['sendDraft'],
+  outbox: invoke('outbox') as AmcApi['outbox'],
+  resolveSend: invoke('resolveSend') as AmcApi['resolveSend'],
+  cancelSend: invoke('cancelSend') as AmcApi['cancelSend'],
+  signature: invoke('signature') as AmcApi['signature'],
+  saveSignature: invoke('saveSignature') as AmcApi['saveSignature'],
+  sendSettings: invoke('sendSettings') as AmcApi['sendSettings'],
+  saveSendSettings: invoke('saveSendSettings') as AmcApi['saveSendSettings'],
   messageHtml: invoke('messageHtml') as AmcApi['messageHtml'],
+  inlineAttachment: invoke('inlineAttachment') as AmcApi['inlineAttachment'],
   openAttachment: invoke('openAttachment') as AmcApi['openAttachment'],
   openExternal: invoke('openExternal') as AmcApi['openExternal'],
   onStatus(listener) {
