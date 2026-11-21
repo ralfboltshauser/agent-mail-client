@@ -35,9 +35,8 @@ import { createApp } from './app.ts'
 import { serveComposerSocket } from './composer-socket.ts'
 
 function setup(
-  options: Pick<
-    ConstructorParameters<typeof SyncManager>[0],
-    'imapClient' | 'imapPollMs' | 'log'
+  options: Partial<
+    Pick<ConstructorParameters<typeof SyncManager>[0], 'imapClient' | 'imapPollMs' | 'log'>
   > = {},
   configOverrides: Partial<ReturnType<typeof testConfig>> = {},
 ) {
