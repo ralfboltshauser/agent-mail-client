@@ -7,12 +7,10 @@ const arrive = (id: string, account = 'one') => new Map([[id, account]])
 function setup(
   run = vi.fn(async (_account: string, _signal: AbortSignal) => ({ assigned: 2, skipped: 1 })),
 ) {
-  const latestSharedRun = vi.fn<() => number | undefined>()
   const onLowBattery = vi.fn(async () => false)
   const triage = new AutoTriage({
     enabled: true,
     lastRun: null,
-    latestSharedRun,
     onLowBattery,
     accountForRun: (account, pending) =>
       account ?? (pending ? pending.values().next().value : 'one'),
@@ -21,7 +19,7 @@ function setup(
   })
   triage.connect(run)
   triage.setAvailable(true)
-  return { triage, run, latestSharedRun, onLowBattery }
+  return { triage, run, onLowBattery }
 }
 
 beforeEach(() => {
@@ -39,7 +37,7 @@ it('debounces from the last arrival and enforces a global cooldown, including ma
   await vi.advanceTimersByTimeAsync(2 * minute - 1)
   expect(run).not.toHaveBeenCalled()
   await vi.advanceTimersByTimeAsync(1)
-  expect(run).toHaveBeenCalledOnce()
+  expect(run).toHaveBeenCalledExactlyOnceWith('one', expect.any(AbortSignal), true)
   expect(triage.status.lastRun).toEqual({
     at: Date.now(),
     result: { assigned: 2, skipped: 1 },
@@ -103,15 +101,12 @@ it('keeps pending arrivals during Pause Sync and allows manual runs when auto-tr
   expect(run).toHaveBeenCalledTimes(2)
 })
 
-it('skips recent Host triage and low battery, then resumes pending work', async () => {
-  const { triage, run, latestSharedRun, onLowBattery } = setup()
-  latestSharedRun.mockReturnValue(Date.now())
+it('skips low battery, then resumes pending work', async () => {
+  const { triage, run, onLowBattery } = setup()
   onLowBattery.mockResolvedValue(true)
   triage.arrivals(arrive('a'))
   await vi.advanceTimersByTimeAsync(2 * minute)
-  expect(triage.status.notice).toMatch(/last 10 minutes/)
-  await vi.advanceTimersByTimeAsync(8 * minute)
-  expect(triage.status.notice).toMatch(/below 20%/)
+  expect(triage.status.notice).toMatch(/battery reading of at least 20%/)
   expect(run).not.toHaveBeenCalled()
   onLowBattery.mockResolvedValue(false)
   await vi.advanceTimersByTimeAsync(10 * minute)

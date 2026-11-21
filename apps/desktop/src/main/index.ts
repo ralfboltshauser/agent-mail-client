@@ -36,6 +36,7 @@ let changedTimer: NodeJS.Timeout | null = null
 let draftRecovery: Promise<void> | null = null
 let handoff: Handoff
 let triage: AutoTriage
+const quittingTriage = new AbortController()
 
 const UNPAIRED: SyncStatus = {
   phase: 'unpaired',
@@ -91,7 +92,9 @@ function createOrganise(client: EngineClient, loop?: SyncLoop) {
 function connect(engineUrl: string, token: string) {
   engine = new EngineClient(engineUrl, token)
   recoverHandoffs(engine)
-  triage.connect((accountId, signal) => runTriageProcess({ engineUrl, token, accountId }, signal))
+  triage.connect((accountId, signal, recent) =>
+    runTriageProcess({ engineUrl, token }, accountId, recent, signal, quittingTriage.signal),
+  )
   if (existsSync(pauseFile())) {
     organise = createOrganise(engine)
     pausedStatus = { ...UNPAIRED, phase: 'paused', engineUrl }
@@ -541,7 +544,6 @@ if (!app.requestSingleInstanceLock()) {
     triage = new AutoTriage({
       enabled: !existsSync(triageOffFile()),
       lastRun: loadLastTriageRun(),
-      latestSharedRun: () => openReplica().latestTriageBucketAt(),
       onLowBattery,
       accountForRun: (accountId, pending) => openReplica().triageAccount(accountId, pending),
       saveLastRun: (run) => {
@@ -589,6 +591,7 @@ if (!app.requestSingleInstanceLock()) {
     event.preventDefault()
     if (flushingBeforeQuit) return
     flushingBeforeQuit = true
+    quittingTriage.abort()
     const stoppingTriage = stopSync()
     if (changedTimer) clearTimeout(changedTimer)
     void Promise.allSettled([flushDrafts(), stoppingTriage]).then(() => {

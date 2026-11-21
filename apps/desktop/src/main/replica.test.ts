@@ -79,11 +79,7 @@ it('triggers triage for new Inbox mail and recognizes synced triage grant assign
     expect(replica.triageAccount(null, arrivals)).toBe('one')
 
     const bucket = { bucket: 'Reply' as const, reason: 'Fixture', setAt: 50, setBy: 'triage-host' }
-    replica.apply([
-      upsert({ ...thread, lastMessageAt: 11, bucket }),
-      upsert({ ...thread, id: 'snapshot', bucket: { ...bucket, setAt: 60, setBy: 'owner' } }),
-    ])
-    expect(replica.latestTriageBucketAt()).toBe(50)
+    replica.apply([upsert({ ...thread, lastMessageAt: 11, bucket })])
     expect(replica.triageAccount(null, arrivals)).toBeUndefined()
   } finally {
     replica.db.close()

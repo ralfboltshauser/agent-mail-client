@@ -39,6 +39,22 @@ across restarts. **Launch at Login** is enabled on first run. If macOS requests
 approval, use the AMC menu to open Login Items settings or cancel the pending
 registration. Desktop upgrades move the previous app bundle to the Trash.
 
+### Mail triage
+
+Automatic desktop triage selects unbucketed Inbox threads whose latest
+provider-recorded delivery is within 24 hours. It uses Gmail's internalDate
+and IMAP's INTERNALDATE. Messages with no recorded delivery time do not count.
+Use `amc triage --recent` for the same selection on the CLI.
+
+The desktop and CLI share one Engine lease. A second client skips a run while
+the lease is held. The client releases the lease when it finishes, and the
+Engine expires leases after ten minutes if release fails.
+
+Desktop main revokes the run's grant by name after the worker exits, including
+on crash or timeout. On quit it stops the worker and allows up to three
+seconds for cleanup. If revocation cannot reach the Engine, the grant expires
+five minutes after minting.
+
 ## Layout
 
 | Path | What | Owner |

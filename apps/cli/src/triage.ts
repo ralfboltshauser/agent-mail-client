@@ -45,22 +45,50 @@ function toolJson(result: CallToolResult): unknown {
   return JSON.parse(content.text)
 }
 
-export async function runTriage(
+export function runTriage(
   config: CliConfig,
   accountId: string,
   dryRun: boolean,
   interrupt: AbortSignal,
   harness: TriageHarness = runClaude,
+  recent = false,
 ) {
   const signal = AbortSignal.any([interrupt, AbortSignal.timeout(120_000)])
+  return withTriageGrant(config, accountId, dryRun, signal, (grant) =>
+    triageWithGrant(grant, dryRun, recent, signal, harness),
+  )
+}
+
+export async function withTriageGrant<T>(
+  config: CliConfig,
+  accountId: string,
+  dryRun: boolean,
+  signal: AbortSignal,
+  run: (grant: CliConfig) => Promise<T>,
+  cleanupTimeout?: number,
+): Promise<T | null> {
+  signal.throwIfAborted()
   const api = authed(config)
   const name = `triage-${randomUUID()}`
-  const client = new Client({ name: 'amc-triage', version: '1' })
-  signal.throwIfAborted()
+  const options = {
+    signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+    redirect: 'error' as const,
+  }
+  const { granted } = await api<{ granted: boolean }>('/v1/triage/lease', {
+    ...options,
+    method: 'POST',
+    body: { holder: name },
+  })
+  if (!granted) return null
+
+  let mintAttempted = false
   let id: string | undefined
   let runError: unknown
   try {
+    signal.throwIfAborted()
+    mintAttempted = true
     const grant = await api<{ id: string; token: string }>('/v1/tokens', {
+      ...options,
       method: 'POST',
       body: {
         name,
@@ -68,14 +96,52 @@ export async function runTriage(
         scopes: dryRun ? ['read'] : ['read', 'organize'],
         expiresInMinutes: 5,
       },
-      signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
-      redirect: 'error',
     })
     id = grant.id
     signal.throwIfAborted()
+    return await run({ engineUrl: config.engineUrl, token: grant.token })
+  } catch (error) {
+    runError = error
+    throw error
+  } finally {
+    const cleanup = cleanupTimeout === undefined ? undefined : AbortSignal.timeout(cleanupTimeout)
+    try {
+      if (mintAttempted) {
+        // Desktop resolves the run's unique name using the owner's token, after the worker exits.
+        await revokeTriageGrant(api, name, cleanup ? undefined : id, cleanup).catch(
+          (error: unknown) => {
+            const message = `Could not revoke grant ${name}. It expires five minutes after minting.`
+            if (runError) throw new AggregateError([runError, error], message)
+            throw new Error(message, { cause: error })
+          },
+        )
+      }
+    } finally {
+      await api('/v1/triage/lease', {
+        method: 'DELETE',
+        body: { holder: name },
+        signal: cleanup ?? AbortSignal.timeout(10_000),
+        redirect: 'error',
+      }).catch(() => {
+        // If release fails, the Engine expires the lease after ten minutes.
+      })
+    }
+  }
+}
+
+export async function triageWithGrant(
+  config: CliConfig,
+  dryRun: boolean,
+  recent: boolean,
+  signal: AbortSignal,
+  harness: TriageHarness = runClaude,
+) {
+  const client = new Client({ name: 'amc-triage', version: '1' })
+  try {
+    signal.throwIfAborted()
     await client.connect(
       new StreamableHTTPClientTransport(new URL('/mcp', config.engineUrl), {
-        requestInit: { headers: { Authorization: `Bearer ${grant.token}` }, redirect: 'error' },
+        requestInit: { headers: { Authorization: `Bearer ${config.token}` }, redirect: 'error' },
       }),
       { signal },
     )
@@ -83,7 +149,9 @@ export async function runTriage(
       client
         .callTool({ name, arguments: args }, CallToolResultSchema, { signal })
         .then((result) => CallToolResultSchema.parse(result))
-    const batch = ListedThreads.parse(toolJson(await call('list_untriaged', { limit: BATCH_SIZE })))
+    const batch = ListedThreads.parse(
+      toolJson(await call('list_untriaged', { limit: BATCH_SIZE, ...(recent ? { recent } : {}) })),
+    )
     if (!batch.length) return []
 
     const ids = new Set(batch.map((thread) => thread.id))
@@ -128,24 +196,20 @@ export async function runTriage(
     } finally {
       forwarder.close()
     }
-  } catch (error) {
-    runError = error
-    throw error
   } finally {
-    await client.close().finally(() =>
-      revokeTriageGrant(api, name, id).catch((error: unknown) => {
-        const message = `Could not revoke grant ${name}. It expires five minutes after minting.`
-        if (runError) throw new AggregateError([runError, error], message)
-        throw new Error(message, { cause: error })
-      }),
-    )
+    await client.close()
   }
 }
 
-async function revokeTriageGrant(api: ReturnType<typeof authed>, name: string, id?: string) {
+async function revokeTriageGrant(
+  api: ReturnType<typeof authed>,
+  name: string,
+  id?: string,
+  signal?: AbortSignal,
+) {
   for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt) await delay(250 * attempt)
-    const options = { signal: AbortSignal.timeout(10_000), redirect: 'error' as const }
+    if (attempt) await delay(250 * attempt, undefined, { signal })
+    const options = { signal: signal ?? AbortSignal.timeout(10_000), redirect: 'error' as const }
     try {
       if (!id) {
         const { tokens } = await api<{
@@ -162,6 +226,7 @@ async function revokeTriageGrant(api: ReturnType<typeof authed>, name: string, i
     } catch (error) {
       if (id && error instanceof EngineError && error.status === 404) return
       if (
+        signal?.aborted ||
         attempt === 2 ||
         (error instanceof EngineError &&
           error.status >= 400 &&

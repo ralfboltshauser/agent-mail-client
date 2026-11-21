@@ -16,9 +16,6 @@ import type { Counts, ReplicaThreadMessage, ThreadQuery, ThreadWithMessages } fr
 import { LocalDraftUpdates } from './draft-updates'
 import { LocalOrganise, ORGANISE_SCHEMA } from './organise'
 
-// Triage grants use the same name prefix on the Mac and Host.
-const TRIAGE_BUCKET = "json_extract(data, '$.bucket.setBy') GLOB 'triage-*'"
-const BUCKET_SET_AT = "json_extract(data, '$.bucket.setAt')"
 function splitMessage({ bodyText, ...metadata }: MessageDetail) {
   const body = Buffer.from(bodyText, 'utf8')
   const bodyRevision = createHash('sha256').update(body).digest('hex')
@@ -49,7 +46,6 @@ export class Replica {
       );
       CREATE INDEX IF NOT EXISTS thread_recent ON thread (last_message_at DESC);
       CREATE INDEX IF NOT EXISTS thread_inbox ON thread (in_inbox, last_message_at DESC);
-      CREATE INDEX IF NOT EXISTS thread_triage_bucket ON thread (${BUCKET_SET_AT} DESC) WHERE ${TRIAGE_BUCKET};
       CREATE TABLE IF NOT EXISTS message (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, sent_at INTEGER NOT NULL, data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS message_thread ON message (thread_id, sent_at);
       CREATE TABLE IF NOT EXISTS draft (id TEXT PRIMARY KEY, thread_id TEXT, updated_at INTEGER NOT NULL, data TEXT NOT NULL);
@@ -237,16 +233,6 @@ export class Replica {
       else this.remove(change.entity, change.id)
     }
     return arrivals
-  }
-
-  latestTriageBucketAt(): number | undefined {
-    const row = this.db
-      .prepare(`
-      SELECT ${BUCKET_SET_AT} AS at FROM thread WHERE ${TRIAGE_BUCKET}
-      ORDER BY ${BUCKET_SET_AT} DESC LIMIT 1
-    `)
-      .get()
-    return typeof row?.at === 'number' ? row.at : undefined
   }
 
   triageAccount(

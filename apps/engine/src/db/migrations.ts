@@ -552,4 +552,16 @@ export const MIGRATIONS: readonly Migration[] = [
       DELETE FROM handoff WHERE t3_thread_id IS NULL;
     `,
   },
+  {
+    version: 16,
+    name: 'Provider delivery time and triage lease',
+    sql: `
+      ALTER TABLE message ADD COLUMN delivered_at INTEGER;
+      CREATE TABLE triage_lease (
+        slot INTEGER PRIMARY KEY CHECK (slot = 1),
+        holder TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+      ) STRICT;
+    `,
+  },
 ]

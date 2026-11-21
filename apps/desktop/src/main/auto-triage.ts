@@ -6,7 +6,6 @@ const COOLDOWN = 10 * 60_000
 interface TriageOptions {
   enabled: boolean
   lastRun: TriageStatus['lastRun']
-  latestSharedRun: () => number | undefined
   onLowBattery: () => Promise<boolean>
   accountForRun: (
     accountId: string | null,
@@ -16,7 +15,7 @@ interface TriageOptions {
   changed: (status: TriageStatus) => void
 }
 
-type Run = (accountId: string, signal: AbortSignal) => Promise<TriageResult>
+type Run = (accountId: string, signal: AbortSignal, recent: boolean) => Promise<TriageResult | null>
 
 export class AutoTriage {
   readonly #options: TriageOptions
@@ -126,10 +125,7 @@ export class AutoTriage {
           this.#skip('No untriaged Inbox threads.')
           return
         }
-        const last = Math.max(
-          this.#lastRun?.at ?? -Infinity,
-          this.#options.latestSharedRun() ?? -Infinity,
-        )
+        const last = this.#lastRun?.at ?? -Infinity
         if (last + COOLDOWN > Date.now()) {
           this.#retryAt = last + COOLDOWN
           this.#skip('Triage ran in the last 10 minutes.')
@@ -143,7 +139,7 @@ export class AutoTriage {
           return
         if (lowBattery) {
           this.#retryAt = Date.now() + COOLDOWN
-          this.#skip('Triage is waiting for power. Battery is below 20%.')
+          this.#skip('Triage is waiting for power or a battery reading of at least 20%.')
           return
         }
         this.#retryAt = 0
@@ -151,10 +147,16 @@ export class AutoTriage {
         const pending = [...this.#pending].filter(([, accountId]) => accountId === account)
         for (const [id] of pending) this.#pending.delete(id)
         const at = Date.now()
-        this.#record({ at, result: null, error: 'Triage was interrupted.' })
-        this.#publish()
         try {
-          const result = await run(account, signal)
+          const result = await run(account, signal, !manual)
+          if (result === null) {
+            if (this.#run === run && this.#enabled) {
+              for (const [id, accountId] of pending) this.#pending.set(id, accountId)
+            }
+            this.#retryAt = Date.now() + COOLDOWN
+            this.#skip('Triage is already running on another client.')
+            return
+          }
           this.#record({ at, result, error: null })
           // A full batch may leave some arrivals waiting for the next slot.
           if (result.assigned + result.skipped === 20 && !signal.aborted && this.#enabled) {
