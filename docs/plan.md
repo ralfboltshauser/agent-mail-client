@@ -113,7 +113,9 @@ The root NVMe disk is at **97%** (7.5 GB free), and `/srv` is a 1.8 TB spinning 
 
 Before dispatch, the Engine records the requested delta and the message's Gmail history ID. If the response could have been lost after Gmail committed the write, the queue reads again before any retry. A matching history ID permits a retry. If the history ID changed or is unavailable, the Engine leaves the uncertain labels alone and excludes them from Undo because Gmail cannot attribute the change to AMC.
 
-Gmail has no conditional write for labels. The final read leaves a window in which the owner can edit the same label before dispatch. The write targets only explicit message IDs. A reply delivered after Archive's final read keeps its Inbox label and enters the replica through history sync. Trash adds the TRASH label and hides the message from Inbox. Untrash removes TRASH so the underlying Inbox membership becomes visible again.
+For acknowledged writes, the Engine records the Gmail history ID for each affected label. If the write response omits it, the Engine immediately reads the message with `messages.get` (`format=minimal`) and uses its history ID as the post-write checkpoint. Undo looks for label changes after that checkpoint, so expired pre-write history does not prevent Undo.
+
+Gmail has no conditional write for labels. Between the final read and the write, an owner can archive the message first, leaving AMC's Archive as a no-op. That race is accepted and Undo can restore Inbox in this case. When AMC needs the follow-up read, its checkpoint can also include owner edits made before that read. The write targets only explicit message IDs. A reply delivered after Archive's final read keeps its Inbox label and enters the replica through history sync. Trash adds the TRASH label and hides the message from Inbox. Untrash removes TRASH so the underlying Inbox membership becomes visible again.
 
 ### 4.5 Sending
 

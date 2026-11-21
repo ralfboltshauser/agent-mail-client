@@ -215,7 +215,7 @@ export class FakeGmail implements GmailApi {
     addLabelIds: string[],
     removeLabelIds: string[],
     beforeDispatch?: () => void,
-  ) {
+  ): Promise<GmailMessageState> {
     beforeDispatch?.()
     // Capture the acknowledgement at commit, before test hooks can interleave owner edits.
     const result = await this.batchModify([id], addLabelIds, removeLabelIds)
