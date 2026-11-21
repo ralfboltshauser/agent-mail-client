@@ -12,6 +12,7 @@ import {
   SNOOZED_LABEL,
   type ThreadSummary,
 } from '@amc/protocol'
+import type { OrganiseNotice } from '../shared/api'
 import { type EngineClient, EngineError } from './engine'
 import type { Replica } from './replica'
 
@@ -24,6 +25,7 @@ interface QueueRow {
   patch: string
   inverse: string
   superseded: string
+  messages: string | null
   status: 'unsent' | MutationResult['status']
   modseq: number | null
   error: string | null
@@ -75,7 +77,16 @@ function applyPatch(thread: ThreadSummary, messages: MessageDetail[], patch: Pat
     thread.labelIds = thread.labelIds.filter((id) => id !== `${prefix}INBOX`)
   }
   thread.inInbox =
-    !thread.muted && thread.snoozedUntil == null && thread.labelIds.includes(`${prefix}INBOX`)
+    !thread.muted &&
+    thread.snoozedUntil == null &&
+    (messages.length === thread.messageCount
+      ? messages.some(
+          (m) =>
+            m.labelIds.includes(`${prefix}INBOX`) &&
+            !m.labelIds.includes(`${prefix}TRASH`) &&
+            !m.labelIds.includes(`${prefix}SPAM`),
+        )
+      : thread.labelIds.includes(`${prefix}INBOX`) && !thread.labelIds.includes(`${prefix}TRASH`))
 }
 
 function patchesFor(
@@ -145,7 +156,29 @@ export class LocalOrganise {
       if (row) {
         threadId = row.thread_id ?? undefined
         patch = JSON.parse(row.inverse)
-        for (const id of JSON.parse(row.superseded) as string[]) delete patch.labels[id]
+        if (row.messages && (row.status === 'applied' || row.status === 'partial')) {
+          const outcomes = JSON.parse(row.messages) as NonNullable<MutationResult['messages']>
+          const forward = JSON.parse(row.patch) as Patch
+          const requested = Object.values(forward.labels)[0] ?? {}
+          patch.labels = Object.fromEntries(
+            outcomes
+              .filter((item) => item.appliedLabels.length)
+              .map(({ messageId, appliedLabels }) => [
+                messageId,
+                Object.fromEntries(
+                  appliedLabels
+                    .filter((label) => label in requested)
+                    .map((label) => [label, !requested[label]]),
+                ),
+              ]),
+          )
+          if (row.status === 'partial') {
+            delete patch.muted
+            delete patch.snoozedUntil
+          }
+        } else {
+          for (const id of JSON.parse(row.superseded) as string[]) delete patch.labels[id]
+        }
         if (patch.snoozedUntil && patch.snoozedUntil <= Date.now()) {
           patch.snoozedUntil = null
           for (const labels of Object.values(patch.labels)) {
@@ -245,13 +278,14 @@ export class LocalOrganise {
       for (const result of results) {
         this.#db
           .prepare(
-            'UPDATE organise_queue SET status = ?, modseq = ?, error = ?, superseded = ? WHERE id = ?',
+            'UPDATE organise_queue SET status = ?, modseq = ?, error = ?, superseded = ?, messages = ? WHERE id = ?',
           )
           .run(
             result.status,
             result.modseq,
             result.error,
             JSON.stringify(result.superseded ?? []),
+            result.messages ? JSON.stringify(result.messages) : null,
             result.id,
           )
       }
@@ -271,15 +305,36 @@ export class LocalOrganise {
     })
   }
 
-  errors(): { id: string; message: string; quiet?: boolean }[] {
+  errors(): OrganiseNotice[] {
     const rows = this.#db
       .prepare(
-        'SELECT id, error AS message FROM organise_queue WHERE error IS NOT NULL AND notified = 0 ORDER BY seq',
+        `UPDATE organise_queue SET notified = 1 WHERE notified = 0 AND error IS NOT NULL
+           AND (status != 'partial' OR modseq <= ?)
+         RETURNING id, error AS message, status, request, messages, thread_id, undo_of`,
       )
-      .all() as { id: string; message: string }[]
-    this.#db
-      .prepare('UPDATE organise_queue SET notified = 1 WHERE error IS NOT NULL AND notified = 0')
-      .run()
+      .all(this.replica.modseq ?? -1) as unknown as (QueueRow & {
+      message: string
+      undo_of: string | null
+    })[]
+    const failures = rows.map((row): OrganiseNotice => {
+      if (row.status !== 'partial' || !row.messages) return { id: row.id, message: row.message }
+      const outcomes = JSON.parse(row.messages) as NonNullable<MutationResult['messages']>
+      const applied = outcomes.filter((item) => item.status === 'applied').length
+      const failed = outcomes.filter((item) => item.status === 'failed').length
+      const { action } = JSON.parse(row.request) as MutationRequest
+      const verb = action.kind === 'archive' ? 'Archived' : 'Changed'
+      const message = failed
+        ? `${verb} ${applied} of ${outcomes.length}. ${failed} couldn't be changed`
+        : row.message
+      return {
+        id: row.id,
+        message,
+        undo:
+          row.thread_id && !row.undo_of && outcomes.some((item) => item.appliedLabels.length)
+            ? { kind: 'undo', threadId: row.thread_id, mutationId: row.id }
+            : undefined,
+      }
+    })
     const internal = this.#db.prepare('SELECT id, message FROM organise_notice').all() as {
       id: string
       message: string
@@ -294,7 +349,7 @@ export class LocalOrganise {
       )
       .all(this.replica.modseq ?? -1) as { id: string; error: string | null }[]
     return [
-      ...rows,
+      ...failures,
       ...internal,
       ...conflicts.map(({ id, error }) => ({
         id: error ? `${id}:superseded` : id,

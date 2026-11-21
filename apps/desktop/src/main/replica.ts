@@ -42,6 +42,9 @@ export class Replica {
     `)
     this.db.exec(ORGANISE_SCHEMA)
     const columns = this.db.prepare('PRAGMA table_info(organise_queue)').all()
+    if (!columns.some((column) => column.name === 'messages')) {
+      this.db.exec('ALTER TABLE organise_queue ADD COLUMN messages TEXT')
+    }
     if (!columns.some((column) => column.name === 'superseded')) {
       this.db.exec("ALTER TABLE organise_queue ADD COLUMN superseded TEXT NOT NULL DEFAULT '[]'")
     }

@@ -202,7 +202,10 @@ export class GmailHttpApi implements GmailApi {
       const thread = await this.#call<{ messages?: GmailMessage[] }>(
         `/threads/${encodeURIComponent(id)}`,
         {
-          params: { format: 'full', fields: 'messages(id,threadId,labelIds,internalDate)' },
+          params: {
+            format: 'full',
+            fields: 'messages(id,threadId,labelIds,internalDate,historyId)',
+          },
           cost: 'threadGet',
           urgent: true,
           writeback: true,

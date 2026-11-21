@@ -34,12 +34,22 @@ export type MutationRequest = z.infer<typeof MutationRequest>
 export const MutationBatch = z.object({ mutations: z.array(MutationRequest).min(1).max(100) })
 export const MutationLookup = z.object({ ids: z.array(id).min(1).max(100) })
 
+const MutationMessageResult = z.object({
+  messageId: z.string().min(1),
+  status: z.enum(['applied', 'superseded', 'failed']),
+  appliedLabels: z.array(z.string()),
+  supersededLabels: z.array(z.string()),
+  failedLabels: z.array(z.string()),
+})
+export type MutationMessageResult = z.infer<typeof MutationMessageResult>
+
 export const MutationResult = z.object({
   id,
   threadId: thread.shape.threadId,
-  status: z.enum(['pending', 'applied', 'failed']),
+  status: z.enum(['pending', 'applied', 'partial', 'failed']),
   error: z.string().nullable(),
   modseq: z.number().int().nonnegative(),
+  messages: z.array(MutationMessageResult).optional(),
   // Message IDs whose Gmail labels changed independently during the mutation.
   superseded: z.array(z.string().min(1)).optional(),
 })
@@ -72,7 +82,7 @@ export function actionLabels(
     case 'mute':
       return action.value ? system('INBOX', false) : {}
     case 'trash':
-      return { ...system('TRASH', action.value), ...(action.value ? system('INBOX', false) : {}) }
+      return system('TRASH', action.value)
     case 'read':
       return system('UNREAD', !action.value)
     case 'star':

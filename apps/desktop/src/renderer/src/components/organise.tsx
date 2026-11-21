@@ -34,6 +34,27 @@ type Control = {
   pressed?: boolean
 }
 
+const run = async (action: OrganiseAction, description: string) => {
+  try {
+    const id = await window.amc.organise(action)
+    if (action.kind === 'undo') toast('Undo queued')
+    else
+      toast(description, {
+        id,
+        duration: 7000,
+        action: {
+          label: 'Undo',
+          onClick: () => void run({ kind: 'undo', threadId: action.threadId, mutationId: id }, ''),
+        },
+      })
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message.replace(/^Error invoking remote method '[^']+': Error: /, '')
+        : 'Could not organise this Thread'
+    toast.error(message)
+  }
+}
 export function useOrganise(thread: ThreadSummary | null) {
   const [picker, setPicker] = useState<Picker | null>(null)
 
@@ -44,7 +65,14 @@ export function useOrganise(thread: ThreadSummary | null) {
         .then((errors) => {
           for (const notice of errors) {
             if (notice.quiet) toast(notice.message, { id: notice.id, action: undefined })
-            else toast.error(notice.message, { id: notice.id })
+            else if (notice.undo) {
+              const undo = notice.undo
+              toast.error(notice.message, {
+                id: notice.id,
+                duration: 7000,
+                action: { label: 'Undo', onClick: () => void run(undo, '') },
+              })
+            } else toast.error(notice.message, { id: notice.id })
           }
         })
         .catch(() => {})
@@ -53,28 +81,6 @@ export function useOrganise(thread: ThreadSummary | null) {
     return window.amc.onChanged(showErrors)
   }, [])
 
-  const run = async (action: OrganiseAction, description: string) => {
-    try {
-      const id = await window.amc.organise(action)
-      if (action.kind === 'undo') toast('Undo queued')
-      else
-        toast(description, {
-          id,
-          duration: 7000,
-          action: {
-            label: 'Undo',
-            onClick: () =>
-              void run({ kind: 'undo', threadId: action.threadId, mutationId: id }, ''),
-          },
-        })
-    } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message.replace(/^Error invoking remote method '[^']+': Error: /, '')
-          : 'Could not organise this Thread'
-      toast.error(message)
-    }
-  }
   const openPicker = (kind: Picker['kind'], thread: ThreadSummary, trigger?: HTMLElement) => {
     const active = document.activeElement
     setPicker({ kind, thread, trigger: trigger ?? (active instanceof HTMLElement ? active : null) })

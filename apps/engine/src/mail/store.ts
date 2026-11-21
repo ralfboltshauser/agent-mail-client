@@ -404,8 +404,15 @@ export class MailStore extends EventEmitter<{ change: [] }> {
     const labels = new Set<string>()
     const participants: Address[] = []
     const seen = new Set<string>()
+    const accountPrefix = tid.slice(0, tid.indexOf(':') + 1)
+    let inInbox = false
     for (const m of [...messages].reverse()) {
-      for (const l of JSON.parse(m.label_ids) as string[]) labels.add(l)
+      const messageLabels = JSON.parse(m.label_ids) as string[]
+      for (const label of messageLabels) labels.add(label)
+      inInbox ||=
+        messageLabels.includes(`${accountPrefix}INBOX`) &&
+        !messageLabels.includes(`${accountPrefix}TRASH`) &&
+        !messageLabels.includes(`${accountPrefix}SPAM`)
       const from = JSON.parse(m.from_json) as Address | null
       if (from && !seen.has(from.address.toLowerCase())) {
         seen.add(from.address.toLowerCase())
@@ -415,7 +422,6 @@ export class MailStore extends EventEmitter<{ change: [] }> {
     const first = messages[0]
     const last = messages[messages.length - 1]
     if (!first || !last) return
-    const accountPrefix = tid.slice(0, tid.indexOf(':') + 1)
 
     this.db
       .prepare(
@@ -431,7 +437,7 @@ export class MailStore extends EventEmitter<{ change: [] }> {
         messages.length,
         messages.reduce((n, m) => n + m.unread, 0),
         messages.some((m) => m.starred) ? 1 : 0,
-        labels.has(`${accountPrefix}INBOX`) ? 1 : 0,
+        Number(inInbox),
         messages.some((m) => m.files > 0) ? 1 : 0,
         JSON.stringify([...labels].sort()),
         last.sent_at,

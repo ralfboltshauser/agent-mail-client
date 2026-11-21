@@ -229,14 +229,14 @@ export const MIGRATIONS: readonly Migration[] = [
         thread_id     TEXT NOT NULL,
         request       TEXT NOT NULL,
         status        TEXT NOT NULL DEFAULT 'pending'
-                      CHECK (status IN ('pending', 'applied', 'failed')),
+                      CHECK (status IN ('pending', 'applied', 'partial', 'failed')),
         error         TEXT,
         modseq        INTEGER NOT NULL DEFAULT 0,
         attempts      INTEGER NOT NULL DEFAULT 0,
         next_attempt  INTEGER NOT NULL DEFAULT 0,
         progress      INTEGER NOT NULL DEFAULT 0,
-        rollback_error TEXT,
-        rollback_progress INTEGER NOT NULL DEFAULT 0,
+        prepared      INTEGER NOT NULL DEFAULT 0,
+        write_journal TEXT,
         state_patch   TEXT NOT NULL DEFAULT '{}',
         state_before  TEXT NOT NULL DEFAULT '{}',
         undo_of       TEXT REFERENCES mutation (id)
@@ -244,7 +244,7 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX mutation_pending ON mutation (account_id, seq) WHERE status = 'pending';
       CREATE INDEX mutation_thread_queue ON mutation (thread_id, status, seq);
       CREATE INDEX mutation_undo ON mutation (principal, thread_id, seq);
-      CREATE INDEX mutation_failures ON mutation (principal, modseq) WHERE status = 'failed';
+      CREATE INDEX mutation_failures ON mutation (principal, modseq) WHERE status IN ('failed', 'partial');
       CREATE UNIQUE INDEX mutation_undo_once ON mutation (undo_of) WHERE status != 'failed';
       CREATE TABLE mutation_message (
         mutation_id TEXT NOT NULL REFERENCES mutation (id) ON DELETE CASCADE,
@@ -254,25 +254,6 @@ export const MIGRATIONS: readonly Migration[] = [
         PRIMARY KEY (mutation_id, message_id)
       ) STRICT;
       CREATE INDEX mutation_message_by_message ON mutation_message (message_id, mutation_id);
-    `,
-  },
-  {
-    version: 5,
-    name: 'Gmail mutation baselines and compensation',
-    sql: `
-      ALTER TABLE mutation ADD COLUMN prepared INTEGER NOT NULL DEFAULT 0;
-      ALTER TABLE mutation ADD COLUMN rollback_plan TEXT;
-      -- Preserve the previous baseline for writes that may already have reached Gmail.
-      UPDATE mutation SET prepared = 2 WHERE status = 'pending'
-        AND (progress > 0 OR attempts > 0 OR rollback_error IS NOT NULL);
-    `,
-  },
-  {
-    version: 6,
-    name: 'Guarded Gmail write journal',
-    sql: `
-      ALTER TABLE mutation ADD COLUMN write_journal TEXT;
-      ALTER TABLE mutation ADD COLUMN superseded TEXT NOT NULL DEFAULT '[]';
     `,
   },
 ]

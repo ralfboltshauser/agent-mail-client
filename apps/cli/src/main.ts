@@ -194,6 +194,11 @@ async function organise(action: OrganiseAction) {
   }
   if (!result) throw new Error(`Mutation status missing for ${id}`)
   if (result.status === 'failed') throw new Error(result.error ?? 'Gmail writeback failed')
+  if (result.status === 'partial') {
+    printJson(result)
+    process.exitCode = 1
+    return
+  }
   console.log(`${result.status === 'applied' ? 'Applied' : 'Queued'} · ${id}`)
 }
 
@@ -243,7 +248,8 @@ program
     })
     if (!mutations.length) throw new Error('Unknown mutation')
     printJson(mutations[0])
-    if (mutations[0]?.status === 'failed') process.exitCode = 1
+    if (mutations[0]?.status === 'failed' || mutations[0]?.status === 'partial')
+      process.exitCode = 1
   })
 
 const token = program.command('token').description('Tokens for Agents (MCP)')

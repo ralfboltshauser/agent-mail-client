@@ -96,6 +96,55 @@ describe('desktop Organise outbox', () => {
     }
   })
 
+  it('announces a partial Archive after sync and queues Undo only for acknowledged labels', () => {
+    const replica = new Replica(':memory:')
+    try {
+      seed(replica)
+      replica.put('thread', { ...THREAD, messageCount: 4 })
+      for (const id of ['1', '2', '3', '4']) replica.put('message', message(id, ['account:INBOX']))
+      const id = replica.organise.enqueue({ kind: 'archive', threadId: THREAD.id })
+      replica.organise.resolve(
+        MutationResponse.parse({
+          mutations: [
+            {
+              id,
+              threadId: THREAD.id,
+              status: 'partial',
+              modseq: 20,
+              error: 'Gmail refused the change (HTTP 403)',
+              messages: ['1', '2', '3', '4'].map((messageId) => ({
+                messageId: `account:${messageId}`,
+                status: messageId === '4' ? 'failed' : 'applied',
+                appliedLabels: messageId === '4' ? [] : ['account:INBOX'],
+                supersededLabels: [],
+                failedLabels: messageId === '4' ? ['account:INBOX'] : [],
+              })),
+            },
+          ],
+        }).mutations,
+      )
+      expect(replica.organise.errors()).toEqual([])
+      for (const id of ['1', '2', '3']) replica.put('message', message(id, []))
+      replica.modseq = 20
+      replica.organise.rebuild()
+      const action = { kind: 'undo', mutationId: id, threadId: THREAD.id } as const
+      expect(replica.organise.errors()).toEqual([
+        { id, message: "Archived 3 of 4. 1 couldn't be changed", undo: action },
+      ])
+      expect(replica.organise.errors()).toEqual([])
+      const undo = replica.organise.enqueue(action)
+      expect(replica.organise.unsent()).toMatchObject({ id: undo, action })
+      const stored = replica.db.prepare('SELECT patch FROM organise_queue WHERE id = ?').get(undo)
+      expect(JSON.parse(String(stored?.patch)).labels).toEqual({
+        'account:1': { 'account:INBOX': true },
+        'account:2': { 'account:INBOX': true },
+        'account:3': { 'account:INBOX': true },
+      })
+    } finally {
+      replica.db.close()
+    }
+  })
+
   it('accepts non-UUID superseded message IDs and notices once when Engine truth arrives', () => {
     const replica = new Replica(':memory:')
     try {
@@ -206,7 +255,7 @@ describe('desktop Organise outbox', () => {
     }
   })
 
-  it('reveals the synced compensation and reports a refusal once', () => {
+  it('reveals the reconciled Gmail state and reports a refusal once', () => {
     const replica = new Replica(':memory:')
     try {
       seed(replica)

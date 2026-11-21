@@ -25,6 +25,10 @@ export class FakeGmail implements GmailApi {
   ]
   #history: GmailHistoryRecord[] = []
   #historyId = 1000
+  readonly lastWriter = new Map<
+    string,
+    Map<string, { writer: 'owner' | 'amc'; revision: number }>
+  >()
   /** History older than this id is "expired" (Gmail answers 404). */
   oldestHistory = 0
   calls = { getMessage: 0, list: 0 }
@@ -33,6 +37,7 @@ export class FakeGmail implements GmailApi {
   afterThreadRead: (() => void) | undefined
   onRead: ((snapshot: ReadonlyMap<string, readonly string[]>) => void) | undefined
   beforeWrite: ((write: FakeGmailWrite) => void) | undefined
+  beforeAmcLabelChange: ((id: string, label: string, present: boolean) => void) | undefined
   afterLabelRead: (() => Promise<void>) | undefined
 
   add(
@@ -65,29 +70,58 @@ export class FakeGmail implements GmailApi {
       },
     }
     this.messages.set(id, message)
+    this.lastWriter.set(
+      id,
+      new Map(
+        (message.labelIds ?? []).map((label) => [
+          label,
+          { writer: 'owner', revision: this.#historyId + 7 },
+        ]),
+      ),
+    )
     this.#record({
       messagesAdded: [{ message: { id, threadId: message.threadId, labelIds: message.labelIds } }],
     })
+    message.historyId = String(this.#historyId)
     return message
   }
 
   setLabels(id: string, labels: string[]) {
-    const m = this.messages.get(id)
-    if (!m) throw new Error(`no message ${id}`)
-    m.labelIds = labels
+    this.#setLabels(id, labels, 'owner')
+  }
+
+  #setLabels(id: string, labels: string[], writer: 'owner' | 'amc') {
+    const message = this.messages.get(id)
+    if (!message) throw new Error(`no message ${id}`)
+    const previous = message.labelIds ?? []
+    const added = labels.filter((label) => !previous.includes(label))
+    const removed = previous.filter((label) => !labels.includes(label))
+    if (!added.length && !removed.length) return
+    if (writer === 'amc') {
+      for (const label of added) this.beforeAmcLabelChange?.(id, label, true)
+      for (const label of removed) this.beforeAmcLabelChange?.(id, label, false)
+    }
+    message.labelIds = labels
+    const reference = { id, threadId: message.threadId }
     this.#record({
-      labelsAdded: [{ message: { id, threadId: m.threadId, labelIds: labels }, labelIds: [] }],
+      ...(added.length ? { labelsAdded: [{ message: reference, labelIds: added }] } : {}),
+      ...(removed.length ? { labelsRemoved: [{ message: reference, labelIds: removed }] } : {}),
     })
+    message.historyId = String(this.#historyId)
+    const writers = this.lastWriter.get(id)
+    for (const label of [...added, ...removed])
+      writers?.set(label, { writer, revision: this.#historyId })
   }
 
   remove(id: string) {
     const m = this.messages.get(id)
     this.messages.delete(id)
+    this.lastWriter.delete(id)
     if (m) this.#record({ messagesDeleted: [{ message: { id, threadId: m.threadId } }] })
   }
 
   #record(record: Omit<GmailHistoryRecord, 'id'>) {
-    this.#historyId++
+    this.#historyId += 7
     this.#history.push({ id: String(this.#historyId), ...record })
   }
 
@@ -107,7 +141,13 @@ export class FakeGmail implements GmailApi {
   async listMessages(options: { pageToken?: string; q?: string; maxResults?: number }) {
     this.calls.list++
     const all = [...this.messages.values()]
-      .filter((m) => !options.q || m.labelIds?.includes('INBOX'))
+      .filter(
+        (m) =>
+          !options.q ||
+          (m.labelIds?.includes('INBOX') &&
+            !m.labelIds.includes('TRASH') &&
+            !m.labelIds.includes('SPAM')),
+      )
       .sort((a, b) => Number(b.internalDate) - Number(a.internalDate))
     const start = Number(options.pageToken ?? 0)
     const size = options.maxResults ?? 500
@@ -153,9 +193,11 @@ export class FakeGmail implements GmailApi {
     for (const id of failure ? ids.slice(0, failure.applied) : ids) {
       const labels = this.messages.get(id)?.labelIds
       if (labels)
-        this.setLabels(id, [
-          ...new Set([...labels.filter((l) => !removeLabelIds.includes(l)), ...addLabelIds]),
-        ])
+        this.#setLabels(
+          id,
+          [...new Set([...labels.filter((l) => !removeLabelIds.includes(l)), ...addLabelIds])],
+          'amc',
+        )
     }
     if (failure) throw failure.error
   }
@@ -168,10 +210,8 @@ export class FakeGmail implements GmailApi {
     const message = this.messages.get(id)
     if (!message) throw new GmailHttpError(404, 'notFound', 'Message no longer exists')
     const labels = message.labelIds ?? []
-    const next = trashed
-      ? [...new Set([...labels.filter((l) => l !== 'INBOX'), 'TRASH'])]
-      : labels.filter((l) => l !== 'TRASH')
-    this.setLabels(id, next)
+    const next = trashed ? [...new Set([...labels, 'TRASH'])] : labels.filter((l) => l !== 'TRASH')
+    this.#setLabels(id, next, 'amc')
     if (failure) throw failure.error
     return next
   }

@@ -52,13 +52,20 @@ export interface SyncStatus {
 }
 
 /** Everything the renderer may ask of the main process. Exposed as `window.amc`. */
+export interface OrganiseNotice {
+  id: string
+  message: string
+  quiet?: boolean
+  undo?: Extract<OrganiseAction, { kind: 'undo' }>
+}
+
 export interface AmcApi {
   pair(engineUrl: string, code: string): Promise<void>
   unpair(): Promise<void>
   status(): Promise<SyncStatus>
   syncNow(): Promise<void>
   organise(action: OrganiseAction): Promise<string>
-  organiseErrors(): Promise<{ id: string; message: string; quiet?: boolean }[]>
+  organiseErrors(): Promise<OrganiseNotice[]>
 
   accounts(): Promise<AccountSummary[]>
   labels(accountId: string | null): Promise<Label[]>

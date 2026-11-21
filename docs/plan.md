@@ -106,27 +106,13 @@ The root NVMe disk is at **97%** (7.5 GB free), and `/srv` is a 1.8 TB spinning 
 
 1. A Client sends `POST /mutations` with a batch of `{id, kind, args}` (archive, label, read, star, trash, snooze, mute, draft edits, send).
 2. The Engine applies the batch locally in one transaction. That bumps `modseq` and logs the changes, so every other Client sees the result at once.
-3. A per-Account writeback queue applies it at the provider (Gmail `modify`; IMAP `STORE`/`MOVE`), with retries and backoff.
-4. If the provider refuses permanently, a compensating change reverts the local state and the error shows in the desktop app. Nothing fails silently.
+3. The per-Account queue writes one Gmail message at a time and reads the current labels before each write or retry. The write contains only the labels whose values still match the mutation's baseline.
+4. If Gmail permanently refuses a message, the queue continues with the other messages. The Engine reads Gmail again and replaces the optimistic projection with the provider's labels. Successful Gmail writes stay in place.
+5. A partial result reports the applied, superseded, and failed labels by message. The desktop shows the count and offers Undo for acknowledged changes. Undo is a user action that checks current Gmail labels and inverts only acknowledged deltas that still match. A change to one label leaves the outcome for other labels on the same message intact.
 
-Every Gmail label write uses a fresh read immediately before dispatch. Forward writes,
-undo, and compensation send only the label changes whose current values match what
-that mutation last observed or wrote. A mismatched label is left alone and the
-message ID appears in the mutation result as superseded. Supersession itself does
-not produce an error toast. The write journal records attempted and acknowledged
-deltas. Saved compensation keeps its expected values and rechecks them after a
-restart. Checkpoints from before the journal that may have sent a write require
-reconciliation with Gmail before any further action on that mutation.
+Before dispatch, the Engine records the requested delta and the message's Gmail history ID. If the response could have been lost after Gmail committed the write, the queue reads again before any retry. A matching history ID permits a retry. If the history ID changed or is unavailable, the Engine leaves the uncertain labels alone and excludes them from Undo because Gmail cannot attribute the change to AMC.
 
-Gmail has no compare-and-swap for labels. AMC accepts the read-to-write latency
-window, including the case where an independent edit sets the same value and Gmail
-cannot attribute the change to either writer. A reply delivered after the thread
-read keeps its Inbox label. Normal history sync brings the reply into the replica.
-
-Engine-side features that providers lack:
-- **Snooze:** remove from Inbox, add the `AMC/Snoozed` Label, return at the chosen time or on the "no reply by" condition.
-- **Mute:** new replies skip the Inbox and Interrupts.
-- **Send-later** and **undo-send:** the outbox holds the message until its send time. The default undo window is 10 seconds.
+Gmail has no conditional write for labels. The final read leaves a window in which the owner can edit the same label before dispatch. The write targets only explicit message IDs. A reply delivered after Archive's final read keeps its Inbox label and enters the replica through history sync. Trash adds the TRASH label and hides the message from Inbox. Untrash removes TRASH so the underlying Inbox membership becomes visible again.
 
 ### 4.5 Sending
 
