@@ -20,9 +20,10 @@ const Decisions = z.object({
   decisions: z.array(BucketInput.extend({ bucket: Bucket })).max(BATCH_SIZE),
 })
 // Claude's structured output supports the shape and enum. AMC validates lengths locally.
-const ModelDecisions = z.object({
+export const ModelDecisions = z.object({
   decisions: z.array(z.object({ threadId: z.string(), bucket: Bucket, reason: z.string() })),
 })
+export const triageJsonSchema = z.toJSONSchema(ModelDecisions, { target: 'draft-7' })
 const ListedThreads = z.array(z.object({ id: z.string() }).passthrough())
 const TOOL_NAMES = ['list_untriaged', 'get_thread'] as const
 
@@ -99,7 +100,7 @@ export async function runTriage(
           typeof AMC_TRIAGE_PROMPT === 'string'
             ? AMC_TRIAGE_PROMPT
             : readFileSync(new URL('../prompts/triage.md', import.meta.url), 'utf8'),
-        schema: z.toJSONSchema(ModelDecisions),
+        schema: triageJsonSchema,
         signal,
         allowReads: forwarder.allowReads,
       })

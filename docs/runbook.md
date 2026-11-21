@@ -91,16 +91,78 @@ its reply body. The Composer Link in the prompt lasts up to two hours. A new han
 the same Thread revokes both previous credentials. Sending or deleting the draft also
 revokes its Composer Link. Review and send the reply from AMC desktop.
 
+## IMAP Draft replacements
+
+If another client replaces a draft with a new UID, AMC can show the replacement
+as a separate draft and retain the previous AMC copy with a mirror conflict.
+Compare both drafts before sending, and keep the version you want in the
+composer. After a UIDVALIDITY reset, a reused UID can refer to a different
+draft and AMC imports it independently.
+
 ## Rolling back
 
-`pnpm deploy:host` rolls back by itself when the new release fails to migrate or to become healthy. To go back by hand:
+`pnpm deploy:host` rolls back by itself when the new release fails to migrate or
+to become healthy.
+
+Before switching to a release that predates the M9 `backup` command, disable
+`amc-backup.timer` and let any running `amc-backup.service` finish:
+
+```sh
+sudo systemctl disable --now amc-backup.timer
+systemctl is-active amc-backup.service
+```
+
+Wait until the backup service is inactive before changing the release. To
+switch releases by hand:
 
 ```sh
 ls -1t /opt/amc/releases
 sudo ln -sfn /opt/amc/releases/<sha> /opt/amc/current && sudo systemctl restart amc-engine
 ```
 
+After the Engine is healthy on an M9-compatible release, run
+`sudo systemctl enable --now amc-backup.timer` and check
+`systemctl list-timers amc-backup.timer`. On older Engines, `amc doctor` reports
+that backup status is unavailable.
+
 A migration that already ran is not undone by a rollback. Restore the `pre-migrate-*.db` copy from `/srv/amc/backups` with the Engine stopped.
+
+## Recovering an unreleased Organise preview database
+
+The unreleased Organise preview at `8926c99` recorded Organise as schema v4.
+Released history uses v4 for IMAP message locations. A preview database without
+`imap_location` cannot apply the current v5 migration.
+
+Stop the preview Engine and preserve its database and any matching `-wal` and
+`-shm` files together. Run this against a copy:
+
+```sh
+sqlite3 -readonly /path/to/preview-copy.db <<'SQL'
+PRAGMA user_version;
+SELECT name FROM sqlite_schema
+WHERE type = 'table' AND name IN ('mutation', 'mutation_message', 'imap_location');
+SQL
+```
+
+A schema version of `4`, with `mutation` and `mutation_message` present and
+`imap_location` absent, identifies this preview. If `schema_migration` exists,
+its v4 entry is `organise`. A released v4 database has `imap_location`.
+
+Start the current Engine with a fresh database in a separate data directory,
+reconnect the provider Accounts and let them sync. Provider-side changes that
+already landed will come back through sync. To save preview-only draft text and
+envelopes, export them from the copy and recreate those drafts manually:
+
+```sh
+umask 077
+sqlite3 -readonly -json /path/to/preview-copy.db \
+  'SELECT account_id, thread_id, to_json, cc_json, bcc_json, subject, body_text FROM draft' \
+  > preview-drafts.json
+```
+
+Keep the original and the export private. Pending mutations and Engine-only
+Organise state need to be reapplied by hand. Leave the preview's schema version
+and migration records intact.
 
 ## Backups and restore
 

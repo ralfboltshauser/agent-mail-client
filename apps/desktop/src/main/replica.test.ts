@@ -2,10 +2,10 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { Replica } from './replica'
 
-it('preserves text around embedded NULs for legacy rows and new body upserts', () => {
+it('splits legacy bodies off the read path and preserves text around embedded NULs', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'amc-replica-'))
   const path = join(dir, 'replica.sqlite')
   const bodyText = 'before 🌱\0after 東京'
@@ -26,6 +26,11 @@ it('preserves text around embedded NULs for legacy rows and new body upserts', (
 
     const replica = new Replica(path)
     try {
+      expect(replica.messageText(message.id)).toBe(bodyText)
+      const row = replica.db.prepare('SELECT data, body_text IS NULL AS legacy FROM message')
+      expect(row.get()?.legacy).toBe(1)
+      await vi.waitFor(() => expect(row.get()?.legacy).toBe(0))
+      expect(JSON.parse(String(row.get()?.data))).not.toHaveProperty('bodyText')
       expect(replica.messageText(message.id)).toBe(bodyText)
       const updated = `${bodyText}\0updated`
       replica.put('message', { ...message, bodyText: updated } as Parameters<

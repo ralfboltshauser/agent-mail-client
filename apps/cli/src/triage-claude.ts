@@ -7,6 +7,29 @@ import type { TriageHarness } from './triage.ts'
 
 export class ClaudeAuthError extends Error {}
 
+const RESULT_ERRORS = new Set([
+  'error_during_execution',
+  'error_max_turns',
+  'error_max_budget_usd',
+  'error_max_structured_output_retries',
+])
+
+type ClaudeEvent = {
+  type?: string
+  subtype?: string
+  tools?: unknown
+  is_error?: boolean
+  structured_output?: unknown
+  error?: { message?: unknown } | string
+  message?: unknown
+  errors?: unknown
+  result?: unknown
+}
+
+function errorText(value: unknown): string | undefined {
+  return typeof value === 'string' ? value.trim() || undefined : undefined
+}
+
 export const runClaude: TriageHarness = async ({
   url,
   bearer,
@@ -102,7 +125,7 @@ export const runClaude: TriageHarness = async ({
         '--',
         prompt,
       ],
-      { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'ignore'] },
+      { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] },
     )
 
     const stopped = new Promise<number | null>((resolve, reject) => {
@@ -121,14 +144,28 @@ export const runClaude: TriageHarness = async ({
     }
     signal.addEventListener('abort', stop, { once: true })
     if (signal.aborted) stop()
+    let inventoryAccepted = false
+    let stderr = ''
+    const diagnosticLimit = 2_000
+    child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
+      if (!inventoryAccepted && stderr.length < diagnosticLimit)
+        stderr += chunk.slice(0, diagnosticLimit - stderr.length)
+    })
     try {
-      let inventoryAccepted = false
       let result: unknown
+      let startupError: string | undefined
+      let resultError: string | undefined
       const allowed = new Set([...tools, 'StructuredOutput'])
       for await (const line of createInterface({ input: child.stdout })) {
-        const event = JSON.parse(line)
-        if (event.type === 'system' && event.subtype === 'init') {
-          const names: string[] = event.tools
+        let event: ClaudeEvent | null
+        try {
+          event = JSON.parse(line)
+        } catch {
+          // Some CLI failures use plain text instead of stream-json.
+          continue
+        }
+        if (event?.type === 'system' && event.subtype === 'init') {
+          const names = event.tools
           if (
             !Array.isArray(names) ||
             names.length !== allowed.size ||
@@ -139,12 +176,35 @@ export const runClaude: TriageHarness = async ({
           inventoryAccepted = true
           allowReads()
         }
-        if (event.type === 'result' && event.is_error === false) result = event.structured_output
+        if (event?.type === 'error' && !inventoryAccepted)
+          startupError =
+            errorText(typeof event.error === 'object' ? event.error?.message : event.error) ??
+            errorText(event.message)
+        if (event?.type === 'result') {
+          if (event.is_error === false) result = event.structured_output
+          if (event.is_error === true) {
+            // Once reads are enabled, free-form errors can echo model or tool input.
+            if (!inventoryAccepted)
+              startupError =
+                (Array.isArray(event.errors)
+                  ? event.errors.map(errorText).filter(Boolean).join('; ')
+                  : undefined) ||
+                errorText(event.result) ||
+                startupError
+            if (event.subtype && RESULT_ERRORS.has(event.subtype)) resultError = event.subtype
+          }
+        }
       }
       const code = await stopped
       signal.throwIfAborted()
-      if (code !== 0 || !inventoryAccepted || result === undefined)
+      if (code !== 0 || !inventoryAccepted || result === undefined) {
+        const detail = startupError ?? errorText(stderr) ?? resultError
+        if (detail)
+          throw new Error(
+            `Claude Code triage failed: ${detail.replaceAll(bearer, '[redacted]').slice(0, diagnosticLimit)}`,
+          )
         throw new Error('Claude Code did not return triage decisions')
+      }
       return result
     } finally {
       signal.removeEventListener('abort', stop)

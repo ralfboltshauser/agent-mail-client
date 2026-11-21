@@ -41,8 +41,8 @@ let notificationSettings = DEFAULT_NOTIFICATION_SETTINGS
 let notifications: NewMailNotifications | null = null
 let threadNavigationReady = false
 let pendingThreadId: string | null = null
-const startedAt = Date.now()
 const notificationSettingsFile = () => join(app.getPath('userData'), 'notifications.json')
+let handoff: Handoff
 
 const UNPAIRED: SyncStatus = {
   phase: 'unpaired',
@@ -88,6 +88,7 @@ function createOrganise(client: EngineClient, loop?: SyncLoop) {
 
 function connect(engineUrl: string, token: string) {
   engine = new EngineClient(engineUrl, token)
+  recoverHandoffs(engine)
   if (existsSync(pauseFile())) {
     organise = createOrganise(engine)
     pausedStatus = { ...UNPAIRED, phase: 'paused', engineUrl }
@@ -98,12 +99,19 @@ function connect(engineUrl: string, token: string) {
   refreshTray()
 }
 
+function recoverHandoffs(client: EngineClient) {
+  if (engine !== client) return
+  void handoff.recover(client).catch(() => {
+    setTimeout(() => recoverHandoffs(client), 10_000).unref()
+  })
+}
+
 function startSync(client: EngineClient) {
   pausedStatus = null
   const updates = openReplica().draftUpdates
   const recovering = updates.flush(client)
   draftRecovery = recovering
-  const loop = new SyncLoop(client, openReplica(), startedAt)
+  const loop = new SyncLoop(client, openReplica())
   if (notifications) loop.on('newMail', (messages) => notifications?.add(messages))
   sync = loop
   organise = createOrganise(client, loop)
@@ -248,7 +256,7 @@ async function pair(engineUrl: string, code: string) {
 }
 
 function registerComposeIpc() {
-  const handoff = new Handoff()
+  handoff = new Handoff(openReplica().db)
   ipcMain.handle('amc:savedT3Url', () => savedT3Url())
   ipcMain.handle('amc:t3Projects', (_e, address: string) => t3Projects(address))
   ipcMain.handle(
@@ -264,12 +272,20 @@ function registerComposeIpc() {
       const link = thread.link && t3NavigationLink(thread.link)
       if (link) void shell.openExternal(link).catch(() => {})
 
+      broadcast('amc:changed')
       return draft
     },
   )
   ipcMain.handle('amc:cancelHandoff', (_e, projectId: string, threadId: string) =>
     handoff.cancel(requireEngine(), projectId, threadId),
   )
+  ipcMain.handle('amc:activeHandoff', (_e, threadId: string) =>
+    handoff.active(requireEngine(), threadId),
+  )
+  ipcMain.handle('amc:endHandoff', async (_e, id: string) => {
+    await handoff.end(requireEngine(), id)
+    broadcast('amc:changed')
+  })
   const compose = '/v1/compose'
   const draftPath = composeDraftPath
   const signaturePath = (id: string) => `${compose}/signature/${encodeURIComponent(id)}`
