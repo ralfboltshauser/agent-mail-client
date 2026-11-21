@@ -627,6 +627,59 @@ describe('Gmail Organise writeback', () => {
     })
   })
 
+  it.each([false, true])(
+    'wakes a self-sent thread after Archive, Undo and sync unless the owner handled it (%s)',
+    async (ownerHandled) => {
+      await withFixture(async ({ gmail, queue, sync, thread, submit, advance, now }) => {
+        gmail.remove('m1')
+        gmail.remove('m2')
+        gmail.add('self', {
+          threadId: 'thread',
+          from: gmail.address,
+          labels: ['INBOX', 'SENT'],
+        })
+        await sync.incremental()
+
+        const archive = submit({ kind: 'archive', threadId: THREAD })
+        await queue.tick()
+        expect(await gmail.getMessageLabels('self')).toEqual(['SENT'])
+        submit({ kind: 'undo', mutationId: archive.id })
+        await queue.tick()
+        await sync.incremental()
+        expect(thread()?.inInbox).toBe(true)
+
+        const modify = gmail.modifyMessage.bind(gmail)
+        const writes = vi.spyOn(gmail, 'modifyMessage').mockImplementationOnce(async (...args) => {
+          const result = await modify(...args)
+          // A follow-up message read can have a newer revision than the Inbox removal.
+          gmail.setLabels('self', ['SENT', 'STARRED'])
+          if (ownerHandled) flipAwayAndBack(gmail, 'self', 'INBOX')
+          return { labelIds: result.labelIds }
+        })
+        const until = now() + 120_000
+        submit({ kind: 'snooze', threadId: THREAD, until })
+        await queue.tick()
+        expect(thread()).toMatchObject({ inInbox: false, snoozedUntil: until })
+        await sync.incremental()
+
+        advance(120_000)
+        await queue.tick()
+        expect(thread()).toMatchObject({ inInbox: !ownerHandled, snoozedUntil: null })
+        expect(await gmail.getMessageLabels('self')).toEqual(
+          ownerHandled ? ['SENT', 'STARRED'] : ['SENT', 'STARRED', 'INBOX'],
+        )
+        expect(writes.mock.calls).toEqual(
+          ownerHandled
+            ? [['self', [], ['INBOX']]]
+            : [
+                ['self', [], ['INBOX']],
+                ['self', ['INBOX'], []],
+              ],
+        )
+      })
+    },
+  )
+
   it('consumes a Snooze after the owner restores and archives it before the deadline', async () => {
     await withFixture(async ({ gmail, queue, sync, thread, submit, advance, now }) => {
       submit({ kind: 'snooze', threadId: THREAD, until: now() + 1000 })
