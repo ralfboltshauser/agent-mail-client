@@ -16,9 +16,11 @@ import type { SyncStatus, ThreadQuery } from '../shared/api'
 import { clearPairing, loadPairing, savePairing } from './auth'
 import { composeDraftPath } from './draft-updates'
 import { EngineClient, EngineError } from './engine'
+import { Handoff, t3NavigationLink } from './handoff'
 import { OrganiseSync } from './organise'
 import { Replica } from './replica'
 import { SyncLoop } from './sync'
+import { launchInT3, savedT3Url, t3Projects } from './t3'
 import { createTray } from './tray'
 
 let window: BrowserWindow | null = null
@@ -215,6 +217,28 @@ async function pair(engineUrl: string, code: string) {
 }
 
 function registerComposeIpc() {
+  const handoff = new Handoff()
+  ipcMain.handle('amc:savedT3Url', () => savedT3Url())
+  ipcMain.handle('amc:t3Projects', (_e, address: string) => t3Projects(address))
+  ipcMain.handle(
+    'amc:handoff',
+    async (_e, address: string, projectId: string, threadId: string) => {
+      await draftRecovery
+      const { draft, thread } = await handoff.launch(
+        requireEngine(),
+        projectId,
+        threadId,
+        (request) => launchInT3(address, request),
+      )
+      const link = thread.link && t3NavigationLink(thread.link)
+      if (link) void shell.openExternal(link).catch(() => {})
+
+      return draft
+    },
+  )
+  ipcMain.handle('amc:cancelHandoff', (_e, projectId: string, threadId: string) =>
+    handoff.cancel(requireEngine(), projectId, threadId),
+  )
   const compose = '/v1/compose'
   const draftPath = composeDraftPath
   const signaturePath = (id: string) => `${compose}/signature/${encodeURIComponent(id)}`

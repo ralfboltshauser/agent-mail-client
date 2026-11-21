@@ -8,6 +8,10 @@ const invoke =
     ipcRenderer.invoke(`amc:${channel}`, ...args)
 
 const api: AmcApi = {
+  savedT3Url: invoke('savedT3Url') as AmcApi['savedT3Url'],
+  t3Projects: invoke('t3Projects') as AmcApi['t3Projects'],
+  handoff: invoke('handoff') as AmcApi['handoff'],
+  cancelHandoff: invoke('cancelHandoff') as AmcApi['cancelHandoff'],
   pair: invoke('pair') as AmcApi['pair'],
   unpair: invoke('unpair') as AmcApi['unpair'],
   status: invoke('status') as AmcApi['status'],

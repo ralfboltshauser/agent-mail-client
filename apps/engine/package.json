@@ -10,9 +10,12 @@
   "dependencies": {
     "@amc/composer": "workspace:*",
     "@amc/protocol": "workspace:*",
+    "@hocuspocus/provider": "^4.9.0",
+    "@hocuspocus/server": "^4.9.0",
     "@hono/node-server": "^1.19.5",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@tiptap/core": "^3.35.0",
+    "@tiptap/extension-collaboration": "^3.35.0",
     "@tiptap/html": "^3.35.0",
     "@tiptap/y-tiptap": "^3.3.1",
     "hono": "^4.10.1",
@@ -21,10 +24,12 @@
     "mailparser": "^3.15.0",
     "nodemailer": "^10.6.1",
     "pino": "^10.0.0",
+    "ws": "^8.23.0",
     "yjs": "^13.6.33",
     "zod": "^4.1.12"
   },
   "devDependencies": {
+    "@types/ws": "^8.18.2",
     "esbuild": "^0.25.11"
   }
 }

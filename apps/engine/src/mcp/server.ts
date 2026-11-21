@@ -8,6 +8,7 @@ import {
 } from '@amc/protocol'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
+import { handoffGrant } from '../auth/handoff.ts'
 import { type Principal, withinAccount } from '../auth/tokens.ts'
 import type { Db } from '../db/database.ts'
 import {
@@ -18,7 +19,7 @@ import {
   setBucketAsAgent,
   threadAccount,
 } from '../mail/agent-actions.ts'
-import { DraftError, type Drafts, searchContacts } from '../mail/drafts.ts'
+import { DraftError, DraftRevisionConflict, type Drafts, searchContacts } from '../mail/drafts.ts'
 import type { Mutations } from '../mail/mutations.ts'
 import type { MailQueries } from '../mail/queries.ts'
 import type { MailStore } from '../mail/store.ts'
@@ -46,6 +47,19 @@ function json(value: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(value, null, 1) }] }
 }
 
+function draftFailure(error: DraftError, read: boolean) {
+  if (!(error instanceof DraftRevisionConflict)) return failure(error.message)
+  return {
+    ...json({
+      error: 'conflict',
+      message: error.message,
+      revision: error.revision,
+      ...(read ? { body: error.body } : {}),
+    }),
+    isError: true,
+  }
+}
+
 function failure(message: string) {
   return { content: [{ type: 'text' as const, text: message }], isError: true }
 }
@@ -56,13 +70,15 @@ function failure(message: string) {
  * here at all; sending stays with the owner.
  */
 export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
+  const handoff = principal.kind === 'agent' && Boolean(principal.threadId)
   const server = new McpServer(
     { name: 'amc', version: VERSION },
     {
-      instructions:
-        "AMC is the owner's mail. You can read Threads, search the entire history, look up contacts, " +
-        'and write drafts that appear in Gmail for the owner to review. You cannot send mail. ' +
-        'To reply, call create_draft with the thread_id; recipients, subject and threading are filled in.',
+      instructions: handoff
+        ? 'Read the assigned Thread and update the draft body using its current revision.'
+        : "AMC is the owner's mail. You can read Threads, search the entire history, look up contacts, " +
+          'and write drafts that appear in Gmail for the owner to review. You cannot send mail. ' +
+          'To reply, call create_draft with the thread_id; recipients, subject and threading are filled in.',
     },
   )
   const can = (scope: Scope) => hasScope(principal.scopes, scope)
@@ -70,6 +86,12 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
   const agent = principal.kind === 'agent' ? principal : undefined
   const accountId = agent?.accountId
   const draftOptions = accountId ? { accountId } : {}
+
+  if (principal.kind === 'composer') return server
+  if (handoff) {
+    registerHandoffTools(server, principal, deps)
+    return server
+  }
 
   server.registerTool(
     'whoami',
@@ -272,9 +294,9 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
       },
       async ({ draft_id }) => {
         const draft = drafts.get(draft_id)
-        return draft && withinAccount(principal, draft.accountId)
-          ? json(draft)
-          : failure(`No draft ${draft_id}`)
+        if (!draft || !withinAccount(principal, draft.accountId))
+          return failure(`No draft ${draft_id}`)
+        return json(draft)
       },
     )
   }
@@ -406,6 +428,16 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
           bcc: z.array(AddressInput).optional(),
           subject: z.string().optional(),
           body: z.string().optional(),
+          ...(agent
+            ? {
+                revision: z
+                  .number()
+                  .int()
+                  .nonnegative()
+                  .optional()
+                  .describe('Required for body edits. Use the revision returned by AMC.'),
+              }
+            : {}),
         },
         annotations: { destructiveHint: false },
       },
@@ -421,6 +453,8 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
               (can('read') || agentCreatedDraft(db, agent, a.draft_id)))
           const write = () => {
             if (!allowed) throw new DraftError('Draft unavailable to this Agent')
+            if (agent && a.body !== undefined && a.revision === undefined)
+              throw new DraftError('Pass the revision returned by AMC when editing a draft body')
             return drafts.update(
               a.draft_id,
               {
@@ -431,6 +465,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
                 ...(a.body !== undefined ? { body: a.body } : {}),
               },
               principal.name,
+              agent ? a.revision : undefined,
             )
           }
           return json(
@@ -445,7 +480,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
               : await write(),
           )
         } catch (error) {
-          if (error instanceof DraftError) return failure(error.message)
+          if (error instanceof DraftError) return draftFailure(error, can('read'))
           throw error
         }
       },
@@ -467,4 +502,73 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
   }
 
   return server
+}
+
+function registerHandoffTools(
+  server: McpServer,
+  principal: Principal,
+  { db, queries, drafts }: McpDeps,
+) {
+  if (hasScope(principal.scopes, 'read')) {
+    server.registerTool(
+      'get_thread',
+      {
+        description: 'Read the Thread selected for this handoff.',
+        inputSchema: { thread_id: z.string() },
+      },
+      ({ thread_id }) => {
+        if (handoffGrant(db, principal)?.thread_id !== thread_id)
+          return failure('Thread outside this handoff')
+        const thread = queries.agentThread(thread_id, MAX_BODY, MAX_THREAD_TEXT, true)
+        return thread ? json(thread) : failure('Thread unavailable')
+      },
+    )
+    server.registerTool(
+      'read_draft',
+      {
+        description: 'Read this handoff draft and its current revision.',
+        inputSchema: { draft_id: z.string() },
+      },
+      ({ draft_id }) => {
+        if (handoffGrant(db, principal)?.draft_id !== draft_id)
+          return failure('Draft outside this handoff')
+        const draft = drafts.openCompose(draft_id)
+        return draft
+          ? json({ body: draft.body, revision: draft.revision })
+          : failure('Draft unavailable')
+      },
+    )
+  }
+  if (!hasScope(principal.scopes, 'draft')) return
+  server.registerTool(
+    'update_draft',
+    {
+      description: 'Replace this draft body as plain text using the revision from read_draft.',
+      inputSchema: {
+        draft_id: z.string(),
+        body: z.string().max(MAX_BODY),
+        revision: z.number().int().nonnegative(),
+      },
+    },
+    async ({ draft_id, body, revision }) => {
+      const grant = handoffGrant(db, principal)
+      try {
+        const draft = await draftAsAgent(
+          db,
+          principal,
+          'update_draft',
+          grant?.thread_id ?? null,
+          () => {
+            if (grant?.draft_id !== draft_id) throw new DraftError('Draft outside this handoff')
+            return drafts.replaceComposeBody(draft_id, body, revision, principal.name)
+          },
+        )
+        return json({ body: 'body' in draft ? draft.body : undefined, revision: draft.revision })
+      } catch (error) {
+        if (error instanceof DraftError)
+          return draftFailure(error, hasScope(principal.scopes, 'read'))
+        throw error
+      }
+    },
+  )
 }

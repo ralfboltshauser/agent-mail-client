@@ -273,13 +273,24 @@ export class MailQueries {
     id: string,
     messageLimit: number,
     threadLimit: number,
+    excludeDrafts = false,
   ): (ThreadSummary & { messages: MessageDetail[] }) | null {
     const thread = this.threadSummary(id)
     if (!thread) return null
-    const messages = this.#messages<null>('m.thread_id = ? ORDER BY m.sent_at, m.id', [id], 'NULL')
+    const messages = this.#messages<null>(
+      'm.thread_id = ? ORDER BY m.sent_at, m.id',
+      [id],
+      'NULL',
+    ).filter((message) => !excludeDrafts || !message.labelIds.includes(`${thread.accountId}:DRAFT`))
     let remaining = threadLimit
     return {
       ...thread,
+      ...(excludeDrafts
+        ? {
+            subject: messages[0]?.subject ?? '',
+            snippet: messages.at(-1)?.snippet ?? '',
+          }
+        : {}),
       messages: messages
         .reverse()
         .map((message) => {

@@ -8,7 +8,7 @@ Design for [#9](https://github.com/ralfboltshauser/agent-mail-client/issues/9) a
 | --- | --- |
 | `read` | List and search allowed Accounts, Threads, Labels, contacts, attachments and drafts. Reading a draft requires `read`, preserving the current behavior. |
 | `organize` | Archive, Label, Snooze, Mute, mark read and set triage fields. |
-| `draft` | Create, update and comment on Agent Drafts. Keep existing discard only once it has a recoverable snapshot. Composer Links, when shipped, are edit-only for one draft and expire after 24 hours. |
+| `draft` | Create, update and comment on Agent Drafts. Keep existing discard only once it has a recoverable snapshot. Composer Links, when shipped, are edit-only for one draft and expire after two hours. |
 | `send` | Explicitly granted `send_draft` for one owner-approved draft version and envelope while **Dangerously Allow Send** is on. |
 | `admin` | Reserved for authorized owner Clients. Agents cannot issue or revoke tokens or change settings. |
 

@@ -17,6 +17,7 @@ import { BucketPicker } from './components/bucket-picker'
 import { CommandPalette } from './components/command-palette'
 import { DraftsView, OutboxView } from './components/compose-views'
 import { Composer } from './components/composer'
+import { HandoffDialog } from './components/handoff-dialog'
 import { OrganisePicker, OrganiseToolbar, useOrganise } from './components/organise'
 import { PairScreen } from './components/pair-screen'
 import { ThreadList } from './components/thread-list'
@@ -68,6 +69,7 @@ function MailApp() {
   const [search, setSearch] = useState<SearchState>(null)
   const paletteInvoker = useRef<HTMLElement | null>(null)
   const [draft, setDraft] = useState<ComposeDraft | null>(null)
+  const [handoffThread, setHandoffThread] = useState<string | null>(null)
   const [openingComposer, setOpeningComposer] = useState(false)
   const opening = useRef(false)
   const [minimised, setMinimised] = useState<{ id: string; subject: string } | null>(null)
@@ -292,6 +294,11 @@ function MailApp() {
       f: () => {
         if (!ownView) void startCompose('forward')
       },
+      t: (event) => {
+        if (!event.repeat && !ownView && !draft && !openingComposer && activeThread) {
+          setHandoffThread(activeThread.thread.id)
+        }
+      },
       'g o': () => goTo({ kind: 'outbox' }),
       b: (event) => {
         if (!event.repeat && selected && !ownView) setBucketPickerId(selected.id)
@@ -475,6 +482,15 @@ function MailApp() {
                       >
                         <Forward />
                       </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        title="Hand off (T)"
+                        disabled={Boolean(draft) || openingComposer}
+                        onClick={() => setHandoffThread(activeThread.thread.id)}
+                      >
+                        Hand off
+                      </Button>
                     </>
                   )}
                   {selected && (
@@ -506,6 +522,17 @@ function MailApp() {
           >
             <SquarePen /> <span className="truncate">{minimised.subject || 'Resume draft'}</span>
           </Button>
+        )}
+        {handoffThread && (
+          <HandoffDialog
+            threadId={handoffThread}
+            onClose={() => setHandoffThread(null)}
+            onDraft={(next) => {
+              setHandoffThread(null)
+              setMinimised(null)
+              setDraft(next)
+            }}
+          />
         )}
         {draft && (
           <Composer

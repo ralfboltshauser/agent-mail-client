@@ -195,7 +195,7 @@ describe('MCP tools', () => {
       text(
         await client.callTool({
           name: 'update_draft',
-          arguments: { draft_id: draft.id, body: 'Friday at 7?' },
+          arguments: { draft_id: draft.id, body: 'Friday at 7?', revision: draft.revision },
         }),
       ),
     )

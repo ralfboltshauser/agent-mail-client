@@ -63,6 +63,21 @@ The Engine listens on `127.0.0.1:4410`. `tailscale serve` publishes it on the ta
 
 M3 ships with Snooze disabled. The Engine reads `features.snooze` from its config at startup. The default is `false`.
 
+## T3 Handoff
+
+1. Set `composerOrigin` in the Engine config to the exact tailnet HTTPS origin, including
+   its port and without a trailing slash. Bind the Engine to loopback behind `tailscale serve`
+   and list the permitted logins in `allowedTailscaleLogins`. A loopback HTTP origin is
+   available for local development.
+2. In AMC, open a Thread and choose **Hand off** or press **T**. On first use, paste the
+   MCP URL from T3's **Settings → Environments** and approve **Supervised** access.
+   Choose the T3 project and launch the handoff.
+
+The launched T3 thread gets a four-hour Agent grant to read the selected Thread and edit
+its reply body. The Composer Link in the prompt lasts up to two hours. A new handoff for
+the same Thread revokes both previous credentials. Sending or deleting the draft also
+revokes its Composer Link. Review and send the reply from AMC desktop.
+
 ## Rolling back
 
 `pnpm deploy:host` rolls back by itself when the new release fails to migrate or to become healthy. To go back by hand:

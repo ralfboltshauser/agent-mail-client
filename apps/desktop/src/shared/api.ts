@@ -82,7 +82,18 @@ export interface OrganiseNotice {
   undo?: Extract<OrganiseAction, { kind: 'undo' }>
 }
 
+export interface T3Project {
+  id: string
+  title: string
+  archivedAt?: string | null
+  deletedAt?: string | null
+}
+
 export interface AmcApi {
+  savedT3Url(): Promise<string>
+  t3Projects(address: string): Promise<T3Project[]>
+  handoff(address: string, projectId: string, threadId: string): Promise<ComposeDraft>
+  cancelHandoff(projectId: string, threadId: string): Promise<void>
   pair(engineUrl: string, code: string): Promise<void>
   unpair(): Promise<void>
   status(): Promise<SyncStatus>

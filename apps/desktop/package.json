@@ -27,6 +27,7 @@
   "dependencies": {
     "@amc/composer": "workspace:*",
     "@amc/protocol": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@tanstack/react-virtual": "^3.14.26",
     "@tiptap/extension-collaboration": "^3.35.0",
     "@tiptap/react": "^3.35.0",

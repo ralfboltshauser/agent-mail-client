@@ -9,6 +9,7 @@ export interface Principal {
   scopes: Scope[]
   subject: string | null
   accountId?: string
+  threadId?: string
 }
 
 interface TokenRow {
@@ -19,11 +20,13 @@ interface TokenRow {
   subject: string | null
   expires_at: number | null
   account_id: string | null
+  thread_id: string | null
   revoked_at: number | null
 }
 
 export const MAX_AGENT_DAYS = 90
 export const DAY_MS = 86_400_000
+export const COMPOSER_TTL_MS = 2 * 60 * 60 * 1000
 
 const PAIRING_CODE_TTL_MS = 10 * 60 * 1000
 
@@ -43,9 +46,25 @@ export function issueToken(
     subject?: string
     accountId?: string
     expiresAt?: number
+    threadId?: string
   },
   now = Date.now(),
 ): IssuedToken {
+  if (input.kind === 'composer') {
+    const expiry = input.expiresAt
+    if (
+      !input.subject ||
+      expiry === undefined ||
+      !Number.isSafeInteger(expiry) ||
+      expiry <= now ||
+      expiry > now + COMPOSER_TTL_MS ||
+      input.scopes.length !== 1 ||
+      input.scopes[0] !== 'draft'
+    )
+      throw new Error(
+        'A Composer Link requires a draft, draft-only scope and an expiry of at most two hours',
+      )
+  }
   if (input.scopes.includes('send') && input.kind !== 'desktop')
     throw new Error(`A ${input.kind} token can never hold the send scope`)
   if (input.kind === 'agent') {
@@ -67,8 +86,8 @@ export function issueToken(
   const id = newId('tok')
   const secret = newSecret('amc')
   db.prepare(
-    `INSERT INTO token (id, kind, name, scopes, subject, hash, created_at, expires_at, account_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO token (id, kind, name, scopes, subject, hash, created_at, expires_at, account_id, thread_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     input.kind,
@@ -79,6 +98,7 @@ export function issueToken(
     now,
     input.expiresAt ?? null,
     input.accountId ?? null,
+    input.threadId ?? null,
   )
   return { id, secret, kind: input.kind, scopes: [...input.scopes] }
 }
@@ -87,11 +107,12 @@ export function issueToken(
 export function authenticate(db: Db, secret: string, now = Date.now()): Principal | null {
   const row = db
     .prepare(
-      'SELECT id, kind, name, scopes, subject, expires_at, revoked_at, account_id FROM token WHERE hash = ?',
+      'SELECT id, kind, name, scopes, subject, expires_at, revoked_at, account_id, thread_id FROM token WHERE hash = ?',
     )
     .get(sha256(secret)) as TokenRow | undefined
   if (!row || row.revoked_at !== null) return null
   if (row.kind === 'agent' && row.expires_at === null) return null
+  if (row.kind === 'composer' && (!row.subject || row.expires_at === null)) return null
   if (row.expires_at !== null && row.expires_at <= now) return null
   db.prepare('UPDATE token SET last_used_at = ? WHERE id = ?').run(now, row.id)
   const scopes = JSON.parse(row.scopes) as Scope[]
@@ -104,6 +125,7 @@ export function authenticate(db: Db, secret: string, now = Date.now()): Principa
         ? scopes.filter((scope) => scope !== 'send' && scope !== 'admin')
         : scopes,
     subject: row.subject,
+    ...(row.kind === 'agent' && row.thread_id !== null ? { threadId: row.thread_id } : {}),
     ...(row.kind === 'agent' && row.account_id !== null ? { accountId: row.account_id } : {}),
   }
 }
@@ -130,15 +152,16 @@ export function agentGrantActive(
   scope: Scope,
   now: number,
   accountId?: string,
+  threadId?: string,
 ): boolean {
   return Boolean(
     db
       .prepare(`
     SELECT 1 FROM token WHERE id = ? AND kind = 'agent' AND revoked_at IS NULL AND expires_at > ?
-      AND (account_id IS NULL OR account_id = ?)
+      AND (thread_id IS NULL OR thread_id = ?) AND (account_id IS NULL OR account_id = ?)
       AND ? IN (SELECT value FROM json_each(token.scopes))
   `)
-      .get(tokenId, now, accountId ?? null, scope),
+      .get(tokenId, now, threadId ?? null, accountId ?? null, scope),
   )
 }
 
