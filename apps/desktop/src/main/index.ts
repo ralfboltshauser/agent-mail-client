@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type {
@@ -11,12 +11,17 @@ import type {
   SendRequest,
 } from '@amc/protocol'
 import { BucketInput } from '@amc/protocol'
-import { app, BrowserWindow, ipcMain, Menu, nativeTheme, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, Menu, Notification, nativeTheme, shell } from 'electron'
 import type { SyncStatus, ThreadQuery } from '../shared/api'
 import { clearPairing, loadPairing, savePairing } from './auth'
 import { composeDraftPath } from './draft-updates'
 import { EngineClient, EngineError } from './engine'
 import { Handoff, t3NavigationLink } from './handoff'
+import {
+  DEFAULT_NOTIFICATION_SETTINGS,
+  NewMailNotifications,
+  parseNotificationSettings,
+} from './notifications'
 import { OrganiseSync } from './organise'
 import { Replica } from './replica'
 import { SyncLoop } from './sync'
@@ -32,6 +37,12 @@ let pausedStatus: SyncStatus | null = null
 let tray: ReturnType<typeof createTray> | null = null
 let changedTimer: NodeJS.Timeout | null = null
 let draftRecovery: Promise<void> | null = null
+let notificationSettings = DEFAULT_NOTIFICATION_SETTINGS
+let notifications: NewMailNotifications | null = null
+let threadNavigationReady = false
+let pendingThreadId: string | null = null
+const startedAt = Date.now()
+const notificationSettingsFile = () => join(app.getPath('userData'), 'notifications.json')
 
 const UNPAIRED: SyncStatus = {
   phase: 'unpaired',
@@ -54,8 +65,10 @@ function openReplica(): Replica {
 }
 
 function refreshTray() {
-  if (tray)
-    tray.refresh(engine ? openReplica().counts(null).inboxUnread : 0, !!engine, !!pausedStatus)
+  if (!tray) return
+  const unread = engine ? openReplica().counts(null).inboxUnread : 0
+  tray.refresh(unread, !!engine, !!pausedStatus)
+  app.dock?.setBadge(unread ? unread.toLocaleString() : '')
 }
 
 function refreshMail() {
@@ -90,7 +103,8 @@ function startSync(client: EngineClient) {
   const updates = openReplica().draftUpdates
   const recovering = updates.flush(client)
   draftRecovery = recovering
-  const loop = new SyncLoop(client, openReplica())
+  const loop = new SyncLoop(client, openReplica(), startedAt)
+  if (notifications) loop.on('newMail', (messages) => notifications?.add(messages))
   sync = loop
   organise = createOrganise(client, loop)
   broadcast('amc:status', loop.status)
@@ -119,6 +133,7 @@ function startSync(client: EngineClient) {
 
 function stopSync() {
   sync?.stop()
+  notifications?.clear()
   sync = null
   organise?.stop()
 }
@@ -148,12 +163,27 @@ function requireEngine(): EngineClient {
 }
 
 function registerIpc() {
+  ipcMain.handle('amc:notificationSettings', () => notificationSettings)
+  ipcMain.handle('amc:saveNotificationSettings', (_event, input: unknown) => {
+    const settings = parseNotificationSettings(input)
+    const path = notificationSettingsFile()
+    writeFileSync(`${path}.tmp`, JSON.stringify(settings), { mode: 0o600 })
+    renameSync(`${path}.tmp`, path)
+    notificationSettings = settings
+    if (!settings.enabled) notifications?.clear()
+  })
+  ipcMain.on('amc:threadNavigationReady', (event) => {
+    if (event.sender !== window?.webContents) return
+    threadNavigationReady = true
+    openPendingThread()
+  })
   ipcMain.handle('amc:pair', (_e, engineUrl: string, code: string) => pair(engineUrl, code))
   ipcMain.handle('amc:unpair', () => {
     stopSync()
     organise = null
     pausedStatus = null
     engine = null
+    pendingThreadId = null
     clearPairing()
     openReplica().clear()
     openReplica().organise.clear()
@@ -205,6 +235,7 @@ async function pair(engineUrl: string, code: string) {
   savePairing(url, body.token)
   stopSync()
   if (previousUrl !== url) {
+    pendingThreadId = null
     const db = openReplica()
     db.transaction(() => {
       db.clear()
@@ -397,6 +428,13 @@ async function flushDrafts() {
   await replica?.draftUpdates.flush(engine)
 }
 
+function openPendingThread() {
+  if (!threadNavigationReady || !pendingThreadId) return
+  const [thread] = openReplica().summaries([pendingThreadId])
+  pendingThreadId = null
+  if (thread) broadcast('amc:openThread', thread)
+}
+
 function createWindow() {
   window = new BrowserWindow({
     width: 1360,
@@ -415,6 +453,10 @@ function createWindow() {
       spellcheck: true,
       devTools: !app.isPackaged,
     },
+  })
+  threadNavigationReady = false
+  window.webContents.on('did-start-navigation', ({ isMainFrame, isSameDocument }) => {
+    if (isMainFrame && !isSameDocument) threadNavigationReady = false
   })
   window.once('ready-to-show', () => window?.show())
   // Never let the app window navigate away or open windows; links go to the browser.
@@ -494,7 +536,39 @@ if (!app.requestSingleInstanceLock()) {
     openReplica()
     const packagedMac = process.platform === 'darwin' && app.isPackaged
     const loginItem = packagedMac && !customProfile
-    if (process.platform === 'darwin') tray = createTray(openWindow, toggleSync, loginItem)
+    const settingsPath = notificationSettingsFile()
+    if (existsSync(settingsPath)) {
+      try {
+        notificationSettings = parseNotificationSettings(
+          JSON.parse(readFileSync(settingsPath, 'utf8')),
+        )
+      } catch (error) {
+        console.error('Could not load the AMC notification settings', error)
+      }
+    }
+    if (process.platform === 'darwin') {
+      tray = createTray(openWindow, toggleSync, loginItem)
+      if (Notification.isSupported()) {
+        notifications = new NewMailNotifications(
+          openReplica(),
+          () => notificationSettings,
+          ({ threadId, ...options }) => {
+            const source = engine
+            const notification = new Notification(options)
+            notification.on('click', () => {
+              if (engine !== source) return
+              pendingThreadId = threadId
+              openWindow()
+              openPendingThread()
+            })
+            notification.on('failed', (_event, error) => {
+              console.error('Could not show an AMC notification', error)
+            })
+            notification.show()
+          },
+        )
+      }
+    }
     refreshTray()
     const pairing = loadPairing()
     if (pairing?.token) connect(pairing.engineUrl, pairing.token)

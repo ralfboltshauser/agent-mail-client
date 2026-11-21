@@ -10,6 +10,7 @@ import {
 } from '@amc/protocol'
 import type { SyncStatus } from '../shared/api'
 import { type EngineClient, EngineError } from './engine'
+import { newInboxMessages } from './notifications'
 import type { Replica } from './replica'
 
 const SNAPSHOT_ORDER: SyncEntity[] = ['account', 'label', 'draft', 'thread', 'message']
@@ -30,18 +31,24 @@ const sleep = (ms: number, signal: AbortSignal) =>
  * Keeps the replica in step with the Engine: bootstrap from a snapshot, then pull changes
  * whenever the event stream says something changed (and every minute, in case it says nothing).
  */
-export class SyncLoop extends EventEmitter<{ status: [SyncStatus]; changed: [] }> {
+export class SyncLoop extends EventEmitter<{
+  status: [SyncStatus]
+  changed: []
+  newMail: [ReturnType<typeof newInboxMessages>]
+}> {
   readonly #engine: EngineClient
   readonly #replica: Replica
   readonly #controller = new AbortController()
+  readonly #startedAt: number
   #status: SyncStatus
   #pulling: Promise<void> | null = null
   #pullAgain = false
 
-  constructor(engine: EngineClient, replica: Replica) {
+  constructor(engine: EngineClient, replica: Replica, startedAt: number) {
     super()
     this.#engine = engine
     this.#replica = replica
+    this.#startedAt = startedAt
     this.#status = {
       phase: 'connecting',
       engineUrl: engine.baseUrl,
@@ -190,19 +197,25 @@ export class SyncLoop extends EventEmitter<{ status: [SyncStatus]; changed: [] }
     const signal = this.#controller.signal
     for (;;) {
       signal.throwIfAborted()
-      const since = this.#replica.modseq ?? 0
+      const cursor = this.#replica.modseq
+      const since = cursor ?? 0
       const res = await this.#engine.get<SyncChanges>(
         `/v1/sync/changes?since=${since}&limit=2000`,
         { signal },
       )
       signal.throwIfAborted()
       if (res.changes.length > 0 || res.modseq !== since) {
+        const arrivals =
+          cursor !== null && this.#status.phase !== 'bootstrapping' && this.listenerCount('newMail')
+            ? newInboxMessages(this.#replica, res.changes, this.#startedAt)
+            : []
         this.#replica.transaction(() => {
           this.#replica.apply(res.changes)
           this.#replica.modseq = res.modseq
           if (res.organiseFailures) this.#replica.organise.notice(res.organiseFailures)
           this.#replica.organise.rebuild()
         })
+        if (arrivals.length) this.emit('newMail', arrivals)
         if (res.changes.length > 0 || res.organiseFailures?.length) this.emit('changed')
       }
       this.#set({ lastSyncAt: Date.now() })

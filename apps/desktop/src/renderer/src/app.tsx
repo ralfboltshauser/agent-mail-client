@@ -63,6 +63,7 @@ function MailApp() {
     if (view !== selectedView) setView(view)
   }, [view, selectedView])
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [notificationThread, setNotificationThread] = useState<ThreadSummary | null>(null)
   const [bucketPickerId, setBucketPickerId] = useState<string | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [filterText, setFilterText] = useState('')
@@ -108,12 +109,19 @@ function MailApp() {
     const byId = new Map(searchSummaries.map((summary) => [summary.id, summary]))
     return search.hits.map((hit) => byId.get(hit.id) ?? hit)
   }, [search?.hits, searchSummaries])
-  const threads: ThreadSummary[] =
+  const listedThreads: ThreadSummary[] =
     searchThreads ??
     (filtered && view.kind === 'bucket'
       ? filtered.filter((item) => item.bucket?.bucket === view.bucket)
       : filtered) ??
     viewThreads
+  const threads =
+    !search &&
+    !filterText.trim() &&
+    notificationThread?.id === selectedId &&
+    !listedThreads.some((item) => item.id === notificationThread.id)
+      ? [notificationThread, ...listedThreads]
+      : listedThreads
   const selected = threads.find((item) => item.id === selectedId)
   const bucketPickerOpen = !!selected && bucketPickerId === selected.id
   const setBucket = async (bucket: Bucket | null) => {
@@ -167,8 +175,20 @@ function MailApp() {
     setFilterText('')
     setBucketPickerId(null)
     setView(next)
+    setNotificationThread(null)
     setSelectedId(null)
   }, [])
+
+  useEffect(
+    () =>
+      window.amc.onOpenThread((target) => {
+        setAccountId(null)
+        goTo(target.inInbox ? INBOX : { kind: 'all' })
+        setNotificationThread(target)
+        setSelectedId(target.id)
+      }),
+    [goTo],
+  )
 
   const runSearch = useCallback(
     async (text: string) => {

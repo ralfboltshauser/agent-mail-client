@@ -89,7 +89,17 @@ export interface T3Project {
   deletedAt?: string | null
 }
 
+export interface NotificationSettings {
+  enabled: boolean
+  showSnippet: boolean
+  quietStart: string
+  quietEnd: string
+}
+
 export interface AmcApi {
+  notificationSettings(): Promise<NotificationSettings>
+  saveNotificationSettings(settings: NotificationSettings): Promise<void>
+  onOpenThread(listener: (thread: ThreadSummary) => void): () => void
   savedT3Url(): Promise<string>
   t3Projects(address: string): Promise<T3Project[]>
   handoff(address: string, projectId: string, threadId: string): Promise<ComposeDraft>

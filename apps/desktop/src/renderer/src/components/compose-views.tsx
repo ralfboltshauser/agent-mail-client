@@ -7,6 +7,7 @@ import {
 import { Settings2 } from 'lucide-react'
 import { useEffect, useId, useState } from 'react'
 import { toast } from 'sonner'
+import type { NotificationSettings } from '../../../shared/api'
 import { Button } from './ui/button'
 import { Dialog, DialogContent, DialogTitle } from './ui/dialog'
 import { Input } from './ui/input'
@@ -122,6 +123,7 @@ export function OutboxView({
   const [confirm, setConfirm] = useState<OutboxItem | null>(null)
   const settingsId = useId()
   const [settings, setSettings] = useState<number | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const items = data?.filter((item) => !accountId || item.accountId === accountId)
   return (
     <section className="flex h-full flex-col">
@@ -129,8 +131,10 @@ export function OutboxView({
         <Button
           variant="ghost"
           size="icon-sm"
-          aria-label="Undo send settings"
+          aria-label="Settings"
           onClick={() => {
+            setSettings(null)
+            setSettingsOpen(true)
             void window.amc
               .sendSettings()
               .then(({ undoSendSeconds }) => setSettings(undoSendSeconds))
@@ -258,43 +262,121 @@ export function OutboxView({
           </DialogContent>
         </Dialog>
       )}
-      {settings !== null && (
-        <Dialog
-          open
-          onOpenChange={(open) => {
-            if (!open) setSettings(null)
-          }}
-        >
+      {settingsOpen && (
+        <Dialog open onOpenChange={setSettingsOpen}>
           <DialogContent aria-describedby={undefined}>
-            <DialogTitle>Undo send</DialogTitle>
-            <form
-              className="flex flex-col gap-4"
-              onSubmit={(event) => {
-                event.preventDefault()
-                void window.amc
-                  .saveSendSettings(settings)
-                  .then(() => setSettings(null))
-                  .catch((cause: Error) => toast.error(cause.message))
-              }}
-            >
-              <label htmlFor={settingsId} className="flex flex-col gap-2 text-sm">
-                Seconds to hold mail before sending
-                <Input
-                  type="number"
-                  min={0}
-                  max={120}
-                  value={settings}
-                  onChange={(event) => setSettings(Number(event.target.value))}
-                  required
-                />
-              </label>
-              <Button className="self-end" type="submit">
-                Save
-              </Button>
-            </form>
+            <DialogTitle>Settings</DialogTitle>
+            {settings !== null && (
+              <form
+                className="flex flex-col gap-4"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void window.amc
+                    .saveSendSettings(settings)
+                    .then(() => setSettingsOpen(false))
+                    .catch((cause: Error) => toast.error(cause.message))
+                }}
+              >
+                <label htmlFor={settingsId} className="flex flex-col gap-2 text-sm">
+                  Seconds to hold mail before sending
+                  <Input
+                    type="number"
+                    min={0}
+                    max={120}
+                    value={settings}
+                    onChange={(event) => setSettings(Number(event.target.value))}
+                    required
+                  />
+                </label>
+                <Button className="self-end" type="submit">
+                  Save undo send
+                </Button>
+              </form>
+            )}
+            <NotificationPreferences />
           </DialogContent>
         </Dialog>
       )}
     </section>
+  )
+}
+
+function NotificationPreferences() {
+  const startId = useId()
+  const endId = useId()
+  const [settings, setSettings] = useState<NotificationSettings>()
+  const [saving, setSaving] = useState(false)
+  useEffect(() => {
+    void window.amc
+      .notificationSettings()
+      .then(setSettings)
+      .catch((error: Error) => {
+        toast.error(error.message)
+      })
+  }, [])
+
+  if (!settings) return null
+  return (
+    <form
+      className="flex flex-col gap-4 border-t pt-4"
+      onSubmit={(event) => {
+        event.preventDefault()
+        setSaving(true)
+        void window.amc
+          .saveNotificationSettings(settings)
+          .then(() => toast.success('Notification settings saved'))
+          .catch((error: Error) => toast.error(error.message))
+          .finally(() => setSaving(false))
+      }}
+    >
+      <fieldset className="flex flex-col gap-3 text-sm" disabled={saving}>
+        <legend className="mb-2 font-medium">Mac notifications</legend>
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={settings.enabled}
+            onChange={(event) => setSettings({ ...settings, enabled: event.target.checked })}
+          />
+          Notify for new mail
+        </label>
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={settings.showSnippet}
+            onChange={(event) => setSettings({ ...settings, showSnippet: event.target.checked })}
+          />
+          Show message snippet
+        </label>
+        <fieldset>
+          <legend className="mb-2">Quiet hours</legend>
+          <div className="flex gap-3">
+            <label htmlFor={startId} className="flex min-w-0 flex-1 flex-col gap-1">
+              Start
+              <Input
+                id={startId}
+                type="time"
+                value={settings.quietStart}
+                onChange={(event) => setSettings({ ...settings, quietStart: event.target.value })}
+              />
+            </label>
+            <label htmlFor={endId} className="flex min-w-0 flex-1 flex-col gap-1">
+              End
+              <Input
+                id={endId}
+                type="time"
+                value={settings.quietEnd}
+                onChange={(event) => setSettings({ ...settings, quietEnd: event.target.value })}
+              />
+            </label>
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">
+            Leave both times blank to disable quiet hours.
+          </p>
+        </fieldset>
+      </fieldset>
+      <Button className="self-end" type="submit" disabled={saving}>
+        {saving ? 'Saving…' : 'Save notifications'}
+      </Button>
+    </form>
   )
 }
