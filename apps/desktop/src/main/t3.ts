@@ -15,7 +15,7 @@ import type {
 } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { app, safeStorage, shell } from 'electron'
 import type { T3Project } from '../shared/api'
-import type { T3Launch, T3Thread } from './handoff'
+import type { T3Launch, T3Launcher, T3Thread } from './handoff'
 
 interface Credentials {
   url: string
@@ -173,7 +173,7 @@ async function pairT3(url: URL): Promise<Client> {
   }
 }
 
-export async function t3Projects(address: string): Promise<T3Project[]> {
+async function t3Projects(address: string): Promise<T3Project[]> {
   const client = await t3Client(address)
   const projects: T3Project[] = []
   let cursor: number | null = null
@@ -197,7 +197,7 @@ export async function t3Projects(address: string): Promise<T3Project[]> {
   return projects
 }
 
-export async function launchInT3(address: string, request: T3Launch): Promise<T3Thread> {
+async function launchInT3(address: string, request: T3Launch): Promise<T3Thread> {
   const client = await t3Client(address)
   try {
     const response = await client.callTool({ name: 't3_thread_launch', arguments: { ...request } })
@@ -209,4 +209,11 @@ export async function launchInT3(address: string, request: T3Launch): Promise<T3
   throw new Error(
     'T3 could not confirm the launch. Retry, or check that AMC has Supervised access.',
   )
+}
+
+export function mcpLauncher(address: string): T3Launcher {
+  return {
+    projects: () => t3Projects(address),
+    launch: (request) => launchInT3(address, request),
+  }
 }
