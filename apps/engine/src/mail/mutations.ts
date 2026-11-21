@@ -1075,10 +1075,8 @@ export class Mutations {
     const rows = this.#db
       .prepare(
         `SELECT m.*, a.kind, a.status AS account_status FROM mutation m JOIN account a ON a.id = m.account_id JOIN (
-        SELECT MIN(seq) AS seq FROM mutation WHERE status = 'pending'
-          AND (next_attempt <= ?1 OR json_extract(request, '$.work') IS NOT 'wake')
-          GROUP BY account_id
-       ) head ON head.seq = m.seq WHERE m.next_attempt <= ?1`,
+        SELECT MIN(seq) AS seq FROM mutation WHERE status = 'pending' GROUP BY account_id
+       ) head ON head.seq = m.seq WHERE m.next_attempt <= ?`,
       )
       .all(now) as unknown as (MutationRow & { kind: string; account_status: string })[]
     const started: Promise<void>[] = []
@@ -1989,7 +1987,9 @@ export class Mutations {
           error.status === 429 ||
           error.status >= 500 ||
           /rateLimitExceeded|quotaExceeded|backendError/i.test(error.reason)))
-    if (!this.#isWake(row) && (!transient || row.attempts >= 8)) return false
+    const wake = this.#isWake(row)
+    const needsReauth = error instanceof OAuthError && error.needsReauth
+    if ((!transient && !(wake && needsReauth)) || (!wake && row.attempts >= 8)) return false
     const delay = Math.min(300_000, 2000 * 2 ** row.attempts)
     const retryAfter = error instanceof GmailHttpError ? error.retryAfterMs : 0
     this.#db
