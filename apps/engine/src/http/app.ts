@@ -75,7 +75,13 @@ export function createApp({ db, config, log, startedAt = Date.now(), mail, mutat
 
   v1.get('/me', (c) => {
     const p = c.get('principal')
-    return c.json({ tokenId: p.tokenId, kind: p.kind, name: p.name, scopes: p.scopes } satisfies Me)
+    return c.json({
+      tokenId: p.tokenId,
+      kind: p.kind,
+      name: p.name,
+      scopes: p.scopes,
+      features: config.features,
+    } satisfies Me)
   })
 
   v1.get('/health', requireScope('read'), (c) => {

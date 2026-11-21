@@ -18,6 +18,7 @@ export function testDb(): Db {
 export function testConfig(overrides: Partial<Config> = {}): Config {
   const dir = tempDir()
   return {
+    features: { snooze: false },
     listen: { host: '127.0.0.1', port: 0 },
     dataDir: dir,
     blobDir: dir,

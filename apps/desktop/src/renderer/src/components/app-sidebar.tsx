@@ -37,7 +37,7 @@ import { cn } from '@/lib/utils'
 import type { Counts, SyncStatus, View } from '../../../shared/api'
 import { SyncIndicator } from './sync-indicator'
 
-export const SYSTEM_VIEWS: { view: View; title: string; icon: typeof Inbox; keys: string }[] = [
+const SYSTEM_VIEWS: { view: View; title: string; icon: typeof Inbox; keys: string }[] = [
   { view: { kind: 'inbox' }, title: 'Inbox', icon: Inbox, keys: 'G I' },
   { view: { kind: 'unread' }, title: 'Unread', icon: Mail, keys: 'G U' },
   { view: { kind: 'starred' }, title: 'Starred', icon: Star, keys: 'G S' },
@@ -47,6 +47,10 @@ export const SYSTEM_VIEWS: { view: View; title: string; icon: typeof Inbox; keys
   { view: { kind: 'snoozed' }, title: 'Snoozed', icon: Clock3, keys: 'G H' },
   { view: { kind: 'trash' }, title: 'Trash', icon: Trash2, keys: 'G X' },
 ]
+
+export function systemViews(snoozeEnabled: boolean) {
+  return snoozeEnabled ? SYSTEM_VIEWS : SYSTEM_VIEWS.filter(({ view }) => view.kind !== 'snoozed')
+}
 
 export function sameView(a: View, b: View): boolean {
   return (
@@ -160,7 +164,7 @@ export function AppSidebar({
         <SidebarGroup>
           <SidebarGroupContent>
             <SidebarMenu>
-              {SYSTEM_VIEWS.map((item) => (
+              {systemViews(status?.snoozeEnabled === true).map((item) => (
                 <SidebarMenuItem key={item.view.kind}>
                   <SidebarMenuButton
                     isActive={sameView(view, item.view)}

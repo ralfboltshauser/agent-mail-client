@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import type { SyncChanges, SyncEntity, SyncSnapshotPage, SyncState } from '@amc/protocol'
+import type { Me, SyncChanges, SyncEntity, SyncSnapshotPage, SyncState } from '@amc/protocol'
 import type { SyncStatus } from '../shared/api'
 import { type EngineClient, EngineError } from './engine'
 import type { Replica } from './replica'
@@ -89,6 +89,9 @@ export class SyncLoop extends EventEmitter<{ status: [SyncStatus]; changed: [] }
     let backoff = 1000
     while (!signal.aborted) {
       try {
+        const me = await this.#engine.get<Me>('/v1/me', { signal })
+        if (signal.aborted) return
+        this.#set({ snoozeEnabled: me.features?.snooze === true })
         if (this.#replica.modseq === null) await this.#bootstrap()
         await this.pull()
         this.#set({ phase: 'live', error: null, progress: null })
@@ -112,7 +115,11 @@ export class SyncLoop extends EventEmitter<{ status: [SyncStatus]; changed: [] }
           continue
         }
         const offline = error instanceof EngineError && error.code === 'unreachable'
-        this.#set({ phase: offline ? 'offline' : 'error', error: (error as Error).message })
+        this.#set({
+          phase: offline ? 'offline' : 'error',
+          error: (error as Error).message,
+          snoozeEnabled: false,
+        })
         await sleep(backoff, signal)
         backoff = Math.min(backoff * 2, 30_000)
       }

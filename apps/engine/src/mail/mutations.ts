@@ -255,6 +255,8 @@ function inverse(changes: Change[]): Change[] {
   }))
 }
 
+export const SNOOZE_DISABLED = 'Snooze is disabled on this Engine'
+
 export class MutationError extends Error {}
 export class MutationPermissionError extends MutationError {}
 
@@ -263,6 +265,7 @@ export class Mutations {
   readonly #api: (accountId: string) => GmailApi | null
   readonly #log: Logger
   readonly #now: () => number
+  readonly snoozeEnabled: boolean
   readonly #running = new Map<string, Promise<void>>()
   #timer: ReturnType<typeof setInterval> | undefined
 
@@ -270,12 +273,13 @@ export class Mutations {
     store: MailStore,
     api: (accountId: string) => GmailApi | null,
     log: Logger,
-    now = Date.now,
+    { now = Date.now, snoozeEnabled = false }: { now?: () => number; snoozeEnabled?: boolean } = {},
   ) {
     this.#store = store
     this.#api = api
     this.#log = log
     this.#now = now
+    this.snoozeEnabled = snoozeEnabled
   }
 
   get #db() {
@@ -325,6 +329,16 @@ export class Mutations {
       | undefined
   }
 
+  #isSnooze(row: MutationRow): boolean {
+    const { kind, snooze } = JSON.parse(row.request)
+    const original = row.undo_of ? this.#row(row.undo_of) : undefined
+    return (
+      kind === 'snooze' ||
+      snooze === true ||
+      (original !== undefined && JSON.parse(original.request).kind === 'snooze')
+    )
+  }
+
   #thread(id: string | undefined): ThreadRow {
     const thread = this.#db
       .prepare(
@@ -360,6 +374,7 @@ export class Mutations {
 
   #submit(principal: string, request: MutationRequest, allowTrash: boolean): MutationResult {
     const action = request.action
+    if (!this.snoozeEnabled && action.kind === 'snooze') throw new MutationError(SNOOZE_DISABLED)
     if (action.kind === 'trash' && !allowTrash)
       throw new MutationPermissionError('Only the owner can move mail to or from Trash')
     const existing = this.#row(request.id)
@@ -368,6 +383,7 @@ export class Mutations {
       if (existing.principal !== principal || existing.request !== body) {
         throw new MutationError('Mutation id is already in use')
       }
+      if (!this.snoozeEnabled && this.#isSnooze(existing)) throw new MutationError(SNOOZE_DISABLED)
       return result(existing)
     }
 
@@ -388,7 +404,9 @@ export class Mutations {
       if (!target || (action.mutationId && target.id !== action.mutationId)) {
         throw new MutationError('There is no matching action to undo')
       }
-      if (!allowTrash && JSON.parse(target.request).kind === 'trash')
+      const targetKind = JSON.parse(target.request).kind
+      if (!this.snoozeEnabled && targetKind === 'snooze') throw new MutationError(SNOOZE_DISABLED)
+      if (!allowTrash && targetKind === 'trash')
         throw new MutationPermissionError('Only the owner can undo changes to Trash')
       if (target.status !== 'pending' && target.prepared !== 1)
         throw new MutationError('This action predates verified Gmail undo')
@@ -774,19 +792,19 @@ export class Mutations {
       .prepare(
         `SELECT t.id, t.account_id, t.organise_state, t.snoozed_until, t.muted,
          a.kind, json_extract(a.cursor, '$.historyId') AS history_cursor,
-         (t.snooze_no_reply = 1 AND EXISTS (
+         (?1 AND t.snooze_no_reply = 1 AND EXISTS (
            SELECT 1 FROM message m WHERE m.thread_id = t.id AND m.first_seen_at >= t.snooze_started_at
              AND m.sent_at >= t.snooze_started_at AND
              lower(COALESCE(json_extract(m.from_json, '$.address'), a.address)) != lower(a.address)
          )) AS replied
          FROM thread t JOIN account a ON a.id = t.account_id
          WHERE a.kind = 'gmail' AND a.status != 'auth_expired'
-           AND (t.snoozed_until IS NOT NULL OR t.muted = 1)
+           AND ((?1 AND t.snoozed_until IS NOT NULL) OR t.muted = 1)
          AND NOT EXISTS (
            SELECT 1 FROM mutation p WHERE p.thread_id = t.id AND p.status = 'pending'
          )`,
       )
-      .all() as unknown as (ThreadRow & {
+      .all(Number(this.snoozeEnabled)) as unknown as (ThreadRow & {
       snoozed_until: number | null
       muted: number
       replied: number
@@ -794,7 +812,7 @@ export class Mutations {
     })[]
     for (const thread of candidates) {
       const state = this.#committedState(thread.id)
-      const snooze = thread.snoozed_until !== null
+      const snooze = this.snoozeEnabled && thread.snoozed_until !== null
       const intentId = snooze ? state.snoozeIntent : state.muteIntent
       const intent = intentId ? this.#intent(intentId) : undefined
       if (intent?.status !== 'active') continue
@@ -866,6 +884,10 @@ export class Mutations {
     const started: Promise<void>[] = []
     for (const row of rows) {
       if (this.#running.has(row.account_id)) continue
+      if (!this.snoozeEnabled && this.#isSnooze(row)) {
+        this.#finish(row, 'failed', SNOOZE_DISABLED, undefined, { discard: true })
+        continue
+      }
       // Older Engine builds allowed scoped Agent tokens to enqueue Organise.
       const nonOwner = this.#db
         .prepare("SELECT 1 FROM token WHERE id = ? AND kind NOT IN ('desktop', 'cli')")
@@ -1057,7 +1079,7 @@ export class Mutations {
     const save = () => this.#saveJournal(row, journal)
     const snoozedId = this.#snoozedLabel(account)
     const startsSnooze = JSON.parse(row.request).kind === 'snooze' && this.#intent(row.id)
-    const mayWriteMarker = automatic?.snooze || startsSnooze
+    const mayWriteMarker = this.snoozeEnabled && (automatic?.snooze || startsSnooze)
     // Retire queued cleanup if a replacement took effect, even if it has since been cancelled.
     if (
       intent &&
@@ -1673,6 +1695,7 @@ export class Mutations {
   }
 
   #queueSnoozeCleanup(thread: ThreadRow, intentId: string) {
+    if (!this.snoozeEnabled) return
     const intent = this.#intent(intentId)
     if (intent?.status !== 'active') return
     const request: AutomaticRequest = {
@@ -1699,15 +1722,17 @@ export class Mutations {
     status: MutationResult['status'],
     error: string | null,
     journal?: JournalEntry[],
+    { discard = false } = {},
   ) {
     transaction(this.#db, () => {
       if (journal) {
         for (const entry of journal) delete entry.pending
         this.#saveJournal(row, journal)
       }
-      const clearSupersededSnooze = row.intent_id
-        ? this.#finishIntent(row, row.intent_id, status, journal ?? [])
-        : false
+      const clearSupersededSnooze =
+        !discard && row.intent_id
+          ? this.#finishIntent(row, row.intent_id, status, journal ?? [])
+          : false
       this.#db
         .prepare('UPDATE mutation SET status = ?, error = ?, next_attempt = ? WHERE id = ?')
         .run(status, error, this.#now() + 60_000, row.id)
@@ -1718,7 +1743,7 @@ export class Mutations {
       const succeeded = status === 'applied' || status === 'partial'
       const cancelsSnooze = userAction && succeeded && JSON.parse(row.request).kind !== 'snooze'
       const patch =
-        status === 'applied' || (!userAction && statePatch.snoozedUntil === null)
+        !discard && (status === 'applied' || (!userAction && statePatch.snoozedUntil === null))
           ? { ...statePatch }
           : {}
       if (cancelsSnooze) Object.assign(patch, CLEAR_SNOOZE)

@@ -2,7 +2,7 @@ import type { SearchHit, ThreadSummary } from '@amc/protocol'
 import { Loader2, Search, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Counts, ThreadWithMessages, View } from '../../shared/api'
-import { AppSidebar, SYSTEM_VIEWS } from './components/app-sidebar'
+import { AppSidebar, systemViews } from './components/app-sidebar'
 import { CommandPalette } from './components/command-palette'
 import { OrganisePicker, OrganiseToolbar, useOrganise } from './components/organise'
 import { PairScreen } from './components/pair-screen'
@@ -16,6 +16,7 @@ import { useReplica, useSyncStatus } from './hooks/use-amc'
 import { useHotkeys } from './hooks/use-hotkeys'
 import { useTheme } from './hooks/use-theme'
 
+const INBOX: View = { kind: 'inbox' }
 const NO_COUNTS: Counts = { inbox: 0, inboxUnread: 0, starred: 0, drafts: 0 }
 
 export function App() {
@@ -36,7 +37,12 @@ function MailApp() {
   const status = useSyncStatus()
   const { theme, setTheme } = useTheme()
   const [accountId, setAccountId] = useState<string | null>(null)
-  const [view, setView] = useState<View>({ kind: 'inbox' })
+  const snoozeEnabled = status?.snoozeEnabled === true
+  const [selectedView, setView] = useState<View>(INBOX)
+  const view = !snoozeEnabled && selectedView.kind === 'snoozed' ? INBOX : selectedView
+  useEffect(() => {
+    if (view !== selectedView) setView(view)
+  }, [view, selectedView])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [filterText, setFilterText] = useState('')
@@ -87,7 +93,7 @@ function MailApp() {
   )
   const canOrganise =
     canUndoOrganise && activeThread?.messages.length === activeThread?.thread.messageCount
-  const organise = useOrganise(canOrganise ? (activeThread?.thread ?? null) : null)
+  const organise = useOrganise(canOrganise ? (activeThread?.thread ?? null) : null, snoozeEnabled)
   const organisePicker =
     canOrganise && organise.picker?.thread.id === activeThread?.thread.id ? organise.picker : null
   const matchSnippets = useMemo(
@@ -109,7 +115,7 @@ function MailApp() {
     ? `Search: ${search.text}`
     : view.kind === 'label'
       ? (labelNames.get(view.labelId) ?? 'Label')
-      : (SYSTEM_VIEWS.find((v) => v.view.kind === view.kind)?.title ?? 'Mail')
+      : (systemViews(snoozeEnabled).find((v) => v.view.kind === view.kind)?.title ?? 'Mail')
 
   const goTo = useCallback((next: View) => {
     setSearch(null)
@@ -183,7 +189,7 @@ function MailApp() {
       'g d': () => goTo({ kind: 'drafts' }),
       'g t': () => goTo({ kind: 'sent' }),
       'g a': () => goTo({ kind: 'all' }),
-      'g h': () => goTo({ kind: 'snoozed' }),
+      ...(snoozeEnabled ? { 'g h': () => goTo({ kind: 'snoozed' }) } : {}),
       'g x': () => goTo({ kind: 'trash' }),
       'mod+0': () => setAccountId(null),
       ...Object.fromEntries(
@@ -286,7 +292,12 @@ function MailApp() {
                 {organise.controls.length > 0 && <OrganiseToolbar controls={organise.controls} />}
               </div>
               <div className="min-h-0 flex-1">
-                <ThreadView data={activeThread} labelNames={labelNames} scrollRef={readerScroll} />
+                <ThreadView
+                  data={activeThread}
+                  snoozeEnabled={snoozeEnabled}
+                  labelNames={labelNames}
+                  scrollRef={readerScroll}
+                />
               </div>
             </div>
           </ResizablePanel>
@@ -313,6 +324,7 @@ function MailApp() {
           setTheme(dark ? 'light' : theme === 'system' && !dark ? 'dark' : dark ? 'light' : 'dark')
         }
         dark={dark}
+        snoozeEnabled={snoozeEnabled}
         organise={organise.controls.map((control) => ({
           ...control,
           run: () => control.run(paletteInvoker.current ?? undefined),

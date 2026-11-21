@@ -44,6 +44,7 @@ export type SyncPhase = 'unpaired' | 'connecting' | 'bootstrapping' | 'live' | '
 
 export interface SyncStatus {
   phase: SyncPhase
+  snoozeEnabled?: boolean
   engineUrl: string | null
   /** Bootstrap progress, 0..1. */
   progress: number | null

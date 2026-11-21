@@ -11,7 +11,7 @@ import {
   CommandShortcut,
 } from '@/components/ui/command'
 import type { View } from '../../../shared/api'
-import { navigableLabels, SYSTEM_VIEWS } from './app-sidebar'
+import { navigableLabels, systemViews } from './app-sidebar'
 
 interface Props {
   open: boolean
@@ -23,6 +23,7 @@ interface Props {
   onSearch: (text: string) => void
   onToggleTheme: () => void
   dark: boolean
+  snoozeEnabled: boolean
   organise: { name: string; shortcut: string; icon: typeof Moon; run: () => void }[]
   undo?: (() => void) | undefined
 }
@@ -38,6 +39,7 @@ export function CommandPalette({
   onSearch,
   onToggleTheme,
   dark,
+  snoozeEnabled,
   organise,
   undo,
 }: Props) {
@@ -88,7 +90,7 @@ export function CommandPalette({
           </CommandGroup>
         )}
         <CommandGroup heading="Go to">
-          {SYSTEM_VIEWS.map((item) => (
+          {systemViews(snoozeEnabled).map((item) => (
             <CommandItem
               key={item.view.kind}
               value={`go ${item.title}`}

@@ -70,6 +70,7 @@ export class GmailAccountSync {
   readonly #store: MailStore
   readonly #state: AccountState
   readonly #log: Logger
+  readonly #snoozeEnabled: boolean
   readonly #seen = new Set<string>()
   /** Called after each stored chunk (the manager uses it to tell live Clients). */
   onProgress?: (stored: number) => void
@@ -77,11 +78,18 @@ export class GmailAccountSync {
   #scanGeneration = 0
   #backfillChanges: Set<string> | undefined
 
-  constructor(api: GmailApi, store: MailStore, state: AccountState, log: Logger) {
+  constructor(
+    api: GmailApi,
+    store: MailStore,
+    state: AccountState,
+    log: Logger,
+    snoozeEnabled = false,
+  ) {
     this.#api = api
     this.#store = store
     this.#state = state
     this.#log = log
+    this.#snoozeEnabled = snoozeEnabled
   }
 
   /** First run: remember where history starts, before backfilling, so nothing is missed. */
@@ -102,7 +110,7 @@ export class GmailAccountSync {
   async syncLabels(): Promise<void> {
     const labels = await this.#api.labels()
     this.#store.syncLabels(this.#state.accountId, labels.map(toIncomingLabel))
-    if (!labels.some(({ name }) => name === SNOOZED_LABEL)) {
+    if (this.#snoozeEnabled && !labels.some(({ name }) => name === SNOOZED_LABEL)) {
       try {
         const label = await this.#api.createLabel(SNOOZED_LABEL)
         this.#store.putLabel(this.#state.accountId, toIncomingLabel(label))

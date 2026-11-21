@@ -55,7 +55,7 @@ const run = async (action: OrganiseAction, description: string) => {
     toast.error(message)
   }
 }
-export function useOrganise(thread: ThreadSummary | null) {
+export function useOrganise(thread: ThreadSummary | null, snoozeEnabled = false) {
   const [picker, setPicker] = useState<Picker | null>(null)
 
   useEffect(() => {
@@ -91,22 +91,21 @@ export function useOrganise(thread: ThreadSummary | null) {
     const threadId = thread.id
     const trashed = thread.labelIds.includes(`${thread.accountId}:TRASH`)
     if (!trashed)
-      controls.push(
-        {
-          name: 'Archive',
-          key: 'e',
-          shortcut: 'E',
-          icon: Archive,
-          run: () => void run({ kind: 'archive', threadId }, 'Archived'),
-        },
-        {
-          name: 'Snooze',
-          key: 'h',
-          shortcut: 'H',
-          icon: Clock3,
-          run: (trigger) => openPicker('snooze', thread, trigger),
-        },
-      )
+      controls.push({
+        name: 'Archive',
+        key: 'e',
+        shortcut: 'E',
+        icon: Archive,
+        run: () => void run({ kind: 'archive', threadId }, 'Archived'),
+      })
+    if (!trashed && snoozeEnabled)
+      controls.push({
+        name: 'Snooze',
+        key: 'h',
+        shortcut: 'H',
+        icon: Clock3,
+        run: (trigger) => openPicker('snooze', thread, trigger),
+      })
     controls.push(
       {
         name: trashed ? 'Restore from Trash' : 'Move to Trash',
@@ -171,7 +170,17 @@ export function useOrganise(thread: ThreadSummary | null) {
       thread && void run({ kind: 'read', threadId: thread.id, value: false }, 'Marked as unread'),
     z: undo,
   }
-  return { controls, shortcuts, undo, picker, setPicker, run }
+  useEffect(() => {
+    if (!snoozeEnabled) setPicker((current) => (current?.kind === 'snooze' ? null : current))
+  }, [snoozeEnabled])
+  return {
+    controls,
+    shortcuts,
+    undo,
+    picker: picker?.kind === 'snooze' && !snoozeEnabled ? null : picker,
+    setPicker,
+    run,
+  }
 }
 
 export function OrganiseToolbar({ controls }: { controls: Control[] }) {

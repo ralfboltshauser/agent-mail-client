@@ -1,6 +1,12 @@
 import { hasScope, MutationBatch, MutationLookup, type MutationResponse } from '@amc/protocol'
 import { Hono, type MiddlewareHandler } from 'hono'
-import { MutationError, MutationPermissionError, type Mutations } from '../mail/mutations.ts'
+import { z } from 'zod'
+import {
+  MutationError,
+  MutationPermissionError,
+  type Mutations,
+  SNOOZE_DISABLED,
+} from '../mail/mutations.ts'
 import { type AppEnv, requireScope } from './app.ts'
 
 const requireOrganiseClient: MiddlewareHandler<AppEnv> = async (c, next) => {
@@ -10,10 +16,20 @@ const requireOrganiseClient: MiddlewareHandler<AppEnv> = async (c, next) => {
   await next()
 }
 
+const MutationKinds = z.object({
+  mutations: z.array(z.object({ action: z.object({ kind: z.string() }) })),
+})
+
 export function mutationRoutes(queue: Mutations) {
   const routes = new Hono<AppEnv>()
   routes.post('/mutations', requireScope('organize'), requireOrganiseClient, async (c) => {
-    const parsed = MutationBatch.safeParse(await c.req.json().catch(() => null))
+    const body: unknown = await c.req.json().catch(() => null)
+    if (!queue.snoozeEnabled) {
+      const batch = MutationKinds.safeParse(body)
+      if (batch.data?.mutations.some(({ action }) => action.kind === 'unsnooze'))
+        return c.json({ error: 'mutation_rejected', message: SNOOZE_DISABLED }, 409)
+    }
+    const parsed = MutationBatch.safeParse(body)
     if (!parsed.success)
       return c.json({ error: 'bad_request', message: 'Invalid mutation batch' }, 400)
     try {

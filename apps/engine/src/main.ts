@@ -64,9 +64,12 @@ async function main(argv: string[]) {
         oauth ??= loadOAuthClient(config.secretsDir)
         return oauth
       }
-      const sync = new SyncManager({ db, store, sealer, log, oauthClient })
+      const snoozeEnabled = config.features.snooze
+      const sync = new SyncManager({ db, store, sealer, log, oauthClient, snoozeEnabled })
       const drafts = new Drafts(db, store, (accountId) => sync.gmailApi(accountId))
-      const mutations = new Mutations(store, (accountId) => sync.gmailApi(accountId), log)
+      const mutations = new Mutations(store, (accountId) => sync.gmailApi(accountId), log, {
+        snoozeEnabled,
+      })
       const app = createApp({
         db,
         config,

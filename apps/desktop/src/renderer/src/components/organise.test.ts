@@ -19,10 +19,16 @@ const thread = {
 
 const mockRun = vi.fn<(action: OrganiseAction, description: string) => Promise<void>>()
 
-function Fixture({ kind }: { kind: 'labels' | 'snooze' }) {
-  const organise = useOrganise(thread)
+function Fixture({
+  kind,
+  snoozeEnabled = true,
+}: {
+  kind: 'labels' | 'snooze'
+  snoozeEnabled?: boolean
+}) {
+  const organise = useOrganise(thread, snoozeEnabled)
   const [selection, setSelection] = useState(0)
-  useHotkeys({ arrowdown: () => setSelection((index) => index + 1) })
+  useHotkeys({ ...organise.shortcuts, arrowdown: () => setSelection((index) => index + 1) })
   return createElement(
     TooltipProvider,
     null,
@@ -90,6 +96,16 @@ afterEach(async () => {
 })
 
 describe('Organise picker', () => {
+  it('hides the Snooze button and shortcut while Snooze is disabled', async () => {
+    await act(async () =>
+      root.render(createElement(Fixture, { kind: 'snooze', snoozeEnabled: false })),
+    )
+    expect(document.querySelector('[aria-label="Snooze"]')).toBeNull()
+    await act(async () => {
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'h', bubbles: true }))
+    })
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+  })
   it('keeps arrows in the Labels dialog and returns focus to the toolbar after Escape', async () => {
     await act(async () => root.render(createElement(Fixture, { kind: 'labels' })))
     const trigger = button('Labels')

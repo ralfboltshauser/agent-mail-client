@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { DbAccountState } from '../accounts.ts'
 import { issueToken } from '../auth/tokens.ts'
 import { BlobStore } from '../blobs.ts'
+import { Config } from '../config.ts'
 import { migrate, openDatabase } from '../db/database.ts'
 import { createApp } from '../http/app.ts'
 import { FakeGmail } from '../providers/gmail/fake.ts'
@@ -22,7 +23,7 @@ import { MailStore } from './store.ts'
 const THREAD = 'a:thread'
 const REQUESTOR = 'test-device'
 
-async function setup(blobDir = tempDir(), db = testDb()) {
+async function setup(blobDir = tempDir(), db = testDb(), snoozeEnabled = true) {
   let now = 100_000
   db.prepare(
     "INSERT INTO account (id, kind, address, credentials, created_at) VALUES ('a', 'gmail', 'owner@example.com', x'00', 0)",
@@ -33,16 +34,11 @@ async function setup(blobDir = tempDir(), db = testDb()) {
   gmail.add('m1', { threadId: 'thread', labels: ['INBOX', 'UNREAD'] })
   gmail.add('m2', { threadId: 'thread', labels: ['SENT', 'STARRED'] })
   const state = new DbAccountState(db, 'a', ['owner@example.com'])
-  const sync = new GmailAccountSync(gmail, store, state, silentLog)
+  const sync = new GmailAccountSync(gmail, store, state, silentLog, snoozeEnabled)
   await sync.start()
   while (await sync.backfillStep()) {}
   const queries = new MailQueries(db)
-  const queue = new Mutations(
-    store,
-    () => gmail,
-    silentLog,
-    () => now,
-  )
+  const queue = new Mutations(store, () => gmail, silentLog, { now: () => now, snoozeEnabled })
   const request = (action: OrganiseAction): MutationRequest => ({ id: randomUUID(), action })
   return {
     db,
@@ -67,13 +63,118 @@ async function setup(blobDir = tempDir(), db = testDb()) {
   }
 }
 
+describe('Snooze disabled', () => {
+  it('defaults to off and rejects Snooze and Unsnooze over HTTP', async () => {
+    const { features: _features, ...settings } = testConfig({
+      listen: { host: '127.0.0.1', port: 4410 },
+    })
+    const config = Config.parse(settings)
+    expect(config.features.snooze).toBe(false)
+    expect(Config.parse({ ...settings, features: {} }).features.snooze).toBe(false)
+    await withFixture(
+      async ({ db, queue, now }) => {
+        const writer = issueToken(db, { kind: 'cli', name: 'CLI', scopes: ['organize'] })
+        const app = createApp({ db, config, log: silentLog, mutations: queue })
+        const headers = {
+          Authorization: `Bearer ${writer.secret}`,
+          'Content-Type': 'application/json',
+        }
+        const me = await app.request('/v1/me', { headers })
+        expect(await me.json()).toMatchObject({ features: { snooze: false } })
+        for (const action of [
+          { kind: 'snooze', threadId: THREAD, until: now() + 1000 },
+          { kind: 'unsnooze', threadId: THREAD },
+        ]) {
+          const response = await app.request('/v1/mutations', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ mutations: [{ id: randomUUID(), action }] }),
+          })
+          expect(response.status).toBe(409)
+          expect(await response.json()).toMatchObject({
+            message: 'Snooze is disabled on this Engine',
+          })
+        }
+        expect(db.prepare('SELECT 1 FROM mutation').get()).toBeUndefined()
+      },
+      undefined,
+      false,
+    )
+  })
+
+  it('does not suppress new deliveries or wake an existing Snooze', async () => {
+    await withFixture(async ({ db, gmail, store, queue, submit, now, advance, sync }) => {
+      const until = now() + 1000
+      submit({ kind: 'snooze', threadId: THREAD, until })
+      await queue.tick()
+      const stopped = new Mutations(store, () => gmail, silentLog, { now })
+      const writes = vi.spyOn(gmail, 'batchModify')
+      gmail.add('m3', { threadId: 'thread', date: now() + 1 })
+      await sync.incremental()
+      await stopped.tick()
+      advance(2000)
+      await stopped.tick()
+      expect(writes).not.toHaveBeenCalled()
+      expect(await gmail.getMessageLabels('m3')).toContain('INBOX')
+      expect(
+        db.prepare("SELECT 1 FROM mutation WHERE json_extract(request, '$.snooze') = 1").get(),
+      ).toBeUndefined()
+    })
+  })
+
+  it('refuses an Undo of Snooze and discards its pending wake without writing to Gmail', async () => {
+    await withFixture(async ({ gmail, store, queue, submit, lookup, request, now, advance }) => {
+      const snooze = submit({ kind: 'snooze', threadId: THREAD, until: now() + 1000 })
+      await queue.tick()
+      advance(2000)
+      gmail.batchFailure = { applied: 0, error: new GmailHttpError(429, '', 'retry later') }
+      await queue.tick()
+      expect(lookup(snooze.id)?.status).toBe('applied')
+      const disabled = new Mutations(store, () => gmail, silentLog, { now })
+      const writes = vi.spyOn(gmail, 'batchModify')
+      expect(() =>
+        disabled.submit(REQUESTOR, [request({ kind: 'undo', mutationId: snooze.id })]),
+      ).toThrow('Snooze is disabled on this Engine')
+      advance(301_000)
+      await disabled.tick()
+      expect(writes).not.toHaveBeenCalled()
+      expect(
+        store.db
+          .prepare(
+            "SELECT status, error FROM mutation WHERE json_extract(request, '$.work') = 'wake'",
+          )
+          .get(),
+      ).toMatchObject({ status: 'failed', error: 'Snooze is disabled on this Engine' })
+    })
+  })
+
+  it('never creates the Gmail marker during startup or label refresh', async () => {
+    await withFixture(
+      async ({ db, gmail, sync }) => {
+        const createLabel = vi.spyOn(gmail, 'createLabel')
+        await sync.syncLabels()
+        expect(createLabel).not.toHaveBeenCalled()
+        expect(gmail.labelList.some(({ name }) => name === SNOOZED_LABEL)).toBe(false)
+        expect(db.prepare('SELECT 1 FROM label WHERE name = ?').get(SNOOZED_LABEL)).toBeUndefined()
+      },
+      undefined,
+      false,
+    )
+  })
+})
+
 describe('Gmail Organise writeback', () => {
   it('applies a batch atomically and idempotently under the organize scope', async () => {
     const { db, queue, request, thread } = await setup()
     const reader = issueToken(db, { kind: 'agent', name: 'Reader', scopes: ['read'] })
     const writer = issueToken(db, { kind: 'cli', name: 'CLI', scopes: ['organize'] })
     vi.spyOn(queue, 'kick').mockImplementation(() => {})
-    const app = createApp({ db, config: testConfig(), log: silentLog, mutations: queue })
+    const app = createApp({
+      db,
+      config: testConfig({ features: { snooze: true } }),
+      log: silentLog,
+      mutations: queue,
+    })
     const post = (token: string, mutations: MutationRequest[]) =>
       app.request('/v1/mutations', {
         method: 'POST',
@@ -111,7 +212,12 @@ describe('Gmail Organise writeback', () => {
       scopes: ['organize', 'admin'],
     })
     vi.spyOn(queue, 'kick').mockImplementation(() => {})
-    const app = createApp({ db, config: testConfig(), log: silentLog, mutations: queue })
+    const app = createApp({
+      db,
+      config: testConfig({ features: { snooze: true } }),
+      log: silentLog,
+      mutations: queue,
+    })
     const post = (token: string, mutations: MutationRequest[]) =>
       app.request('/v1/mutations', {
         method: 'POST',
@@ -150,7 +256,7 @@ describe('Gmail Organise writeback', () => {
       error: new GmailHttpError(403, 'forbidden', 'refused'),
     }
     advance(2000)
-    await new Mutations(store, () => gmail, silentLog, now).tick()
+    await new Mutations(store, () => gmail, silentLog, { now, snoozeEnabled: true }).tick()
     expect(lookup(trash.id)).toMatchObject({
       status: 'failed',
       error: 'A change to Trash may have been applied. Gmail refused the change (HTTP 403)',
@@ -297,7 +403,7 @@ describe('Gmail Organise writeback', () => {
     const label = submit({ kind: 'label', labelId: 'a:Label_work', value: true, threadId: THREAD })
     await queue.tick()
     expect(lookup(label.id)?.status).toBe('pending')
-    const restarted = new Mutations(store, () => gmail, silentLog, now)
+    const restarted = new Mutations(store, () => gmail, silentLog, { now, snoozeEnabled: true })
     await restarted.tick()
     expect(api).toHaveBeenCalledTimes(1)
     advance(2000)
@@ -321,7 +427,7 @@ describe('Gmail Organise writeback', () => {
       const action = submit({ kind: 'trash', threadId: THREAD, value: true })
       await queue.tick()
       advance(2000)
-      await new Mutations(store, () => gmail, silentLog, now).tick()
+      await new Mutations(store, () => gmail, silentLog, { now, snoozeEnabled: true }).tick()
       expect(lookup(action.id)).toMatchObject({ status: 'partial' })
       expect(trash.mock.calls).toEqual([
         ['m1', true],
@@ -557,7 +663,7 @@ describe('Gmail Organise writeback', () => {
     await queue.tick()
     gmail.setLabels('m1', ['UNREAD', 'TRASH'])
     advance(2000)
-    await new Mutations(store, () => gmail, silentLog, now).tick()
+    await new Mutations(store, () => gmail, silentLog, { now, snoozeEnabled: true }).tick()
     expect(write.mock.calls).toEqual([
       ['m1', true],
       ['m2', true],
@@ -603,7 +709,7 @@ describe('Gmail Organise writeback', () => {
       },
       { limiter: new QuotaLimiter({ rate: 10_000, maxRate: 10_000 }) },
     )
-    const queue = new Mutations(store, () => api, silentLog, now)
+    const queue = new Mutations(store, () => api, silentLog, { now, snoozeEnabled: true })
     const action = submit({ kind: 'trash', value: true, threadId: THREAD })
     await queue.tick()
     expect(lookup(action.id)?.status).toBe('pending')
@@ -724,7 +830,7 @@ describe.each([
       db.close()
       db = openDatabase(path)
       const store = new MailStore(db, new BlobStore(directory), now)
-      const restarted = new Mutations(store, () => gmail, silentLog, now)
+      const restarted = new Mutations(store, () => gmail, silentLog, { now, snoozeEnabled: true })
       await restarted.tick()
       expect(write.mock.calls).toEqual([
         ['m1', true],
@@ -824,7 +930,7 @@ describe.each([
     expect(dispatched).toBeDefined()
     expect(db.prepare("SELECT 1 FROM mutation WHERE status = 'pending'").get()).toBeDefined()
     advance(2000)
-    await new Mutations(store, () => gmail, silentLog, now).tick()
+    await new Mutations(store, () => gmail, silentLog, { now, snoozeEnabled: true }).tick()
     expect(reads).toBeGreaterThan(faultAt)
     expect(attempted.filter((write) => write === dispatched)).toHaveLength(1)
     expect(db.prepare("SELECT 1 FROM mutation WHERE status = 'pending'").get()).toBeUndefined()
@@ -852,6 +958,7 @@ function seededRandom(seed: number) {
 describe('seeded Gmail writeback interleavings', () => {
   it('preserves Gmail owner writes and converges after sync', async () => {
     const directory = tempDir()
+    const snoozeEnabled = process.env.AMC_FUZZ_SNOOZE === '1'
     const failingSeed = process.env.AMC_FUZZ_SEED
     const seeds = failingSeed
       ? [Number(failingSeed)]
@@ -872,7 +979,7 @@ describe('seeded Gmail writeback interleavings', () => {
           advance,
           queue: initialQueue,
           sync: initialSync,
-        } = await setup(directory)
+        } = await setup(directory, undefined, snoozeEnabled)
         const pick = seededRandom(seed)
         const targeted = seededRandom(seed ^ 0x6fa97c03)
         const trace: string[] = []
@@ -890,8 +997,10 @@ describe('seeded Gmail writeback interleavings', () => {
           const ids = [...gmail.messages.keys()]
           const id = ids[pick(ids.length)] ?? ''
           const choices = phase === 'during backoff' ? 11 : phase === 'before planning' ? 10 : 9
-          let edit = ids.length < 2 ? 8 : pick(choices)
-          if (phase === 'before planning' && edit === 9) edit = 10
+          const edits = Array.from({ length: choices }, (_, i) => i)
+            .map((edit) => (phase === 'before planning' && edit === 9 ? 10 : edit))
+            .filter((edit) => snoozeEnabled || (edit !== 6 && edit !== 10))
+          const edit = ids.length < 2 ? 8 : (edits[pick(edits.length)] ?? 8)
           trace.push(`owner ${phase}: ${edit} ${id}`)
           if (phase === 'after read') ownerEditedAfterRead = true
           if (edit === 8) {
@@ -945,8 +1054,8 @@ describe('seeded Gmail writeback interleavings', () => {
         }
         const restart = () => {
           trace.push('restart')
-          queue = new Mutations(store, () => gmail, silentLog, now)
-          sync = new GmailAccountSync(gmail, store, state, silentLog)
+          queue = new Mutations(store, () => gmail, silentLog, { now, snoozeEnabled })
+          sync = new GmailAccountSync(gmail, store, state, silentLog, snoozeEnabled)
         }
 
         // Inspect Gmail's actual label transitions and writer metadata, which are
@@ -1039,10 +1148,24 @@ describe('seeded Gmail writeback interleavings', () => {
               { kind: 'trash', value: false, threadId: THREAD },
               { kind: 'star', value: Boolean(pick(2)), threadId: THREAD },
               { kind: 'label', labelId: 'a:Label_work', value: Boolean(pick(2)), threadId: THREAD },
-              { kind: 'snooze', until: now() + 1000, noReply: Boolean(pick(2)), threadId: THREAD },
+            ]
+            if (snoozeEnabled) {
+              actions.push({
+                kind: 'snooze',
+                until: now() + 1000,
+                noReply: Boolean(pick(2)),
+                threadId: THREAD,
+              })
+            } else {
+              actions.push(
+                { kind: 'read', value: true, threadId: THREAD },
+                { kind: 'read', value: false, threadId: THREAD },
+              )
+            }
+            actions.push(
               { kind: 'mute', value: Boolean(pick(2)), threadId: THREAD },
               { kind: 'undo', threadId: THREAD },
-            ]
+            )
             const action = actions[pick(actions.length)] as OrganiseAction
             const request = { id: `${seed}-${round}`, action }
             if (db.prepare('SELECT 1 FROM thread WHERE id = ?').get(THREAD)) {
@@ -1101,7 +1224,9 @@ describe('seeded Gmail writeback interleavings', () => {
             })),
           ).toEqual(truth)
           const scenarios = [
-            (fixture: OrganiseFixture) => checkWake(fixture, Boolean(targeted(2))),
+            ...(snoozeEnabled
+              ? [(fixture: OrganiseFixture) => checkWake(fixture, Boolean(targeted(2)))]
+              : []),
             (fixture: OrganiseFixture) =>
               checkMuteSuppression(
                 fixture,
@@ -1122,50 +1247,59 @@ describe('seeded Gmail writeback interleavings', () => {
                 Boolean(targeted(2)),
               ),
           ]
-          scenarios.push((fixture) => checkTrashCleanup(fixture, targeted(2) ? 'm1' : 'm2'))
+          if (snoozeEnabled)
+            scenarios.push((fixture) => checkTrashCleanup(fixture, targeted(2) ? 'm1' : 'm2'))
           scenarios.push(
             (fixture) =>
               checkUndoAba(fixture, targeted(2) ? 'TRASH' : 'Label_work', targeted(2) ? 1 : 500),
             (fixture) => checkRetryAba(fixture, targeted(2) ? 'm1' : 'm2', targeted(2) ? 429 : 401),
           )
-          scenarios.push((fixture) =>
-            checkSnoozedActionAfterMarkerEdit(fixture, targeted(2) ? 'archive' : 'trash'),
-          )
-          scenarios.push((fixture) =>
-            checkOwnerSnoozeMarker(
-              fixture,
-              (['before Snooze', 'at delivery', 'during Snooze'] as const)[targeted(3)] ??
-                'during Snooze',
-            ),
-          )
-          // Each automatic path gets an owner edit after the action has settled.
-          // Vary the path, pagination, and whether a first dispatch was refused.
-          scenarios.push((fixture) => {
-            fixture.gmail.historyPageSize = targeted(2) ? 1 : 500
-            const retry = Boolean(targeted(2))
-            switch (targeted(6)) {
-              case 0:
-                return checkSuppressionOwnerEdit(fixture, 'snooze', retry)
-              case 1:
-                return checkSuppressionOwnerEdit(fixture, 'mute', retry)
-              case 2:
-                return checkSnoozeMarkerEdit(fixture, 'reply', Boolean(targeted(2)))
-              case 3:
-                return checkSnoozeMarkerEdit(fixture, 'timer', Boolean(targeted(2)))
-              case 4:
-                return checkWakeCleanupOwnerEdit(fixture, retry)
-              default:
-                return checkWakeInboxEdit(fixture, retry)
-            }
-          })
-          scenarios.push((fixture) => checkReplacementSnooze(fixture, Boolean(targeted(2))))
+          if (snoozeEnabled) {
+            scenarios.push((fixture) =>
+              checkSnoozedActionAfterMarkerEdit(fixture, targeted(2) ? 'archive' : 'trash'),
+            )
+            scenarios.push((fixture) =>
+              checkOwnerSnoozeMarker(
+                fixture,
+                (['before Snooze', 'at delivery', 'during Snooze'] as const)[targeted(3)] ??
+                  'during Snooze',
+              ),
+            )
+            // Each automatic path gets an owner edit after the action has settled.
+            // Vary the path, pagination, and whether a first dispatch was refused.
+            scenarios.push((fixture) => {
+              fixture.gmail.historyPageSize = targeted(2) ? 1 : 500
+              const retry = Boolean(targeted(2))
+              switch (targeted(6)) {
+                case 0:
+                  return checkSuppressionOwnerEdit(fixture, 'snooze', retry)
+                case 1:
+                  return checkSuppressionOwnerEdit(fixture, 'mute', retry)
+                case 2:
+                  return checkSnoozeMarkerEdit(fixture, 'reply', Boolean(targeted(2)))
+                case 3:
+                  return checkSnoozeMarkerEdit(fixture, 'timer', Boolean(targeted(2)))
+                case 4:
+                  return checkWakeCleanupOwnerEdit(fixture, retry)
+                default:
+                  return checkWakeInboxEdit(fixture, retry)
+              }
+            })
+            scenarios.push((fixture) => checkReplacementSnooze(fixture, Boolean(targeted(2))))
+          } else {
+            scenarios.push((fixture) => {
+              fixture.gmail.historyPageSize = targeted(2) ? 1 : 500
+              return checkSuppressionOwnerEdit(fixture, 'mute', Boolean(targeted(2)))
+            })
+            expect(gmail.labelList.some(({ name }) => name === SNOOZED_LABEL)).toBe(false)
+          }
           const scenario = targeted(scenarios.length)
           trace.push(`targeted interleaving ${scenario}`)
           const runScenario = scenarios[scenario]
-          if (runScenario) await withFixture(runScenario, directory)
+          if (runScenario) await withFixture(runScenario, directory, snoozeEnabled)
         } catch (error) {
           console.error(
-            `Gmail interleaving failed for seed ${seed}. Replay with AMC_FUZZ_SEED=${seed}\n${trace.join('\n')}`,
+            `Gmail interleaving failed for seed ${seed}. Replay with AMC_FUZZ_SNOOZE=${Number(snoozeEnabled)} AMC_FUZZ_SEED=${seed}\n${trace.join('\n')}`,
           )
           throw error
         } finally {
@@ -1199,7 +1333,7 @@ async function checkMuteSuppression(
   gmail.setLabels('m3', ['INBOX', 'UNREAD'])
   if (syncRestore) await sync.incremental()
   advance(2000)
-  const restarted = new Mutations(store, () => gmail, silentLog, now)
+  const restarted = new Mutations(store, () => gmail, silentLog, { now, snoozeEnabled: true })
   await restarted.tick()
   await restarted.tick()
   expect(await gmail.getMessageLabels('m3')).toContain('INBOX')
@@ -1279,12 +1413,12 @@ async function checkExpiredTrash(
   expect(await gmail.getMessageLabels('m1')).toContain('TRASH')
   db.exec("UPDATE account SET status = 'auth_expired' WHERE id = 'a'")
   advance(2000)
-  await new Mutations(store, () => null, silentLog, now).tick()
+  await new Mutations(store, () => null, silentLog, { now, snoozeEnabled: true }).tick()
   expect(spy.mock.calls).toEqual([
     ['m1', true],
     ['m2', true],
   ])
-  const restarted = new Mutations(store, () => gmail, silentLog, now)
+  const restarted = new Mutations(store, () => gmail, silentLog, { now, snoozeEnabled: true })
   const result = restarted.lookup(REQUESTOR, [action.id])[0]
   expect(result).toMatchObject({
     status: 'partial',
@@ -1323,7 +1457,7 @@ async function checkAmbiguousTrash(
   if (ownerRestores) gmail.setLabels('m1', ['INBOX', 'UNREAD'])
   gmail.trashFailure = { afterWrite: false, error: new GmailHttpError(403, '', 'refused') }
   advance(2000)
-  await new Mutations(store, () => gmail, silentLog, now).tick()
+  await new Mutations(store, () => gmail, silentLog, { now, snoozeEnabled: true }).tick()
   const result = lookup(action.id)
   expect(result).toMatchObject({
     status: 'failed',
@@ -1426,8 +1560,9 @@ async function checkWake(
 async function withFixture(
   run: (fixture: OrganiseFixture) => Promise<void>,
   directory?: string,
+  snoozeEnabled = true,
 ): Promise<void> {
-  const fixture = await setup(directory)
+  const fixture = await setup(directory, undefined, snoozeEnabled)
   try {
     await run(fixture)
   } finally {
@@ -1534,7 +1669,7 @@ async function checkRetryAba(
   flipAwayAndBack(gmail, target, 'TRASH')
   await sync.incremental()
   advance(2000)
-  await new Mutations(store, () => gmail, silentLog, now).tick()
+  await new Mutations(store, () => gmail, silentLog, { now, snoozeEnabled: true }).tick()
   expect(calls.filter((id) => id === target)).toHaveLength(1)
   expect(await gmail.getMessageLabels(target)).not.toContain('TRASH')
   expect(await gmail.getMessageLabels(target === 'm1' ? 'm2' : 'm1')).toContain('TRASH')
@@ -1684,11 +1819,11 @@ it('times out and retries a stalled Gmail labels body while unrelated writeback 
       },
       { timeoutMs: 500 },
     )
-    const sync = new GmailAccountSync(api, store, state, silentLog)
+    const sync = new GmailAccountSync(api, store, state, silentLog, true)
     const provision = sync.start()
     try {
       await started
-      const queue = new Mutations(store, () => api, silentLog, now)
+      const queue = new Mutations(store, () => api, silentLog, { now, snoozeEnabled: true })
       const first = request({ kind: 'snooze', threadId: THREAD, until: now() + 60_000 })
       const second = request({ kind: 'read', threadId: THREAD, value: true })
       queue.submit(REQUESTOR, [first, second])
@@ -1818,7 +1953,7 @@ it('cleans untouched Snoozed markers after a user action without waking the thre
     expect(await gmail.getMessageLabels('m1')).toContain(marker)
 
     advance(1000)
-    const restarted = new Mutations(store, () => gmail, silentLog, now)
+    const restarted = new Mutations(store, () => gmail, silentLog, { now, snoozeEnabled: true })
     await restarted.tick()
     for (const id of ['m1', 'm2']) {
       const labels = await gmail.getMessageLabels(id)
@@ -1897,7 +2032,7 @@ async function checkReplacementSnooze(
 
   advance(60_000)
   const writes = vi.spyOn(gmail, 'modifyMessage')
-  const restarted = new Mutations(store, () => gmail, silentLog, now)
+  const restarted = new Mutations(store, () => gmail, silentLog, { now, snoozeEnabled: true })
   await restarted.tick()
   const markerRemovals = writes.mock.calls
     .filter(([, , remove]) => remove.includes(marker))
@@ -2026,7 +2161,7 @@ async function checkSuppressionOwnerEdit(
   flipAwayAndBack(gmail, 'm3', 'INBOX')
   await sync.incremental()
   advance(2000)
-  const restarted = new Mutations(store, () => gmail, silentLog, now)
+  const restarted = new Mutations(store, () => gmail, silentLog, { now, snoozeEnabled: true })
   await restarted.tick()
   expect(await gmail.getMessageLabels('m3')).toContain('INBOX')
   await restarted.tick()

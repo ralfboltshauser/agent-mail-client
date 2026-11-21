@@ -10,13 +10,14 @@ import { HtmlBody, TextBody } from './message-body'
 
 interface Props {
   data: ThreadWithMessages | null
+  snoozeEnabled: boolean
   labelNames: Map<string, string>
   scrollRef: React.RefObject<HTMLDivElement | null>
 }
 
 const HIDDEN_LABELS = /:(INBOX|UNREAD|STARRED|IMPORTANT|SENT|DRAFT|CATEGORY_\w+)$/
 
-export function ThreadView({ data, labelNames, scrollRef }: Props) {
+export function ThreadView({ data, snoozeEnabled, labelNames, scrollRef }: Props) {
   if (!data) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-1 text-sm text-muted-foreground">
@@ -30,6 +31,7 @@ export function ThreadView({ data, labelNames, scrollRef }: Props) {
     )
   }
   const { thread, messages } = data
+  const snoozedUntil = snoozeEnabled ? thread.snoozedUntil : null
   const labels = thread.labelIds
     .filter((id) => !HIDDEN_LABELS.test(id) && id !== `${thread.accountId}:${SNOOZED_LABEL}`)
     .map((id) => labelNames.get(id) ?? id.split(':').pop() ?? id)
@@ -45,11 +47,11 @@ export function ThreadView({ data, labelNames, scrollRef }: Props) {
             <Star className="mt-1.5 size-4 shrink-0 fill-amber-400 text-amber-400" />
           )}
         </div>
-        {(labels.length > 0 || thread.muted || thread.snoozedUntil) && (
+        {(labels.length > 0 || thread.muted || snoozedUntil) && (
           <div className="-mt-3 mb-5 flex flex-wrap gap-1.5">
             {thread.muted && <Badge variant="secondary">Muted</Badge>}
-            {thread.snoozedUntil && (
-              <Badge variant="secondary">Snoozed until {fullDate(thread.snoozedUntil)}</Badge>
+            {snoozedUntil && (
+              <Badge variant="secondary">Snoozed until {fullDate(snoozedUntil)}</Badge>
             )}
             {labels.map((l) => (
               <Badge key={l} variant="secondary" className="font-normal">

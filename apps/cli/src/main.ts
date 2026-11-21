@@ -235,18 +235,6 @@ program
   )
 
 program
-  .command('snooze')
-  .argument('<thread>', 'Thread id')
-  .argument('<until>', 'ISO date and time')
-  .option('--if-no-reply', 'cancel the Snooze if a reply arrives first')
-  .action((threadId: string, until: string, opts: { ifNoReply?: boolean }) => {
-    const timestamp = Date.parse(until)
-    if (!Number.isFinite(timestamp) || timestamp <= Date.now())
-      throw new Error('Choose a future ISO date and time')
-    return organise({ kind: 'snooze', threadId, until: timestamp, noReply: opts.ifNoReply })
-  })
-
-program
   .command('mutation-status')
   .argument('<id>', 'Mutation id')
   .action(async (id: string) => {
@@ -421,7 +409,33 @@ function formatDuration(seconds: number): string {
   return `${Math.round(seconds / 86400)}d`
 }
 
-program.parseAsync().catch((error: unknown) => {
+async function main() {
+  const args = process.argv.slice(2)
+  const [command] = args
+  // Only command discovery and Snooze itself need the Engine's feature settings.
+  if (!command || ['help', '-h', '--help', 'snooze'].includes(command)) {
+    const config = readConfig()
+    const me = config
+      ? await authed(config)<Me>('/v1/me', { signal: AbortSignal.timeout(1500) }).catch(() => null)
+      : null
+    if (me?.features?.snooze === true) {
+      program
+        .command('snooze')
+        .argument('<thread>', 'Thread id')
+        .argument('<until>', 'ISO date and time')
+        .option('--if-no-reply', 'cancel the Snooze if a reply arrives first')
+        .action((threadId: string, until: string, opts: { ifNoReply?: boolean }) => {
+          const timestamp = Date.parse(until)
+          if (!Number.isFinite(timestamp) || timestamp <= Date.now())
+            throw new Error('Choose a future ISO date and time')
+          return organise({ kind: 'snooze', threadId, until: timestamp, noReply: opts.ifNoReply })
+        })
+    }
+  }
+  await program.parseAsync()
+}
+
+main().catch((error: unknown) => {
   if (error instanceof EngineError) console.error(`Error: ${error.message}`)
   else console.error(error)
   process.exit(1)
