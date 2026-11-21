@@ -8,8 +8,9 @@ import { type AppEnv, requireOwnerAdmin } from './app.ts'
 const CreateAgentToken = z.object({
   name: z.string().min(1).max(60),
   scopes: z.array(z.enum(SCOPES)).min(1),
-  expiresInDays: z.number().int().min(1).max(MAX_AGENT_DAYS),
+  expiresInDays: z.number().int().min(1).max(MAX_AGENT_DAYS).optional(),
   accountId: z.string().min(1).max(512).optional(),
+  expiresInMinutes: z.number().int().min(1).max(60).optional(),
 })
 
 /** Agent tokens: created by the owner's CLI or desktop app. Agents never get `admin`. */
@@ -29,6 +30,10 @@ export function tokenRoutes(db: Db) {
     const parsed = CreateAgentToken.safeParse(await c.req.json().catch(() => null))
     if (!parsed.success)
       return c.json({ error: 'bad_request', message: z.prettifyError(parsed.error) }, 400)
+    const { expiresInDays, expiresInMinutes } = parsed.data
+    if ((expiresInDays === undefined) === (expiresInMinutes === undefined))
+      return c.json({ error: 'bad_request', message: 'Choose exactly one expiry unit' }, 400)
+    const duration = (expiresInDays ?? 0) * DAY_MS + (expiresInMinutes ?? 0) * 60_000
     if (parsed.data.scopes.includes('admin')) {
       return c.json(
         { error: 'forbidden', message: 'Agent tokens cannot hold the admin scope' },
@@ -43,7 +48,7 @@ export function tokenRoutes(db: Db) {
           kind: 'agent',
           name: parsed.data.name,
           scopes: parsed.data.scopes,
-          expiresAt: now + parsed.data.expiresInDays * DAY_MS,
+          expiresAt: now + duration,
           ...(parsed.data.accountId ? { accountId: parsed.data.accountId } : {}),
         },
         now,

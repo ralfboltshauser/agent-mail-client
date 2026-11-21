@@ -1,4 +1,5 @@
 import { createReadStream } from 'node:fs'
+import { addAbortSignal } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import type { Address } from '@amc/protocol'
 import type { FetchMessageObject, ListResponse, MessageStructureObject } from 'imapflow'
@@ -12,7 +13,7 @@ import {
 } from 'mailparser'
 import type { BlobStore } from '../../blobs.ts'
 import type { IncomingAttachment, IncomingLabel, IncomingMessage } from '../../mail/store.ts'
-import { htmlToText, normalizeWhitespace } from '../../mail/text.ts'
+import { BODY_SEARCH_LIMIT, ImapBodyParts } from './body-parts.ts'
 
 const systemLabels = new Map([
   ['\\Inbox', ['INBOX', 'Inbox']],
@@ -96,10 +97,15 @@ export async function parseMessage(
   const lazyStructure =
     (item.size ?? 0) > LAZY_ATTACHMENT_THRESHOLD ? item.bodyStructure : undefined
   const attachments = lazyStructure ? largeAttachments(lazyStructure) : []
+  const bodies = new ImapBodyParts(blobs)
+  const abort = new AbortController()
   const parser = new MailParser({
     skipImageLinks: true,
     skipHtmlToText: true,
     skipTextToHtml: true,
+    checksumAlgo: false,
+    storeTextPart: (stream, charset, flowed, delSp) =>
+      bodies.store(addAbortSignal(abort.signal, stream), charset, flowed, delSp),
   })
   parser.on('headers', (value: Headers) => {
     headers = value
@@ -133,16 +139,16 @@ export async function parseMessage(
       part.release?.()
     }
   }
-  await Promise.all([
-    pipeline(createReadStream(blobs.path(sourceBlob)), parser),
-    consume().catch((error: Error) => {
-      parser.destroy(error)
-      throw error
-    }),
-  ])
+  try {
+    await Promise.all([pipeline(createReadStream(blobs.path(sourceBlob)), parser), consume()])
+  } catch (error) {
+    abort.abort()
+    parser.destroy()
+    throw error
+  }
 
-  const bodyHtml = text.html || null
-  const bodyText = normalizeWhitespace(text.text ?? (bodyHtml ? htmlToText(bodyHtml) : ''))
+  const bodiesForStore = await bodies.finish(text.text, text.html)
+  const { bodyText } = bodiesForStore
   const unsubscribe = lines.find((header) => header.key === 'list-unsubscribe')
   const date = headers.get('date')
   const timestamp =
@@ -168,9 +174,9 @@ export async function parseMessage(
     replyTo: addresses(headers.get('reply-to') as AddressObject | AddressObject[] | undefined),
     subject: typeof subject === 'string' ? subject : '',
     snippet: bodyText.slice(0, 1024).replace(/\s+/g, ' ').slice(0, 200),
-    bodyText,
-    bodySearchLimit: 256 * 1024,
-    bodyHtml,
+    ...bodiesForStore,
+    bodySearchLimit: BODY_SEARCH_LIMIT,
+    bodyHtml: null,
     sentAt: Number.isFinite(timestamp) ? timestamp : 0,
     size: item.size ?? 0,
     labels: [folder.label.providerId],

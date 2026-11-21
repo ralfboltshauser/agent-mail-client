@@ -2,6 +2,7 @@ import type {
   AccountSummary,
   Address,
   AttachmentSummary,
+  Bucket,
   Label,
   MessageDetail,
   SearchHit,
@@ -10,7 +11,9 @@ import type {
   ThreadSummary,
 } from '@amc/protocol'
 import { RECENT_THREAD_BODIES } from '@amc/protocol'
+import type { BlobStore } from '../blobs.ts'
 import type { Db } from '../db/database.ts'
+import { type BodyParts, readBodyParts, readTextBody } from './body-blobs.ts'
 
 interface ThreadRow {
   id: string
@@ -27,6 +30,10 @@ interface ThreadRow {
   last_message_at: number
   snoozed_until: number | null
   muted: number
+  bucket: Bucket | null
+  bucket_reason: string
+  bucket_set_by: string
+  bucket_set_at: number
 }
 
 type MessageWithBody<Body extends string | null> = Omit<MessageDetail, 'bodyText'> & {
@@ -47,6 +54,7 @@ interface MessageRow {
   subject: string
   snippet: string
   body_text: Uint8Array | null
+  body_parts: string | null
   body_search_truncated: number
   html_blob: string | null
   sent_at: number
@@ -87,6 +95,14 @@ function toThread(row: ThreadRow): ThreadSummary {
     lastMessageAt: row.last_message_at,
     snoozedUntil: row.snoozed_until,
     muted: row.muted === 1,
+    bucket: row.bucket
+      ? {
+          bucket: row.bucket,
+          reason: row.bucket_reason,
+          setBy: row.bucket_set_by,
+          setAt: row.bucket_set_at,
+        }
+      : null,
   }
 }
 
@@ -97,6 +113,7 @@ export interface ThreadQuery {
   /** Only Threads in the Inbox (across Accounts unless accountId is set). */
   inbox?: boolean
   unread?: boolean
+  untriaged?: boolean
   /** Return Threads whose last message is older than this (epoch ms), for paging. */
   before?: number
   limit?: number
@@ -110,7 +127,10 @@ export class MailQueries {
   readonly #threadColumns: string
   readonly #readAgentBody: ReturnType<Db['prepare']>
 
-  constructor(db: Db, snoozeEnabled = false) {
+  readonly #blobs?: BlobStore
+
+  constructor(db: Db, snoozeEnabled = false, blobs?: BlobStore) {
+    this.#blobs = blobs
     this.db = db
     this.#readAgentBody = db.prepare(
       'SELECT substr(CAST(body_text AS BLOB), 1, ?) AS body FROM message WHERE id = ?',
@@ -128,7 +148,8 @@ export class MailQueries {
         ) ELSE t.in_inbox END`
     this.#threadColumns = `t.id, t.account_id, t.subject, t.snippet, t.participants, t.message_count,
       t.unread_count, t.starred, ${this.#inbox} AS in_inbox, t.has_attachments, t.label_ids,
-      t.last_message_at, ${snoozeEnabled ? 't.snoozed_until' : 'NULL'} AS snoozed_until, t.muted`
+      t.last_message_at, ${snoozeEnabled ? 't.snoozed_until' : 'NULL'} AS snoozed_until, t.muted,
+      t.bucket, t.bucket_reason, t.bucket_set_by, t.bucket_set_at`
   }
 
   accounts(): AccountSummary[] {
@@ -215,6 +236,7 @@ export class MailQueries {
       where.push('EXISTS (SELECT 1 FROM json_each(t.label_ids) WHERE value = ?)')
       params.push(query.labelId)
     }
+    if (query.untriaged) where.push('t.bucket IS NULL')
     if (query.unread) where.push('t.unread_count > 0')
     if (query.before !== undefined) {
       where.push('t.last_message_at < ?')
@@ -352,7 +374,7 @@ export class MailQueries {
     const rows = this.db
       .prepare(
         `SELECT m.id, m.thread_id, m.account_id, m.rfc_message_id, m.in_reply_to, m.from_json, m.to_json,
-                m.cc_json, m.bcc_json, m.reply_to_json, m.subject, m.snippet, CAST(${body} AS BLOB) AS body_text, m.html_blob,
+                m.cc_json, m.bcc_json, m.reply_to_json, m.subject, m.snippet, CAST(${body} AS BLOB) AS body_text, m.body_parts, m.html_blob,
                 CASE WHEN m.body_search_limit IS NOT NULL THEN length(m.body_text) > m.body_search_limit ELSE 0 END AS body_search_truncated,
                 m.sent_at, m.unread, m.starred, m.label_ids, m.list_unsubscribe
          FROM message m WHERE ${where}`,
@@ -361,8 +383,14 @@ export class MailQueries {
     const attachments = this.db.prepare(
       'SELECT id, filename, mime_type, size, inline, content_id FROM attachment WHERE message_id = ? ORDER BY id',
     )
-    return rows.map(
-      (m): MessageWithBody<Body> => ({
+    return rows.map((m): MessageWithBody<Body> => {
+      const bodyParts = m.body_parts ? (JSON.parse(m.body_parts) as BodyParts) : null
+      const bodyText =
+        m.body_text === null
+          ? null
+          : ((bodyParts && this.#blobs ? readTextBody(this.#blobs, bodyParts) : undefined) ??
+            Buffer.from(m.body_text).toString('utf8'))
+      return {
         id: m.id,
         threadId: m.thread_id,
         accountId: m.account_id,
@@ -375,9 +403,9 @@ export class MailQueries {
         replyTo: JSON.parse(m.reply_to_json) as Address[],
         subject: m.subject,
         snippet: m.snippet,
-        bodyText: (m.body_text === null ? null : Buffer.from(m.body_text).toString('utf8')) as Body,
-        bodySearchTruncated: Boolean(m.body_search_truncated),
-        hasHtml: m.html_blob !== null,
+        bodyText: bodyText as Body,
+        bodySearchTruncated: Boolean(bodyParts?.searchTruncated || m.body_search_truncated),
+        hasHtml: m.html_blob !== null || Boolean(bodyParts?.html),
         sentAt: m.sent_at,
         unread: m.unread === 1,
         starred: m.starred === 1,
@@ -393,15 +421,17 @@ export class MailQueries {
             contentId: a.content_id,
           }),
         ),
-      }),
-    )
+      }
+    })
   }
 
-  messageHtmlBlob(messageId: string): string | null {
-    const row = this.db.prepare('SELECT html_blob FROM message WHERE id = ?').get(messageId) as
-      | { html_blob: string | null }
-      | undefined
-    return row?.html_blob ?? null
+  messageHtml(messageId: string, blobs: BlobStore): string | null {
+    const row = this.db
+      .prepare('SELECT html_blob, body_parts FROM message WHERE id = ?')
+      .get(messageId) as { html_blob: string | null; body_parts: string | null } | undefined
+    if (row?.html_blob) return blobs.get(row.html_blob)?.toString('utf8') ?? null
+    const parts = row?.body_parts ? (JSON.parse(row.body_parts) as BodyParts).html : undefined
+    return parts ? (readBodyParts(blobs, parts) ?? null) : null
   }
 
   /** Full-text search over the entire history, best matches first, one hit per Thread. */

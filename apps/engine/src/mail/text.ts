@@ -42,10 +42,13 @@ export function htmlToText(html: string): string {
 }
 
 export function normalizeWhitespace(text: string): string {
+  return collapseWhitespace(text).trim()
+}
+
+export function collapseWhitespace(text: string): string {
   return text
     .replace(/\r\n?/g, '\n')
     .replace(/[ \t ]+/g, ' ')
     .replace(/ *\n */g, '\n')
     .replace(/\n{3,}/g, '\n\n')
-    .trim()
 }

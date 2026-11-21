@@ -1,15 +1,18 @@
-import type {
-  ComposeDraft,
-  ComposeStart,
-  OutboxItem,
-  SearchHit,
-  ThreadSummary,
+import {
+  BUCKETS,
+  type Bucket,
+  type ComposeDraft,
+  type ComposeStart,
+  type OutboxItem,
+  type SearchHit,
+  type ThreadSummary,
 } from '@amc/protocol'
 import { Forward, Loader2, Reply, ReplyAll, Search, SquarePen, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import type { Counts, ThreadWithMessages, View } from '../../shared/api'
 import { AppSidebar, systemViews } from './components/app-sidebar'
+import { BucketPicker } from './components/bucket-picker'
 import { CommandPalette } from './components/command-palette'
 import { DraftsView, OutboxView } from './components/compose-views'
 import { Composer } from './components/composer'
@@ -27,7 +30,7 @@ import { useHotkeys } from './hooks/use-hotkeys'
 import { useTheme } from './hooks/use-theme'
 
 const INBOX: View = { kind: 'inbox' }
-const NO_COUNTS: Counts = { inbox: 0, inboxUnread: 0, starred: 0, drafts: 0 }
+const NO_COUNTS: Counts = { inbox: 0, inboxUnread: 0, starred: 0, drafts: 0, buckets: {} }
 
 export function App() {
   const status = useSyncStatus()
@@ -58,6 +61,7 @@ function MailApp() {
     if (view !== selectedView) setView(view)
   }, [view, selectedView])
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [bucketPickerId, setBucketPickerId] = useState<string | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [filterText, setFilterText] = useState('')
   const [search, setSearch] = useState<SearchState>(null)
@@ -101,8 +105,23 @@ function MailApp() {
     const byId = new Map(searchSummaries.map((summary) => [summary.id, summary]))
     return search.hits.map((hit) => byId.get(hit.id) ?? hit)
   }, [search?.hits, searchSummaries])
-  const threads: ThreadSummary[] = searchThreads ?? filtered ?? viewThreads
+  const threads: ThreadSummary[] =
+    searchThreads ??
+    (filtered && view.kind === 'bucket'
+      ? filtered.filter((item) => item.bucket?.bucket === view.bucket)
+      : filtered) ??
+    viewThreads
   const selected = threads.find((item) => item.id === selectedId)
+  const bucketPickerOpen = !!selected && bucketPickerId === selected.id
+  const setBucket = async (bucket: Bucket | null) => {
+    if (!selected || (selected.bucket?.bucket ?? null) === bucket) return
+    setBucketPickerId(null)
+    try {
+      await window.amc.setBucket({ threadId: selected.id, bucket, reason: 'Set manually' })
+    } catch (error) {
+      toast.error('Could not move Thread', { description: (error as Error).message })
+    }
+  }
   const activeThread = selected && thread?.thread.id === selectedId ? thread : null
   const organiseAccountId = selected?.accountId ?? accountId
   const organiseAccount = accounts.find((account) => account.id === organiseAccountId)
@@ -136,11 +155,14 @@ function MailApp() {
     ? `Search: ${search.text}`
     : view.kind === 'label'
       ? (labelNames.get(view.labelId) ?? 'Label')
-      : (systemViews(snoozeEnabled).find((v) => v.view.kind === view.kind)?.title ?? 'Mail')
+      : view.kind === 'bucket'
+        ? view.bucket
+        : (systemViews(snoozeEnabled).find((v) => v.view.kind === view.kind)?.title ?? 'Mail')
 
   const goTo = useCallback((next: View) => {
     setSearch(null)
     setFilterText('')
+    setBucketPickerId(null)
     setView(next)
     setSelectedId(null)
   }, [])
@@ -272,6 +294,17 @@ function MailApp() {
         if (!ownView) void startCompose('forward')
       },
       'g o': () => goTo({ kind: 'outbox' }),
+      b: (event) => {
+        if (!event.repeat && selected && !ownView) setBucketPickerId(selected.id)
+      },
+      ...Object.fromEntries(
+        BUCKETS.map((bucket, index) => [
+          String(index + 1),
+          (event: KeyboardEvent) => {
+            if (!event.repeat && !ownView) void setBucket(bucket)
+          },
+        ]),
+      ),
       j: () => move(1),
       arrowdown: () => move(1),
       k: () => move(-1),
@@ -302,7 +335,7 @@ function MailApp() {
         accounts.slice(0, 9).map((a, i) => [`mod+${i + 1}`, () => setAccountId(a.id)]),
       ),
     },
-    !draft && !paletteOpen && !organisePicker,
+    !draft && !paletteOpen && !organisePicker && !bucketPickerOpen,
   )
 
   return (
@@ -451,6 +484,14 @@ function MailApp() {
                         <Forward />
                       </Button>
                     </>
+                  )}
+                  {selected && (
+                    <BucketPicker
+                      current={selected.bucket?.bucket ?? null}
+                      open={bucketPickerOpen}
+                      onOpenChange={(open) => setBucketPickerId(open ? selected.id : null)}
+                      onSelect={(bucket) => void setBucket(bucket)}
+                    />
                   )}
                 </div>
                 <div className="min-h-0 flex-1">

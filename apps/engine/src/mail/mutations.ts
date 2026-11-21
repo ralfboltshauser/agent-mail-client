@@ -385,7 +385,14 @@ export class Mutations {
         SELECT * FROM mutation WHERE agent_action_id = ? AND status != 'failed' ORDER BY seq DESC
       `)
         .all(actionId) as unknown as MutationRow[]
-      if (!targets.length) throw new MutationError('This action has no changes to undo')
+      if (!targets.length) {
+        const action = this.#db.prepare('SELECT tool FROM agent_action WHERE id = ?').get(actionId)
+        if (action?.tool === 'set_bucket')
+          throw new MutationError(
+            'Bucket Undo is unavailable because its previous assignment was not recorded',
+          )
+        throw new MutationError('This action has no changes to undo')
+      }
       return targets.map((target) => {
         const existing = this.#agentUndoFor(target.id)
         if (existing && existing.status !== 'failed') return result(existing)

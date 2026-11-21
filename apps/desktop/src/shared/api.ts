@@ -1,6 +1,8 @@
 import type {
   AccountSummary,
   AgentAction,
+  Bucket,
+  BucketInput,
   ComposeAttachment,
   ComposeDraft,
   ComposePatch,
@@ -27,6 +29,7 @@ export type View =
   | { kind: 'all' }
   | { kind: 'snoozed' }
   | { kind: 'trash' }
+  | { kind: 'bucket'; bucket: Bucket }
   | { kind: 'label'; labelId: string }
 
 export interface ThreadQuery {
@@ -48,6 +51,7 @@ export interface Counts {
   inboxUnread: number
   starred: number
   drafts: number
+  buckets: Partial<Record<Bucket, number>>
 }
 
 export type SyncPhase =
@@ -83,6 +87,7 @@ export interface AmcApi {
   unpair(): Promise<void>
   status(): Promise<SyncStatus>
   syncNow(): Promise<void>
+  setBucket(input: BucketInput): Promise<void>
   organise(action: OrganiseAction): Promise<string>
   organiseErrors(): Promise<OrganiseNotice[]>
   agentActivity(before?: number): Promise<{ actions: AgentAction[]; nextBefore: number | null }>

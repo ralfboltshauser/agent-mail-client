@@ -283,10 +283,9 @@ export function mailRoutes(deps: MailDeps) {
     const allowed =
       !accountId ||
       db.prepare('SELECT 1 FROM message WHERE id = ? AND account_id = ?').get(id, accountId)
-    const hash = allowed ? queries.messageHtmlBlob(id) : null
-    const html = hash ? deps.blobs.get(hash) : null
+    const html = allowed ? queries.messageHtml(id, deps.blobs) : null
     if (!html) return c.json({ error: 'not_found', message: 'This message has no HTML body' }, 404)
-    return c.json({ html: html.toString('utf8') })
+    return c.json({ html })
   })
 
   r.get('/attachments/:id', requireScope('read'), async (c) => {

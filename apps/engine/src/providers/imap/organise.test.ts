@@ -311,6 +311,7 @@ it('uses the mailbox role to refuse a scoped CLI and an agent filing into a seco
   if (!agent) throw new Error('Missing agent principal')
   const server = buildMcpServer(agent, {
     db,
+    store,
     queries,
     drafts: new Drafts(db, store, () => null),
     mutations: queue,

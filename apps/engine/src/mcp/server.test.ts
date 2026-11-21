@@ -60,6 +60,7 @@ function combinations<T>(items: readonly T[]): T[][] {
 }
 
 const organizeTools = [
+  'set_bucket',
   'archive',
   'mark_read',
   'mark_unread',
@@ -81,7 +82,11 @@ describe('MCP tools', () => {
       expect(tools.map(({ name }) => name).filter((name) => organizeTools.includes(name))).toEqual(
         scopes.includes('organize') ? organizeTools : [],
       )
-      expect(tools.some(({ name }) => name === 'get_message')).toBe(scopes.includes('read'))
+      for (const name of ['get_message', 'list_untriaged']) {
+        expect(tools.some((tool) => tool.name === name)).toBe(scopes.includes('read'))
+        if (!scopes.includes('read'))
+          expect(await client.callTool({ name, arguments: {} })).toMatchObject({ isError: true })
+      }
       for (const name of ['send', 'send_draft', 'trash', 'snooze']) {
         const reply = await client.callTool({ name, arguments: { thread_ids: ['a:t-m1'] } })
         expect(reply).toMatchObject({ isError: true })
@@ -101,8 +106,96 @@ describe('MCP tools', () => {
     expect(readTools).toContain('get_thread')
     expect(readTools).toContain('get_message')
     expect(readTools).not.toContain('create_draft')
+    expect(readTools).not.toContain('set_bucket')
+    expect(readTools).toContain('list_untriaged')
     const draft = await connect(['read', 'draft'])
     expect((await draft.client.listTools()).tools.map((t) => t.name)).toContain('create_draft')
+  })
+
+  it('lists only Inbox Threads without a Bucket and attributes assignments to the Agent', async () => {
+    const { client, db, queries, gmail, store, mutations } = await connect(
+      ['read', 'organize'],
+      setup(),
+      'a',
+    )
+    db.exec(
+      "INSERT INTO account (id, kind, address, credentials, created_at) VALUES ('b', 'gmail', 'other@example.com', x'00', 0)",
+    )
+    store.putMessage(
+      'b',
+      ['other@example.com'],
+      fromGmail(gmail.add('other', { date: Date.now() + DAY_MS })),
+    )
+    const archived = gmail.add('archived', { labels: ['STARRED'] })
+    store.putMessage('a', ['owner@example.com'], fromGmail(archived))
+    const list = async () =>
+      JSON.parse(
+        text(
+          await client.callTool({
+            name: 'list_untriaged',
+            arguments: { limit: 1 },
+          }),
+        ),
+      )
+    const input = { threadId: 'a:t-m1', bucket: 'Reply', reason: 'Alice asked a question' }
+    const set = (args = input) => client.callTool({ name: 'set_bucket', arguments: args })
+    expect(await list()).toMatchObject([{ id: input.threadId }])
+    expect(
+      await client.callTool({ name: 'list_untriaged', arguments: { account_id: 'b' } }),
+    ).toMatchObject({ isError: true })
+    expect(await set({ ...input, threadId: 'b:t-other' })).toMatchObject({ isError: true })
+    expect(queries.threadSummary('b:t-other')?.bucket).toBeNull()
+    expect(await set()).not.toHaveProperty('isError', true)
+    expect(listAgentActions(db, mutations).actions[0]).toMatchObject({
+      tool: 'set_bucket',
+      tokenName: 't3',
+      threads: [input.threadId],
+      status: 'applied',
+    })
+    expect(queries.threadSummary(input.threadId)?.bucket).toEqual({
+      bucket: 'Reply',
+      reason: input.reason,
+      setBy: 't3',
+      setAt: expect.any(Number),
+    })
+    expect(await list()).toEqual([])
+    const skipped = await client.callTool({
+      name: 'set_bucket',
+      arguments: { ...input, bucket: 'Later', onlyUntriaged: true },
+    })
+    expect(JSON.parse(text(skipped))).toEqual({ updated: false })
+    expect(queries.threadSummary(input.threadId)?.bucket?.bucket).toBe('Reply')
+  })
+
+  it('refuses Bucket Undo and keeps a newer owner assignment', async () => {
+    const { client, db, store, mutations, queries } = await connect(['organize'])
+    const threadId = 'a:t-m1'
+    const assignment = await client.callTool({
+      name: 'set_bucket',
+      arguments: { threadId, bucket: 'Reply', reason: 'Agent assignment' },
+    })
+    expect(assignment).not.toHaveProperty('isError', true)
+    const [action] = listAgentActions(db, mutations).actions
+    if (!action) throw new Error('Missing agent action')
+    const revised = { threadId, bucket: 'Later', reason: 'Owner correction' } as const
+    expect(store.setBucket(revised, 'owner')).toBe(true)
+
+    const app = createApp({ db, config: testConfig(), log: silentLog, mutations })
+    const owner = issueToken(db, { kind: 'cli', name: 'Owner', scopes: ['admin', 'organize'] })
+    const response = await app.request(`/v1/agent/log/${action.id}/undo`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${owner.secret}` },
+    })
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({
+      message: 'Bucket Undo is unavailable because its previous assignment was not recorded',
+    })
+    expect(queries.threadSummary(threadId)?.bucket).toMatchObject({
+      bucket: revised.bucket,
+      reason: revised.reason,
+      setBy: 'owner',
+    })
+    await client.close()
   })
 
   it('reads a Thread and drafts a threaded reply that lands in Gmail', async () => {
