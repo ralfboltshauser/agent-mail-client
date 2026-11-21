@@ -9,13 +9,21 @@
   "files": ["main/**", "preload/**", "renderer/**"],
   "extraResources": [{ "from": "build", "filter": ["trayTemplate.png", "trayTemplate@2x.png"] }],
   "beforeBuild": "./build/packaging-hooks.mjs",
-  "afterPack": "./build/packaging-hooks.mjs",
+  "electronFuses": {
+    "runAsNode": false,
+    "enableNodeOptionsEnvironmentVariable": false,
+    "enableNodeCliInspectArguments": false,
+    "enableEmbeddedAsarIntegrityValidation": true,
+    "onlyLoadAppFromAsar": true
+  },
   "artifactName": "${productName}-${version}-${arch}.${ext}",
   "mac": {
     "target": [{ "target": "dmg", "arch": ["arm64"] }],
     "category": "public.app-category.productivity",
     "icon": "build/icon.icns",
-    "identity": null,
+    "identity": "-",
+    "hardenedRuntime": false,
+    "sign": "./build/packaging-hooks.mjs",
     "notarize": false
   },
   "dmg": {

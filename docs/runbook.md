@@ -2,24 +2,37 @@
 
 ## Mac desktop app
 
-On an Apple silicon Mac, run `pnpm install` and `pnpm desktop:install` from the
-repository root, then open `~/Applications/AMC.app` in Finder. To update, quit AMC
-from the menu bar or with ⌘Q, update the checkout, and rerun those commands. Quit
-the electron-vite dev instance before switching to the installed app. Both builds
-use the same pairing and SQLite replica in
-`~/Library/Application Support/@amc/desktop`.
+On an Apple silicon Mac, run `pnpm install` from the repository root. Run
+`scripts/create-signing-identity.sh` once to create **AMC Local Code Signing** in
+your login Keychain. Then run `pnpm desktop:install` and open
+`~/Applications/AMC.app`. To update, quit AMC with ⌘Q, update the checkout, and
+rerun `pnpm install` and `pnpm desktop:install`.
+
+If macOS asks whether `codesign` can use **AMC Local Code Signing** during a build,
+choose **Allow** for that signing operation. Keep this approval per use because
+any process running as your user can invoke `codesign`. The self-signed
+certificate works without adding a Keychain trust exception. Keep the same
+identity for future builds.
 
 `pnpm --filter @amc/desktop package` builds both `apps/desktop/dist/mac-arm64/AMC.app`
-and `apps/desktop/dist/AMC-<version>-arm64.dmg`. The bundle is signed ad hoc for
-local use. If Finder blocks a copy you built, right-click AMC and choose **Open**
+and `apps/desktop/dist/AMC-<version>-arm64.dmg`. Packaging uses the local identity
+when present and prints a warning when it falls back to ad hoc signing.
+If Finder blocks a copy you built, right-click AMC and choose **Open**
 if Finder offers the confirmation. On newer macOS versions, try opening AMC,
 then use **Open Anyway** under **System Settings → Privacy & Security**.
 [Apple's Gatekeeper instructions](https://support.apple.com/en-us/102445)
 
-Both builds use the `@amc/desktop Safe Storage` service. macOS Keychain may ask
-whether the new build can use the existing entry. Allow access to carry over the
-pairing. If AMC cannot decrypt the saved token, use the pair screen to pair again.
-Pairing to the same Engine URL keeps the replica.
+On first launch of the stably signed app, choose **Always Allow** if macOS asks
+whether **AMC** can access **@amc/desktop Safe Storage**. Keychain remembers the
+app's bundle ID and certificate, so updates signed with the same identity keep
+that approval. This is a separate prompt from the signing prompt during builds.
+
+Quit the electron-vite dev instance before switching to the installed app. Both
+use the same Safe Storage item and the same profile at
+`~/Library/Application Support/@amc/desktop`. Use **Allow** for a one-time dev
+session. If Keychain Access already lists Electron as permanently trusted for
+this item, review that access there. If the installed app cannot decrypt the
+saved token, pair again using the same Engine URL to keep the replica.
 
 Closing the window keeps sync running in the menu bar. **Pause Sync** persists
 across restarts. **Launch at Login** is enabled on first run. If macOS requests
