@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events'
 import type { Address } from '@amc/protocol'
 import type { BlobStore } from '../blobs.ts'
 import { type Db, transaction } from '../db/database.ts'
@@ -56,12 +57,14 @@ export const messageId = (accountId: string, providerId: string) => `${accountId
  * entity's modseq, which is what Clients sync from (plan §5). Callers group work in
  * transactions; each public method is atomic on its own.
  */
-export class MailStore {
+export class MailStore extends EventEmitter<{ change: [] }> {
   readonly db: Db
   readonly blobs: BlobStore
   readonly #now: () => number
 
   constructor(db: Db, blobs: BlobStore, now: () => number = Date.now) {
+    super()
+    this.setMaxListeners(100)
     this.db = db
     this.blobs = blobs
     this.#now = now
@@ -72,6 +75,7 @@ export class MailStore {
       .prepare('INSERT INTO change_log (entity, entity_id, op, at) VALUES (?, ?, ?, ?)')
       .run(entity, id, op, this.#now())
     const modseq = Number(lastInsertRowid)
+    this.emit('change')
     if (op === 'upsert') {
       this.db.prepare(`UPDATE ${entity} SET modseq = ? WHERE id = ?`).run(modseq, id)
     }

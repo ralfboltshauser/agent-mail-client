@@ -26,6 +26,43 @@ interface ThreadRow {
   last_message_at: number
 }
 
+interface MessageRow {
+  id: string
+  thread_id: string
+  account_id: string
+  rfc_message_id: string | null
+  in_reply_to: string | null
+  from_json: string
+  to_json: string
+  cc_json: string
+  bcc_json: string
+  reply_to_json: string
+  subject: string
+  snippet: string
+  body_text: string
+  html_blob: string | null
+  sent_at: number
+  unread: number
+  starred: number
+  label_ids: string
+  list_unsubscribe: string | null
+}
+
+interface AttachmentRow {
+  id: string
+  filename: string
+  mime_type: string
+  size: number
+  inline: number
+  content_id: string | null
+}
+
+function parseCursor(cursor: string | null): [number | null, string | null] {
+  if (!cursor) return [null, null]
+  const at = cursor.indexOf(':')
+  return [Number(cursor.slice(0, at)), cursor.slice(at + 1)]
+}
+
 const THREAD_COLUMNS = `t.id, t.account_id, t.subject, t.snippet, t.participants, t.message_count,
   t.unread_count, t.starred, t.in_inbox, t.has_attachments, t.label_ids, t.last_message_at`
 
@@ -168,82 +205,110 @@ export class MailQueries {
       | ThreadRow
       | undefined
     if (!row) return null
-    const messages = this.db
-      .prepare(
-        `SELECT id, thread_id, account_id, rfc_message_id, in_reply_to, from_json, to_json, cc_json,
-                bcc_json, reply_to_json, subject, snippet, body_text, html_blob, sent_at, unread,
-                starred, label_ids, list_unsubscribe
-         FROM message WHERE thread_id = ? ORDER BY sent_at ASC`,
-      )
-      .all(id) as {
-      id: string
-      thread_id: string
-      account_id: string
-      rfc_message_id: string | null
-      in_reply_to: string | null
-      from_json: string
-      to_json: string
-      cc_json: string
-      bcc_json: string
-      reply_to_json: string
-      subject: string
-      snippet: string
-      body_text: string
-      html_blob: string | null
-      sent_at: number
-      unread: number
-      starred: number
-      label_ids: string
-      list_unsubscribe: string | null
-    }[]
-    const attachments = this.db.prepare(
-      `SELECT id, filename, mime_type, size, inline, content_id FROM attachment WHERE message_id = ? ORDER BY id`,
-    )
     return {
       ...toThread(row),
-      messages: messages.map(
-        (m): MessageDetail => ({
-          id: m.id,
-          threadId: m.thread_id,
-          accountId: m.account_id,
-          rfcMessageId: m.rfc_message_id,
-          inReplyTo: m.in_reply_to,
-          from: JSON.parse(m.from_json) as Address | null,
-          to: JSON.parse(m.to_json) as Address[],
-          cc: JSON.parse(m.cc_json) as Address[],
-          bcc: JSON.parse(m.bcc_json) as Address[],
-          replyTo: JSON.parse(m.reply_to_json) as Address[],
-          subject: m.subject,
-          snippet: m.snippet,
-          bodyText: m.body_text,
-          hasHtml: m.html_blob !== null,
-          sentAt: m.sent_at,
-          unread: m.unread === 1,
-          starred: m.starred === 1,
-          labelIds: JSON.parse(m.label_ids) as string[],
-          listUnsubscribe: m.list_unsubscribe,
-          attachments: (
-            attachments.all(m.id) as {
-              id: string
-              filename: string
-              mime_type: string
-              size: number
-              inline: number
-              content_id: string | null
-            }[]
-          ).map(
-            (a): AttachmentSummary => ({
-              id: a.id,
-              filename: a.filename,
-              mimeType: a.mime_type,
-              size: a.size,
-              inline: a.inline === 1,
-              contentId: a.content_id,
-            }),
-          ),
-        }),
-      ),
+      messages: this.#messages('m.thread_id = ? ORDER BY m.sent_at ASC', [id]),
     }
+  }
+
+  threadSummary(id: string): ThreadSummary | null {
+    const row = this.db.prepare(`SELECT ${THREAD_COLUMNS} FROM thread t WHERE t.id = ?`).get(id) as
+      | ThreadRow
+      | undefined
+    return row ? toThread(row) : null
+  }
+
+  message(id: string): MessageDetail | null {
+    return this.#messages('m.id = ?', [id])[0] ?? null
+  }
+
+  account(id: string): AccountSummary | null {
+    return this.accounts().find((a) => a.id === id) ?? null
+  }
+
+  label(id: string): Label | null {
+    const row = this.db.prepare('SELECT account_id FROM label WHERE id = ?').get(id) as
+      | { account_id: string }
+      | undefined
+    return row ? (this.labels(row.account_id).find((l) => l.id === id) ?? null) : null
+  }
+
+  /** Keyset pages of Threads, newest first, for replica snapshots. Cursor = "<lastMessageAt>:<id>". */
+  threadPage(cursor: string | null, limit: number): { rows: ThreadSummary[]; next: string | null } {
+    const [at, id] = parseCursor(cursor)
+    const rows = this.db
+      .prepare(
+        `SELECT ${THREAD_COLUMNS} FROM thread t
+         WHERE (?1 IS NULL OR t.last_message_at < ?1 OR (t.last_message_at = ?1 AND t.id < ?2))
+         ORDER BY t.last_message_at DESC, t.id DESC LIMIT ?3`,
+      )
+      .all(at, id, limit) as unknown as ThreadRow[]
+    const last = rows.at(-1)
+    return {
+      rows: rows.map(toThread),
+      next: rows.length === limit && last ? `${last.last_message_at}:${last.id}` : null,
+    }
+  }
+
+  /** Keyset pages of messages, newest first, for replica snapshots. */
+  messagePage(
+    cursor: string | null,
+    limit: number,
+  ): { rows: MessageDetail[]; next: string | null } {
+    const [at, id] = parseCursor(cursor)
+    const rows = this.#messages(
+      `(?1 IS NULL OR m.sent_at < ?1 OR (m.sent_at = ?1 AND m.id < ?2)) ORDER BY m.sent_at DESC, m.id DESC LIMIT ?3`,
+      [at, id, limit],
+    )
+    const last = rows.at(-1)
+    return { rows, next: rows.length === limit && last ? `${last.sentAt}:${last.id}` : null }
+  }
+
+  #messages(where: string, params: (string | number | null)[]): MessageDetail[] {
+    const rows = this.db
+      .prepare(
+        `SELECT m.id, m.thread_id, m.account_id, m.rfc_message_id, m.in_reply_to, m.from_json, m.to_json,
+                m.cc_json, m.bcc_json, m.reply_to_json, m.subject, m.snippet, m.body_text, m.html_blob,
+                m.sent_at, m.unread, m.starred, m.label_ids, m.list_unsubscribe
+         FROM message m WHERE ${where}`,
+      )
+      .all(...params) as unknown as MessageRow[]
+    const attachments = this.db.prepare(
+      'SELECT id, filename, mime_type, size, inline, content_id FROM attachment WHERE message_id = ? ORDER BY id',
+    )
+    return rows.map(
+      (m): MessageDetail => ({
+        id: m.id,
+        threadId: m.thread_id,
+        accountId: m.account_id,
+        rfcMessageId: m.rfc_message_id,
+        inReplyTo: m.in_reply_to,
+        from: JSON.parse(m.from_json) as Address | null,
+        to: JSON.parse(m.to_json) as Address[],
+        cc: JSON.parse(m.cc_json) as Address[],
+        bcc: JSON.parse(m.bcc_json) as Address[],
+        replyTo: JSON.parse(m.reply_to_json) as Address[],
+        subject: m.subject,
+        snippet: m.snippet,
+        bodyText: m.body_text,
+        hasHtml: m.html_blob !== null,
+        sentAt: m.sent_at,
+        unread: m.unread === 1,
+        starred: m.starred === 1,
+        labelIds: JSON.parse(m.label_ids) as string[],
+        listUnsubscribe: m.list_unsubscribe,
+        attachments: (attachments.all(m.id) as unknown as AttachmentRow[]).map(
+          (a): AttachmentSummary => ({
+            id: a.id,
+            filename: a.filename,
+            mimeType: a.mime_type,
+            size: a.size,
+            inline: a.inline === 1,
+            contentId: a.content_id,
+          }),
+        ),
+      }),
+    )
   }
 
   messageHtmlBlob(messageId: string): string | null {

@@ -43,7 +43,11 @@ async function connect(scopes: Scope[], deps = setup()) {
 }
 
 function combinations<T>(items: readonly T[]): T[][] {
-  return items.reduce<T[][]>((acc, item) => [...acc, ...acc.map((c) => [...c, item])], [[]])
+  const all: T[][] = [[]]
+  for (const item of items) {
+    for (const combo of [...all]) all.push([...combo, item])
+  }
+  return all
 }
 
 const text = (result: unknown) => (result as { content: { text: string }[] }).content[0]?.text ?? ''

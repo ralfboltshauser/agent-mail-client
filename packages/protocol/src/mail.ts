@@ -124,3 +124,41 @@ export const Contact = z.object({
   sentCount: z.number(),
 })
 export type Contact = z.infer<typeof Contact>
+
+/** Entities a replica holds, keyed the same in snapshots and changes. */
+export const SYNC_ENTITIES = ['account', 'label', 'thread', 'message', 'draft'] as const
+export type SyncEntity = (typeof SYNC_ENTITIES)[number]
+
+export type SyncData = {
+  account: AccountSummary
+  label: Label
+  thread: ThreadSummary
+  message: MessageDetail
+  draft: Draft
+}
+
+export type SyncChange = {
+  [E in SyncEntity]:
+    | { modseq: number; entity: E; id: string; op: 'upsert'; data: SyncData[E] }
+    | { modseq: number; entity: E; id: string; op: 'delete' }
+}[SyncEntity]
+
+export interface SyncState {
+  /** The newest change; follow changes from here after a snapshot. */
+  modseq: number
+  /** Asking for changes older than this answers `resync_required`. */
+  oldestModseq: number
+}
+
+export interface SyncChanges {
+  changes: SyncChange[]
+  /** Ask again with since = this. */
+  modseq: number
+  more: boolean
+}
+
+export interface SyncSnapshotPage<E extends SyncEntity = SyncEntity> {
+  entity: E
+  rows: SyncData[E][]
+  cursor: string | null
+}
