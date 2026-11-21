@@ -1,12 +1,12 @@
 import { INLINE_IMAGE_TYPES } from '@amc/composer'
-import { type MessageDetail, SNOOZED_LABEL } from '@amc/protocol'
+import { SNOOZED_LABEL } from '@amc/protocol'
 import { FileText, Paperclip, Star } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { fileSize, fullDate, hueFor, initials, listDate, personName } from '@/lib/format'
 import { cn } from '@/lib/utils'
-import type { ThreadWithMessages } from '../../../shared/api'
+import type { ReplicaThreadMessage, ThreadWithMessages } from '../../../shared/api'
 import { HtmlBody, TextBody } from './message-body'
 
 interface Props {
@@ -62,16 +62,91 @@ export function ThreadView({ data, snoozeEnabled, labelNames, scrollRef }: Props
           </div>
         )}
         <div className="space-y-3">
-          {messages.map((m, i) => (
-            <Message key={m.id} message={m} defaultOpen={i === messages.length - 1 || m.unread} />
-          ))}
+          <ThreadMessages key={thread.id} messages={messages} />
         </div>
       </div>
     </div>
   )
 }
 
-function Message({ message: m, defaultOpen }: { message: MessageDetail; defaultOpen: boolean }) {
+function ThreadMessages({ messages }: { messages: ReplicaThreadMessage[] }) {
+  const rows = []
+  for (let i = 0; i < messages.length; ) {
+    const message = messages[i]
+    if (!message) break
+    if (message.bodyText !== null || message.unread || i === messages.length - 1) {
+      rows.push(
+        <Message
+          key={message.id}
+          message={message}
+          defaultOpen={i === messages.length - 1 || message.unread}
+        />,
+      )
+      i++
+      continue
+    }
+    const start = i++
+    while (i < messages.length - 1 && messages[i]?.bodyText === null && !messages[i]?.unread) i++
+    rows.push(<OlderMessages key={message.id} messages={messages.slice(start, i)} />)
+  }
+  return rows
+}
+
+function OlderMessages({ messages }: { messages: ReplicaThreadMessage[] }) {
+  const [shown, setShown] = useState(false)
+  return (
+    <div className="space-y-3">
+      <button
+        type="button"
+        aria-expanded={shown}
+        onClick={() => setShown(!shown)}
+        className="w-full rounded-lg border bg-card px-4 py-3 text-left text-sm text-muted-foreground hover:bg-muted"
+      >
+        {messages.length} older {messages.length === 1 ? 'message' : 'messages'}
+      </button>
+      {shown &&
+        messages.map((message) => (
+          <Message key={message.id} message={message} defaultOpen={false} />
+        ))}
+    </div>
+  )
+}
+
+function DeferredText({ id }: { id: string }) {
+  const [body, setBody] = useState<string | null>()
+  useEffect(() => {
+    if (body !== undefined) return
+    let cancelled = false
+    window.amc.messageText(id).then(
+      (text) => !cancelled && setBody(text),
+      () => !cancelled && setBody(null),
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [id, body])
+  if (body === undefined) return <Skeleton className="my-2 h-3 w-3/4" />
+  if (body === null) {
+    return (
+      <button
+        type="button"
+        className="min-h-11 text-sm underline"
+        onClick={() => setBody(undefined)}
+      >
+        Could not load message. Retry
+      </button>
+    )
+  }
+  return <TextBody text={body} />
+}
+
+function Message({
+  message: m,
+  defaultOpen,
+}: {
+  message: ReplicaThreadMessage
+  defaultOpen: boolean
+}) {
   const [open, setOpen] = useState(defaultOpen)
   const [html, setHtml] = useState<string | null | undefined>(undefined)
   const isDraft = m.labelIds.some((l) => l.endsWith(':DRAFT'))
@@ -131,6 +206,7 @@ function Message({ message: m, defaultOpen }: { message: MessageDetail; defaultO
       <button
         type="button"
         className="flex w-full items-start gap-3 px-4 py-3 text-left"
+        aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
       >
         <div
@@ -173,8 +249,10 @@ function Message({ message: m, defaultOpen }: { message: MessageDetail; defaultO
             </div>
           ) : m.hasHtml && html ? (
             <HtmlBody html={html} />
-          ) : (
+          ) : m.bodyText !== null ? (
             <TextBody text={m.bodyText} />
+          ) : (
+            <DeferredText key={m.bodyRevision} id={m.id} />
           )}
           {m.bodySearchTruncated && (
             <p className="mt-2 text-xs text-muted-foreground">

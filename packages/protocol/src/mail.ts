@@ -87,7 +87,13 @@ export const MessageDetail = z.object({
 })
 export type MessageDetail = z.infer<typeof MessageDetail>
 
-export const ThreadDetail = ThreadSummary.extend({ messages: z.array(MessageDetail) })
+export const RECENT_THREAD_BODIES = 3
+
+/** A null body is deferred. An empty string is a loaded, empty body. */
+export const ThreadMessage = MessageDetail.extend({ bodyText: z.string().nullable() })
+export type ThreadMessage = z.infer<typeof ThreadMessage>
+
+export const ThreadDetail = ThreadSummary.extend({ messages: z.array(ThreadMessage) })
 export type ThreadDetail = z.infer<typeof ThreadDetail>
 
 export const ThreadList = z.object({

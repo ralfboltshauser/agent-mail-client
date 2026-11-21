@@ -1,5 +1,13 @@
 import { EventEmitter } from 'node:events'
-import type { Me, SyncChanges, SyncEntity, SyncSnapshotPage, SyncState } from '@amc/protocol'
+import {
+  doctorWarnings,
+  type Health,
+  type Me,
+  type SyncChanges,
+  type SyncEntity,
+  type SyncSnapshotPage,
+  type SyncState,
+} from '@amc/protocol'
 import type { SyncStatus } from '../shared/api'
 import { type EngineClient, EngineError } from './engine'
 import type { Replica } from './replica'
@@ -92,6 +100,13 @@ export class SyncLoop extends EventEmitter<{ status: [SyncStatus]; changed: [] }
     return this.#pulling
   }
 
+  async #refreshHealth(signal: AbortSignal): Promise<void> {
+    const health = await this.#engine
+      .get<Health>('/v1/health', { signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]) })
+      .catch(() => null)
+    if (health && !signal.aborted) this.#set({ healthWarnings: doctorWarnings(health) })
+  }
+
   async #run(): Promise<void> {
     const signal = this.#controller.signal
     let backoff = 1000
@@ -100,12 +115,16 @@ export class SyncLoop extends EventEmitter<{ status: [SyncStatus]; changed: [] }
         const me = await this.#engine.get<Me>('/v1/me', { signal })
         if (signal.aborted) return
         this.#set({ snoozeEnabled: me.features?.snooze === true })
+        void this.#refreshHealth(signal)
         if (this.#replica.modseq === null) await this.#bootstrap()
         await this.pull()
         if (signal.aborted) return
         this.#set({ phase: 'live', error: null, progress: null })
         backoff = 1000
-        const poll = setInterval(() => void this.pull().catch(() => {}), 60_000)
+        const poll = setInterval(() => {
+          void this.pull().catch(() => {})
+          void this.#refreshHealth(signal)
+        }, 60_000)
         try {
           await this.#engine.events(
             '/v1/sync/events',

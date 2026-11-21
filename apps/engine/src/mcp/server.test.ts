@@ -81,6 +81,7 @@ describe('MCP tools', () => {
       expect(tools.map(({ name }) => name).filter((name) => organizeTools.includes(name))).toEqual(
         scopes.includes('organize') ? organizeTools : [],
       )
+      expect(tools.some(({ name }) => name === 'get_message')).toBe(scopes.includes('read'))
       for (const name of ['send', 'send_draft', 'trash', 'snooze']) {
         const reply = await client.callTool({ name, arguments: { thread_ids: ['a:t-m1'] } })
         expect(reply).toMatchObject({ isError: true })
@@ -98,6 +99,7 @@ describe('MCP tools', () => {
     const read = await connect(['read'])
     const readTools = (await read.client.listTools()).tools.map((t) => t.name)
     expect(readTools).toContain('get_thread')
+    expect(readTools).toContain('get_message')
     expect(readTools).not.toContain('create_draft')
     const draft = await connect(['read', 'draft'])
     expect((await draft.client.listTools()).tools.map((t) => t.name)).toContain('create_draft')
@@ -237,6 +239,55 @@ describe('MCP tools', () => {
     const httpDraft = (await response.json()) as { id: string }
     expect(httpDraft).toEqual(receipt(httpDraft.id))
     expect(JSON.parse(text(await edit(client, httpDraft.id)))).toEqual(receipt(httpDraft.id))
+  })
+
+  it('budgets text newest first and reads omitted messages within the token account', async () => {
+    const deps = setup()
+    deps.db
+      .prepare(
+        "INSERT INTO account (id, kind, address, credentials, created_at) VALUES ('b', 'gmail', 'other@example.com', x'00', 0)",
+      )
+      .run()
+    const { client, store, gmail } = await connect(['read'], deps, 'a')
+    const largeBody = 'x'.repeat(20_000)
+    const now = Date.now()
+    for (let n = 2; n <= 9; n++) {
+      store.putMessage(
+        'a',
+        ['owner@example.com'],
+        fromGmail(
+          gmail.add(`m${n}`, {
+            threadId: 't-m1',
+            labels: ['INBOX'],
+            date: n * 1000 + now,
+            body: n === 9 ? 'Newest reply' : n === 3 ? '' : `${n}${largeBody}`,
+          }),
+        ),
+      )
+    }
+    const thread = JSON.parse(
+      text(await client.callTool({ name: 'get_thread', arguments: { thread_id: 'a:t-m1' } })),
+    )
+    expect(thread.messages.map((m: { id: string }) => m.id)).toEqual(
+      Array.from({ length: 9 }, (_, i) => `a:m${i + 1}`),
+    )
+    const marker = '\n[…truncated]'
+    expect(thread.messages.map((m: { bodyText: string }) => m.bodyText)).toEqual([
+      marker,
+      marker,
+      '',
+      `4${largeBody.slice(0, -1 - 'Newest reply'.length)}${marker}`,
+      ...[5, 6, 7, 8].map((n) => `${n}${largeBody.slice(1)}${marker}`),
+      'Newest reply',
+    ])
+
+    const args = { name: 'get_message', arguments: { messageId: 'a:m2' } }
+    expect(JSON.parse(text(await client.callTool(args)))).toMatchObject({
+      id: 'a:m2',
+      bodyText: `2${largeBody.slice(1)}${marker}`,
+    })
+    const other = await connect(['read'], deps, 'b')
+    expect(await other.client.callTool(args)).toMatchObject({ isError: true })
   })
 
   it('searches mail and contacts', async () => {

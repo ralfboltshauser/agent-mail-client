@@ -8,6 +8,7 @@ import type {
   GmailAuthStartResponse,
   Health,
   Me,
+  MessageDetail,
   MutationResponse,
   OrganiseAction,
   PairResponse,
@@ -16,6 +17,7 @@ import type {
   ThreadList,
   ThreadSummary,
 } from '@amc/protocol'
+import { doctorWarnings } from '@amc/protocol'
 import { Command } from 'commander'
 import { authed, EngineError, request } from './client.ts'
 import { readConfig, writeConfig } from './config.ts'
@@ -48,7 +50,7 @@ program
 
 program
   .command('status')
-  .description('Show the Engine version, storage and who this token is')
+  .description('Show Engine health and token details')
   .option('--json', 'print JSON')
   .action(async (opts: { json?: boolean }) => {
     const api = authed(requireConfig())
@@ -62,11 +64,40 @@ program
     )
     console.log(`Token  ${me.name} (${me.kind}) · ${me.scopes.join(', ')}`)
     console.log(`Database ${formatBytes(health.database.bytes)}`)
+    if (health.lastBackup !== undefined) {
+      const b = health.lastBackup
+      console.log(
+        `Backup ${b ? `${new Date(b.at).toISOString()} · ${formatBytes(b.bytes)}` : 'none yet'}`,
+      )
+    }
+    for (const account of health.accounts ?? []) {
+      const lag = account.syncLagSeconds
+      console.log(
+        `Account ${account.address} · ${account.status} · ${lag === null ? 'never synced' : `sync lag ${formatDuration(Math.floor(lag))}`}`,
+      )
+      if (account.lastError) console.log(`  ${account.lastError}`)
+    }
+    if (health.outboxDepth !== undefined) {
+      console.log(`Outbox ${health.outboxDepth} pending`)
+    }
+    if (health.mutationQueueDepth !== undefined) {
+      console.log(`Mutation queue ${health.mutationQueueDepth} pending`)
+    }
     for (const disk of health.disks) {
       console.log(
         `Disk   ${disk.path}: ${formatBytes(disk.freeBytes)} free of ${formatBytes(disk.totalBytes)}`,
       )
     }
+  })
+
+program
+  .command('doctor')
+  .description('Warn about stale backups, slow sync, low disk space and Account errors')
+  .action(async () => {
+    const health = await authed(requireConfig())<Health>('/v1/health')
+    const warnings = doctorWarnings(health)
+    if (!warnings.length) return console.log('No health warnings.')
+    for (const warning of warnings) console.warn(`Warning: ${warning}`)
   })
 
 const account = program.command('account').description('Manage mail Accounts')
@@ -159,10 +190,15 @@ program
   .argument('<id>', 'Thread id')
   .option('--json', 'print JSON')
   .action(async (id: string, opts: { json?: boolean }) => {
-    const t = await authed(requireConfig())<ThreadDetail>(`/v1/threads/${encodeURIComponent(id)}`)
-    if (opts.json) return printJson(t)
-    console.log(`# ${t.subject || '(no subject)'}\n`)
+    const api = authed(requireConfig())
+    const t = await api<ThreadDetail>(`/v1/threads/${encodeURIComponent(id)}?deferBodies=1`)
+    if (!opts.json) console.log(`# ${t.subject || '(no subject)'}\n`)
     for (const m of t.messages) {
+      if (m.bodyText === null) {
+        const detail = await api<MessageDetail>(`/v1/messages/${encodeURIComponent(m.id)}`)
+        m.bodyText = detail.bodyText
+      }
+      if (opts.json) continue
       const from = m.from
         ? m.from.name
           ? `${m.from.name} <${m.from.address}>`
@@ -175,6 +211,7 @@ program
         console.log(`📎    ${a.filename} (${formatBytes(a.size)})`)
       console.log(`\n${m.bodyText}\n\n${'─'.repeat(60)}\n`)
     }
+    if (opts.json) printJson(t)
   })
 
 program

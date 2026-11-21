@@ -4,6 +4,7 @@ import { createPairingCode } from './auth/tokens.ts'
 import { BlobStore } from './blobs.ts'
 import { databasePath, loadConfig } from './config.ts'
 import { Sealer } from './crypto.ts'
+import { backupDatabase, lockDatabaseFiles, restoreDatabase } from './db/backups.ts'
 import { migrate, openDatabase } from './db/database.ts'
 import { createApp } from './http/app.ts'
 import { createLogger } from './log.ts'
@@ -21,6 +22,8 @@ const USAGE = `amc-engine ${VERSION}
 
 Usage:
   amc-engine serve                 Run the Engine (default)
+  amc-engine backup                Write and verify a nightly database backup
+  amc-engine restore <file>        Replace the database while the Engine is stopped
   amc-engine migrate               Apply database migrations and exit
   amc-engine pair [--desktop]      Print a one-time code to pair the amc CLI (or the desktop app)
 
@@ -42,16 +45,42 @@ async function main(argv: string[]) {
   for (const dir of [config.dataDir, config.blobDir, config.backupDir]) {
     mkdirSync(dir, { recursive: true, mode: 0o700 })
   }
-  const db = openDatabase(databasePath(config))
+  const dbPath = databasePath(config)
+  if (command === 'restore') {
+    const [source] = rest
+    if (!source || rest.length !== 1) throw new Error('Usage: amc-engine restore <file>')
+    process.env.SQLITE_TMPDIR = config.dataDir
+    const previous = restoreDatabase(source, dbPath)
+    console.log(`Restored ${dbPath}`)
+    if (previous) console.log(`Previous database saved at ${previous}`)
+    return
+  }
+
+  const guard = lockDatabaseFiles(config.dataDir)
+  if (command === 'backup') {
+    try {
+      process.env.SQLITE_TMPDIR = config.backupDir
+      console.log(`Verified backup written to ${backupDatabase(dbPath, config.backupDir)}`)
+    } finally {
+      guard.close()
+    }
+    return
+  }
+
+  const db = openDatabase(dbPath)
   const version = migrate(db, { backupDir: config.backupDir, log })
 
   switch (command) {
     case 'migrate':
+      db.close()
+      guard.close()
       console.log(`Schema version ${version}`)
       return
     case 'pair': {
       const kind = rest.includes('--desktop') ? 'desktop' : 'cli'
       const code = createPairingCode(db, kind)
+      db.close()
+      guard.close()
       console.log(`Pairing code for the ${kind === 'desktop' ? 'desktop app' : 'amc CLI'}: ${code}`)
       console.log('It works once and expires in 10 minutes.')
       return
@@ -137,6 +166,7 @@ async function main(argv: string[]) {
           await Promise.all([outbox.waitForIdle(), mirroring, pullingDrafts])
           await Promise.all([mutations.stop(), sync.stop()])
           db.close()
+          guard.close()
           process.exit(0)
         })
         setTimeout(() => process.exit(1), 10_000).unref()
@@ -146,6 +176,8 @@ async function main(argv: string[]) {
       return
     }
     default:
+      db.close()
+      guard.close()
       console.error(`Unknown command: ${command}\n\n${USAGE}`)
       process.exitCode = 2
   }
