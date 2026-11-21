@@ -4,6 +4,11 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  mailparser@3.15.0:
+    hash: c27c9ad50ece9b3311a6568cc09248c09ffaeba36966b43123bbaa03842e5930
+    path: patches/mailparser@3.15.0.patch
+
 importers:
 
   .:
@@ -160,9 +165,12 @@ importers:
       imapflow:
         specifier: ^2.12.2
         version: 2.12.2
+      libmime:
+        specifier: 5.6.5
+        version: 5.6.5
       mailparser:
         specifier: ^3.15.0
-        version: 3.15.0
+        version: 3.15.0(patch_hash=c27c9ad50ece9b3311a6568cc09248c09ffaeba36966b43123bbaa03842e5930)
       nodemailer:
         specifier: ^10.6.1
         version: 10.6.1
@@ -7234,7 +7242,7 @@ snapshots:
     dependencies:
       '@jridgewell/sourcemap-codec': 1.6.0
 
-  mailparser@3.15.0:
+  mailparser@3.15.0(patch_hash=c27c9ad50ece9b3311a6568cc09248c09ffaeba36966b43123bbaa03842e5930):
     dependencies:
       '@zone-eu/mailsplit': 5.4.31
       he: 1.2.0

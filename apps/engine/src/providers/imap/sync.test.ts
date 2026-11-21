@@ -17,7 +17,7 @@ function fixture(extensions: string[] = []) {
   db.prepare(
     "INSERT INTO account (id, kind, address, credentials, created_at) VALUES ('a', 'imap', 'owner@example.com', zeroblob(1), 0)",
   ).run()
-  const queries = new MailQueries(db)
+  const queries = new MailQueries(db, false, blobs)
   const makeSync = () => new ImapAccountSync(imap.client, store, 'a', 'owner@example.com')
   return { db, blobs, store, queries, imap, makeSync }
 }
@@ -203,6 +203,41 @@ it('counts identical copies once and preserves the surviving folder after one co
   expect(thread()?.messages[0]?.id).not.toBe(shared?.id)
 })
 
+it.each([
+  ['BOM only', '//4='],
+  ['whitespace only', '//4gAAkA'],
+])('uses HTML when the decoded plain alternative is %s', async (_label, encodedPlain) => {
+  const { imap, makeSync, queries, blobs } = fixture()
+  imap.add(
+    'INBOX',
+    'Subject: HTML fallback\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=outer',
+    [
+      '--outer',
+      'Content-Type: multipart/alternative; boundary=alt',
+      '',
+      '--alt',
+      'Content-Type: text/plain; charset=utf-16le',
+      'Content-Transfer-Encoding: base64',
+      '',
+      encodedPlain,
+      '--alt',
+      'Content-Type: text/html; charset=utf-8',
+      '',
+      '<p>Actual message</p>',
+      '--alt--',
+      '--outer--',
+    ].join('\r\n'),
+  )
+
+  await makeSync().step('all')
+
+  const [thread] = queries.threads({}).threads
+  const message = queries.thread(thread?.id ?? '')?.messages[0]
+  expect(message).toMatchObject({ bodyText: 'Actual message', snippet: 'Actual message' })
+  expect(queries.messageHtml(message?.id ?? '', blobs)).toBe('<p>Actual message</p>')
+  expect(queries.search('actual', {})).toHaveLength(1)
+})
+
 const longBody = `${'A line in a large message. '.repeat(32)}\r\n`
 
 it('stores oversized raw and displayed bodies completely and marks the FTS prefix', async () => {
@@ -226,14 +261,62 @@ it('stores oversized raw and displayed bodies completely and marks the FTS prefi
   expect(message?.bodyText.length).toBeGreaterThan(16 * 1024 * 1024)
   expect(message?.bodySearchTruncated).toBe(true)
   expect(message?.hasHtml).toBe(true)
-  const htmlBlob = queries.messageHtmlBlob(String(row?.message_id))
-  expect(blobs.get(String(htmlBlob))?.toString().includes('<p>html end</p>')).toBe(true)
+  expect(queries.messageHtml(String(row?.message_id), blobs)).toContain('<p>html end</p>')
   expect(queries.search('startmarker', {})).toHaveLength(1)
   expect(queries.search('endmarker', {})).toHaveLength(0)
   const source = imap.folder('INBOX').messages.get(uid)?.source
   expect(source && blobs.get(String(row?.source_blob))?.equals(source)).toBe(true)
   expect(imap.downloads).toEqual([{ path: 'INBOX', uid, part: undefined }])
 })
+
+it('bounds peak decoded heap during sync for large encoded text and HTML', async () => {
+  const { imap, makeSync, db, queries, blobs } = fixture()
+  const mib = 1024 * 1024
+  const encode = (body: string, encoding: BufferEncoding = 'utf8') =>
+    Buffer.from(body, encoding).toString('base64')
+  imap.add(
+    'INBOX',
+    'Subject: Encoded bodies\r\nContent-Type: multipart/alternative; boundary="encoded"',
+    [
+      '--encoded',
+      'Content-Type: text/plain; charset=utf-8',
+      'Content-Transfer-Encoding: base64',
+      '',
+      encode(`firstword\n${'a'.repeat(32 * mib)}\nlastword`),
+      '--encoded',
+      'Content-Type: text/html; charset=iso-8859-1',
+      'Content-Transfer-Encoding: base64',
+      '',
+      encode(`<p>Début</p>${'b'.repeat(24 * mib)}<p>Terminé</p>`, 'latin1'),
+      '--encoded--',
+    ].join('\r\n'),
+  )
+
+  const start = process.memoryUsage().heapUsed
+  let peak = start
+  const measure = () => {
+    peak = Math.max(peak, process.memoryUsage().heapUsed)
+  }
+  const timer = setInterval(measure, 5)
+  try {
+    await makeSync().step('all')
+    measure()
+  } finally {
+    clearInterval(timer)
+  }
+  expect(peak - start).toBeLessThan(24 * mib)
+
+  const stored = db.prepare('SELECT id, length(body_text) AS length FROM message').get()
+  const id = String(stored?.id)
+  expect(stored?.length).toBe(256 * 1024)
+  expect(queries.message(id)?.bodyText.endsWith('lastword')).toBe(true)
+  expect(queries.message(id)?.bodySearchTruncated).toBe(true)
+  const html = queries.messageHtml(id, blobs)
+  expect(html?.startsWith('<p>Début</p>')).toBe(true)
+  expect(html?.endsWith('<p>Terminé</p>')).toBe(true)
+  expect(queries.search('firstword', {})).toHaveLength(1)
+  expect(queries.search('lastword', {})).toHaveLength(0)
+}, 30_000)
 
 it.each(['Message-ID: <oversized@example.com>', 'X-No-Message-ID: true'])(
   'deduplicates byte-identical oversized copies with %s',
@@ -540,7 +623,7 @@ it('replaces a v4 preview with the full source under the cached message ID', asy
   `)
   migrate(db)
   const store = new MailStore(db, new BlobStore(tempDir()))
-  const queries = new MailQueries(db)
+  const queries = new MailQueries(db, false, store.blobs)
   expect(queries.message('a:INBOX:1:1')?.bodyText).toBe('Start of the body')
   await new ImapAccountSync(imap.client, store, 'a', 'owner@example.com').step('all')
   const message = queries.message('a:INBOX:1:1')

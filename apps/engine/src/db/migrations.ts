@@ -473,4 +473,9 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX mutation_agent_action ON mutation (agent_action_id) WHERE agent_action_id IS NOT NULL;
     `,
   },
+  {
+    version: 11,
+    name: 'IMAP body blobs',
+    sql: 'ALTER TABLE message ADD COLUMN body_parts TEXT',
+  },
 ]
