@@ -3,8 +3,20 @@ import { createRoot } from 'react-dom/client'
 import { App } from './app'
 import './styles.css'
 
-createRoot(document.getElementById('root') as HTMLElement).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-)
+async function mount() {
+  if (import.meta.env.DEV) {
+    const scenario = new URLSearchParams(location.search).get('fixture')
+    if (scenario) {
+      const { loadFixture } = await import('./lib/amc')
+      await loadFixture(scenario)
+    }
+  }
+
+  createRoot(document.getElementById('root') as HTMLElement).render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  )
+}
+
+void mount()

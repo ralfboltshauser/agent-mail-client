@@ -18,7 +18,7 @@
   --secondary: oklch(0.967 0.002 286);
   --secondary-foreground: oklch(0.27 0.006 286);
   --muted: oklch(0.967 0.002 286);
-  --muted-foreground: oklch(0.55 0.012 286);
+  --muted-foreground: oklch(0.49 0.018 266);
   --accent: oklch(0.955 0.012 264);
   --accent-foreground: oklch(0.3 0.08 264);
   --destructive: oklch(0.58 0.22 27);
@@ -27,7 +27,7 @@
   --ring: oklch(0.6 0.16 264);
   --unread: oklch(0.55 0.2 264);
 
-  --sidebar: oklch(0.975 0.002 286);
+  --sidebar: oklch(0.969 0.008 266);
   --sidebar-foreground: oklch(0.35 0.008 286);
   --sidebar-primary: oklch(0.52 0.19 264);
   --sidebar-primary-foreground: oklch(0.985 0 0);
@@ -39,9 +39,9 @@
 
 .dark {
   color-scheme: dark;
-  --background: oklch(0.17 0.004 286);
+  --background: oklch(0.196 0.012 269);
   --foreground: oklch(0.95 0.002 286);
-  --card: oklch(0.2 0.005 286);
+  --card: oklch(0.218 0.013 269);
   --card-foreground: var(--foreground);
   --popover: oklch(0.21 0.006 286);
   --popover-foreground: var(--foreground);
@@ -50,23 +50,23 @@
   --secondary: oklch(0.25 0.006 286);
   --secondary-foreground: oklch(0.95 0.002 286);
   --muted: oklch(0.24 0.006 286);
-  --muted-foreground: oklch(0.68 0.01 286);
+  --muted-foreground: oklch(0.74 0.016 265);
   --accent: oklch(0.27 0.03 264);
   --accent-foreground: oklch(0.92 0.03 264);
   --destructive: oklch(0.65 0.2 25);
   --border: oklch(0.27 0.006 286);
   --input: oklch(0.29 0.006 286);
-  --ring: oklch(0.6 0.14 264);
+  --ring: oklch(0.73 0.14 264);
   --unread: oklch(0.72 0.15 264);
 
-  --sidebar: oklch(0.145 0.004 286);
+  --sidebar: oklch(0.166 0.013 268);
   --sidebar-foreground: oklch(0.8 0.006 286);
   --sidebar-primary: oklch(0.68 0.16 264);
   --sidebar-primary-foreground: oklch(0.16 0.02 264);
   --sidebar-accent: oklch(0.23 0.006 286);
   --sidebar-accent-foreground: oklch(0.96 0.002 286);
   --sidebar-border: oklch(0.24 0.005 286);
-  --sidebar-ring: oklch(0.6 0.14 264);
+  --sidebar-ring: oklch(0.73 0.14 264);
 }
 
 @theme inline {
@@ -118,6 +118,8 @@
     @apply bg-background text-foreground antialiased;
     font-feature-settings: "cv11", "ss01";
     -webkit-font-smoothing: antialiased;
+    scrollbar-color: var(--input) transparent;
+    scrollbar-width: thin;
     user-select: none;
     cursor: default;
   }
@@ -142,6 +144,10 @@
   *,
   ::before,
   ::after {
+    scroll-behavior: auto !important;
+  }
+
+  [data-sonner-toast], [data-slot="tooltip-content"], [data-slot="dropdown-menu-content"] {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
@@ -163,4 +169,88 @@
 
 .amc-compose-editor a {
   text-decoration: underline;
+}
+
+@theme inline {
+  --color-star: var(--star);
+}
+
+:root {
+  --star: oklch(0.49 0.12 65);
+  --avatar-bg: 0.93 0.04;
+  --avatar-ink: 0.37 0.075;
+}
+
+.dark {
+  --star: oklch(0.81 0.12 78);
+  --avatar-bg: 0.29 0.045;
+  --avatar-ink: 0.83 0.065;
+}
+
+@layer components {
+  .app-toolbar {
+    @apply flex h-13 shrink-0 items-center border-b bg-card;
+  }
+
+  .app-toolbar > * {
+    flex-shrink: 0;
+  }
+
+  .app-toolbar > .relative {
+    flex-shrink: 1;
+  }
+
+  .mail-state-icon {
+    @apply inline-grid size-10 place-items-center rounded-lg border bg-muted text-muted-foreground;
+  }
+
+  .app-sidebar [data-sidebar="menu-button"] {
+    @apply h-7 text-[13px];
+  }
+
+  .app-sidebar [data-sidebar="menu-button"][data-size="lg"] {
+    @apply h-11;
+  }
+
+  .app-sidebar [data-sidebar="menu-button"][data-active="true"] {
+    @apply bg-accent text-accent-foreground;
+  }
+
+  .app-sidebar [data-sidebar="menu-badge"] {
+    @apply top-1;
+  }
+
+  .app-sidebar [data-sidebar="group-label"] {
+    @apply h-6 font-semibold text-muted-foreground;
+  }
+
+  .mail-row[aria-selected="true"] {
+    box-shadow: inset 2px 0 var(--unread);
+    border-bottom-color: transparent;
+  }
+
+  .mail-list:focus-visible {
+    outline-offset: -2px;
+  }
+
+  .mail-avatar {
+    background: oklch(var(--avatar-bg) var(--avatar-hue));
+    color: oklch(var(--avatar-ink) var(--avatar-hue));
+  }
+}
+
+@layer base {
+  :is(button, a, input, textarea, select, [contenteditable], [tabindex], summary):focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 1px;
+  }
+}
+
+.mail-toast[data-sonner-toast] {
+  border-radius: var(--radius-lg);
+  box-shadow: 0 2px 5px rgb(0 0 0 / 8%), 0 12px 32px rgb(0 0 0 / 12%);
+}
+
+.mail-toast-description[data-description] {
+  color: var(--muted-foreground);
 }

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
+import { getAmc } from '@/lib/amc'
 import type { TriageStatus } from '../../../shared/api'
 
 export function useTriageStatus() {
@@ -7,11 +8,11 @@ export function useTriageStatus() {
   useEffect(() => {
     let current = true
     let received = false
-    const unsubscribe = window.amc.onTriageStatus((next) => {
+    const unsubscribe = getAmc().onTriageStatus((next) => {
       received = true
       setStatus(next)
     })
-    void window.amc
+    void getAmc()
       .triageStatus()
       .then((initial) => {
         if (current && !received) setStatus(initial)
@@ -34,9 +35,11 @@ export function AutoTriageSetting() {
         checked={status?.enabled ?? true}
         disabled={!status}
         onChange={(event) => {
-          void window.amc.setAutoTriage(event.target.checked).catch(() => {
-            toast.error('Could not save the auto-triage setting.')
-          })
+          void getAmc()
+            .setAutoTriage(event.target.checked)
+            .catch(() => {
+              toast.error('Could not save the auto-triage setting.')
+            })
         }}
       />
       Auto-triage new mail

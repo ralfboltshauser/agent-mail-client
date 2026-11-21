@@ -1,7 +1,8 @@
-import { Loader2 } from 'lucide-react'
+import { CircleAlert, Loader2, Mail } from 'lucide-react'
 import { useId, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { getAmc } from '@/lib/amc'
 
 /** First run: connect this Mac to the Engine with a one-time code from the Host. */
 export function PairScreen({
@@ -23,7 +24,7 @@ export function PairScreen({
     setBusy(true)
     setError(null)
     try {
-      await window.amc.pair(engineUrl.trim(), code.trim())
+      await getAmc().pair(engineUrl.trim(), code.trim())
     } catch (e) {
       setError(
         (e as Error).message.replace(/^Error invoking remote method '[^']+': (Error: )?/, ''),
@@ -37,15 +38,23 @@ export function PairScreen({
     <div className="flex h-full flex-col">
       <div className="app-drag h-10 shrink-0" />
       <div className="flex flex-1 items-center justify-center p-8">
-        <form onSubmit={submit} className="w-full max-w-sm space-y-6">
-          <div className="space-y-1.5">
-            <h1 className="text-2xl font-semibold tracking-tight">Connect to your Engine</h1>
+        <form
+          onSubmit={submit}
+          className="w-full max-w-[25rem] space-y-6 rounded-xl border bg-card p-7 shadow-sm"
+        >
+          <div className="space-y-2.5">
+            <span className="mail-state-icon mb-1 bg-accent text-primary">
+              <Mail size={20} aria-hidden />
+            </span>
+            <h1 className="text-[23px] leading-tight font-semibold tracking-tight">
+              Connect to your Engine
+            </h1>
             {recoveryMessage ? (
               <p role="alert" className="text-sm text-destructive">
                 {recoveryMessage}
               </p>
             ) : (
-              <p className="text-sm text-muted-foreground">
+              <p className="text-sm leading-relaxed text-muted-foreground">
                 On your Host, run{' '}
                 <code className="rounded bg-muted px-1 py-0.5 text-xs">
                   sudo amc-engine pair --desktop
@@ -56,7 +65,7 @@ export function PairScreen({
           </div>
           <div className="space-y-3">
             <label htmlFor={urlId} className="block space-y-1.5">
-              <span className="text-xs font-medium text-muted-foreground">Engine URL</span>
+              <span className="text-xs font-medium text-foreground">Engine URL</span>
               <Input
                 id={urlId}
                 value={engineUrl}
@@ -66,7 +75,7 @@ export function PairScreen({
               />
             </label>
             <label htmlFor={codeId} className="block space-y-1.5">
-              <span className="text-xs font-medium text-muted-foreground">Pairing code</span>
+              <span className="text-xs font-medium text-foreground">Pairing code</span>
               <Input
                 id={codeId}
                 value={code}
@@ -76,13 +85,21 @@ export function PairScreen({
               />
             </label>
           </div>
-          {error && <p className="text-sm text-destructive">{error}</p>}
+          {error && (
+            <p
+              role="alert"
+              className="flex items-start gap-2 rounded-md bg-destructive/10 p-2.5 text-sm text-destructive"
+            >
+              <CircleAlert className="mt-0.5 size-4 shrink-0" />
+              {error}
+            </p>
+          )}
           <Button
             type="submit"
             className="w-full"
             disabled={busy || code.length < 8 || engineUrl.length < 10}
           >
-            {busy && <Loader2 className="animate-spin" />}
+            {busy && <Loader2 className="motion-safe:animate-spin" />}
             Connect
           </Button>
         </form>
