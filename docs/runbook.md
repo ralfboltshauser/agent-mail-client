@@ -74,7 +74,7 @@ journalctl -u amc-engine -f        # JSON logs; pipe through `npx pino-pretty` t
 
 The Engine listens on `127.0.0.1:4410`. `tailscale serve` publishes it on the tailnet only at `https://<host>.<tailnet>.ts.net:4443`. It is never on Funnel. Requests through `tailscale serve` must come from a login listed in `allowedTailscaleLogins`.
 
-M3 ships with Snooze disabled. The Engine reads `features.snooze` from its config at startup. The default is `false`.
+Snooze is enabled by default. Set `features.snooze` to `false` to disable it. The Engine keeps the schedule in its database and uses the Account’s archive and Inbox operations. IMAP Accounts need a server-designated Archive folder.
 
 ## T3 Handoff
 

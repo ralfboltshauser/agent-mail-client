@@ -104,8 +104,8 @@ export function imapActionLabels(
   let destination: string
   switch (action.kind) {
     case 'mute':
-    case 'snooze':
       return {}
+    case 'snooze':
     case 'archive':
       if (!folders.includes(inbox)) return {}
       destination = `${accountId}:ARCHIVE`
@@ -134,13 +134,13 @@ export function imapActionError(
   moves: boolean | undefined = undefined,
 ): string | undefined {
   const has = (id: string) => folderIds.has(`${accountId}:${id}`)
-  if (action.kind === 'archive' && !has('ARCHIVE')) return 'This IMAP Account has no Archive folder'
+  if ((action.kind === 'archive' || action.kind === 'snooze') && !has('ARCHIVE'))
+    return 'This IMAP Account has no Archive folder'
   if (action.kind === 'trash' && (!has('TRASH') || (!action.value && !has('INBOX'))))
     return 'This IMAP Account has no folder for this Trash action'
   if (action.kind === 'label' && !action.value)
     return 'Choose a destination folder to move IMAP mail'
-  if (action.kind === 'snooze') return 'Snooze is unavailable for IMAP Accounts'
-  if (moves === false && ['archive', 'trash', 'label'].includes(action.kind))
+  if (moves === false && ['archive', 'snooze', 'trash', 'label'].includes(action.kind))
     return 'This IMAP server does not support safe moves'
 }
 

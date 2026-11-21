@@ -29,7 +29,8 @@ async function fixture({
 } = {}) {
   const db = testDb()
   const store = new MailStore(db, new BlobStore(tempDir()))
-  const queries = new MailQueries(db)
+  const queries = new MailQueries(db, true)
+  let now = Date.now()
   const sealer = new Sealer(randomBytes(32))
   const imap = new FakeImap()
   if (capability) imap.capabilities.set(capability, true)
@@ -55,6 +56,8 @@ async function fixture({
   })
   const queue = new Mutations(store, () => null, silentLog, {
     imap: (account, work) => sync.organiseImap(account, work),
+    now: () => now,
+    snoozeEnabled: true,
   })
   cleanups.push(async () => {
     await Promise.all([sync.stop(), queue.stop()])
@@ -81,6 +84,10 @@ async function fixture({
   const run = (action: Input<OrganiseAction>) => settle(enqueue(action))
   return {
     db,
+    now: () => now,
+    advance: (ms: number) => {
+      now += ms
+    },
     imap,
     imapClient,
     queue,
@@ -376,4 +383,36 @@ it('reconciles a move whose response is lost without replaying it or offering an
     { message_id: messageId },
   ])
   expect(view()?.messages[0]).toMatchObject({ id: messageId, labelIds: ['a:ARCHIVE'] })
+})
+
+it.each(['wake', 'undo', 'delete'] as const)('handles IMAP Snooze on %s', async (mode) => {
+  const { imap, view, run, now, queue, advance } = await fixture()
+  const until = now() + 1000
+  expect(await run({ kind: 'snooze', until })).toMatchObject({ status: 'applied' })
+  expect(view()).toMatchObject({ inInbox: false, snoozedUntil: until, labelIds: ['a:ARCHIVE'] })
+  if (mode === 'delete') {
+    const [uid] = imap.folder('Filed mail').messages.keys()
+    if (uid === undefined) throw new Error('Missing archived message')
+    imap.expunge('Filed mail', uid)
+  }
+  if (mode === 'undo') await run({ kind: 'undo' })
+  else {
+    advance(1000)
+    await queue.tick()
+  }
+  await queue.tick()
+  expect(view()?.snoozedUntil ?? null).toBeNull()
+  expect(imap.folder('INBOX').messages.size).toBe(mode === 'delete' ? 0 : 1)
+  expect(imap.folder('Filed mail').messages.size).toBe(0)
+  expect(imap.writes.map(({ command }) => command)).toEqual(
+    mode === 'delete' ? ['UID MOVE'] : ['UID MOVE', 'UID MOVE'],
+  )
+})
+
+it('refuses IMAP Snooze without a designated Archive folder', async () => {
+  const { imap, enqueue, now } = await fixture({ archive: false })
+  expect(() => enqueue({ kind: 'snooze', until: now() + 1000 })).toThrow(
+    'This IMAP Account has no Archive folder',
+  )
+  expect(imap.writes).toEqual([])
 })

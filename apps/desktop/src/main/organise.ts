@@ -53,13 +53,7 @@ export const ORGANISE_SCHEMA = `
     UNION ALL SELECT * FROM organise_thread;
 `
 
-function applyPatch(
-  thread: ThreadSummary,
-  messages: ThreadMessage[],
-  patch: Patch,
-  kind: OrganiseAction['kind'],
-  imap: boolean,
-) {
+function applyPatch(thread: ThreadSummary, messages: ThreadMessage[], patch: Patch, imap: boolean) {
   const prefix = `${thread.accountId}:`
   const marker = `${prefix}${SNOOZED_LABEL}`
   for (const [index, message] of messages.entries()) {
@@ -67,7 +61,7 @@ function applyPatch(
     if (!next) continue
     // Older outbox entries can still carry optimistic marker cleanup.
     const labels = { ...next }
-    if (kind !== 'snooze') delete labels[marker]
+    delete labels[marker]
     const unreadId = `${prefix}UNREAD`
     const starredId = `${prefix}STARRED`
     const labelIds = applyLabelPatch(message.labelIds, labels)
@@ -79,13 +73,12 @@ function applyPatch(
     }
   }
   if (patch.muted !== undefined) thread.muted = patch.muted
-  thread.snoozedUntil = kind === 'snooze' ? (patch.snoozedUntil ?? null) : null
+  if (patch.snoozedUntil !== undefined) thread.snoozedUntil = patch.snoozedUntil
   if (messages.length === thread.messageCount && messages.length) {
     thread.labelIds = [...new Set(messages.flatMap((m) => m.labelIds))].sort()
     thread.unreadCount = messages.filter((m) => m.unread).length
     thread.starred = messages.some((m) => m.starred)
   } else if (
-    thread.snoozedUntil ||
     patch.muted ||
     messages.some((m) => patch.labels[m.id]?.[`${prefix}INBOX`] === false)
   ) {
@@ -93,7 +86,6 @@ function applyPatch(
   }
   thread.inInbox =
     !thread.muted &&
-    thread.snoozedUntil == null &&
     (messages.length === thread.messageCount
       ? messages.some(
           (m) =>
@@ -120,7 +112,7 @@ function patchesFor(
   }
   if (action.kind === 'snooze') {
     patch.snoozedUntil = action.until
-    state[snoozed] = true
+    inverse.snoozedUntil = null
   }
   for (const message of messages) {
     if (message.labelIds.includes(`${thread.accountId}:DRAFT`)) continue
@@ -203,9 +195,10 @@ export class LocalOrganise {
         } else {
           for (const id of JSON.parse(row.superseded) as string[]) delete patch.labels[id]
         }
-        delete patch.snoozedUntil
         const thread = threadId && this.replica.baseThread(threadId)
         if (thread && this.#account(thread.thread.accountId)?.kind === 'imap') patch.labels = {}
+        // The Engine checks the whole Thread before undoing Snooze.
+        if (patch.snoozedUntil === null) patch.labels = {}
         target = row.id
       }
       action = { kind: 'undo', threadId, mutationId: target }
@@ -248,17 +241,16 @@ export class LocalOrganise {
   messages(thread: ThreadSummary, base: ThreadMessage[]): ThreadMessage[] {
     const rows = this.#db
       .prepare(
-        `SELECT patch, json_extract(request, '$.action.kind') AS kind FROM organise_queue
+        `SELECT patch FROM organise_queue
          WHERE thread_id = ? AND (modseq IS NULL OR modseq > ?)
            AND (status != 'pending' OR error IS NULL) ORDER BY seq`,
       )
       .all(thread.id, this.replica.modseq ?? -1) as {
       patch: string
-      kind: OrganiseAction['kind']
     }[]
     if (!rows.length) return base
     const imap = this.#account(thread.accountId)?.kind === 'imap'
-    for (const row of rows) applyPatch(thread, base, JSON.parse(row.patch) as Patch, row.kind, imap)
+    for (const row of rows) applyPatch(thread, base, JSON.parse(row.patch) as Patch, imap)
     return base
   }
 

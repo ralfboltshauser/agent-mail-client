@@ -41,7 +41,6 @@ export interface SyncManagerOptions {
   pollMs?: number
   imapPollMs?: number
   labelsEveryMs?: number
-  snoozeEnabled?: boolean
 }
 
 interface Runner {
@@ -81,7 +80,6 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
       pollMs: 15_000,
       imapPollMs: 2 * 60_000,
       labelsEveryMs: 5 * 60_000,
-      snoozeEnabled: false,
       ...options,
     }
   }
@@ -246,7 +244,6 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
       store,
       new DbAccountState(db, accountId, [row.address]),
       log,
-      this.#o.snoozeEnabled,
     )
     sync.onProgress = () => this.emit('change')
     const controller = new AbortController()

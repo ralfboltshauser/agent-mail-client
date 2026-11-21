@@ -123,7 +123,6 @@ export interface ThreadQuery {
 export class MailQueries {
   readonly db: Db
 
-  readonly #inbox: string
   readonly #threadColumns: string
   readonly #readAgentBody: ReturnType<Db['prepare']>
 
@@ -135,19 +134,8 @@ export class MailQueries {
     this.#readAgentBody = db.prepare(
       'SELECT substr(CAST(body_text AS BLOB), 1, ?) AS body FROM message WHERE id = ?',
     )
-    // Old Gmail summaries may have suppressed Inbox membership while Snooze was enabled.
-    this.#inbox = snoozeEnabled
-      ? '(t.in_inbox AND t.snoozed_until IS NULL)'
-      : `CASE WHEN t.in_inbox = 0 AND t.snoozed_until IS NOT NULL AND t.muted = 0 THEN EXISTS (
-          SELECT 1 FROM message m WHERE m.thread_id = t.id
-            AND t.account_id || ':INBOX' IN (SELECT value FROM json_each(m.label_ids))
-            AND NOT EXISTS (
-              SELECT 1 FROM json_each(m.label_ids)
-              WHERE value IN (t.account_id || ':TRASH', t.account_id || ':SPAM')
-            )
-        ) ELSE t.in_inbox END`
     this.#threadColumns = `t.id, t.account_id, t.subject, t.snippet, t.participants, t.message_count,
-      t.unread_count, t.starred, ${this.#inbox} AS in_inbox, t.has_attachments, t.label_ids,
+      t.unread_count, t.starred, t.in_inbox, t.has_attachments, t.label_ids,
       t.last_message_at, ${snoozeEnabled ? 't.snoozed_until' : 'NULL'} AS snoozed_until, t.muted,
       t.bucket, t.bucket_reason, t.bucket_set_by, t.bucket_set_at`
   }
@@ -231,7 +219,7 @@ export class MailQueries {
       params.push(query.accountId)
     }
     if (query.inbox) {
-      where.push(`(${this.#inbox}) = 1`)
+      where.push('t.in_inbox = 1')
     } else if (query.labelId) {
       where.push('EXISTS (SELECT 1 FROM json_each(t.label_ids) WHERE value = ?)')
       params.push(query.labelId)
