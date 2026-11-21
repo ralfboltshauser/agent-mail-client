@@ -256,4 +256,15 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX mutation_message_by_message ON mutation_message (message_id, mutation_id);
     `,
   },
+  {
+    version: 5,
+    name: 'Gmail mutation baselines and compensation',
+    sql: `
+      ALTER TABLE mutation ADD COLUMN prepared INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE mutation ADD COLUMN rollback_plan TEXT;
+      -- Preserve the previous baseline for writes that may already have reached Gmail.
+      UPDATE mutation SET prepared = 2 WHERE status = 'pending'
+        AND (progress > 0 OR attempts > 0 OR rollback_error IS NOT NULL);
+    `,
+  },
 ]

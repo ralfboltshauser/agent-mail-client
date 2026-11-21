@@ -96,6 +96,119 @@ describe('Gmail Organise writeback', () => {
     ).toBe(409)
   })
 
+  it('rejects Organise for legacy Agent tokens and reserves Trash for owner Clients', async () => {
+    const { db, gmail, queue, request } = await setup()
+    const agent = issueToken(db, { kind: 'agent', name: 'Legacy Agent', scopes: ['organize'] })
+    const limited = issueToken(db, { kind: 'cli', name: 'Limited CLI', scopes: ['organize'] })
+    const owner = issueToken(db, {
+      kind: 'desktop',
+      name: 'Desktop',
+      scopes: ['organize', 'admin'],
+    })
+    vi.spyOn(queue, 'kick').mockImplementation(() => {})
+    const app = createApp({ db, config: testConfig(), log: silentLog, mutations: queue })
+    const post = (token: string, mutations: MutationRequest[]) =>
+      app.request('/v1/mutations', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mutations }),
+      })
+    const archive = request({ kind: 'archive', threadId: THREAD })
+    const trash = request({ kind: 'trash', threadId: THREAD, value: true })
+    expect((await post(agent.secret, [archive])).status).toBe(403)
+    expect((await post(agent.secret, [trash])).status).toBe(403)
+    expect((await post(limited.secret, [archive, trash])).status).toBe(403)
+    // A row accepted by the old endpoint must also be refused at dispatch.
+    queue.submit(agent.id, [trash])
+    await queue.tick()
+    expect(queue.lookup(agent.id, [trash.id])[0]?.status).toBe('failed')
+    expect(await gmail.getMessageLabels('m1')).toContain('INBOX')
+    const ownerTrash = request(trash.action)
+    expect((await post(owner.secret, [ownerTrash])).status).toBe(200)
+    await queue.tick()
+    expect(await gmail.getMessageLabels('m1')).toContain('TRASH')
+  })
+
+  it('compensates a Trash committed before its response was lost and a retry was refused', async () => {
+    const { gmail, queue, store, submit, lookup, advance, now, thread } = await setup()
+    gmail.trashFailure = { afterWrite: true, error: new Error('connection lost') }
+    const trash = submit({ kind: 'trash', threadId: THREAD, value: true })
+    await queue.tick()
+    expect(lookup(trash.id)?.status).toBe('pending')
+    expect(await gmail.getMessageLabels('m1')).toContain('TRASH')
+    const threadMessages = gmail.getThreadMessages.bind(gmail)
+    vi.spyOn(gmail, 'getThreadMessages').mockImplementation(async (id) =>
+      (await threadMessages(id)).filter((message) => !message.labelIds?.includes('TRASH')),
+    )
+    gmail.trashFailure = {
+      afterWrite: false,
+      error: new GmailHttpError(403, 'forbidden', 'refused'),
+    }
+    advance(2000)
+    await new Mutations(store, () => gmail, silentLog, now).tick()
+    expect(lookup(trash.id)).toMatchObject({
+      status: 'failed',
+      error: 'Gmail refused the change (HTTP 403)',
+    })
+    expect(await gmail.getMessageLabels('m1')).toEqual(expect.arrayContaining(['INBOX', 'UNREAD']))
+    expect(thread()?.labelIds).not.toContain('a:TRASH')
+  })
+
+  it('reports and reflects Trash remaining in Gmail if compensation is refused', async () => {
+    const { gmail, queue, submit, lookup, thread } = await setup()
+    const call = gmail.setTrashed.bind(gmail)
+    vi.spyOn(gmail, 'setTrashed').mockImplementation(async (id, trashed) => {
+      if (id !== 'm1' || !trashed) throw new GmailHttpError(403, 'forbidden', 'refused')
+      return call(id, trashed)
+    })
+    const trash = submit({ kind: 'trash', threadId: THREAD, value: true })
+    await queue.tick()
+    expect(lookup(trash.id)?.error).toContain('Gmail may have kept part of the change')
+    expect(await gmail.getMessageLabels('m1')).toContain('TRASH')
+    expect(thread()?.labelIds).toContain('a:TRASH')
+  })
+
+  it('reverses only the applied part of a failed batch', async () => {
+    const { gmail, queue, submit, lookup } = await setup()
+    gmail.setLabels('m2', ['SENT', 'STARRED', 'Label_work'])
+    gmail.add('m3', { threadId: 'thread', labels: ['INBOX'] })
+    gmail.batchFailure = { applied: 1, error: new GmailHttpError(403, 'forbidden', 'refused') }
+    const label = submit({ kind: 'label', threadId: THREAD, labelId: 'a:Label_work', value: true })
+    await queue.tick()
+    expect(lookup(label.id)?.status).toBe('failed')
+    expect(await gmail.getMessageLabels('m1')).not.toContain('Label_work')
+    expect(await gmail.getMessageLabels('m2')).toContain('Label_work')
+    expect(await gmail.getMessageLabels('m3')).not.toContain('Label_work')
+  })
+
+  it('does not undo an archive already performed in Gmail while the replica still showed Inbox', async () => {
+    const { gmail, queue, submit, lookup, thread } = await setup()
+    gmail.setLabels('m1', ['UNREAD'])
+    expect(thread()?.inInbox).toBe(true)
+    const archive = submit({ kind: 'archive', threadId: THREAD })
+    const undo = submit({ kind: 'undo', threadId: THREAD, mutationId: archive.id })
+    await queue.tick()
+    await queue.tick()
+    expect(lookup(undo.id)?.status).toBe('applied')
+    expect(await gmail.getMessageLabels('m1')).toEqual(['UNREAD'])
+    expect(thread()?.inInbox).toBe(false)
+  })
+
+  it('archives a Gmail reply absent from the replica and can undo just the changed labels', async () => {
+    const { gmail, queue, submit, lookup, sync, thread } = await setup()
+    const archive = submit({ kind: 'archive', threadId: THREAD })
+    gmail.add('m3', { threadId: 'thread', labels: ['INBOX', 'Label_work'] })
+    await queue.tick()
+    expect(await gmail.getMessageLabels('m3')).toEqual(['Label_work'])
+    expect(thread()?.messageCount).toBe(2)
+    const undo = submit({ kind: 'undo', threadId: THREAD, mutationId: archive.id })
+    await queue.tick()
+    expect(lookup(undo.id)?.status).toBe('applied')
+    expect(await gmail.getMessageLabels('m3')).toEqual(['Label_work', 'INBOX'])
+    await sync.incremental()
+    expect(thread()).toMatchObject({ inInbox: true, messageCount: 3 })
+  })
+
   it('projects changes immediately, writes both messages, and restores per-message state on undo', async () => {
     const { gmail, queue, thread, submit, lookup, db } = await setup()
     const before = thread()?.messages.map((m) => m.labelIds)
@@ -184,6 +297,17 @@ describe('Gmail Organise writeback', () => {
     expect(await gmail.getMessageLabels('m2')).not.toContain('INBOX')
   })
 
+  it('undoing Trash leaves Gmail Inbox membership that the original action never changed', async () => {
+    const { gmail, queue, submit } = await setup()
+    submit({ kind: 'trash', threadId: THREAD, value: true })
+    await queue.tick()
+    await gmail.setTrashed('m2', false)
+    gmail.setLabels('m2', ['INBOX', 'SENT', 'STARRED'])
+    submit({ kind: 'undo', threadId: THREAD })
+    await queue.tick()
+    expect(await gmail.getMessageLabels('m2')).toContain('INBOX')
+  })
+
   it('keeps a queued archive above older history echoes and fences a read racing writeback', async () => {
     const { gmail, queue, thread, sync, state, submit } = await setup()
     gmail.setLabels('m1', ['INBOX', 'UNREAD', 'Label_work'])
@@ -216,6 +340,68 @@ describe('Gmail Organise writeback', () => {
     await sync.incremental()
     expect(thread()).toMatchObject({ inInbox: false, unreadCount: 0 })
     expect(thread()?.labelIds).toContain('a:Label_work')
+  })
+
+  it('discards a reconciliation label read overtaken by live history', async () => {
+    const { gmail, sync, thread, state } = await setup()
+    gmail.oldestHistory = Number(state.cursor().historyId) + 1
+    gmail.setLabels('m1', ['INBOX', 'UNREAD', 'Label_work'])
+    await sync.incremental()
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let start!: () => void
+    const started = new Promise<void>((resolve) => {
+      start = resolve
+    })
+    gmail.afterLabelRead = () => {
+      start()
+      return held
+    }
+    const scanning = sync.backfillStep()
+    await started
+    gmail.setLabels('m1', ['UNREAD', 'Label_work'])
+    await sync.incremental()
+    release()
+    await scanning
+    while (await sync.backfillStep()) {}
+    expect(await sync.incremental()).toBe(0)
+    expect(thread()?.inInbox).toBe(false)
+  })
+
+  it('does not restore the Snoozed label after undoing Archive past the old deadline', async () => {
+    const { gmail, queue, submit, advance, now, thread } = await setup()
+    submit({ kind: 'snooze', threadId: THREAD, until: now() + 60_000 })
+    await queue.tick()
+    submit({ kind: 'archive', threadId: THREAD })
+    await queue.tick()
+    advance(60_000)
+    submit({ kind: 'undo', threadId: THREAD })
+    await queue.tick()
+    const label = gmail.labelList.find((l) => l.name === 'AMC/Snoozed')
+    expect(await gmail.getMessageLabels('m1')).not.toContain(label?.id)
+    expect(thread()).toMatchObject({ inInbox: false, snoozedUntil: null })
+  })
+
+  it('cleans the Snoozed label from Trash and wakes a surviving message when Gmail deleted another', async () => {
+    const { gmail, queue, submit, advance, now, thread, sync } = await setup()
+    gmail.add('m3', { threadId: 'thread', date: 3000 })
+    await sync.incremental()
+    submit({ kind: 'snooze', threadId: THREAD, until: now() + 60_000 })
+    await queue.tick()
+    const label = gmail.labelList.find((l) => l.name === 'AMC/Snoozed')
+    await gmail.setTrashed('m2', true)
+    gmail.remove('m3')
+    advance(60_000)
+    await queue.tick()
+    expect(await gmail.getMessageLabels('m1')).toContain('INBOX')
+    expect(await gmail.getMessageLabels('m2')).toContain('TRASH')
+    expect(await gmail.getMessageLabels('m2')).not.toContain(label?.id)
+    expect(await gmail.getMessageLabels('m2')).not.toContain('INBOX')
+    await sync.incremental()
+    expect(thread()).toMatchObject({ inInbox: true, snoozedUntil: null, messageCount: 2 })
+    expect(thread()?.labelIds).not.toContain('a:AMC/Snoozed')
   })
 
   it('stores Snooze in the Engine, mirrors its Label and returns the Thread to Inbox', async () => {

@@ -144,6 +144,14 @@ export class LocalOrganise {
       if (row) {
         threadId = row.thread_id ?? undefined
         patch = JSON.parse(row.inverse)
+        if (patch.snoozedUntil && patch.snoozedUntil <= Date.now()) {
+          patch.snoozedUntil = null
+          for (const labels of Object.values(patch.labels)) {
+            for (const key of Object.keys(labels)) {
+              if (key.endsWith(`:${SNOOZED_LABEL}`) && labels[key]) delete labels[key]
+            }
+          }
+        }
         target = row.id
       }
       action = { kind: 'undo', threadId, mutationId: target }
@@ -241,6 +249,18 @@ export class LocalOrganise {
     })
   }
 
+  refusePending(message: string, noticeId: string = randomUUID()): void {
+    this.replica.transaction(() => {
+      this.#db
+        .prepare(
+          "UPDATE organise_queue SET status = 'failed', modseq = 0 WHERE status IN ('unsent', 'pending')",
+        )
+        .run()
+      this.#db.prepare('INSERT INTO organise_notice VALUES (?, ?)').run(noticeId, message)
+      this.rebuild()
+    })
+  }
+
   errors(): { id: string; message: string }[] {
     const rows = this.#db
       .prepare(
@@ -283,6 +303,7 @@ export class OrganiseSync extends EventEmitter<{ changed: [] }> {
   #running = false
   #retryAt = 0
   #failures = 0
+  #refusal: string | null = null
 
   constructor(local: LocalOrganise, engine: EngineClient, pull: () => Promise<void>) {
     super()
@@ -301,10 +322,16 @@ export class OrganiseSync extends EventEmitter<{ changed: [] }> {
     this.#controller.abort()
   }
 
+  enqueue(action: OrganiseAction): string {
+    if (this.#refusal) throw new Error(this.#refusal)
+    return this.#local.enqueue(action)
+  }
+
   async flush(): Promise<void> {
     const signal = this.#controller.signal
     if (
       signal.aborted ||
+      this.#refusal ||
       this.#running ||
       Date.now() < this.#retryAt ||
       this.#local.replica.modseq === null
@@ -332,8 +359,7 @@ export class OrganiseSync extends EventEmitter<{ changed: [] }> {
           this.#local.resolve(res.mutations)
         } catch (error) {
           if (signal.aborted) return
-          if (!(error instanceof EngineError) || ![400, 403, 409].includes(error.status))
-            throw error
+          if (!(error instanceof EngineError) || ![400, 409].includes(error.status)) throw error
           this.#local.resolve([
             {
               id: request.id,
@@ -356,7 +382,17 @@ export class OrganiseSync extends EventEmitter<{ changed: [] }> {
       this.#failures = 0
       this.#retryAt = 0
       await this.#pull()
-    } catch {
+    } catch (error) {
+      if (signal.aborted) return
+      if (error instanceof EngineError && (error.status === 401 || error.status === 403)) {
+        this.#refusal =
+          error.status === 401
+            ? 'The Engine rejected this pairing. Pair this Mac again to organise mail.'
+            : `The Engine refused Organise. ${error.message}`
+        this.#local.refusePending(this.#refusal, request?.id ?? pending[0])
+        this.emit('changed')
+        return
+      }
       this.#retryAt = Date.now() + Math.min(30_000, 1000 * 2 ** this.#failures++)
     } finally {
       this.#running = false

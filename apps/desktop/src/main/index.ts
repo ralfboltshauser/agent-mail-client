@@ -76,7 +76,7 @@ function registerIpc() {
   ipcMain.handle('amc:organise', (_event, input: unknown) => {
     if (!organise) throw new Error('Pair with the Engine first')
     const action = OrganiseAction.parse(input)
-    const id = openReplica().organise.enqueue(action)
+    const id = organise.enqueue(action)
     broadcast('amc:changed')
     void organise.flush()
     return id

@@ -76,7 +76,8 @@ export interface GmailApi {
   }): Promise<GmailListMessages>
   /** `urgent` = live sync: served before backfill under the quota. */
   getMessage(id: string, urgent?: boolean): Promise<GmailMessage | null>
-  getMessageLabels(id: string): Promise<string[] | null>
+  getMessageLabels(id: string, writeback?: boolean): Promise<string[] | null>
+  getThreadMessages(id: string): Promise<GmailMessage[]>
   batchModify(ids: string[], addLabelIds: string[], removeLabelIds: string[]): Promise<void>
   setTrashed(id: string, trashed: boolean): Promise<string[]>
   createLabel(name: string): Promise<GmailLabel>

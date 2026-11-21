@@ -131,6 +131,14 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
       }
     }
 
+    let filling: Promise<void> | undefined
+    const startBackfill = () => {
+      if (!filling && !sync.backfillDone)
+        filling = backfill().finally(() => {
+          filling = undefined
+        })
+    }
+
     const live = async () => {
       let backoff = this.#o.pollMs
       let lastLabels = Date.now()
@@ -143,6 +151,7 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
           const changes = await sync.incremental()
           touchAccountSync(db, accountId)
           if (sync.backfillDone) setAccountStatus(db, store, accountId, 'ready')
+          else startBackfill()
           if (changes > 0) this.emit('change')
           backoff = this.#o.pollMs
         } catch (error) {
@@ -165,7 +174,11 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
           await sleep(30_000, signal)
         }
       }
-      if (!signal.aborted) await Promise.all([backfill(), live()])
+      if (!signal.aborted) {
+        startBackfill()
+        await live()
+        await filling
+      }
     })()
 
     this.#runners.set(accountId, { stop: () => controller.abort(), done, api })

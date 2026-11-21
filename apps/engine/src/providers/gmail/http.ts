@@ -182,16 +182,35 @@ export class GmailHttpApi implements GmailApi {
     }
   }
 
-  async getMessageLabels(id: string): Promise<string[] | null> {
+  async getMessageLabels(id: string, writeback = false): Promise<string[] | null> {
     try {
       const message = await this.#call<GmailMessage>(`/messages/${encodeURIComponent(id)}`, {
         params: { format: 'minimal', fields: 'id,labelIds' },
         cost: 'get',
         urgent: true,
+        writeback,
       })
       return message.labelIds ?? []
     } catch (error) {
       if (error instanceof GmailHttpError && error.status === 404) return null
+      throw error
+    }
+  }
+
+  async getThreadMessages(id: string): Promise<GmailMessage[]> {
+    try {
+      const thread = await this.#call<{ messages?: GmailMessage[] }>(
+        `/threads/${encodeURIComponent(id)}`,
+        {
+          params: { format: 'full', fields: 'messages(id,threadId,labelIds,internalDate)' },
+          cost: 'threadGet',
+          urgent: true,
+          writeback: true,
+        },
+      )
+      return thread.messages ?? []
+    } catch (error) {
+      if (error instanceof GmailHttpError && error.status === 404) return []
       throw error
     }
   }

@@ -99,6 +99,22 @@ describe('Gmail sync', () => {
     ).toEqual(['a:t-m2', 'a:t-m3'])
   })
 
+  it('keeps a Gmail message skipped when list pages shift during reconciliation', async () => {
+    const { gmail, sync, queries, state, backfillAll } = setup(1)
+    gmail.add('m1')
+    gmail.add('m2')
+    await sync.start()
+    await backfillAll()
+    gmail.oldestHistory = Number(state.cursor().historyId) + 1
+    gmail.setLabels('m2', ['INBOX', 'STARRED'])
+    await sync.incremental()
+    await sync.backfillStep() // The first offset page contains m2.
+    gmail.remove('m2') // m1 shifts onto that page and will be omitted by the next page.
+    await sync.incremental()
+    await backfillAll()
+    expect(queries.threads().threads.map((thread) => thread.id)).toEqual(['a:t-m1'])
+  })
+
   it('records every change in the change log', async () => {
     const { db, gmail, sync, backfillAll } = setup()
     gmail.add('m1')

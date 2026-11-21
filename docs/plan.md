@@ -27,7 +27,7 @@ Scope: everything in AMC v1 ([What exactly is in AMC v1?](https://github.com/ral
 
 - The **Engine** is the single source of truth. Every **Client** (the desktop app, the `amc` CLI, Agents over MCP, a composer link) works through its API. No Client talks to Gmail or IMAP directly.
 - The **desktop app** keeps a local **replica**, so every read and every action is local and instant. It syncs with the Engine in the background.
-- **Agents** never see more than their token allows. The send tool simply does not exist for them unless Dangerously Allow Send is on.
+- **Agents** never see more than their token allows. Unattended Agents have no send tool. Interactive Agent sends require the [M6 send gate](agents/permissions.md#dangerously-allow-send).
 - **The Engine runs as its own system user, `amc`** ([ADR 0003](adr/0003-engine-runs-as-its-own-user.md)). Its tokens, key and mail are unreadable to anything running as `ralf`, including T3 Code and Codex agents with full shell access. Only the agent runner runs as `ralf`, because it needs the owner's Claude and Codex logins (ADR 0002), and it reaches mail only through MCP.
 
 ## 2. Stack
@@ -118,7 +118,7 @@ Engine-side features that providers lack:
 
 - **Gmail:** `users.messages.send` with the right `threadId`, `In-Reply-To` and `References`.
 - **IMAP Accounts:** SMTP through Nodemailer, then `APPEND` to the Sent folder unless the provider does that itself.
-- **Who can send:** sending is a mutation only the owner principal may issue. The send code path checks the principal, not the UI.
+- **Who can send:** the Engine authorizes the owner send path and applies the separate [M6 send gate](agents/permissions.md#dangerously-allow-send) to interactive Agents.
 
 ## 5. Sync protocol (Engine ↔ desktop)
 
@@ -138,7 +138,7 @@ JMAP-style "changes since state X" over one global `modseq`. This was the top pi
 - **The Engine runs as system user `amc`.** Its data and secrets are readable by no one else (ADR 0003). The owner token on the Mac sits in the Keychain, restricted to the AMC app.
 - **Principals and tokens:**
   - **Owner device:** the desktop app, paired once with a code shown by `amc pair`. Its token lives in the macOS Keychain. It can do everything, including sending.
-  - **Agent token:** created by the owner with scopes `read`, `organize`, `draft`. `send` is grantable only while Dangerously Allow Send is on. The MCP tool list is computed from the token, so a missing scope means the tool does not exist.
+  - **Agent token:** in M6, bound to an owner-approved job with explicit operations, Accounts, targets and expiry. [M6 permissions](agents/permissions.md)
   - **Composer link:** a capability token for one draft, edit only, expiring after 24 hours. It cannot send, list or read other mail.
 - **Dangerously Allow Send:** toggled only in the desktop app, behind a confirmation. Every send by an Agent is logged, and turning the setting on is announced in a notification.
 - **Provider credentials** (OAuth refresh tokens, IMAP passwords) are encrypted at rest with a key in `~/.config/amc/key` (mode 600). The Google OAuth client is already at `~/.config/amc/google-oauth-client.json`.
@@ -151,14 +151,12 @@ JMAP-style "changes since state X" over one global `modseq`. This was the top pi
 - **Read tools:** `list_threads` (by Bucket, Label, query), `get_thread`, `search`, `search_contacts`, `get_attachment_text`.
 - **Organize tools:** `set_triage`, `archive`, `label`, `snooze`, `mute`, `mark_read`.
 - **Draft tools:** `create_draft`, `read_draft`, `update_draft`, `comment_on_draft` (questions for the owner), `composer_link`.
-- **Send:** `send_draft` exists **only** with Dangerously Allow Send on and the `send` scope.
+- **Send:** `send_draft` is exposed only to interactive Agents with a live send grant and Dangerously Allow Send on. Each send also needs exact-draft owner approval.
 - **`amc` CLI:** the same surface for scripts and Agents that prefer a shell.
 - **Undo:** every Agent call is written to `agent_action` and can be undone from the desktop app.
 
 ### 7.2 Agent runner (the Engine's own Agents)
-- **Claude adapter:** the Claude Agent SDK with `pathToClaudeCodeExecutable` set to the installed `claude`, `settingSources: []`, `strictMcpConfig`, and an explicit `tools` list containing only the AMC MCP server under a scoped token.
-- **Codex adapter:** `codex app-server` with `-c` overrides that disable owner MCP servers and tools.
-- Both share the owner's login, per ADR 0002. The sandbox ticket confirms the isolation, and the headless proof ticket proves both run unattended on the Host.
+- The Claude Agent SDK and Codex app-server share the owner's existing login under ADR 0002. The runner uses a private MCP forwarder per run. Each adapter stays off until its [inventory](agents/headless.md#adapter-activation) and [Host confinement checks](agents/sandbox.md#before-enabling-either-adapter) pass.
 - Runs are queued and limited to two at a time, with a time limit per run. Their output is only ever MCP calls.
 
 ### 7.3 Triage
@@ -204,7 +202,7 @@ From [How does the owner hand a Thread to an Agent and iterate on the reply toge
 
 ## 9. Operations on the Host
 
-- **Services:** `amc-engine.service` is a system service running as user `amc`. `amc-agents.service` is a user service running as `ralf` (the agent runner). Both restart on failure and log JSON (pino) to journald.
+- **Services:** `amc-engine.service` is a system service running as user `amc`. `amc-agents.service` is a system-managed service running as `ralf`, with per-run confinement and a trusted forwarder as specified in [ADR 0004](adr/0004-confine-the-agent-runner-on-the-host.md). Both restart on failure and log JSON (pino) to journald.
 - **Deploy:** `pnpm deploy:host` (from the Mac) runs, over SSH:
   1. sync the commit into `/opt/amc/releases/<sha>` and point `/opt/amc/current` at it
   2. install and build

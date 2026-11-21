@@ -132,7 +132,7 @@ export class MailStore extends EventEmitter<{ change: [] }> {
     this.recordChange('label', id, 'upsert')
   }
 
-  private providerLabels(accountId: string, labels: string[]): string[] {
+  providerLabels(accountId: string, labels: string[]): string[] {
     const snoozed = this.db
       .prepare('SELECT provider_id FROM label WHERE account_id = ? AND name = ?')
       .get(accountId, SNOOZED_LABEL) as { provider_id: string } | undefined

@@ -2,7 +2,9 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { MessageDetail, ThreadSummary } from '@amc/protocol'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { EngineClient, EngineError } from './engine'
+import { OrganiseSync } from './organise'
 import { Replica } from './replica'
 
 const THREAD: ThreadSummary = {
@@ -91,6 +93,80 @@ describe('desktop Organise outbox', () => {
     } finally {
       replica.db.close()
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('does not project an expired Snooze when undoing Archive offline', () => {
+    const replica = new Replica(':memory:')
+    try {
+      seed(replica)
+      replica.put('thread', {
+        ...THREAD,
+        inInbox: false,
+        snoozedUntil: 1,
+        labelIds: ['account:AMC/Snoozed'],
+      })
+      replica.put('message', message('1', ['account:AMC/Snoozed']))
+      replica.organise.enqueue({ kind: 'archive', threadId: THREAD.id })
+      replica.organise.enqueue({ kind: 'undo', threadId: THREAD.id })
+      const thread = replica.thread(THREAD.id)?.thread
+      expect(thread?.snoozedUntil).toBeNull()
+      expect(thread?.labelIds).not.toContain('account:AMC/Snoozed')
+    } finally {
+      replica.db.close()
+    }
+  })
+
+  it.each([401, 403])('rolls back all optimistic changes and stops on HTTP %i', async (status) => {
+    const replica = new Replica(':memory:')
+    try {
+      seed(replica)
+      const engine = new EngineClient('http://example.invalid', 'synthetic-token')
+      const request = vi
+        .spyOn(engine, 'request')
+        .mockRejectedValue(new EngineError(status, 'refused', 'Synthetic refusal'))
+      const sync = new OrganiseSync(replica.organise, engine, async () => {})
+      const pending = replica.organise.enqueue({ kind: 'read', value: true, threadId: THREAD.id })
+      replica.organise.resolve([
+        { id: pending, threadId: THREAD.id, status: 'pending', modseq: 20, error: null },
+      ])
+      replica.organise.enqueue({ kind: 'archive', threadId: THREAD.id })
+      expect(replica.threads(inbox)).toEqual([])
+      await sync.flush()
+      expect(replica.threads(inbox)).toHaveLength(1)
+      expect(replica.counts(null).inboxUnread).toBe(1)
+      expect(replica.organise.unsent()).toBeNull()
+      expect(replica.organise.pending()).toEqual([])
+      expect(replica.organise.errors()).toEqual([
+        { id: expect.any(String), message: expect.stringMatching(/pair|refused/i) },
+      ])
+      await sync.flush()
+      expect(request).toHaveBeenCalledTimes(1)
+    } finally {
+      replica.db.close()
+    }
+  })
+
+  it('clears a pending overlay when the Engine refuses a status poll', async () => {
+    const replica = new Replica(':memory:')
+    try {
+      seed(replica)
+      const engine = new EngineClient('http://example.invalid', 'synthetic-token')
+      const request = vi
+        .spyOn(engine, 'request')
+        .mockRejectedValue(new EngineError(403, 'forbidden', 'Synthetic refusal'))
+      const sync = new OrganiseSync(replica.organise, engine, async () => {})
+      const id = replica.organise.enqueue({ kind: 'archive', threadId: THREAD.id })
+      replica.organise.resolve([
+        { id, threadId: THREAD.id, status: 'pending', modseq: 20, error: null },
+      ])
+      await sync.flush()
+      await sync.flush()
+      expect(request).toHaveBeenCalledTimes(1)
+      expect(request.mock.calls[0]?.[0]).toBe('/v1/mutations/status')
+      expect(replica.threads(inbox)).toHaveLength(1)
+    } finally {
+      replica.db.close()
     }
   })
 

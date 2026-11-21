@@ -23,6 +23,9 @@ export class FakeGmail implements GmailApi {
   /** History older than this id is "expired" (Gmail answers 404). */
   oldestHistory = 0
   calls = { getMessage: 0, list: 0 }
+  trashFailure: { afterWrite: boolean; error: Error } | undefined
+  batchFailure: { applied: number; error: Error } | undefined
+  afterLabelRead: (() => Promise<void>) | undefined
 
   add(
     id: string,
@@ -116,25 +119,42 @@ export class FakeGmail implements GmailApi {
 
   async getMessageLabels(id: string): Promise<string[] | null> {
     const message = this.messages.get(id)
-    return message ? [...(message.labelIds ?? [])] : null
+    const labels = message ? [...(message.labelIds ?? [])] : null
+    const pause = this.afterLabelRead
+    this.afterLabelRead = undefined
+    await pause?.()
+    return labels
+  }
+
+  async getThreadMessages(id: string) {
+    return [...this.messages.values()]
+      .filter((message) => message.threadId === id)
+      .map((message) => structuredClone(message))
   }
 
   async batchModify(ids: string[], addLabelIds: string[], removeLabelIds: string[]) {
-    for (const id of ids) {
+    const failure = this.batchFailure
+    this.batchFailure = undefined
+    for (const id of failure ? ids.slice(0, failure.applied) : ids) {
       const labels = await this.getMessageLabels(id)
       if (labels)
         this.setLabels(id, [
           ...new Set([...labels.filter((l) => !removeLabelIds.includes(l)), ...addLabelIds]),
         ])
     }
+    if (failure) throw failure.error
   }
 
   async setTrashed(id: string, trashed: boolean): Promise<string[]> {
+    const failure = this.trashFailure
+    this.trashFailure = undefined
+    if (failure && !failure.afterWrite) throw failure.error
     const labels = (await this.getMessageLabels(id)) ?? []
     const next = trashed
       ? [...new Set([...labels.filter((l) => l !== 'INBOX'), 'TRASH'])]
       : labels.filter((l) => l !== 'TRASH')
     this.setLabels(id, next)
+    if (failure) throw failure.error
     return next
   }
 

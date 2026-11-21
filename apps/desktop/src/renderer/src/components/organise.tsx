@@ -24,13 +24,13 @@ import {
 import { Input } from '@/components/ui/input'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
-type Picker = { kind: 'labels' | 'snooze'; thread: ThreadSummary }
+type Picker = { kind: 'labels' | 'snooze'; thread: ThreadSummary; trigger: HTMLElement | null }
 type Control = {
   name: string
   key: string
   shortcut: string
   icon: typeof Archive
-  run: () => void
+  run: (trigger?: HTMLElement) => void
   pressed?: boolean
 }
 
@@ -72,6 +72,10 @@ export function useOrganise(thread: ThreadSummary | null) {
       toast.error(message)
     }
   }
+  const openPicker = (kind: Picker['kind'], thread: ThreadSummary, trigger?: HTMLElement) => {
+    const active = document.activeElement
+    setPicker({ kind, thread, trigger: trigger ?? (active instanceof HTMLElement ? active : null) })
+  }
   const undo = () => void run({ kind: 'undo' }, '')
   const controls: Control[] = []
   if (thread) {
@@ -91,7 +95,7 @@ export function useOrganise(thread: ThreadSummary | null) {
           key: 'h',
           shortcut: 'H',
           icon: Clock3,
-          run: () => setPicker({ kind: 'snooze', thread }),
+          run: (trigger) => openPicker('snooze', thread, trigger),
         },
       )
     controls.push(
@@ -134,7 +138,7 @@ export function useOrganise(thread: ThreadSummary | null) {
         key: 'l',
         shortcut: 'L',
         icon: Tag,
-        run: () => setPicker({ kind: 'labels', thread }),
+        run: (trigger) => openPicker('labels', thread, trigger),
       },
       {
         name: thread.muted ? 'Unmute' : 'Mute',
@@ -173,7 +177,7 @@ export function OrganiseToolbar({ controls }: { controls: Control[] }) {
               variant="ghost"
               aria-label={name}
               aria-pressed={pressed}
-              onClick={run}
+              onClick={(event) => run(event.currentTarget)}
               className={pressed ? 'bg-accent text-accent-foreground' : 'text-muted-foreground'}
             >
               <Icon />
@@ -192,11 +196,12 @@ interface PickerProps {
   picker: Picker
   labels: Label[]
   onClose: () => void
+  focusFallback?: () => void
   run: (action: OrganiseAction, description: string) => Promise<void>
 }
 
 function tomorrowMorning(): Date {
-  const tomorrow = new Date()
+  const tomorrow = new Date(Date.now())
   tomorrow.setDate(tomorrow.getDate() + 1)
   tomorrow.setHours(9, 0, 0, 0)
   return tomorrow
@@ -206,9 +211,15 @@ function localInputValue(date: Date): string {
   return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
 }
 
-export function OrganisePicker({ picker, labels, onClose, run }: PickerProps) {
+function preset(date: Date) {
+  return { value: localInputValue(date), instant: date.getTime() }
+}
+
+export function OrganisePicker({ picker, labels, onClose, focusFallback, run }: PickerProps) {
   const timeId = useId()
-  const [when, setWhen] = useState(() => localInputValue(tomorrowMorning()))
+  const [when, setWhen] = useState<{ value: string; instant: number | null }>(() =>
+    preset(tomorrowMorning()),
+  )
   const [noReply, setNoReply] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const { thread } = picker
@@ -226,7 +237,20 @@ export function OrganisePicker({ picker, labels, onClose, run }: PickerProps) {
         if (!open) onClose()
       }}
     >
-      <DialogContent className="sm:max-w-sm">
+      <DialogContent
+        className="sm:max-w-sm"
+        onCloseAutoFocus={(event) => {
+          event.preventDefault()
+          if (picker.trigger?.isConnected && picker.trigger !== document.body)
+            picker.trigger.focus()
+          if (
+            !picker.trigger ||
+            picker.trigger === document.body ||
+            document.activeElement !== picker.trigger
+          )
+            focusFallback?.()
+        }}
+      >
         <DialogHeader>
           <DialogTitle>{picker.kind === 'labels' ? 'Labels' : 'Snooze Thread'}</DialogTitle>
           <DialogDescription className="truncate">
@@ -266,7 +290,7 @@ export function OrganisePicker({ picker, labels, onClose, run }: PickerProps) {
             className="grid gap-4"
             onSubmit={(event) => {
               event.preventDefault()
-              const until = new Date(when).getTime()
+              const until = when.instant ?? new Date(when.value).getTime()
               if (!Number.isFinite(until) || until <= Date.now()) {
                 setError('Choose a time in the future.')
                 return
@@ -279,7 +303,10 @@ export function OrganisePicker({ picker, labels, onClose, run }: PickerProps) {
                 type="button"
                 size="sm"
                 variant="outline"
-                onClick={() => setWhen(localInputValue(new Date(Date.now() + 3600_000)))}
+                onClick={() => {
+                  setWhen(preset(new Date(Date.now() + 3600_000)))
+                  setError(null)
+                }}
               >
                 In an hour
               </Button>
@@ -287,7 +314,10 @@ export function OrganisePicker({ picker, labels, onClose, run }: PickerProps) {
                 type="button"
                 size="sm"
                 variant="outline"
-                onClick={() => setWhen(localInputValue(tomorrowMorning()))}
+                onClick={() => {
+                  setWhen(preset(tomorrowMorning()))
+                  setError(null)
+                }}
               >
                 Tomorrow at 9
               </Button>
@@ -300,10 +330,10 @@ export function OrganisePicker({ picker, labels, onClose, run }: PickerProps) {
                 id={timeId}
                 type="datetime-local"
                 required
-                value={when}
+                value={when.value}
                 aria-invalid={!!error}
                 onChange={(event) => {
-                  setWhen(event.target.value)
+                  setWhen({ value: event.target.value, instant: null })
                   setError(null)
                 }}
               />

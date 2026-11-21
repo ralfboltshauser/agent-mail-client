@@ -73,6 +73,8 @@ export class GmailAccountSync {
   /** Called after each stored chunk (the manager uses it to tell live Clients). */
   onProgress?: (stored: number) => void
   #reconcileTrusted = false
+  #scanGeneration = 0
+  #backfillChanges: Set<string> | undefined
 
   constructor(api: GmailApi, store: MailStore, state: AccountState, log: Logger) {
     this.#api = api
@@ -154,10 +156,12 @@ export class GmailAccountSync {
     if (this.#store.writeEpoch(account) !== epoch) return 0
     let changes = 0
     for (const id of deleted) {
+      this.#backfillChanges?.add(id)
       this.#store.deleteMessage(this.#state.accountId, id)
       changes++
     }
     for (const [index, id] of known.entries()) {
+      this.#backfillChanges?.add(id)
       const labels = current[index]
       if (labels) this.#store.setMessageLabels(account, id, labels)
       else this.#store.deleteMessage(account, id)
@@ -174,6 +178,16 @@ export class GmailAccountSync {
 
   /** One page of backfill. Returns false when there is nothing left to do. */
   async backfillStep(): Promise<boolean> {
+    const changed = new Set<string>()
+    this.#backfillChanges = changed
+    try {
+      return await this.#scanPage(this.#scanGeneration, changed)
+    } finally {
+      this.#backfillChanges = undefined
+    }
+  }
+
+  async #scanPage(generation: number, changed: Set<string>): Promise<boolean> {
     const state = this.#state.backfill()
     if (!state.phase || state.phase === 'done') return false
 
@@ -182,8 +196,8 @@ export class GmailAccountSync {
       q: state.phase === 'recent' ? RECENT_QUERY : undefined,
       maxResults: 500,
     })
+    if (generation !== this.#scanGeneration) return true
     const ids = (page.messages ?? []).map((m) => m.id)
-    if (state.phase === 'all') for (const id of ids) this.#seen.add(id)
     const missing = ids.filter((id) => !this.#store.hasMessage(this.#state.accountId, id))
     if (state.reconcile) {
       const account = this.#state.accountId
@@ -193,13 +207,16 @@ export class GmailAccountSync {
       const labels = await mapLimit(known, FETCH_CONCURRENCY, (id) =>
         this.#api.getMessageLabels(id),
       )
-      if (this.#store.writeEpoch(account) !== epoch) return true
+      if (this.#store.writeEpoch(account) !== epoch || generation !== this.#scanGeneration)
+        return true
       for (const [index, id] of known.entries()) {
         const current = labels[index]
-        if (current) this.#store.setMessageLabels(account, id, current)
+        if (current && !changed.has(id)) this.#store.setMessageLabels(account, id, current)
       }
     }
-    const stored = await this.#fetchAndStore(missing, false)
+    const stored = await this.#fetchAndStore(missing, false, { generation, changed })
+    if (generation !== this.#scanGeneration) return true
+    if (state.phase === 'all') for (const id of ids) this.#seen.add(id)
 
     const next: BackfillState = { ...state, fetched: (state.fetched ?? 0) + stored }
     if (page.nextPageToken) {
@@ -210,7 +227,8 @@ export class GmailAccountSync {
       this.#reconcileTrusted = true
       this.#seen.clear()
     } else {
-      this.#finishAllPhase(state)
+      await this.#finishAllPhase(state, generation, changed)
+      if (generation !== this.#scanGeneration) return true
       next.phase = 'done'
       next.pageToken = null
       next.reconcile = false
@@ -220,7 +238,11 @@ export class GmailAccountSync {
   }
 
   /** Fetches in small chunks and stores each one, so an error never discards finished work. */
-  async #fetchAndStore(ids: string[], perMessage: boolean): Promise<number> {
+  async #fetchAndStore(
+    ids: string[],
+    perMessage: boolean,
+    scan?: { generation: number; changed: Set<string> },
+  ): Promise<number> {
     let stored = 0
     for (let i = 0; i < ids.length; i += STORE_CHUNK) {
       const epoch = this.#store.writeEpoch(this.#state.accountId)
@@ -232,10 +254,16 @@ export class GmailAccountSync {
         i -= STORE_CHUNK
         continue
       }
-      const incoming = messages.filter((m) => m !== null).map(fromGmail)
+      if (scan && scan.generation !== this.#scanGeneration) return stored
+      const incoming = messages
+        .filter((m) => m !== null)
+        .filter((m) => !scan?.changed.has(m.id))
+        .map(fromGmail)
       if (perMessage) {
-        for (const msg of incoming)
+        for (const msg of incoming) {
+          this.#backfillChanges?.add(msg.providerId)
           this.#store.putMessage(this.#state.accountId, this.#state.ownAddresses, msg)
+        }
       } else {
         this.#store.putMessages(this.#state.accountId, this.#state.ownAddresses, incoming)
       }
@@ -257,6 +285,7 @@ export class GmailAccountSync {
       estimatedTotal: profile.messagesTotal,
       reconcile: true,
     })
+    this.#scanGeneration++
     this.#seen.clear()
     this.#reconcileTrusted = true
   }
@@ -265,15 +294,26 @@ export class GmailAccountSync {
    * Deletes local messages that Gmail no longer lists, but only when this process saw the whole
    * `all` pass itself (after a restart mid-pass, the seen-set is incomplete and nothing is deleted).
    */
-  #finishAllPhase(state: BackfillState): void {
+  async #finishAllPhase(
+    state: BackfillState,
+    generation: number,
+    changed: Set<string>,
+  ): Promise<void> {
     if (!state.reconcile || !this.#reconcileTrusted) return
     const local = this.#store.db
       .prepare('SELECT provider_id FROM message WHERE account_id = ?')
       .all(this.#state.accountId) as { provider_id: string }[]
+    // List pagination can miss messages when the mailbox changes during the scan.
+    // Confirm absence with Gmail before deleting anything from the replica.
+    const missing = local.map((row) => row.provider_id).filter((id) => !this.#seen.has(id))
+    const current = await mapLimit(missing, FETCH_CONCURRENCY, (id) =>
+      this.#api.getMessageLabels(id),
+    )
+    if (generation !== this.#scanGeneration) return
     let removed = 0
-    for (const { provider_id } of local) {
-      if (!this.#seen.has(provider_id)) {
-        this.#store.deleteMessage(this.#state.accountId, provider_id)
+    for (const [index, id] of missing.entries()) {
+      if (current[index] === null && !changed.has(id)) {
+        this.#store.deleteMessage(this.#state.accountId, id)
         removed++
       }
     }

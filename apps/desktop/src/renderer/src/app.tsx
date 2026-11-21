@@ -41,6 +41,7 @@ function MailApp() {
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [filterText, setFilterText] = useState('')
   const [search, setSearch] = useState<SearchState>(null)
+  const paletteInvoker = useRef<HTMLElement | null>(null)
   const searchInput = useRef<HTMLInputElement>(null)
   const readerScroll = useRef<HTMLDivElement>(null)
 
@@ -141,43 +142,48 @@ function MailApp() {
   }
 
   const dark = document.documentElement.classList.contains('dark')
-  useHotkeys({
-    ...(!paletteOpen && !organise.picker
-      ? Object.fromEntries(
-          Object.entries(organise.shortcuts).map(([key, run]) => [
-            key,
-            (event: KeyboardEvent) => {
-              if (!event.repeat) run()
-            },
-          ]),
-        )
-      : {}),
-    j: () => move(1),
-    arrowdown: () => move(1),
-    k: () => move(-1),
-    arrowup: () => move(-1),
-    space: () =>
-      readerScroll.current?.scrollBy({
-        top: readerScroll.current.clientHeight * 0.8,
-        behavior: 'smooth',
-      }),
-    '/': () => searchInput.current?.focus(),
-    'mod+f': () => searchInput.current?.focus(),
-    'mod+k': () => setPaletteOpen((o) => !o),
-    escape: () => clearSearch(),
-    'g i': () => goTo({ kind: 'inbox' }),
-    'g u': () => goTo({ kind: 'unread' }),
-    'g s': () => goTo({ kind: 'starred' }),
-    'g d': () => goTo({ kind: 'drafts' }),
-    'g t': () => goTo({ kind: 'sent' }),
-    'g a': () => goTo({ kind: 'all' }),
-    'g h': () => goTo({ kind: 'snoozed' }),
-    'g x': () => goTo({ kind: 'trash' }),
-    'mod+0': () => setAccountId(null),
-    ...Object.fromEntries(
-      accounts.slice(0, 9).map((a, i) => [`mod+${i + 1}`, () => setAccountId(a.id)]),
-    ),
-  })
+  useHotkeys(
+    {
+      ...Object.fromEntries(
+        Object.entries(organise.shortcuts).map(([key, run]) => [
+          key,
+          (event: KeyboardEvent) => {
+            if (!event.repeat) run()
+          },
+        ]),
+      ),
+      j: () => move(1),
+      arrowdown: () => move(1),
+      k: () => move(-1),
+      arrowup: () => move(-1),
+      space: () =>
+        readerScroll.current?.scrollBy({
+          top: readerScroll.current.clientHeight * 0.8,
+          behavior: 'smooth',
+        }),
+      '/': () => searchInput.current?.focus(),
+      'mod+f': () => searchInput.current?.focus(),
+      'mod+k': () => {
+        paletteInvoker.current =
+          document.activeElement instanceof HTMLElement ? document.activeElement : null
+        setPaletteOpen(true)
+      },
+      escape: () => clearSearch(),
+      'g i': () => goTo({ kind: 'inbox' }),
+      'g u': () => goTo({ kind: 'unread' }),
+      'g s': () => goTo({ kind: 'starred' }),
+      'g d': () => goTo({ kind: 'drafts' }),
+      'g t': () => goTo({ kind: 'sent' }),
+      'g a': () => goTo({ kind: 'all' }),
+      'g h': () => goTo({ kind: 'snoozed' }),
+      'g x': () => goTo({ kind: 'trash' }),
+      'mod+0': () => setAccountId(null),
+      ...Object.fromEntries(
+        accounts.slice(0, 9).map((a, i) => [`mod+${i + 1}`, () => setAccountId(a.id)]),
+      ),
+    },
+    !paletteOpen && !organise.picker,
+  )
 
   return (
     <SidebarProvider
@@ -283,6 +289,7 @@ function MailApp() {
           picker={organise.picker}
           labels={labels}
           onClose={() => organise.setPicker(null)}
+          focusFallback={() => searchInput.current?.focus()}
           run={organise.run}
         />
       )}
@@ -298,7 +305,10 @@ function MailApp() {
           setTheme(dark ? 'light' : theme === 'system' && !dark ? 'dark' : dark ? 'light' : 'dark')
         }
         dark={dark}
-        organise={organise.controls}
+        organise={organise.controls.map((control) => ({
+          ...control,
+          run: () => control.run(paletteInvoker.current ?? undefined),
+        }))}
         undo={organise.undo}
       />
     </SidebarProvider>
