@@ -229,6 +229,60 @@ it('falls back to UID COPY, Deleted, and UID EXPUNGE for just the source UID', a
   expect(view()?.messages[0]).toMatchObject({ id: messageId, labelIds: ['a:ARCHIVE'] })
 })
 
+it.each([false, true])(
+  'queues Undo during an IMAP Archive and waits for UID verification (duplicate: %s)',
+  async (duplicate) => {
+    const { imap, queue, enqueue, settle, view } = await fixture({ copyUid: false })
+    let releaseMove!: () => void
+    const released = new Promise<void>((resolve) => {
+      releaseMove = resolve
+    })
+    const move = imap.uidMove.bind(imap)
+    const stalledMove = vi
+      .spyOn(imap, 'uidMove')
+      .mockImplementationOnce(async (uid, destination) => {
+        await released
+        const result = await move(uid, destination)
+        if (duplicate) {
+          const archive = imap.folder(destination)
+          const [moved] = archive.messages.values()
+          if (!moved) throw new Error('Missing moved message')
+          archive.messages.set(archive.nextUid++, moved)
+        }
+        return result
+      })
+
+    const archive = enqueue({ kind: 'archive' })
+    const writing = queue.tick()
+    let undo: string
+    try {
+      await vi.waitFor(() => expect(stalledMove).toHaveBeenCalledOnce())
+      expect(queue.lookup('owner', [archive])[0]?.status).toBe('pending')
+      undo = enqueue({ kind: 'undo' })
+      await queue.tick()
+      expect(queue.lookup('owner', [undo])[0]?.status).toBe('pending')
+      expect(imap.writes).toHaveLength(0)
+    } finally {
+      releaseMove()
+      await writing
+    }
+
+    expect(queue.lookup('owner', [archive])[0]?.status).toBe('applied')
+    const result = await settle(undo)
+    if (duplicate) {
+      expect(result).toMatchObject({
+        status: 'failed',
+        error: 'Undo unavailable: the IMAP server did not verify the moved UID',
+      })
+      expect(imap.writes).toHaveLength(1)
+    } else {
+      expect(result?.status).toBe('applied')
+      expect(imap.writes).toHaveLength(2)
+      expect(view()?.messages[0]?.labelIds).toEqual(['a:INBOX'])
+    }
+  },
+)
+
 it('undoes a MOVE without COPYUID using the unique full-source match', async () => {
   const { imap, uid, messageId, view, run } = await fixture({ copyUid: false })
   const other = imap.add(
