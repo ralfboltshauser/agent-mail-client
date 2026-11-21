@@ -10,17 +10,37 @@ const config = { engineUrl: 'http://engine.invalid', token: 'owner' }
 const decision = { threadId: 'a:t1', bucket: 'Reply', reason: 'The sender asked a question' }
 const signal = () => new AbortController().signal
 
-function fixture({ lostMint = false, revokeFailures = 0, dryRun = false } = {}) {
+function fixture({
+  lostMint = false,
+  revokeFailures = 0,
+  dryRun = false,
+  recent = false,
+  busy = false,
+} = {}) {
   const setBucket = vi.fn(() => ({ updated: true }))
   const getThread = vi.fn(() => ({ id: 'a:t1' }))
   const revoke = vi.fn()
   const list = vi.fn()
+  const mint = vi.fn()
+  let holder: string
   let grantName: string
   const originalFetch = globalThis.fetch
   vi.stubGlobal('fetch', async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const req = new Request(input, init)
     const url = new URL(req.url)
     if (url.origin !== config.engineUrl) return originalFetch(input, init)
+    if (url.pathname === '/v1/triage/lease') {
+      expect(req.headers.get('Authorization')).toBe('Bearer owner')
+      const body = z.object({ holder: z.string() }).parse(await req.json())
+      if (req.method === 'POST') {
+        holder = body.holder
+        return Response.json({ granted: !busy })
+      }
+      expect(req.method).toBe('DELETE')
+      expect(body.holder).toBe(holder)
+      expect(revoke).toHaveBeenCalled()
+      return new Response(null, { status: 204 })
+    }
     if (url.pathname === '/v1/tokens') {
       expect(req.headers.get('Authorization')).toBe('Bearer owner')
       if (req.method === 'GET') {
@@ -33,6 +53,7 @@ function fixture({ lostMint = false, revokeFailures = 0, dryRun = false } = {}) 
         })
       }
       expect(req.method).toBe('POST')
+      mint()
       const body = await req.json()
       expect(body).toEqual({
         name: expect.stringMatching(/^triage-[0-9a-f-]{36}$/),
@@ -41,6 +62,7 @@ function fixture({ lostMint = false, revokeFailures = 0, dryRun = false } = {}) 
         expiresInMinutes: 5,
       })
       grantName = z.object({ name: z.string() }).parse(body).name
+      expect(grantName).toBe(holder)
       if (lostMint) throw new Error('Lost mint response')
       return Response.json({ id: 'test-token', token: 'agent' })
     }
@@ -58,8 +80,13 @@ function fixture({ lostMint = false, revokeFailures = 0, dryRun = false } = {}) 
     const json = (data: unknown) => ({
       content: [{ type: 'text' as const, text: JSON.stringify(data) }],
     })
-    server.registerTool('list_untriaged', { inputSchema: { limit: z.number() } }, async () =>
-      json([{ id: 'a:t1', subject: 'Fixture' }]),
+    server.registerTool(
+      'list_untriaged',
+      { inputSchema: { limit: z.number(), recent: z.boolean().optional() } },
+      async (args) => {
+        expect(args.recent).toBe(recent ? true : undefined)
+        return json([{ id: 'a:t1', subject: 'Fixture' }])
+      },
     )
     server.registerTool('get_thread', { inputSchema: { thread_id: z.string() } }, async () =>
       json(getThread()),
@@ -83,7 +110,7 @@ function fixture({ lostMint = false, revokeFailures = 0, dryRun = false } = {}) 
     await server.connect(transport)
     return transport.handleRequest(req)
   })
-  return { getThread, setBucket, revoke, list }
+  return { getThread, setBucket, revoke, list, mint }
 }
 
 const harness: TriageHarness = async ({ url, bearer, allowReads }) => {
@@ -138,6 +165,19 @@ describe('amc triage', () => {
       expect(revoke).toHaveBeenCalledOnce()
     },
   )
+
+  it('requests recent deliveries when opted in', async () => {
+    fixture({ recent: true })
+    expect(await runTriage(config, 'a', false, signal(), harness, true)).toHaveLength(1)
+  })
+
+  it('skips without minting a grant when another client holds the lease', async () => {
+    const { mint } = fixture({ busy: true })
+    const model = vi.fn(harness)
+    await expect(runTriage(config, 'a', false, signal(), model)).resolves.toBeNull()
+    expect(mint).not.toHaveBeenCalled()
+    expect(model).not.toHaveBeenCalled()
+  })
 
   it('finds and revokes the named grant after a lost mint response', async () => {
     const { list, revoke } = fixture({ lostMint: true })

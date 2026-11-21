@@ -114,6 +114,7 @@ export interface ThreadQuery {
   inbox?: boolean
   unread?: boolean
   untriaged?: boolean
+  deliveredSince?: number
   /** Return Threads whose last message is older than this (epoch ms), for paging. */
   before?: number
   limit?: number
@@ -237,6 +238,12 @@ export class MailQueries {
       params.push(query.labelId)
     }
     if (query.untriaged) where.push('t.bucket IS NULL')
+    if (query.deliveredSince !== undefined) {
+      where.push(`(
+        SELECT MAX(m.delivered_at) FROM message m WHERE m.thread_id = t.id
+      ) BETWEEN ? AND ?`)
+      params.push(query.deliveredSince, Date.now())
+    }
     if (query.unread) where.push('t.unread_count > 0')
     if (query.before !== undefined) {
       where.push('t.last_message_at < ?')

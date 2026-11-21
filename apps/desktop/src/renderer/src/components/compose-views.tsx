@@ -130,7 +130,7 @@ export function OutboxView({
   return (
     <section className="flex h-full flex-col">
       <MailboxHeader title="Outbox">
-        <Button variant="ghost" size="icon-sm" aria-label="Undo send settings" onClick={onSettings}>
+        <Button variant="ghost" size="icon-sm" aria-label="Settings" onClick={onSettings}>
           <Settings2 />
         </Button>
       </MailboxHeader>

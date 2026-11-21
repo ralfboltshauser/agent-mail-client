@@ -157,8 +157,8 @@ export async function parseMessage(
   const { bodyText } = bodiesForStore
   const unsubscribe = lines.find((header) => header.key === 'list-unsubscribe')
   const date = headers.get('date')
-  const timestamp =
-    date instanceof Date ? date.getTime() : new Date(item.internalDate ?? 0).getTime()
+  const internalDate = new Date(item.internalDate ?? 0).getTime()
+  const timestamp = date instanceof Date ? date.getTime() : internalDate
   const rfcId = headers.get('message-id')
   const reply = headers.get('in-reply-to')
   const references = headers.get('references')
@@ -184,6 +184,7 @@ export async function parseMessage(
     bodySearchLimit: BODY_SEARCH_LIMIT,
     bodyHtml: draftBody?.html ?? null,
     sentAt: Number.isFinite(timestamp) ? timestamp : 0,
+    ...(Number.isFinite(internalDate) && internalDate > 0 ? { deliveredAt: internalDate } : {}),
     size: item.size ?? 0,
     labels: [folder.label.providerId],
     ...messageFlags(item.flags),
