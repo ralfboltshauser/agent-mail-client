@@ -11,7 +11,12 @@ await build({
   platform: 'node',
   target: 'node22',
   format: 'esm',
-  define: { AMC_VERSION: JSON.stringify(version) },
+  define: {
+    AMC_VERSION: JSON.stringify(version),
+    AMC_TRIAGE_PROMPT: JSON.stringify(
+      readFileSync(new URL('./prompts/triage.md', import.meta.url), 'utf8'),
+    ),
+  },
   banner: {
     js: "#!/usr/bin/env node\nimport { createRequire } from 'node:module'; const require = createRequire(import.meta.url);",
   },

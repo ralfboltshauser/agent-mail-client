@@ -69,6 +69,40 @@ function seed(replica: Replica, kind: 'gmail' | 'imap' = 'gmail') {
 
 const inbox = { view: { kind: 'inbox' }, accountId: null } as const
 
+it('updates Bucket lists and counts from Thread sync changes', () => {
+  const replica = new Replica(':memory:')
+  try {
+    seed(replica)
+    const query = { view: { kind: 'bucket', bucket: 'Reply' }, accountId: null } as const
+    expect(replica.threads(query)).toEqual([])
+    const bucket = {
+      bucket: 'Reply',
+      reason: 'Needs a reply',
+      setBy: 'triage',
+      setAt: 100,
+    } as const
+    replica.apply([
+      { entity: 'thread', id: THREAD.id, op: 'upsert', modseq: 11, data: { ...THREAD, bucket } },
+    ])
+    expect(replica.threads(query)).toMatchObject([{ id: THREAD.id, bucket }])
+    expect(replica.counts(THREAD.accountId).buckets).toEqual({ Reply: 1 })
+    expect(replica.counts('another-account').buckets).toEqual({})
+    replica.apply([
+      {
+        entity: 'thread',
+        id: THREAD.id,
+        op: 'upsert',
+        modseq: 12,
+        data: { ...THREAD, bucket: null },
+      },
+    ])
+    expect(replica.threads(query)).toEqual([])
+    expect(replica.counts(null).buckets).toEqual({})
+  } finally {
+    replica.db.close()
+  }
+})
+
 describe('desktop Organise outbox', () => {
   it('rejects Snooze and Unsnooze before changing the replica when disabled', () => {
     const replica = new Replica(':memory:')

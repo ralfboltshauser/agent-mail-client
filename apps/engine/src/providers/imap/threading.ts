@@ -97,6 +97,50 @@ export class ImapThreads {
     return thread
   }
 
+  restoreBucket(pathKey: string, message: ThreadHeaders, sourceBlob: string, mid: string): void {
+    const { db } = this.store
+    if (
+      !db
+        .prepare('SELECT 1 FROM imap_bucket_reimport WHERE account_id = ? AND path_key = ?')
+        .get(this.accountId, pathKey)
+    )
+      return
+
+    const keys = JSON.stringify([
+      ...hints(message).keys.map((key) => `rfc:${key}`),
+      `source:${sourceBlob}`,
+    ])
+    const match = db
+      .prepare(`
+      SELECT thread_key FROM imap_bucket_reimport
+      WHERE account_id = ? AND path_key = ? AND identity IN (SELECT value FROM json_each(?))
+      ORDER BY bucket_set_at DESC, thread_key LIMIT 1
+    `)
+      .get(this.accountId, pathKey, keys) as { thread_key: string } | undefined
+    if (!match) return
+
+    const restored = db
+      .prepare(`
+      UPDATE thread
+      SET (bucket, bucket_reason, bucket_set_by, bucket_set_at) = (
+        SELECT bucket, bucket_reason, bucket_set_by, bucket_set_at
+        FROM imap_bucket_reimport WHERE account_id = ? AND path_key = ? AND thread_key = ?
+        LIMIT 1
+      )
+      WHERE id = (SELECT thread_id FROM message WHERE id = ?) AND bucket IS NULL
+      RETURNING id
+    `)
+      .get(this.accountId, pathKey, match.thread_key, mid) as { id: string } | undefined
+    if (restored) this.store.recordChange('thread', restored.id, 'upsert')
+
+    db.prepare(`
+      DELETE FROM imap_bucket_reimport WHERE account_id = ?1 AND path_key = ?2 AND thread_key IN (
+        SELECT thread_key FROM imap_bucket_reimport
+        WHERE account_id = ?1 AND path_key = ?2 AND identity IN (SELECT value FROM json_each(?3))
+      )
+    `).run(this.accountId, pathKey, keys)
+  }
+
   remember(message: IncomingMessage, mid: string): void {
     const { keys, subject, reply, hasParent } = hints(message)
     const { db } = this.store

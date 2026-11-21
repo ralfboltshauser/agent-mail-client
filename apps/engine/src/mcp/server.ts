@@ -1,4 +1,10 @@
-import { hasScope, type OrganiseAction, type Scope } from '@amc/protocol'
+import {
+  BucketInput,
+  hasScope,
+  type OrganiseAction,
+  type Scope,
+  UntriagedLimit,
+} from '@amc/protocol'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { type Principal, withinAccount } from '../auth/tokens.ts'
@@ -8,15 +14,18 @@ import {
   agentCreatedDraft,
   draftAsAgent,
   organizeAsAgent,
+  setBucketAsAgent,
   threadAccount,
 } from '../mail/agent-actions.ts'
 import { DraftError, type Drafts, searchContacts } from '../mail/drafts.ts'
 import type { Mutations } from '../mail/mutations.ts'
 import type { MailQueries } from '../mail/queries.ts'
+import type { MailStore } from '../mail/store.ts'
 import { VERSION } from '../version.ts'
 
 export interface McpDeps {
   db: Db
+  store: MailStore
   queries: MailQueries
   drafts: Drafts
   mutations?: Mutations | undefined
@@ -77,7 +86,43 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
       }),
   )
 
+  if (agent && can('organize')) {
+    server.registerTool(
+      'set_bucket',
+      {
+        description: 'Set an AMC Bucket and one-line reason. Set bucket to null to clear.',
+        inputSchema: BucketInput.extend({
+          onlyUntriaged: z
+            .boolean()
+            .optional()
+            .describe('Skip if the Thread left the Inbox or already has a Bucket.'),
+        }),
+        annotations: { destructiveHint: false },
+      },
+      async ({ onlyUntriaged, ...input }) => {
+        const result = setBucketAsAgent(deps.store, agent, input, onlyUntriaged)
+        return result.error ? failure(result.error) : json({ updated: result.updated })
+      },
+    )
+  }
+
   if (can('read')) {
+    server.registerTool(
+      'list_untriaged',
+      {
+        description: 'List Inbox Threads without a Bucket, newest first.',
+        inputSchema: { limit: UntriagedLimit, account_id: z.string().optional() },
+        annotations: { readOnlyHint: true },
+      },
+      async ({ limit, account_id }) => {
+        const target = account_id ?? accountId
+        if (!withinAccount(principal, target)) return failure('Account unavailable to this Agent')
+        return json(
+          queries.threads({ inbox: true, untriaged: true, accountId: target, limit }).threads,
+        )
+      },
+    )
+
     server.registerTool(
       'list_accounts',
       {

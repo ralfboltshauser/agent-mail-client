@@ -1,9 +1,16 @@
 import { randomUUID } from 'node:crypto'
-import { type AgentAction, type Draft, hasScope, type OrganiseAction } from '@amc/protocol'
+import {
+  type AgentAction,
+  type BucketInput,
+  type Draft,
+  hasScope,
+  type OrganiseAction,
+} from '@amc/protocol'
 import { agentGrantActive, type Principal, withinAccount } from '../auth/tokens.ts'
 import { type Db, transaction } from '../db/database.ts'
 import { DraftError } from './drafts.ts'
 import { MutationError, type Mutations } from './mutations.ts'
+import type { MailStore } from './store.ts'
 
 type AgentOrganise = Exclude<OrganiseAction, { kind: 'snooze' | 'trash' | 'undo' }>
 const AGENT_WRITE_CAP = 60
@@ -55,6 +62,35 @@ function start(db: Db, agent: Principal, tool: string, threads: string[], cost: 
     error,
   )
   return { id, error }
+}
+
+export function setBucketAsAgent(
+  store: MailStore,
+  agent: Principal,
+  input: BucketInput,
+  onlyUntriaged = false,
+) {
+  const { db } = store
+  return transaction(db, () => {
+    const entry = start(db, agent, 'set_bucket', [input.threadId], 1)
+    if (entry.error) return { updated: false, error: entry.error, status: 429 as const }
+    const account = threadAccount(db, input.threadId)
+    if (!account || !withinAccount(agent, account)) {
+      const error = 'Thread is no longer available'
+      db.prepare("UPDATE agent_action SET status = 'rejected', error = ? WHERE id = ?").run(
+        error,
+        entry.id,
+      )
+      return { updated: false, error, status: 404 as const }
+    }
+    const updated = store.setBucket(input, agent.name, onlyUntriaged)
+    db.prepare('UPDATE agent_action SET status = ?, error = ? WHERE id = ?').run(
+      updated ? 'applied' : 'rejected',
+      updated ? null : 'Thread already has a Bucket or left the Inbox',
+      entry.id,
+    )
+    return { updated }
+  })
 }
 
 export function organizeAsAgent(

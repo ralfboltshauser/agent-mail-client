@@ -10,6 +10,7 @@ import type {
   PairResponse,
   SendRequest,
 } from '@amc/protocol'
+import { BucketInput } from '@amc/protocol'
 import { app, BrowserWindow, ipcMain, Menu, nativeTheme, shell } from 'electron'
 import type { SyncStatus, ThreadQuery } from '../shared/api'
 import { clearPairing, loadPairing, savePairing } from './auth'
@@ -159,6 +160,17 @@ function registerIpc() {
     unpairedStatus = UNPAIRED
     broadcast('amc:status', unpairedStatus)
     refreshTray()
+  })
+  ipcMain.handle('amc:setBucket', async (_event, input: unknown) => {
+    const body = BucketInput.parse(input)
+    const loop = sync
+    if (!loop) throw new Error('Resume sync to move Threads between Buckets')
+    await requireEngine().request('/v1/bucket', {
+      method: 'PUT',
+      body,
+      signal: AbortSignal.timeout(10_000),
+    })
+    void loop.pull().catch(() => {}) // The normal sync loop retries if this pull fails.
   })
   ipcMain.handle('amc:organise', (_event, input: unknown) => {
     if (!organise) throw new Error('Pair with the Engine first')

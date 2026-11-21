@@ -1,28 +1,31 @@
 import { randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
 import { setTimeout as delay } from 'node:timers/promises'
-import type {
-  AccountSummary,
-  AgentAction,
-  Contact,
-  GmailAuthStartResponse,
-  Health,
-  Me,
-  MessageDetail,
-  MutationResponse,
-  OrganiseAction,
-  PairResponse,
-  SearchHit,
-  ThreadDetail,
-  ThreadList,
-  ThreadSummary,
+import {
+  type AccountSummary,
+  type AgentAction,
+  Bucket,
+  BucketInput,
+  type Contact,
+  doctorWarnings,
+  type GmailAuthStartResponse,
+  type Health,
+  type Me,
+  type MessageDetail,
+  type MutationResponse,
+  type OrganiseAction,
+  type PairResponse,
+  type SearchHit,
+  type ThreadDetail,
+  type ThreadList,
+  type ThreadSummary,
 } from '@amc/protocol'
-import { doctorWarnings } from '@amc/protocol'
 import { Command } from 'commander'
 import { authed, EngineError, request } from './client.ts'
 import { readConfig, writeConfig } from './config.ts'
 import { addImapAccount } from './imap-signin.ts'
 import { loopbackSignIn } from './signin.ts'
+import { runTriage } from './triage.ts'
 
 declare const AMC_VERSION: string | undefined
 const VERSION = typeof AMC_VERSION === 'string' ? AMC_VERSION : 'dev'
@@ -271,6 +274,51 @@ program
   .action((threadId: string, labelId: string, opts: { remove?: boolean }) =>
     organise({ kind: 'label', threadId, labelId, value: !opts.remove }),
   )
+
+program
+  .command('bucket')
+  .argument('<thread>', 'Thread id')
+  .argument('<bucket>', 'Reply, Action, Follow-up, Update, Later, "When I have time", or clear')
+  .option('--reason <text>', 'one-line reason', 'Set manually')
+  .action(async (threadId: string, value: string, opts: { reason: string }) => {
+    const bucket = Bucket.options.find((name) => name.toLowerCase() === value.toLowerCase())
+    if (!bucket && value.toLowerCase() !== 'clear')
+      throw new Error(`Choose ${Bucket.options.join(', ')}, or clear`)
+    const body = BucketInput.parse({ threadId, bucket: bucket ?? null, reason: opts.reason })
+    await authed(requireConfig())('/v1/bucket', { method: 'PUT', body })
+    console.log(bucket ? `Moved to ${bucket}` : 'Bucket cleared')
+  })
+
+program
+  .command('triage')
+  .description('Triage the newest untriaged Inbox Threads with Claude Code')
+  .option('--account <id>', 'Account to triage (required if there are multiple)')
+  .option('--dry-run', 'print proposed Buckets and reasons')
+  .action(async (opts: { account?: string; dryRun?: boolean }) => {
+    const controller = new AbortController()
+    const interrupt = () => controller.abort(new Error('Triage interrupted'))
+    process.once('SIGINT', interrupt)
+    process.once('SIGTERM', interrupt)
+    try {
+      const config = requireConfig()
+      let accountId = opts.account
+      if (!accountId) {
+        const { accounts } = await authed(config)<{ accounts: AccountSummary[] }>('/v1/accounts', {
+          signal: controller.signal,
+          redirect: 'error',
+        })
+        if (accounts.length !== 1 || !accounts[0])
+          throw new Error('Choose an Account with --account <id> (see amc accounts --json)')
+        accountId = accounts[0].id
+      }
+      const results = await runTriage(config, accountId, opts.dryRun === true, controller.signal)
+      if (!results.length) console.log('No untriaged Inbox Threads.')
+      else printJson(results)
+    } finally {
+      process.off('SIGINT', interrupt)
+      process.off('SIGTERM', interrupt)
+    }
+  })
 
 program
   .command('mutation-status')
