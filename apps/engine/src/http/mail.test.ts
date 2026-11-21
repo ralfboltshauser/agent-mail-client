@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { SCOPES } from '@amc/protocol'
+import { MessageDetail, SCOPES, ThreadDetail } from '@amc/protocol'
 import { describe, expect, it, vi } from 'vitest'
 import { issueToken } from '../auth/tokens.ts'
 import { BlobStore } from '../blobs.ts'
@@ -12,6 +12,7 @@ import { Outbox } from '../mail/outbox.ts'
 import { MailQueries } from '../mail/queries.ts'
 import { MailStore } from '../mail/store.ts'
 import { FakeGmail } from '../providers/gmail/fake.ts'
+import { fromGmail } from '../providers/gmail/mapping.ts'
 import type { ImapCredentials } from '../providers/imap/client.ts'
 import { FakeImap } from '../providers/imap/fake.ts'
 import { LAZY_ATTACHMENT_THRESHOLD } from '../providers/imap/mapping.ts'
@@ -78,7 +79,7 @@ function setup(
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     })
-  return { app, db, sealer, sync, gmail, imap, verifyImap, call, admin, reader, outbox }
+  return { app, db, sealer, store, sync, gmail, imap, verifyImap, call, admin, reader, outbox }
 }
 
 const login = {
@@ -100,6 +101,53 @@ const login = {
 }
 
 describe('mail routes', () => {
+  it('defers old read bodies and serves a complete older body by message id', async () => {
+    const { db, store, gmail, call, reader } = setup()
+    db.prepare(
+      "INSERT INTO account (id, kind, address, credentials, created_at) VALUES ('a', 'gmail', 'owner@example.com', x'00', 0)",
+    ).run()
+    const body = 'Long message text. '.repeat(20_000)
+    for (const n of [6, 3, 2, 1, 5, 4]) {
+      const message = gmail.add(`m${n}`, {
+        threadId: 'thread',
+        labels: n === 2 ? ['INBOX', 'UNREAD'] : ['INBOX'],
+        body: `${body}End ${n}`,
+        date: n === 4 ? 3000 : n * 1000,
+      })
+      store.putMessage('a', ['owner@example.com'], fromGmail(message))
+    }
+
+    const response = await call('/v1/threads/a%3Athread', reader)
+    expect(response.status).toBe(200)
+    const thread = ThreadDetail.parse(await response.json())
+    expect(thread.messages.map((m) => m.id)).toEqual([
+      'a:m1',
+      'a:m2',
+      'a:m3',
+      'a:m4',
+      'a:m5',
+      'a:m6',
+    ])
+    expect(thread.messages.map((m) => m.bodyText === null)).toEqual([
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+    ])
+    expect(thread.messages[0]).toMatchObject({
+      from: { name: 'Alice', address: 'alice@example.com' },
+      snippet: body.slice(0, 50),
+      unread: false,
+    })
+
+    const older = await call('/v1/messages/a%3Am1', reader)
+    expect(older.status).toBe(200)
+    expect(MessageDetail.parse(await older.json()).bodyText).toBe(`${body}End 1`)
+    expect((await call('/v1/messages/missing', reader)).status).toBe(404)
+  })
+
   it('verifies IMAP/SMTP under admin, seals the login, and syncs Inbox updates alongside Gmail', async () => {
     const { db, sealer, sync, gmail, imap, verifyImap, call, admin, reader } = setup()
     try {

@@ -111,6 +111,34 @@ describe('MCP tools', () => {
     expect(gmail.drafts.size).toBe(1)
   })
 
+  it('includes old read bodies and marks capped text', async () => {
+    const { client, store, gmail } = await connect(['read'])
+    const largeBody = 'x'.repeat(20_000)
+    for (let n = 2; n <= 9; n++) {
+      store.putMessage(
+        'a',
+        ['owner@example.com'],
+        fromGmail(
+          gmail.add(`m${n}`, {
+            threadId: 't-m1',
+            labels: ['INBOX'],
+            body: n === 3 ? 'Body 3' : `${largeBody} beyond cap`,
+          }),
+        ),
+      )
+    }
+    const thread = JSON.parse(
+      text(await client.callTool({ name: 'get_thread', arguments: { thread_id: 'a:t-m1' } })),
+    )
+    expect(thread.messages).toHaveLength(9)
+    expect(thread.messages[1].bodyText).toBe(`${largeBody}\n[…truncated]`)
+    expect(thread.messages[2].bodyText).toBe('Body 3')
+    expect(thread.messages[6].bodyText).toBe(
+      `${largeBody.slice(0, -'Friday works?Body 3'.length)}\n[…truncated]`,
+    )
+    expect(thread.messages[7].bodyText).toBe('\n[…truncated]')
+  })
+
   it('searches mail and contacts', async () => {
     const { client } = await connect(['read'])
     expect(

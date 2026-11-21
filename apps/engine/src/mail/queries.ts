@@ -9,6 +9,7 @@ import type {
   ThreadList,
   ThreadSummary,
 } from '@amc/protocol'
+import { RECENT_THREAD_BODIES } from '@amc/protocol'
 import type { Db } from '../db/database.ts'
 
 interface ThreadRow {
@@ -28,7 +29,11 @@ interface ThreadRow {
   muted: number
 }
 
-interface MessageRow {
+type MessageWithBody<Body extends string | null> = Omit<MessageDetail, 'bodyText'> & {
+  bodyText: Body
+}
+
+interface MessageRow<Body extends string | null> {
   id: string
   thread_id: string
   account_id: string
@@ -41,7 +46,7 @@ interface MessageRow {
   reply_to_json: string
   subject: string
   snippet: string
-  body_text: string
+  body_text: Body
   body_search_truncated: number
   html_blob: string | null
   sent_at: number
@@ -220,13 +225,47 @@ export class MailQueries {
   }
 
   thread(id: string): ThreadDetail | null {
-    const row = this.db
-      .prepare(`SELECT ${this.#threadColumns} FROM thread t WHERE t.id = ?`)
-      .get(id) as ThreadRow | undefined
-    if (!row) return null
+    const thread = this.threadSummary(id)
+    if (!thread) return null
     return {
-      ...toThread(row),
-      messages: this.#messages('m.thread_id = ? ORDER BY m.sent_at ASC', [id]),
+      ...thread,
+      messages: this.#messages<string | null>(
+        'm.thread_id = ?1 ORDER BY m.sent_at, m.id',
+        [id],
+        `CASE WHEN m.unread = 1 OR m.id IN (
+           SELECT id FROM message WHERE thread_id = ?1
+           ORDER BY sent_at DESC, id DESC LIMIT ${RECENT_THREAD_BODIES}
+         ) THEN m.body_text END`,
+      ),
+    }
+  }
+
+  /** Agent reads preserve every message, with a text budget for the whole thread. */
+  agentThread(
+    id: string,
+    messageLimit: number,
+    threadLimit: number,
+  ): (ThreadSummary & { messages: MessageDetail[] }) | null {
+    const thread = this.threadSummary(id)
+    if (!thread) return null
+    const messages = this.#messages<null>('m.thread_id = ? ORDER BY m.sent_at, m.id', [id], 'NULL')
+    const readBody = this.db.prepare(
+      'SELECT substr(CAST(body_text AS BLOB), 1, ?) AS body FROM message WHERE id = ?',
+    )
+    let remaining = threadLimit
+    return {
+      ...thread,
+      messages: messages.map((message) => {
+        const limit = Math.min(messageLimit, remaining)
+        // Read enough UTF-8 bytes for the allowed text and one extra character to detect truncation.
+        const row = readBody.get(4 * (limit + 1), message.id) as { body: Uint8Array }
+        const body = Buffer.from(row.body).toString('utf8')
+        remaining -= Math.min(body.length, limit)
+        return {
+          ...message,
+          bodyText: body.length > limit ? `${body.slice(0, limit)}\n[…truncated]` : body,
+        }
+      }),
     }
   }
 
@@ -283,21 +322,25 @@ export class MailQueries {
     return { rows, next: rows.length === limit && last ? `${last.sentAt}:${last.id}` : null }
   }
 
-  #messages(where: string, params: (string | number | null)[]): MessageDetail[] {
+  #messages<Body extends string | null = string>(
+    where: string,
+    params: (string | number | null)[],
+    body = 'm.body_text',
+  ): MessageWithBody<Body>[] {
     const rows = this.db
       .prepare(
         `SELECT m.id, m.thread_id, m.account_id, m.rfc_message_id, m.in_reply_to, m.from_json, m.to_json,
-                m.cc_json, m.bcc_json, m.reply_to_json, m.subject, m.snippet, m.body_text, m.html_blob,
-                coalesce(length(m.body_text) > m.body_search_limit, 0) AS body_search_truncated,
+                m.cc_json, m.bcc_json, m.reply_to_json, m.subject, m.snippet, ${body} AS body_text, m.html_blob,
+                CASE WHEN m.body_search_limit IS NOT NULL THEN length(m.body_text) > m.body_search_limit ELSE 0 END AS body_search_truncated,
                 m.sent_at, m.unread, m.starred, m.label_ids, m.list_unsubscribe
          FROM message m WHERE ${where}`,
       )
-      .all(...params) as unknown as MessageRow[]
+      .all(...params) as unknown as MessageRow<Body>[]
     const attachments = this.db.prepare(
       'SELECT id, filename, mime_type, size, inline, content_id FROM attachment WHERE message_id = ? ORDER BY id',
     )
     return rows.map(
-      (m): MessageDetail => ({
+      (m): MessageWithBody<Body> => ({
         id: m.id,
         threadId: m.thread_id,
         accountId: m.account_id,

@@ -236,6 +236,13 @@ export function mailRoutes(deps: MailDeps) {
     })
   })
 
+  r.get('/messages/:id', requireScope('read'), (c) => {
+    const message = queries.message(c.req.param('id'))
+    return message
+      ? c.json(message)
+      : c.json({ error: 'not_found', message: 'No such message' }, 404)
+  })
+
   r.get('/messages/:id/html', requireScope('read'), (c) => {
     const hash = queries.messageHtmlBlob(c.req.param('id'))
     const html = hash ? deps.blobs.get(hash) : null
