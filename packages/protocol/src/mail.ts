@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { BucketAssignment } from './buckets.ts'
 import type { MutationResult } from './organise.ts'
 
 export const Address = z.object({ name: z.string().nullable(), address: z.string() })
@@ -49,6 +50,7 @@ export const ThreadSummary = z.object({
   lastMessageAt: z.number(),
   snoozedUntil: z.number().nullable().default(null),
   muted: z.boolean().default(false),
+  bucket: BucketAssignment.nullable().optional(),
 })
 export type ThreadSummary = z.infer<typeof ThreadSummary>
 

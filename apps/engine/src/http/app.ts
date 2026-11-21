@@ -20,6 +20,7 @@ import type { Outbox } from '../mail/outbox.ts'
 import { buildMcpServer } from '../mcp/server.ts'
 import { VERSION } from '../version.ts'
 import { agentActionRoutes } from './agent-actions.ts'
+import { bucketRoutes } from './buckets.ts'
 import { composeRoutes } from './compose.ts'
 import { type MailDeps, mailRoutes } from './mail.ts'
 import { mutationRoutes } from './mutations.ts'
@@ -155,12 +156,14 @@ export function createApp({
   if (mail) {
     if (outbox) v1.route('/compose', composeRoutes(mail, outbox))
     v1.route('/', mailRoutes(mail))
+    v1.route('/', bucketRoutes(mail.store))
     v1.route('/', syncRoutes(mail, mutations))
 
     // MCP over Streamable HTTP, stateless: one server per request, built from the token's scopes.
     app.all('/mcp', requireAuth(db), async (c) => {
       const server = buildMcpServer(c.get('principal'), {
         db,
+        store: mail.store,
         queries: mail.queries,
         drafts: mail.drafts,
         mutations,

@@ -114,6 +114,63 @@ it('replaces a changed UIDVALIDITY and removes a deleted folder without affectin
   expect(queries.labels('a').map((label) => label.providerId)).toEqual(['ARCHIVE', 'INBOX'])
 })
 
+it('restores Bucket metadata after an interrupted UIDVALIDITY reimport by Message-ID', async () => {
+  const { imap, makeSync, queries, store } = fixture()
+  const inbox = imap.folder('INBOX')
+  imap.add('INBOX', 'Subject: Old parent\r\nMessage-ID: <old@example.com>')
+  imap.add(
+    'INBOX',
+    'Subject: Re: Old parent\r\nMessage-ID: <keep@example.com>\r\nReferences: <old@example.com>',
+  )
+  const sync = makeSync()
+  await sync.step('all')
+  const oldId = 'a:imap:old%40example.com'
+  store.setBucket({ threadId: oldId, bucket: 'Later', reason: 'Keep this reason' }, 'triage')
+  const assignment = queries.threadSummary(oldId)?.bucket
+  expect(assignment).toMatchObject({ bucket: 'Later', setBy: 'triage' })
+
+  inbox.validity = 2n
+  inbox.nextUid = 1
+  inbox.messages.clear()
+  imap.add('INBOX', 'Subject: Different mail\r\nMessage-ID: <different@example.com>')
+  imap.add('INBOX', 'Subject: Kept mail, reimported\r\nMessage-ID: <keep@example.com>')
+  imap.failFetch = true
+  await expect(sync.step('all')).rejects.toThrow('Fake FETCH failed')
+  sync.dispose()
+  expect(queries.threadSummary(oldId)).toBeNull()
+
+  imap.failFetch = false
+  await makeSync().step('all')
+  expect(queries.threadSummary('a:imap:keep%40example.com')?.bucket).toEqual(assignment)
+  expect(queries.threadSummary('a:imap:different%40example.com')?.bucket).toBeNull()
+})
+
+it.each([false, true])(
+  'preserves Buckets on a reference merge (target assigned: %s)',
+  async (targetAssigned) => {
+    const { imap, makeSync, queries, store } = fixture()
+    imap.add('INBOX', 'Subject: Destination\r\nMessage-ID: <target@example.com>')
+    imap.add('INBOX', 'Subject: Source\r\nMessage-ID: <source@example.com>')
+    const sync = makeSync()
+    await sync.step('all')
+    const sourceId = 'a:imap:source%40example.com'
+    const targetId = 'a:imap:target%40example.com'
+    store.setBucket({ threadId: sourceId, bucket: 'Reply', reason: 'Source reason' }, 'triage')
+    if (targetAssigned)
+      store.setBucket({ threadId: targetId, bucket: 'Later', reason: 'Target reason' }, 'owner')
+    const assignment = queries.threadSummary(targetAssigned ? targetId : sourceId)?.bucket
+    expect(assignment).toMatchObject({ bucket: targetAssigned ? 'Later' : 'Reply' })
+
+    imap.add(
+      'INBOX',
+      'Subject: Bridge\r\nMessage-ID: <bridge@example.com>\r\nReferences: <target@example.com> <source@example.com>',
+    )
+    await sync.step('all')
+    expect(queries.threadSummary(sourceId)).toBeNull()
+    expect(queries.threadSummary(targetId)).toMatchObject({ messageCount: 3, bucket: assignment })
+  },
+)
+
 it('joins reference containers across folders and saves real MIME attachment bytes', async () => {
   const { imap, makeSync, queries, blobs } = fixture()
   imap.addFolder('Sent', '\\Sent')

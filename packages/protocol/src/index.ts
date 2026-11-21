@@ -1,4 +1,5 @@
 export * from './api.ts'
+export * from './buckets.ts'
 export * from './compose.ts'
 export * from './doctor.ts'
 export * from './mail.ts'

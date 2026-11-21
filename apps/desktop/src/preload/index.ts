@@ -12,6 +12,7 @@ const api: AmcApi = {
   unpair: invoke('unpair') as AmcApi['unpair'],
   status: invoke('status') as AmcApi['status'],
   syncNow: invoke('syncNow') as AmcApi['syncNow'],
+  setBucket: invoke('setBucket') as AmcApi['setBucket'],
   organise: invoke('organise') as AmcApi['organise'],
   organiseErrors: invoke('organiseErrors') as AmcApi['organiseErrors'],
   agentActivity: invoke('agentActivity') as AmcApi['agentActivity'],

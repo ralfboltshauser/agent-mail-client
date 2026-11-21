@@ -478,4 +478,27 @@ export const MIGRATIONS: readonly Migration[] = [
     name: 'IMAP body blobs',
     sql: 'ALTER TABLE message ADD COLUMN body_parts TEXT',
   },
+  {
+    version: 12,
+    name: 'Thread Buckets',
+    sql: `
+      ALTER TABLE thread ADD COLUMN bucket TEXT;
+      ALTER TABLE thread ADD COLUMN bucket_reason TEXT;
+      ALTER TABLE thread ADD COLUMN bucket_set_by TEXT;
+      ALTER TABLE thread ADD COLUMN bucket_set_at INTEGER;
+
+      CREATE TABLE imap_bucket_reimport (
+        account_id TEXT NOT NULL REFERENCES account (id) ON DELETE CASCADE,
+        path_key TEXT NOT NULL,
+        identity TEXT NOT NULL,
+        thread_key TEXT NOT NULL,
+        bucket TEXT NOT NULL,
+        bucket_reason TEXT,
+        bucket_set_by TEXT,
+        bucket_set_at INTEGER,
+        PRIMARY KEY (account_id, path_key, identity)
+      ) STRICT;
+      CREATE INDEX imap_bucket_reimport_thread ON imap_bucket_reimport (account_id, path_key, thread_key);
+    `,
+  },
 ]

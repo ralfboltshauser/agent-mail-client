@@ -2,6 +2,8 @@ import type { ThreadSummary } from '@amc/protocol'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { Paperclip, Star } from 'lucide-react'
 import { useEffect, useRef } from 'react'
+import { Badge } from '@/components/ui/badge'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { listDate, participantsLine } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
@@ -103,8 +105,22 @@ export function ThreadList({ threads, selectedId, onSelect, self, empty, matchSn
                 >
                   {t.subject || '(no subject)'}
                 </div>
-                <div className="truncate text-xs text-muted-foreground">
-                  {match ? <MatchSnippet text={match} /> : t.snippet}
+                <div className="flex items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                    {match ? <MatchSnippet text={match} /> : t.snippet}
+                  </span>
+                  {t.bucket && (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Badge variant="secondary" className="h-4 shrink-0 text-[10px]">
+                          {t.bucket.bucket}
+                        </Badge>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-64 break-words">
+                        {t.bucket.reason}
+                      </TooltipContent>
+                    </Tooltip>
+                  )}
                 </div>
               </div>
             </div>

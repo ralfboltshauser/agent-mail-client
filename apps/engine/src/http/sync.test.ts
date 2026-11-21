@@ -1,6 +1,6 @@
-import type { SyncChanges, SyncSnapshotPage } from '@amc/protocol'
+import type { BucketInput, SyncChanges, SyncSnapshotPage } from '@amc/protocol'
 import { describe, expect, it, vi } from 'vitest'
-import { issueToken, revokeToken } from '../auth/tokens.ts'
+import { DAY_MS, issueToken, revokeToken } from '../auth/tokens.ts'
 import { BlobStore } from '../blobs.ts'
 import { Drafts } from '../mail/drafts.ts'
 import { MailQueries } from '../mail/queries.ts'
@@ -105,6 +105,62 @@ describe('sync protocol', () => {
       }
     },
   )
+
+  it('sets and clears a Bucket through HTTP and syncs it as Thread metadata', async () => {
+    const { app, db, get, add, gmail } = setup()
+    const owner = issueToken(db, { kind: 'desktop', name: 'mac', scopes: ['organize'] }).secret
+    const expiresAt = Date.now() + DAY_MS
+    const reader = issueToken(db, {
+      kind: 'agent',
+      name: 'reader',
+      scopes: ['read'],
+      expiresAt,
+    }).secret
+    db.exec(
+      "INSERT INTO account (id, kind, address, credentials, created_at) VALUES ('b', 'gmail', 'other@x.com', x'00', 0)",
+    )
+    const scoped = issueToken(db, {
+      kind: 'agent',
+      name: 'scoped',
+      scopes: ['organize'],
+      accountId: 'b',
+      expiresAt,
+    }).secret
+    const set = (token: string, body: BucketInput) =>
+      app.request('/v1/bucket', {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    add('m1', 1000)
+    const { body: before } = await get<{ modseq: number }>('/v1/sync/state')
+    const input = { threadId: 'a:t-m1', bucket: 'Reply', reason: 'Needs an answer' } as const
+    const original = await gmail.getMessageState('m1')
+    expect((await set(reader, input)).status).toBe(403)
+    expect((await set(scoped, input)).status).toBe(404)
+    expect((await set(owner, { ...input, threadId: 'missing' })).status).toBe(404)
+    expect((await set(owner, input)).status).toBe(200)
+
+    const snapshot = await get<SyncSnapshotPage<'thread'>>('/v1/sync/snapshot?entity=thread')
+    const assignment = {
+      bucket: 'Reply',
+      reason: input.reason,
+      setBy: 'owner',
+      setAt: expect.any(Number),
+    }
+    expect(snapshot.body.rows[0]?.bucket).toEqual(assignment)
+    const { body: changes } = await get<SyncChanges>(`/v1/sync/changes?since=${before.modseq}`)
+    expect(changes.changes).toMatchObject([
+      { entity: 'thread', op: 'upsert', data: { bucket: assignment } },
+    ])
+
+    expect((await set(owner, { ...input, bucket: null })).status).toBe(200)
+    const cleared = await get<SyncChanges>(`/v1/sync/changes?since=${changes.modseq}`)
+    expect(cleared.body.changes).toMatchObject([
+      { entity: 'thread', op: 'upsert', data: { bucket: null } },
+    ])
+    expect(await gmail.getMessageState('m1')).toEqual(original)
+  })
 
   it('pages changes and asks stale clients to resync', async () => {
     const { db, get, add } = setup()

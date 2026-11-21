@@ -119,6 +119,7 @@ export class ImapLocations {
         Number(message.starred),
         sourceBlob,
       )
+      this.#threads.restoreBucket(encodeURIComponent(folder.path), message, sourceBlob, mid)
       this.#refresh(mid)
       if (old && old.message_id !== mid) this.#refresh(old.message_id)
     })
@@ -137,16 +138,55 @@ export class ImapLocations {
     })
   }
 
-  clear(path: string): void {
+  clear(path: string, preserveBuckets = false): void {
     const { db } = this.store
+    const key = encodeURIComponent(path)
+    if (preserveBuckets) {
+      // Location deletion cascades through the last message and its reference aliases.
+      db.prepare(`
+        WITH affected AS (
+          SELECT DISTINCT t.id, t.provider_thread_id, t.bucket, t.bucket_reason,
+                          t.bucket_set_by, t.bucket_set_at
+          FROM imap_location l
+          JOIN message m ON m.id = l.message_id
+          JOIN thread t ON t.id = m.thread_id
+          WHERE l.account_id = ?1 AND l.path_key = ?2 AND t.bucket IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM message other
+              JOIN imap_location kept ON kept.message_id = other.id
+              WHERE other.thread_id = t.id AND kept.path_key <> ?2
+            )
+        ), identities AS (
+          SELECT t.id, 'rfc:' || a.rfc_id AS identity
+          FROM affected t JOIN imap_thread_alias a ON a.thread_id = t.id
+          UNION
+          SELECT t.id, 'source:' || m.imap_fingerprint
+          FROM affected t JOIN message m ON m.thread_id = t.id
+          WHERE m.imap_fingerprint IS NOT NULL
+        )
+        INSERT OR REPLACE INTO imap_bucket_reimport
+          (account_id, path_key, identity, thread_key, bucket, bucket_reason, bucket_set_by, bucket_set_at)
+        SELECT ?1, ?2, i.identity, t.provider_thread_id, t.bucket, t.bucket_reason,
+               t.bucket_set_by, t.bucket_set_at
+        FROM affected t JOIN identities i ON i.id = t.id
+      `).run(this.accountId, key)
+    } else {
+      this.finishReimport(path)
+    }
     const next = db.prepare(
       'SELECT validity, uid FROM imap_location WHERE account_id = ? AND path_key = ? LIMIT ?',
     )
     let rows: { validity: string; uid: number }[]
     do {
-      rows = next.all(this.accountId, encodeURIComponent(path), PAGE) as typeof rows
+      rows = next.all(this.accountId, key, PAGE) as typeof rows
       for (const { validity, uid } of rows) this.remove(path, validity, uid)
     } while (rows.length)
+  }
+
+  finishReimport(path: string): void {
+    this.store.db
+      .prepare('DELETE FROM imap_bucket_reimport WHERE account_id = ? AND path_key = ?')
+      .run(this.accountId, encodeURIComponent(path))
   }
 
   flags(path: string, validity: string, uid: number, unread: boolean, starred: boolean): void {
@@ -176,6 +216,10 @@ export class ImapLocations {
     const oldPath = encodeURIComponent(path)
     const newPath = encodeURIComponent(folder.path)
     const label = labelId(this.accountId, folder.label.providerId)
+    if (oldPath !== newPath)
+      db.prepare(
+        'UPDATE imap_bucket_reimport SET path_key = ? WHERE account_id = ? AND path_key = ?',
+      ).run(newPath, this.accountId, oldPath)
     // The caller updates Labels, locations and the saved cursor in one transaction.
     const mismatched = db.prepare(
       `SELECT DISTINCT message_id FROM imap_location

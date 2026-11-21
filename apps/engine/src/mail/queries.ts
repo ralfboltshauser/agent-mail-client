@@ -2,6 +2,7 @@ import type {
   AccountSummary,
   Address,
   AttachmentSummary,
+  Bucket,
   Label,
   MessageDetail,
   SearchHit,
@@ -29,6 +30,10 @@ interface ThreadRow {
   last_message_at: number
   snoozed_until: number | null
   muted: number
+  bucket: Bucket | null
+  bucket_reason: string
+  bucket_set_by: string
+  bucket_set_at: number
 }
 
 type MessageWithBody<Body extends string | null> = Omit<MessageDetail, 'bodyText'> & {
@@ -90,6 +95,14 @@ function toThread(row: ThreadRow): ThreadSummary {
     lastMessageAt: row.last_message_at,
     snoozedUntil: row.snoozed_until,
     muted: row.muted === 1,
+    bucket: row.bucket
+      ? {
+          bucket: row.bucket,
+          reason: row.bucket_reason,
+          setBy: row.bucket_set_by,
+          setAt: row.bucket_set_at,
+        }
+      : null,
   }
 }
 
@@ -100,6 +113,7 @@ export interface ThreadQuery {
   /** Only Threads in the Inbox (across Accounts unless accountId is set). */
   inbox?: boolean
   unread?: boolean
+  untriaged?: boolean
   /** Return Threads whose last message is older than this (epoch ms), for paging. */
   before?: number
   limit?: number
@@ -134,7 +148,8 @@ export class MailQueries {
         ) ELSE t.in_inbox END`
     this.#threadColumns = `t.id, t.account_id, t.subject, t.snippet, t.participants, t.message_count,
       t.unread_count, t.starred, ${this.#inbox} AS in_inbox, t.has_attachments, t.label_ids,
-      t.last_message_at, ${snoozeEnabled ? 't.snoozed_until' : 'NULL'} AS snoozed_until, t.muted`
+      t.last_message_at, ${snoozeEnabled ? 't.snoozed_until' : 'NULL'} AS snoozed_until, t.muted,
+      t.bucket, t.bucket_reason, t.bucket_set_by, t.bucket_set_at`
   }
 
   accounts(): AccountSummary[] {
@@ -217,6 +232,7 @@ export class MailQueries {
       where.push('EXISTS (SELECT 1 FROM json_each(t.label_ids) WHERE value = ?)')
       params.push(query.labelId)
     }
+    if (query.untriaged) where.push('t.bucket IS NULL')
     if (query.unread) where.push('t.unread_count > 0')
     if (query.before !== undefined) {
       where.push('t.last_message_at < ?')
