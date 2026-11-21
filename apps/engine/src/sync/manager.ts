@@ -128,45 +128,66 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
     return this.withImapPaused(account.address, async () => {
       const current = getAccountRow(db, accountId)
       if (current?.kind !== 'imap' || current.status === 'auth_expired') return null
-      const row = db
+      const attachment = db
         .prepare(
-          `SELECT a.blob, a.provider_attachment AS part, l.path_key, l.validity, l.uid
-         FROM attachment a JOIN imap_location l ON l.message_id = a.message_id
-         WHERE a.id = ? AND l.account_id = ? LIMIT 1`,
+          `SELECT a.blob, a.provider_attachment AS part, a.message_id
+           FROM attachment a JOIN message m ON m.id = a.message_id
+           WHERE a.id = ? AND m.account_id = ?`,
         )
         .get(attachmentId, accountId) as
-        | {
-            blob: string | null
-            part: string | null
-            path_key: string
-            validity: string
-            uid: number
-          }
+        | { blob: string | null; part: string | null; message_id: string }
         | undefined
-      if (!row?.part) return null
-      if (row.blob) return row.blob
+      if (!attachment || attachment.blob) return attachment?.blob ?? null
+      if (!attachment.part) return null
+
+      const locations = db.prepare(
+        `SELECT path_key, validity, uid FROM imap_location
+         WHERE message_id = ? AND account_id = ? ORDER BY path_key, validity, uid`,
+      )
+      const attempted = new Set<string>()
       const credentials = sealer.open<ImapCredentials>(current.credentials)
-      const client = (this.#o.imapClient ?? createImapClient)(credentials.imap)
+      let client: ReturnType<ImapClientFactory> | undefined
       try {
-        await connectImap(client)
-        const box = await client.mailboxOpen(decodeURIComponent(row.path_key), { readOnly: true })
-        if (String(box.uidValidity) !== row.validity) return null
-        const { content } = await client.download(String(row.uid), row.part, {
-          uid: true,
-          decodeText: false,
-        })
-        if (!content) return null
-        const { hash, size } = await store.blobs.putStream(content)
-        db.prepare('UPDATE attachment SET blob = ?, size = ? WHERE id = ?').run(
-          hash,
-          size,
-          attachmentId,
-        )
-        return hash
-      } catch {
-        return null
+        for (;;) {
+          const rows = (
+            locations.all(attachment.message_id, accountId) as {
+              path_key: string
+              validity: string
+              uid: number
+            }[]
+          ).filter(
+            ({ path_key, validity, uid }) => !attempted.has(`${path_key}:${validity}:${uid}`),
+          )
+          if (!rows.length) return null
+          for (const { path_key, validity, uid } of rows) {
+            attempted.add(`${path_key}:${validity}:${uid}`)
+            try {
+              if (!client?.usable) {
+                client?.close()
+                client = (this.#o.imapClient ?? createImapClient)(credentials.imap)
+                await connectImap(client)
+              }
+              const box = await client.mailboxOpen(decodeURIComponent(path_key), { readOnly: true })
+              if (String(box.uidValidity) !== validity) continue
+              const { content } = await client.download(String(uid), attachment.part, {
+                uid: true,
+                decodeText: false,
+              })
+              if (!content) continue
+              const { hash, size } = await store.blobs.putStream(content)
+              db.prepare('UPDATE attachment SET blob = ?, size = ? WHERE id = ?').run(
+                hash,
+                size,
+                attachmentId,
+              )
+              return hash
+            } catch {
+              // Folder and UID failures are local to this copy. Try the remaining locations.
+            }
+          }
+        }
       } finally {
-        client.close()
+        client?.close()
       }
     })
   }

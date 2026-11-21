@@ -260,4 +260,31 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX imap_thread_subject_lookup ON imap_thread_subject (account_id, subject, sent_at);
     `,
   },
+  {
+    version: 5,
+    name: 'Index IMAP body prefixes and refresh legacy previews',
+    sql: `
+      ALTER TABLE message ADD COLUMN body_search_limit INTEGER;
+
+      DROP TRIGGER message_fts_insert;
+      DROP TRIGGER message_fts_update;
+      CREATE TRIGGER message_fts_insert AFTER INSERT ON message BEGIN
+        INSERT INTO message_fts (rowid, subject, people, body, attachments)
+        VALUES (new.rowid, new.subject, new.from_json || ' ' || new.to_json || ' ' || new.cc_json,
+          coalesce(substr(new.body_text, 1, new.body_search_limit), new.body_text), '');
+      END;
+      CREATE TRIGGER message_fts_update
+        AFTER UPDATE OF subject, body_text, body_search_limit, from_json, to_json, cc_json ON message BEGIN
+        DELETE FROM message_fts WHERE rowid = old.rowid;
+        INSERT INTO message_fts (rowid, subject, people, body, attachments)
+        VALUES (new.rowid, new.subject, new.from_json || ' ' || new.to_json || ' ' || new.cc_json,
+          coalesce(substr(new.body_text, 1, new.body_search_limit), new.body_text), '');
+      END;
+
+      -- Re-download v4 preview-only locations at the next reconciliation, in place.
+      UPDATE message SET imap_fingerprint = NULL WHERE id IN
+        (SELECT message_id FROM imap_location WHERE source_blob IS NULL);
+      UPDATE imap_location SET verified = 0 WHERE source_blob IS NULL;
+    `,
+  },
 ]

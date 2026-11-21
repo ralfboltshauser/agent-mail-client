@@ -30,13 +30,19 @@ export class ImapLocations {
     this.#threads = new ImapThreads(store, accountId)
   }
 
-  page(path: string, validity: string, after = 0): Location[] {
+  page(path: string, validity: string, after = 0, limit = PAGE): Location[] {
     return this.store.db
       .prepare(
         `SELECT uid, message_id, label_id, unread, starred, verified, source_blob FROM imap_location
        WHERE account_id = ? AND path_key = ? AND validity = ? AND uid > ? ORDER BY uid LIMIT ?`,
       )
-      .all(this.accountId, encodeURIComponent(path), validity, after, PAGE) as unknown as Location[]
+      .all(
+        this.accountId,
+        encodeURIComponent(path),
+        validity,
+        after,
+        limit,
+      ) as unknown as Location[]
   }
 
   get(path: string, validity: string, uid: number): Location | undefined {
@@ -55,24 +61,19 @@ export class ImapLocations {
     validity: string,
     uid: number,
     message: IncomingMessage,
-    fingerprint: string | null,
-    sourceBlob: string | null,
+    fingerprint: string,
+    sourceBlob: string,
   ): void {
     const { db } = this.store
     transaction(db, () => {
       const old = this.get(folder.path, validity, uid)
-      const duplicate =
-        fingerprint &&
-        message.rfcMessageId &&
-        (db
-          .prepare(
-            'SELECT id FROM message WHERE account_id = ? AND rfc_message_id = ? AND imap_fingerprint = ?',
-          )
-          .get(this.accountId, message.rfcMessageId, fingerprint) as
-          | { id: string }
-          | undefined
-          | null
-          | '')
+      const duplicate = db
+        .prepare(
+          'SELECT id FROM message WHERE account_id = ? AND rfc_message_id IS ? AND imap_fingerprint IN (?, ?) ORDER BY CASE WHEN imap_fingerprint = ? THEN 0 ELSE 1 END, rowid LIMIT 1',
+        )
+        .get(this.accountId, message.rfcMessageId, fingerprint, sourceBlob, fingerprint) as
+        | { id: string }
+        | undefined
       let mid: string
       if (duplicate) {
         mid = duplicate.id

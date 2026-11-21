@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { pipeline } from 'node:stream/promises'
 import type { Address } from '@amc/protocol'
@@ -9,7 +10,6 @@ import {
   type Headers,
   MailParser,
   type MessageText,
-  simpleParser,
 } from 'mailparser'
 import type { BlobStore } from '../../blobs.ts'
 import type { IncomingAttachment, IncomingLabel, IncomingMessage } from '../../mail/store.ts'
@@ -75,41 +75,45 @@ function addresses(input: AddressObject | AddressObject[] | undefined): Address[
   )
 }
 
-export const MESSAGE_LIMIT = 16 * 1024 * 1024
-const PREVIEW_LIMIT = 256 * 1024
+export const LAZY_ATTACHMENT_THRESHOLD = 16 * 1024 * 1024
 
 export async function parseMessage(
   folder: Folder,
   uidValidity: string,
   item: FetchMessageObject,
   blobs: BlobStore,
-  sourceBlob: string | null,
-  preview: MessageText = { type: 'text' },
-): Promise<IncomingMessage> {
+  sourceBlob: string,
+): Promise<{ message: IncomingMessage; fingerprint: string }> {
   let headers: Headers = new Map()
   let lines: HeaderLines = []
-  let text = preview
-  const attachments: IncomingAttachment[] = []
-
-  if (sourceBlob) {
-    const parser = new MailParser({
-      skipImageLinks: true,
-      skipHtmlToText: true,
-      skipTextToHtml: true,
-    })
-    parser.on('headers', (value: Headers) => {
-      headers = value
-    })
-    parser.on('headerLines', (value: HeaderLines) => {
-      lines = value
-    })
-    const consume = async () => {
-      for await (const part of parser as AsyncIterable<AttachmentStream | MessageText>) {
-        if (part.type === 'text') {
-          text = part
-          continue
+  let text: MessageText = { type: 'text' }
+  const lazyStructure =
+    (item.size ?? 0) > LAZY_ATTACHMENT_THRESHOLD ? item.bodyStructure : undefined
+  const attachments = lazyStructure ? largeAttachments(lazyStructure) : []
+  const parser = new MailParser({
+    skipImageLinks: true,
+    skipHtmlToText: true,
+    skipTextToHtml: true,
+  })
+  parser.on('headers', (value: Headers) => {
+    headers = value
+  })
+  parser.on('headerLines', (value: HeaderLines) => {
+    lines = value
+  })
+  const consume = async () => {
+    for await (const part of parser as AsyncIterable<AttachmentStream | MessageText>) {
+      if (part.type === 'text') {
+        text = part
+        continue
+      }
+      if (lazyStructure) {
+        // MailParser must finish the current part before it can emit the body.
+        for await (const _ of part.content) {
+          // The IMAP part can be fetched when opened.
         }
-        const file = await blobs.putStream(part.content, MESSAGE_LIMIT)
+      } else {
+        const file = await blobs.putStream(part.content)
         attachments.push({
           providerAttachmentId: null,
           filename: part.filename ?? 'attachment',
@@ -119,22 +123,17 @@ export async function parseMessage(
           inline: !!part.related || part.contentDisposition === 'inline',
           blob: file.hash,
         })
-        part.release?.()
       }
+      part.release?.()
     }
-    await Promise.all([
-      pipeline(createReadStream(blobs.path(sourceBlob)), parser),
-      consume().catch((error: Error) => {
-        parser.destroy(error)
-        throw error
-      }),
-    ])
-  } else {
-    const mail = await simpleParser(item.headers ?? Buffer.alloc(0), { skipImageLinks: true })
-    headers = mail.headers
-    lines = mail.headerLines
-    attachments.push(...largeParts(item.bodyStructure).attachments)
   }
+  await Promise.all([
+    pipeline(createReadStream(blobs.path(sourceBlob)), parser),
+    consume().catch((error: Error) => {
+      parser.destroy(error)
+      throw error
+    }),
+  ])
 
   const bodyHtml = text.html || null
   const bodyText = normalizeWhitespace(text.text ?? (bodyHtml ? htmlToText(bodyHtml) : ''))
@@ -146,7 +145,7 @@ export async function parseMessage(
   const reply = headers.get('in-reply-to')
   const references = headers.get('references')
   const subject = headers.get('subject')
-  return {
+  const message: IncomingMessage = {
     providerId: providerMessageId(folder.path, uidValidity, item.uid),
     providerThreadId: '',
     rfcMessageId: typeof rfcId === 'string' ? rfcId : null,
@@ -162,8 +161,9 @@ export async function parseMessage(
     bcc: addresses(headers.get('bcc') as AddressObject | AddressObject[] | undefined),
     replyTo: addresses(headers.get('reply-to') as AddressObject | AddressObject[] | undefined),
     subject: typeof subject === 'string' ? subject : '',
-    snippet: bodyText.replace(/\s+/g, ' ').slice(0, 200),
+    snippet: bodyText.slice(0, 1024).replace(/\s+/g, ' ').slice(0, 200),
     bodyText,
+    bodySearchLimit: 256 * 1024,
     bodyHtml,
     sentAt: Number.isFinite(timestamp) ? timestamp : 0,
     size: item.size ?? 0,
@@ -172,11 +172,19 @@ export async function parseMessage(
     listUnsubscribe: unsubscribe?.line.replace(/^list-unsubscribe:\s*/i, '') ?? null,
     attachments,
   }
+  // A reused Message-ID can refer to different mail. The full source hash disambiguates it.
+  const fingerprint = message.rfcMessageId
+    ? sourceBlob
+    : item.emailId
+      ? `email-id:${item.emailId}`
+      : `headers:${createHash('sha256')
+          .update(JSON.stringify([headers.get('date'), message.from, subject, item.size, lines]))
+          .digest('hex')}`
+  return { message, fingerprint }
 }
 
-export function largeParts(structure: MessageStructureObject | undefined) {
+function largeAttachments(structure: MessageStructureObject): IncomingAttachment[] {
   const attachments: IncomingAttachment[] = []
-  const preview: { text?: string; html?: string } = {}
   function visit(node: MessageStructureObject, related: boolean) {
     const type = node.type.toLowerCase()
     const part = node.part ?? '1'
@@ -197,41 +205,8 @@ export function largeParts(structure: MessageStructureObject | undefined) {
       })
     } else if (node.childNodes) {
       for (const child of node.childNodes) visit(child, related || type === 'multipart/related')
-    } else if (type === 'text/plain') {
-      preview.text ??= part
-    } else if (type === 'text/html') {
-      preview.html ??= part
     }
   }
-  if (structure) visit(structure, false)
-  return { attachments, preview }
-}
-
-export async function largePreview(
-  client: import('./client.ts').ImapClient,
-  item: FetchMessageObject,
-): Promise<MessageText> {
-  const text: MessageText = { type: 'text' }
-  const { preview } = largeParts(item.bodyStructure)
-  for (const kind of ['text', 'html'] as const) {
-    const part = preview[kind]
-    if (!part) continue
-    const { content } = await client.download(String(item.uid), part, {
-      uid: true,
-      maxBytes: PREVIEW_LIMIT,
-    })
-    if (!content) continue
-    const decoder = new TextDecoder()
-    let bytes = 0
-    let value = ''
-    for await (const chunk of content) {
-      const data = Buffer.from(chunk)
-      value += decoder.decode(data.subarray(0, Math.max(0, PREVIEW_LIMIT - bytes)), {
-        stream: true,
-      })
-      bytes += data.length
-    }
-    text[kind] = value + decoder.decode()
-  }
-  return text
+  visit(structure, false)
+  return attachments
 }

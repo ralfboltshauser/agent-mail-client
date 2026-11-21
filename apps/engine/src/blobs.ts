@@ -33,14 +33,19 @@ export class BlobStore {
     return hash
   }
 
-  async putStream(source: Readable, maxBytes = Infinity): Promise<{ hash: string; size: number }> {
+  async putStream(
+    source: Readable,
+    expectedSize?: number,
+  ): Promise<{ hash: string; size: number }> {
     const hash = createHash('sha256')
     const tmp = join(this.root, `stream-${randomUUID()}.tmp`)
     let size = 0
     const meter = new Transform({
       transform(chunk: Buffer, _encoding, callback) {
         size += chunk.length
-        if (size > maxBytes) return callback(new Error('Blob exceeded its download limit'))
+        if (expectedSize !== undefined && size > expectedSize) {
+          return callback(new Error('Blob size differs from the expected size'))
+        }
         hash.update(chunk)
         callback(null, chunk)
       },
@@ -48,6 +53,9 @@ export class BlobStore {
     try {
       await mkdir(this.root, { recursive: true })
       await pipeline(source, meter, createWriteStream(tmp, { flags: 'wx' }))
+      if (expectedSize !== undefined && size !== expectedSize) {
+        throw new Error('Blob size differs from the expected size')
+      }
       const digest = hash.digest('hex')
       const path = this.path(digest)
       await mkdir(dirname(path), { recursive: true })

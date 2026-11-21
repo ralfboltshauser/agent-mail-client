@@ -16,6 +16,7 @@ interface FakeMessage {
   source: Buffer
   flags: Set<string>
   modseq: bigint
+  emailId?: string
   structure?: MessageStructureObject
   parts?: Map<string, Buffer>
 }
@@ -49,6 +50,8 @@ export class FakeImap extends EventEmitter {
   readonly searches: { path: string; uids: number[] }[] = []
   readonly downloads: { path: string; uid: number; part: string | undefined }[] = []
   readonly idles: string[] = []
+  onSearch?: (path: string) => void
+  onDownload?: (path: string, uid: number, part: string | undefined) => void
   onIdle?: (path: string) => void
   readonly appended: { folder: string; raw: Buffer; flags: string[] }[] = []
   usable = false
@@ -166,6 +169,7 @@ export class FakeImap extends EventEmitter {
         ? [...selected.messages.keys()].slice(Number(query.seq) - 1, Number(query.seq))
         : this.#uids(selected, typeof query.uid === 'string' ? query.uid : '1:*')
     this.searches.push({ path: selected.path, uids })
+    this.onSearch?.(selected.path)
     return uids
   }
 
@@ -202,6 +206,7 @@ export class FakeImap extends EventEmitter {
           size: query.size ? item.source.length : undefined,
           headers: query.headers ? item.source.subarray(0, headerEnd + 4) : undefined,
           bodyStructure: query.bodyStructure ? item.structure : undefined,
+          emailId: query.emailId ? item.emailId : undefined,
           source: query.source ? item.source : undefined,
         }
       }
@@ -219,6 +224,7 @@ export class FakeImap extends EventEmitter {
     if (!this.#selected || !options.uid) throw new Error('Expected UID download in selected folder')
     const uid = Number(range)
     this.downloads.push({ path: this.#selected.path, uid, part })
+    this.onDownload?.(this.#selected.path, uid, part)
     const item = this.#selected.messages.get(uid)
     const bytes = part ? item?.parts?.get(part) : item?.source
     if (!bytes) return {}

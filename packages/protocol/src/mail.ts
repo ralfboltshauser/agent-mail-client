@@ -73,6 +73,7 @@ export const MessageDetail = z.object({
   subject: z.string(),
   snippet: z.string(),
   bodyText: z.string(),
+  bodySearchTruncated: z.boolean().optional(),
   hasHtml: z.boolean(),
   sentAt: z.number(),
   unread: z.boolean(),

@@ -3,25 +3,17 @@ import { transaction } from '../../db/database.ts'
 import type { MailStore } from '../../mail/store.ts'
 import type { ImapClient } from './client.ts'
 import { ImapLocations, PAGE } from './locations.ts'
-import {
-  type Folder,
-  largePreview,
-  MESSAGE_LIMIT,
-  mapFolders,
-  messageFlags,
-  parseMessage,
-} from './mapping.ts'
+import { type Folder, mapFolders, messageFlags, parseMessage } from './mapping.ts'
 
-interface FolderRename {
-  folder: Folder
-  identified: boolean
-}
+const RECONCILE_PAGE = 512
+const INBOX_WINDOW_INTERVAL = 1000
 
 interface FolderCursor {
   path: string
   validity: string
   mailboxId?: string | undefined
   highUid: number
+  exists?: number
   modseq: string | null
   before: number
 }
@@ -78,7 +70,7 @@ export class ImapAccountSync {
 
   async step(
     mode: 'all' | 'inbox' | 'backfill',
-    betweenFolders?: () => Promise<void>,
+    serviceInbox?: () => Promise<void>,
   ): Promise<boolean> {
     if (mode !== 'backfill') this.#inboxChanged = false
     if (mode === 'all') await this.#listFolders()
@@ -86,8 +78,8 @@ export class ImapAccountSync {
     for (const folder of this.#folders) {
       if (mode === 'inbox' && folder.path !== 'INBOX') continue
       if (mode === 'backfill' && !this.#cursor.get(folder.path)?.before) continue
-      if (processed || (mode === 'backfill' && folder.path !== 'INBOX')) await betweenFolders?.()
-      await this.#syncFolder(folder, mode !== 'backfill')
+      if (processed || (mode === 'backfill' && folder.path !== 'INBOX')) await serviceInbox?.()
+      await this.#syncFolder(folder, mode !== 'backfill', serviceInbox)
       processed = true
     }
     const done = !this.#folders.some((folder) => this.#cursor.get(folder.path)?.before)
@@ -158,9 +150,9 @@ export class ImapAccountSync {
     }
     const paths = new Set(folders.map((folder) => folder.path))
     const missing = [...this.#cursor.values()].filter(({ path }) => !paths.has(path))
-    const renames = new Map<string, FolderRename>()
+    const renames = new Map<string, Folder>()
     if (missing.length) {
-      const candidates = new Map<string, FolderRename[]>()
+      const candidates = new Map<string, Folder[]>()
       for (const folder of folders) {
         if (this.#cursor.has(folder.path)) continue
         const box = await this.client.mailboxOpen(folder.path, { readOnly: true })
@@ -175,10 +167,7 @@ export class ImapAccountSync {
         }
         const match = matches.length === 1 ? matches[0] : undefined
         if (match) {
-          candidates.set(match.path, [
-            ...(candidates.get(match.path) ?? []),
-            { folder, identified: Boolean(match.mailboxId && box.mailboxId) },
-          ])
+          candidates.set(match.path, [...(candidates.get(match.path) ?? []), folder])
         }
       }
       for (const [path, matches] of candidates) {
@@ -194,16 +183,8 @@ export class ImapAccountSync {
       for (const old of missing) {
         const renamed = renames.get(old.path)
         if (renamed) {
-          const { folder, identified } = renamed
-          this.#locations.relabel(old.path, folder)
-          this.#cursor.set(folder.path, {
-            ...old,
-            path: folder.path,
-            // Matching bytes protect cached messages. Only a stable server mailbox ID
-            // also proves that the previous folder's UID and MODSEQ checkpoints apply.
-            before: identified ? old.before : old.highUid + 1,
-            modseq: identified ? old.modseq : null,
-          })
+          this.#locations.relabel(old.path, renamed)
+          this.#cursor.set(renamed.path, { ...old, path: renamed.path })
         } else {
           this.#locations.clear(old.path)
         }
@@ -215,26 +196,43 @@ export class ImapAccountSync {
     this.#folders = folders
   }
 
-  // Base IMAP has no stable mailbox identifier. Require byte-for-byte evidence for
-  // every cached UID still present at the candidate path before transferring its cursor.
+  // A unique UIDVALIDITY/UIDNEXT/count match can identify a rename without OBJECTID.
+  // Older checkpoints lack the count. For those and for changed folders, check
+  // overlapping cached UIDs against their content or the legacy Message-ID.
   async #matchesCachedFolder(old: FolderCursor, box: MailboxObject): Promise<boolean> {
-    if (!box.exists || box.uidNext <= old.highUid) return false
-    let after = 0
-    let matched = false
-    for (;;) {
-      const rows = this.#locations.page(old.path, old.validity, after)
-      if (!rows.length) return matched
-      const remote = new Set(await this.#search({ uid: rows.map(({ uid }) => uid).join(',') }))
-      for (const { uid, source_blob } of rows) {
-        if (!remote.has(uid)) continue
-        if (!source_blob) return false
-        const item = await this.#metadata(uid)
-        if (!item || item.size === undefined || item.size > MESSAGE_LIMIT) return false
-        if ((await this.#downloadSource(uid)) !== source_blob) return false
-        matched = true
-      }
-      after = rows[rows.length - 1]?.uid ?? after
+    if (box.uidNext === old.highUid + 1) {
+      const count =
+        old.exists ??
+        (old.before === 0
+          ? this.store.db
+              .prepare(
+                'SELECT count(*) AS count FROM imap_location WHERE account_id = ? AND path_key = ? AND validity = ?',
+              )
+              .get(this.accountId, encodeURIComponent(old.path), old.validity)?.count
+          : undefined)
+      if (box.exists === count) return true
     }
+    if (!box.exists || box.uidNext <= old.highUid) return false
+    const rows = this.#locations.page(old.path, old.validity)
+    if (!rows.length) return false
+    const remote = new Set(await this.#search({ uid: rows.map(({ uid }) => uid).join(',') }))
+    let matched = false
+    for (const { uid, message_id, source_blob } of rows) {
+      if (!remote.has(uid)) continue
+      if (source_blob) {
+        if ((await this.#downloadSource(uid)) !== source_blob) return false
+      } else {
+        const local = this.store.db
+          .prepare('SELECT rfc_message_id FROM message WHERE id = ?')
+          .get(message_id)?.rfc_message_id
+        if (typeof local !== 'string') continue
+        const headers = (await this.#metadata(uid))?.headers?.toString()
+        if (headers?.match(/^Message-ID:[ \t]*(?:\r?\n[ \t]+)?([^\r\n]+)/im)?.[1]?.trim() !== local)
+          return false
+      }
+      matched = true
+    }
+    return matched
   }
 
   #saveCursor(): void {
@@ -244,7 +242,11 @@ export class ImapAccountSync {
       .run(json, this.accountId, json)
   }
 
-  async #syncFolder(folder: Folder, reconcile: boolean): Promise<void> {
+  async #syncFolder(
+    folder: Folder,
+    reconcile: boolean,
+    serviceInbox?: () => Promise<void>,
+  ): Promise<void> {
     const { path } = folder
     const box = await this.client.mailboxOpen(path, { readOnly: true })
     if (!box.uidValidity || !Number.isSafeInteger(box.uidNext) || box.uidNext < 1) {
@@ -258,6 +260,17 @@ export class ImapAccountSync {
       }
     }
     const validity = String(box.uidValidity)
+    let lastInboxWindow = performance.now()
+    const yieldToInbox = async () => {
+      if (path === 'INBOX' || !serviceInbox) return
+      if (performance.now() - lastInboxWindow < INBOX_WINDOW_INTERVAL) return
+      await serviceInbox()
+      const current = await this.client.mailboxOpen(path, { readOnly: true })
+      if (String(current.uidValidity) !== validity || current.mailboxId !== box.mailboxId) {
+        throw new Error('IMAP mailbox identity changed during reconciliation')
+      }
+      lastInboxWindow = performance.now()
+    }
     const highUid = box.uidNext - 1
     const modseq =
       !box.noModseq && this.client.enabled.has('CONDSTORE') && box.highestModseq
@@ -275,19 +288,21 @@ export class ImapAccountSync {
         validity,
         mailboxId: box.mailboxId,
         highUid,
+        exists: box.exists,
         modseq,
         before: box.exists ? box.uidNext : 0,
       }
       this.#cursor.set(path, cursor)
       this.#saveCursor()
     } else if (reconcile) {
-      await this.#reconcile(folder, cursor, box, modseq)
+      await this.#reconcile(folder, cursor, box, modseq, yieldToInbox)
     }
 
     for (let before = highUid + 1; before > cursor.highUid + 1 && box.exists; ) {
       const page = await this.#pageBefore(cursor.highUid + 1, before)
       await this.#fetchMessages(folder, validity, page.uids)
       before = page.before
+      await yieldToInbox()
     }
     let before = cursor.before
     if (before > 1 && box.exists) {
@@ -299,6 +314,7 @@ export class ImapAccountSync {
       ...cursor,
       mailboxId: box.mailboxId ?? cursor.mailboxId,
       highUid,
+      exists: box.exists,
       before: box.exists && before > 1 ? before : 0,
       modseq: reconcile ? modseq : cursor.modseq,
     })
@@ -370,13 +386,11 @@ export class ImapAccountSync {
     return item
   }
 
-  async #downloadSource(uid: number): Promise<string> {
-    const { content } = await this.client.download(String(uid), undefined, {
-      uid: true,
-      maxBytes: MESSAGE_LIMIT + 1,
-    })
+  async #downloadSource(uid: number, expectedSize?: number): Promise<string> {
+    const { content, meta } = await this.client.download(String(uid), undefined, { uid: true })
     if (!content) throw new Error('IMAP source disappeared during download')
-    return (await this.store.blobs.putStream(content, MESSAGE_LIMIT)).hash
+    const { hash } = await this.store.blobs.putStream(content, expectedSize ?? meta?.expectedSize)
+    return hash
   }
 
   async #fetchMessages(folder: Folder, validity: string, uids: number[]): Promise<void> {
@@ -384,15 +398,14 @@ export class ImapAccountSync {
       if (this.#locations.get(folder.path, validity, uid)?.verified) continue
       const item = await this.#metadata(uid)
       if (!item) continue
-      const source =
-        item.size !== undefined && item.size <= MESSAGE_LIMIT
-          ? await this.#downloadSource(uid)
-          : null
-      const preview = source ? undefined : await largePreview(this.client, item)
-      const message = await parseMessage(folder, validity, item, this.store.blobs, source, preview)
-      // ImapFlow synthesizes its fallback "id" from a folder and UID. Only emailId
-      // from the server can identify an oversized copy without downloading it.
-      const fingerprint = source ?? (item.emailId ? `email-id:${item.emailId}` : null)
+      const source = await this.#downloadSource(uid, item.size)
+      const { message, fingerprint } = await parseMessage(
+        folder,
+        validity,
+        item,
+        this.store.blobs,
+        source,
+      )
       this.#locations.put(folder, validity, uid, message, fingerprint, source)
     }
   }
@@ -402,6 +415,7 @@ export class ImapAccountSync {
     cursor: FolderCursor,
     box: MailboxObject,
     modseq: string | null,
+    yieldToInbox: () => Promise<void>,
   ) {
     const { path } = folder
     const { validity } = cursor
@@ -411,7 +425,7 @@ export class ImapAccountSync {
         : null
     let after = 0
     for (;;) {
-      const rows = this.#locations.page(path, validity, after)
+      const rows = this.#locations.page(path, validity, after, RECONCILE_PAGE)
       if (!rows.length) return
       after = rows[rows.length - 1]?.uid ?? after
       // SEARCH is authoritative even when QRESYNC's VANISHED is limited to the FETCH
@@ -436,7 +450,11 @@ export class ImapAccountSync {
           this.#locations.flags(path, validity, item.uid, unread, starred)
         }
       }
-      await this.#fetchMessages(folder, validity, legacy)
+      await yieldToInbox()
+      for (let start = 0; start < legacy.length; start += PAGE) {
+        await this.#fetchMessages(folder, validity, legacy.slice(start, start + PAGE))
+        await yieldToInbox()
+      }
     }
   }
 }

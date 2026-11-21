@@ -12,7 +12,7 @@ import { MailStore } from '../mail/store.ts'
 import { FakeGmail } from '../providers/gmail/fake.ts'
 import type { ImapCredentials } from '../providers/imap/client.ts'
 import { FakeImap } from '../providers/imap/fake.ts'
-import { MESSAGE_LIMIT } from '../providers/imap/mapping.ts'
+import { LAZY_ATTACHMENT_THRESHOLD } from '../providers/imap/mapping.ts'
 import { ImapProvider } from '../providers/imap/provider.ts'
 import { setSetting } from '../settings.ts'
 import { SyncManager } from '../sync/manager.ts'
@@ -309,48 +309,100 @@ it('releases a one-session mailbox for verification and resumes after failure an
   }
 })
 
-it('lazy-loads a huge MIME attachment by part and streams the cached response', async () => {
-  const { db, imap, call, sync, admin, reader } = setup()
-  const bytes = Buffer.alloc(MESSAGE_LIMIT + 20, 'x')
-  const uid = imap.add('INBOX', 'Subject: Huge file', 'x'.repeat(MESSAGE_LIMIT))
-  const fixture = imap.folder('INBOX').messages.get(uid)
-  if (!fixture) throw new Error('Missing fake MIME fixture')
-  fixture.structure = {
-    type: 'multipart/mixed',
-    childNodes: [
-      { type: 'text/plain', part: '1' },
-      {
-        type: 'application/octet-stream',
-        part: '2',
-        size: bytes.length,
-        disposition: 'attachment',
-        dispositionParameters: { filename: 'huge.bin' },
-      },
-    ],
-  }
-  fixture.parts = new Map([
-    ['1', Buffer.from('Small preview')],
-    ['2', bytes],
-  ])
-  try {
-    expect((await call('/v1/accounts/imap', admin, login)).status).toBe(200)
-    await vi.waitFor(() => expect(db.prepare('SELECT id FROM attachment').get()).toBeDefined())
-    const row = db.prepare('SELECT id, blob, provider_attachment FROM attachment').get()
-    expect(row).toMatchObject({ blob: null, provider_attachment: '2' })
-    expect(imap.downloads.map(({ part }) => part)).toEqual(['1'])
-    expect(db.prepare('SELECT body_text FROM message').get()?.body_text).toBe('Small preview')
-    const path = `/v1/attachments/${row?.id}`
-    const response = await call(path, reader)
-    expect(response.status).toBe(200)
-    expect(Number(response.headers.get('content-length'))).toBe(bytes.length)
-    expect(Buffer.from(await response.arrayBuffer()).equals(bytes)).toBe(true)
-    const again = await call(path, reader)
-    await again.body?.cancel()
-    expect(imap.downloads.map(({ part }) => part)).toEqual(['1', '2'])
-  } finally {
-    await sync.stop()
-  }
-})
+it.each([false, true])(
+  'streams a lazy attachment from the surviving IMAP copy (refresh locations: %s)',
+  async (refreshLocations) => {
+    const { db, imap, call, sync, admin, reader } = setup()
+    const bytes = Buffer.alloc(LAZY_ATTACHMENT_THRESHOLD + 20, 'x')
+    const encoded = bytes
+      .toString('base64')
+      .match(/.{1,76}/g)
+      ?.join('\r\n')
+    const headers = [
+      'Subject: Huge file',
+      'Message-ID: <huge-file@example.com>',
+      'Content-Type: multipart/mixed; boundary="file"',
+    ].join('\r\n')
+    const mime = [
+      '--file',
+      'Content-Type: text/plain',
+      '',
+      'Body from the source',
+      '--file',
+      'Content-Type: application/octet-stream',
+      'Content-Disposition: attachment; filename="huge.bin"',
+      'Content-Transfer-Encoding: base64',
+      '',
+      encoded,
+      '--file--',
+    ].join('\r\n')
+    imap.addFolder('Archive', '\\Archive')
+    const copy = (path: string) => {
+      const uid = imap.add(path, headers, mime)
+      const item = imap.folder(path).messages.get(uid)
+      if (!item) throw new Error('Missing fake MIME fixture')
+      item.structure = {
+        type: 'multipart/mixed',
+        childNodes: [
+          { type: 'text/plain', part: '1' },
+          {
+            type: 'application/octet-stream',
+            part: '2',
+            size: bytes.length,
+            disposition: 'attachment',
+            dispositionParameters: { filename: 'huge.bin' },
+          },
+        ],
+      }
+      item.parts = new Map([['2', bytes]])
+      return uid
+    }
+    const inbox = copy('INBOX')
+    const archive = copy('Archive')
+    try {
+      expect((await call('/v1/accounts/imap', admin, login)).status).toBe(200)
+      await vi.waitFor(
+        () =>
+          expect(db.prepare('SELECT count(*) AS count FROM imap_location').get()?.count).toBe(2),
+        { timeout: 5_000 },
+      )
+      const row = db.prepare('SELECT id, blob, provider_attachment FROM attachment').get()
+      expect(row).toMatchObject({ blob: null, provider_attachment: '2' })
+      expect(imap.downloads.map(({ part }) => part)).toEqual([undefined, undefined])
+      expect(db.prepare('SELECT body_text FROM message').get()?.body_text).toBe(
+        'Body from the source',
+      )
+
+      imap.onDownload = (folder, uid, part) => {
+        if (folder !== 'Archive' || part !== '2') return
+        imap.expunge(folder, uid)
+        if (refreshLocations) {
+          db.prepare("UPDATE imap_location SET uid = ? WHERE path_key = 'INBOX'").run(inbox)
+        }
+      }
+      if (refreshLocations) {
+        // The first lookup still has an outdated Inbox UID. The correct UID appears after
+        // that attempt, so a fresh lookup must discover it.
+        db.prepare("UPDATE imap_location SET uid = 99 WHERE path_key = 'INBOX'").run()
+      }
+      const path = `/v1/attachments/${row?.id}`
+      const response = await call(path, reader)
+      expect(response.status).toBe(200)
+      expect(Number(response.headers.get('content-length'))).toBe(bytes.length)
+      expect(Buffer.from(await response.arrayBuffer()).equals(bytes)).toBe(true)
+      const again = await call(path, reader)
+      await again.body?.cancel()
+      expect(imap.downloads.filter(({ part }) => part)).toEqual([
+        { path: 'Archive', uid: archive, part: '2' },
+        ...(refreshLocations ? [{ path: 'INBOX', uid: 99, part: '2' }] : []),
+        { path: 'INBOX', uid: inbox, part: '2' },
+      ])
+    } finally {
+      await sync.stop()
+    }
+  },
+  15_000,
+)
 
 it('has no SMTP submission dispatch through Agent tokens, HTTP, MCP or the CLI (ADR 0001)', async () => {
   const { app, call, admin, db, imap, sync } = setup()
