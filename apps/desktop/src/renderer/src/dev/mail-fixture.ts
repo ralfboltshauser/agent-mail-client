@@ -1,5 +1,7 @@
 import {
   type AccountSummary,
+  actionLabels,
+  applyLabelPatch,
   BUCKETS,
   type ComposeDraft,
   type OutboxItem,
@@ -80,6 +82,7 @@ export function createFixture(scenario: string): AmcApi {
     healthRefreshFailed: scenario === 'health-error',
   }
   const changed = new Set<() => void>()
+  const mutations = new Map<string, ThreadSummary>()
   const notify = () =>
     changed.forEach((listener) => {
       listener()
@@ -206,11 +209,16 @@ export function createFixture(scenario: string): AmcApi {
     }),
     threads: async ({ view }) =>
       threads.filter((thread) => {
+        const trashed = thread.labelIds.includes(`${account.id}:TRASH`)
+        if (view.kind === 'trash') return trashed
+        if (trashed) return false
         switch (view.kind) {
           case 'inbox':
             return thread.inInbox
           case 'unread':
             return thread.unreadCount > 0
+          case 'snoozed':
+            return thread.snoozedUntil !== null
           case 'starred':
             return thread.starred
           case 'bucket':
@@ -253,13 +261,45 @@ export function createFixture(scenario: string): AmcApi {
       notify()
     },
     organise: async (action) => {
-      if (action.kind === 'archive') {
-        threads = threads.map((thread) =>
-          thread.id === action.threadId ? { ...thread, inInbox: false } : thread,
-        )
+      if (action.kind === 'undo') {
+        const id = action.mutationId ?? [...mutations.keys()].at(-1)
+        const previous = id ? mutations.get(id) : undefined
+        if (!id || !previous) throw new Error('No synthetic action to undo.')
+        threads = threads.map((thread) => (thread.id === previous.id ? previous : thread))
+        mutations.delete(id)
         notify()
+        return id
       }
-      return 'fixture-mutation'
+      const thread = threads.find((item) => item.id === action.threadId)
+      if (!thread) throw new Error('Synthetic thread not found.')
+      const id = crypto.randomUUID()
+      mutations.set(id, thread)
+      const patch = actionLabels(action, account.id)
+      let updated = thread
+      switch (action.kind) {
+        case 'archive':
+          updated = { ...thread, inInbox: false }
+          break
+        case 'snooze':
+          updated = { ...thread, inInbox: false, snoozedUntil: action.until }
+          break
+        case 'trash':
+          updated = { ...thread, inInbox: !action.value }
+          break
+        case 'read':
+          updated = { ...thread, unreadCount: action.value ? 0 : 1 }
+          break
+        case 'star':
+          updated = { ...thread, starred: action.value }
+          break
+        case 'mute':
+          updated = { ...thread, muted: action.value }
+          break
+      }
+      const labelIds = applyLabelPatch(thread.labelIds, patch)
+      threads = threads.map((item) => (item.id === thread.id ? { ...updated, labelIds } : item))
+      notify()
+      return id
     },
     organiseErrors: async () => [],
     agentActivity: async () => ({

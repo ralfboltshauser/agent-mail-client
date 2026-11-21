@@ -1,4 +1,5 @@
 import { type AccountSummary, BUCKETS, type Label } from '@amc/protocol'
+import { defaultFilter } from 'cmdk'
 import {
   Layers,
   type LucideIcon,
@@ -92,6 +93,9 @@ export function CommandPalette({
       title="Command palette"
       description="Run an action, switch views or search all mail."
       showCloseButton={false}
+      filter={(value, search, keywords) =>
+        value === 'mail-search-fallback' ? 0.001 : defaultFilter(value, search, keywords)
+      }
     >
       <CommandInput
         placeholder="Type a command or search mail…"
@@ -107,7 +111,7 @@ export function CommandPalette({
           <CommandGroup heading="Organise">
             {organise.map(renderAction)}
             {undo && (
-              <CommandItem value="undo organise" onSelect={run(undo)}>
+              <CommandItem value="Undo" keywords={['organise']} onSelect={run(undo)}>
                 <Undo2 />
                 Undo
                 <CommandShortcut>Z</CommandShortcut>
@@ -174,17 +178,18 @@ export function CommandPalette({
             <RefreshCw />
             Sync now
           </CommandItem>
-          <CommandItem value="toggle theme dark light" onSelect={run(onToggleTheme)}>
+          <CommandItem
+            value={dark ? 'Light mode' : 'Dark mode'}
+            keywords={['toggle', 'theme']}
+            onSelect={run(onToggleTheme)}
+          >
             {dark ? <Sun /> : <Moon />}
             {dark ? 'Light mode' : 'Dark mode'}
           </CommandItem>
         </CommandGroup>
         {query.trim() && (
           <CommandGroup heading="Search all mail">
-            <CommandItem
-              value={`search ${query.trim()}`}
-              onSelect={run(() => onSearch(query.trim()))}
-            >
+            <CommandItem value="mail-search-fallback" onSelect={run(() => onSearch(query.trim()))}>
               <Search />
               Search for “{query.trim()}”
             </CommandItem>
