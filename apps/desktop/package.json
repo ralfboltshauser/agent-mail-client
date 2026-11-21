@@ -8,7 +8,8 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "start": "electron-vite preview",
-    "package": "electron-vite build && electron-builder --mac --dir"
+    "package": "pnpm build && node build/prepare-package.mjs && electron-builder --mac --arm64 --publish never",
+    "package:dir": "pnpm package --dir"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.5",

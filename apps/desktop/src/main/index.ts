@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { PairResponse } from '@amc/protocol'
@@ -9,12 +9,16 @@ import { EngineClient, EngineError } from './engine'
 import { OrganiseSync } from './organise'
 import { Replica } from './replica'
 import { SyncLoop } from './sync'
+import { createTray } from './tray'
 
 let window: BrowserWindow | null = null
 let replica: Replica | null = null
 let engine: EngineClient | null = null
 let sync: SyncLoop | null = null
 let organise: OrganiseSync | null = null
+let pausedStatus: SyncStatus | null = null
+let tray: ReturnType<typeof createTray> | null = null
+let changedTimer: NodeJS.Timeout | null = null
 
 const UNPAIRED: SyncStatus = {
   phase: 'unpaired',
@@ -23,6 +27,9 @@ const UNPAIRED: SyncStatus = {
   lastSyncAt: null,
   error: null,
 }
+
+let unpairedStatus = UNPAIRED
+const pauseFile = () => join(app.getPath('userData'), 'sync-paused')
 
 function broadcast(channel: string, payload?: unknown) {
   window?.webContents.send(channel, payload)
@@ -33,26 +40,82 @@ function openReplica(): Replica {
   return replica
 }
 
+function refreshTray() {
+  if (tray)
+    tray.refresh(engine ? openReplica().counts(null).inboxUnread : 0, !!engine, !!pausedStatus)
+}
+
+function refreshMail() {
+  broadcast('amc:changed')
+  refreshTray()
+}
+
+function createOrganise(client: EngineClient, loop?: SyncLoop) {
+  const worker = new OrganiseSync(
+    openReplica().organise,
+    client,
+    () => loop?.pull() ?? Promise.resolve(),
+  )
+  worker.on('changed', refreshMail)
+  return worker
+}
+
 function connect(engineUrl: string, token: string) {
-  sync?.stop()
-  organise?.stop()
   engine = new EngineClient(engineUrl, token)
-  sync = new SyncLoop(engine, openReplica())
-  const activeSync = sync
-  organise = new OrganiseSync(openReplica().organise, engine, () => activeSync.pull())
-  organise.on('changed', () => broadcast('amc:changed'))
-  let changedTimer: NodeJS.Timeout | null = null
-  sync.on('status', (status) => broadcast('amc:status', status))
-  sync.on('changed', () => {
+  if (existsSync(pauseFile())) {
+    organise = createOrganise(engine)
+    pausedStatus = { ...UNPAIRED, phase: 'paused', engineUrl }
+    broadcast('amc:status', pausedStatus)
+  } else {
+    startSync(engine)
+  }
+  refreshTray()
+}
+
+function startSync(client: EngineClient) {
+  pausedStatus = null
+  const loop = new SyncLoop(client, openReplica())
+  sync = loop
+  organise = createOrganise(client, loop)
+  broadcast('amc:status', loop.status)
+  loop.on('status', (status) => {
+    if (sync === loop) broadcast('amc:status', status)
+  })
+  loop.on('changed', () => {
     // Coalesce bursts (backfill pages) into one UI refresh per 120 ms.
     if (changedTimer) return
     changedTimer = setTimeout(() => {
       changedTimer = null
-      broadcast('amc:changed')
+      refreshMail()
     }, 120)
   })
-  sync.start()
+  loop.start()
   organise.start()
+}
+
+function stopSync() {
+  sync?.stop()
+  sync = null
+  organise?.stop()
+}
+
+function toggleSync() {
+  if (!engine) return
+  try {
+    if (sync) writeFileSync(pauseFile(), '')
+    else rmSync(pauseFile(), { force: true })
+  } catch (error) {
+    console.error('Could not save the AMC sync preference', error)
+    return
+  }
+  if (sync) {
+    pausedStatus = { ...sync.status, phase: 'paused', progress: null, error: null }
+    stopSync()
+    broadcast('amc:status', pausedStatus)
+  } else {
+    startSync(engine)
+  }
+  refreshTray()
 }
 
 function requireEngine(): EngineClient {
@@ -63,21 +126,22 @@ function requireEngine(): EngineClient {
 function registerIpc() {
   ipcMain.handle('amc:pair', (_e, engineUrl: string, code: string) => pair(engineUrl, code))
   ipcMain.handle('amc:unpair', () => {
-    sync?.stop()
-    organise?.stop()
+    stopSync()
     organise = null
-    sync = null
+    pausedStatus = null
     engine = null
     clearPairing()
     openReplica().clear()
     openReplica().organise.clear()
-    broadcast('amc:status', UNPAIRED)
+    unpairedStatus = UNPAIRED
+    broadcast('amc:status', unpairedStatus)
+    refreshTray()
   })
   ipcMain.handle('amc:organise', (_event, input: unknown) => {
     if (!organise) throw new Error('Pair with the Engine first')
-    const id = organise.enqueue(input, sync?.status.snoozeEnabled)
-    broadcast('amc:changed')
-    void organise.flush()
+    const id = organise.enqueue(input, (sync?.status ?? pausedStatus)?.snoozeEnabled)
+    refreshMail()
+    if (sync) void organise.flush()
     return id
   })
   ipcMain.handle('amc:organiseErrors', () => openReplica().organise.errors())
@@ -99,13 +163,22 @@ async function pair(engineUrl: string, code: string) {
   if (!res.ok || !body.token) throw new Error(body.message ?? 'Pairing failed')
   if (body.kind !== 'desktop')
     throw new Error('That code is for the CLI. Run `sudo amc-engine pair --desktop` on the Host.')
+  const previousUrl = engine?.baseUrl ?? unpairedStatus.engineUrl
   savePairing(url, body.token)
-  openReplica().clear()
+  stopSync()
+  if (previousUrl !== url) {
+    const db = openReplica()
+    db.transaction(() => {
+      db.clear()
+      db.organise.clear()
+    })
+    broadcast('amc:changed')
+  }
   connect(url, body.token)
 }
 
 function registerReadIpc() {
-  ipcMain.handle('amc:status', () => sync?.status ?? UNPAIRED)
+  ipcMain.handle('amc:status', () => sync?.status ?? pausedStatus ?? unpairedStatus)
   ipcMain.handle('amc:syncNow', () => sync?.pull())
 
   ipcMain.handle('amc:accounts', () => openReplica().accounts())
@@ -178,6 +251,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       spellcheck: true,
+      devTools: !app.isPackaged,
     },
   })
   window.once('ready-to-show', () => window?.show())
@@ -189,11 +263,23 @@ function createWindow() {
   window.webContents.on('will-navigate', (event, url) => {
     if (url !== window?.webContents.getURL()) event.preventDefault()
   })
-  if (process.env.ELECTRON_RENDERER_URL) void window.loadURL(process.env.ELECTRON_RENDERER_URL)
-  else void window.loadFile(join(import.meta.dirname, '../renderer/index.html'))
+  if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) {
+    void window.loadURL(process.env.ELECTRON_RENDERER_URL)
+  } else void window.loadFile(join(import.meta.dirname, '../renderer/index.html'))
   window.on('closed', () => {
     window = null
   })
+}
+
+function openWindow() {
+  if (process.platform === 'darwin') app.focus({ steal: true })
+  if (!window) {
+    createWindow()
+    return
+  }
+  if (window.isMinimized()) window.restore()
+  window.show()
+  window.focus()
 }
 
 function buildMenu() {
@@ -205,7 +291,7 @@ function buildMenu() {
         label: 'View',
         submenu: [
           { role: 'reload' },
-          { role: 'toggleDevTools' },
+          ...(!app.isPackaged ? [{ role: 'toggleDevTools' as const }] : []),
           { type: 'separator' },
           { role: 'togglefullscreen' },
         ],
@@ -215,20 +301,37 @@ function buildMenu() {
   )
 }
 
+// Both the packaged app and electron-vite use the original dev profile by default.
+const customProfile = app.commandLine.getSwitchValue('user-data-dir')
+const profile = customProfile || join(app.getPath('appData'), '@amc', 'desktop')
+mkdirSync(profile, { recursive: true })
+app.setPath('userData', profile)
+
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
-  app.on('second-instance', () => {
-    if (window?.isMinimized()) window.restore()
-    window?.focus()
-  })
+  app.on('second-instance', openWindow)
   app.whenReady().then(() => {
+    // Keep the same app name at safeStorage initialization as the dev build.
     app.setName('AMC')
     buildMenu()
     registerIpc()
+    openReplica()
+    const packagedMac = process.platform === 'darwin' && app.isPackaged
+    const loginItem = packagedMac && !customProfile
+    if (process.platform === 'darwin') tray = createTray(openWindow, toggleSync, loginItem)
+    refreshTray()
     const pairing = loadPairing()
-    if (pairing) connect(pairing.engineUrl, pairing.token)
+    if (pairing?.token) connect(pairing.engineUrl, pairing.token)
     else {
+      if (pairing) {
+        unpairedStatus = {
+          ...UNPAIRED,
+          engineUrl: pairing.engineUrl,
+          error:
+            "AMC couldn't read its saved pairing (the app changed). Pair again with `sudo amc-engine pair --desktop` on the Host.",
+        }
+      }
       // Scriptable first run: --engine-url=… --pairing-code=…
       const arg = (name: string) =>
         process.argv.find((a) => a.startsWith(`--${name}=`))?.split('=')[1]
@@ -239,10 +342,13 @@ if (!app.requestSingleInstanceLock()) {
           console.error(`Pairing failed: ${error.message}`),
         )
     }
-    createWindow()
-    app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) createWindow()
-    })
+    if (!loginItem || !app.getLoginItemSettings().wasOpenedAtLogin) createWindow()
+    app.on('activate', openWindow)
+    app.on('browser-window-focus', refreshTray)
+  })
+  app.on('before-quit', () => {
+    stopSync()
+    if (changedTimer) clearTimeout(changedTimer)
   })
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit()

@@ -1,5 +1,31 @@
 # Runbook: the Engine on the Host
 
+## Mac desktop app
+
+On an Apple silicon Mac, run `pnpm install` and `pnpm desktop:install` from the
+repository root, then open `~/Applications/AMC.app` in Finder. To update, quit AMC
+from the menu bar or with ⌘Q, update the checkout, and rerun those commands. Quit
+the electron-vite dev instance before switching to the installed app. Both builds
+use the same pairing and SQLite replica in
+`~/Library/Application Support/@amc/desktop`.
+
+`pnpm --filter @amc/desktop package` builds both `apps/desktop/dist/mac-arm64/AMC.app`
+and `apps/desktop/dist/AMC-<version>-arm64.dmg`. The bundle is signed ad hoc for
+local use. If Finder blocks a copy you built, right-click AMC and choose **Open**
+if Finder offers the confirmation. On newer macOS versions, try opening AMC,
+then use **Open Anyway** under **System Settings → Privacy & Security**.
+[Apple's Gatekeeper instructions](https://support.apple.com/en-us/102445)
+
+Both builds use the `@amc/desktop Safe Storage` service. macOS Keychain may ask
+whether the new build can use the existing entry. Allow access to carry over the
+pairing. If AMC cannot decrypt the saved token, use the pair screen to pair again.
+Pairing to the same Engine URL keeps the replica.
+
+Closing the window keeps sync running in the menu bar. **Pause Sync** persists
+across restarts. **Launch at Login** is enabled on first run. If macOS requests
+approval, use the AMC menu to open Login Items settings or cancel the pending
+registration. Desktop upgrades move the previous app bundle to the Trash.
+
 ## Layout
 
 | Path | What | Owner |

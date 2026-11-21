@@ -25,7 +25,11 @@ export function App() {
   if (!status) return null
   return (
     <TooltipProvider delayDuration={400}>
-      {status.phase === 'unpaired' ? <PairScreen /> : <MailApp />}
+      {status.phase === 'unpaired' ? (
+        <PairScreen savedEngineUrl={status.engineUrl} recoveryMessage={status.error} />
+      ) : (
+        <MailApp />
+      )}
       <Toaster position="bottom-center" />
     </TooltipProvider>
   )

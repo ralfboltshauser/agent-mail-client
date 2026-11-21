@@ -8,10 +8,14 @@ const SNAPSHOT_ORDER: SyncEntity[] = ['account', 'label', 'draft', 'thread', 'me
 const sleep = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve) => {
     const t = setTimeout(resolve, ms)
-    signal.addEventListener('abort', () => {
-      clearTimeout(t)
-      resolve()
-    })
+    signal.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(t)
+        resolve()
+      },
+      { once: true },
+    )
   })
 
 /**
@@ -58,6 +62,8 @@ export class SyncLoop extends EventEmitter<{ status: [SyncStatus]; changed: [] }
 
   /** Pull now; coalesces concurrent requests into one extra pull. */
   pull(): Promise<void> {
+    const signal = this.#controller.signal
+    if (signal.aborted) return Promise.resolve()
     if (this.#pulling) {
       this.#pullAgain = true
       return this.#pulling
@@ -69,14 +75,16 @@ export class SyncLoop extends EventEmitter<{ status: [SyncStatus]; changed: [] }
           try {
             await this.#pullChanges()
           } catch (error) {
+            signal.throwIfAborted()
             if (!(error instanceof EngineError && error.code === 'resync_required')) throw error
             await this.#bootstrap()
-            if (!this.#controller.signal.aborted) {
-              this.#set({ phase: 'live', progress: null })
-              this.#pullAgain = true
-            }
+            signal.throwIfAborted()
+            this.#set({ phase: 'live', progress: null })
+            this.#pullAgain = true
           }
-        } while (this.#pullAgain)
+        } while (this.#pullAgain && !signal.aborted)
+      } catch (error) {
+        if (!signal.aborted) throw error
       } finally {
         this.#pulling = null
       }
@@ -94,6 +102,7 @@ export class SyncLoop extends EventEmitter<{ status: [SyncStatus]; changed: [] }
         this.#set({ snoozeEnabled: me.features?.snooze === true })
         if (this.#replica.modseq === null) await this.#bootstrap()
         await this.pull()
+        if (signal.aborted) return
         this.#set({ phase: 'live', error: null, progress: null })
         backoff = 1000
         const poll = setInterval(() => void this.pull().catch(() => {}), 60_000)
@@ -112,6 +121,7 @@ export class SyncLoop extends EventEmitter<{ status: [SyncStatus]; changed: [] }
         if (signal.aborted) return
         if (error instanceof EngineError && error.code === 'resync_required') {
           this.#replica.clear()
+          this.emit('changed')
           continue
         }
         const offline = error instanceof EngineError && error.code === 'unreachable'
@@ -128,10 +138,10 @@ export class SyncLoop extends EventEmitter<{ status: [SyncStatus]; changed: [] }
 
   async #bootstrap(): Promise<void> {
     const signal = this.#controller.signal
-    if (signal.aborted) return
+    signal.throwIfAborted()
     this.#set({ phase: 'bootstrapping', progress: 0 })
     const state = await this.#engine.get<SyncState>('/v1/sync/state', { signal })
-    if (signal.aborted) return
+    signal.throwIfAborted()
     this.#replica.clear()
     let done = 0
     for (const entity of SNAPSHOT_ORDER) {
@@ -141,7 +151,7 @@ export class SyncLoop extends EventEmitter<{ status: [SyncStatus]; changed: [] }
         const page: SyncSnapshotPage = await this.#engine.get(`/v1/sync/snapshot?${query}`, {
           signal,
         })
-        if (signal.aborted) return
+        signal.throwIfAborted()
         this.#replica.transaction(() => {
           for (const row of page.rows) this.#replica.put(entity, row)
           if (entity === 'thread' || entity === 'message') this.#replica.organise.rebuild()
@@ -159,13 +169,14 @@ export class SyncLoop extends EventEmitter<{ status: [SyncStatus]; changed: [] }
 
   async #pullChanges(): Promise<void> {
     const signal = this.#controller.signal
-    while (!signal.aborted) {
+    for (;;) {
+      signal.throwIfAborted()
       const since = this.#replica.modseq ?? 0
       const res = await this.#engine.get<SyncChanges>(
         `/v1/sync/changes?since=${since}&limit=2000`,
         { signal },
       )
-      if (signal.aborted) return
+      signal.throwIfAborted()
       if (res.changes.length > 0 || res.modseq !== since) {
         this.#replica.transaction(() => {
           this.#replica.apply(res.changes)

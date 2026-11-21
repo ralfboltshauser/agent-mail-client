@@ -10,16 +10,22 @@ interface Stored {
 
 const file = () => join(app.getPath('userData'), 'pairing.json')
 
-export function loadPairing(): { engineUrl: string; token: string } | null {
+type LoadedPairing =
+  | { engineUrl: string; token: string }
+  | { engineUrl: string | null; token: null }
+
+export function loadPairing(): LoadedPairing | null {
   if (!existsSync(file())) return null
+  let engineUrl: string | null = null
   try {
     const stored = JSON.parse(readFileSync(file(), 'utf8')) as Stored
-    return {
-      engineUrl: stored.engineUrl,
-      token: safeStorage.decryptString(Buffer.from(stored.token, 'base64')),
-    }
+    engineUrl = new URL(stored.engineUrl).origin
+    const token = safeStorage.decryptString(Buffer.from(stored.token, 'base64'))
+    if (token) return { engineUrl, token }
+    return { engineUrl, token: null }
   } catch {
-    return null
+    // The URL is plaintext so a Keychain failure needn't lose the replica identity.
+    return { engineUrl, token: null }
   }
 }
 

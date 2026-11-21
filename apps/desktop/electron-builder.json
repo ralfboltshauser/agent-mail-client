@@ -1,0 +1,24 @@
+{
+  "appId": "io.github.ralfboltshauser.amc",
+  "productName": "AMC",
+  "directories": {
+    "app": "out",
+    "output": "dist",
+    "buildResources": "build"
+  },
+  "files": ["main/**", "preload/**", "renderer/**"],
+  "extraResources": [{ "from": "build", "filter": ["trayTemplate.png", "trayTemplate@2x.png"] }],
+  "beforeBuild": "./build/packaging-hooks.mjs",
+  "afterPack": "./build/packaging-hooks.mjs",
+  "artifactName": "${productName}-${version}-${arch}.${ext}",
+  "mac": {
+    "target": [{ "target": "dmg", "arch": ["arm64"] }],
+    "category": "public.app-category.productivity",
+    "icon": "build/icon.icns",
+    "identity": null,
+    "notarize": false
+  },
+  "dmg": {
+    "sign": false
+  }
+}
