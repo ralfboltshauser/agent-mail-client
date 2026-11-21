@@ -9,8 +9,11 @@ import { type Config, databasePath } from '../config.ts'
 import { type Db, fileSize, schemaVersion } from '../db/database.ts'
 import type { Logger } from '../log.ts'
 import type { Mutations } from '../mail/mutations.ts'
+import { DraftError } from '../mail/drafts.ts'
+import type { Outbox } from '../mail/outbox.ts'
 import { buildMcpServer } from '../mcp/server.ts'
 import { VERSION } from '../version.ts'
+import { composeRoutes } from './compose.ts'
 import { type MailDeps, mailRoutes } from './mail.ts'
 import { mutationRoutes } from './mutations.ts'
 import { syncRoutes } from './sync.ts'
@@ -27,12 +30,14 @@ export interface AppDeps {
   startedAt?: number
   mail?: MailDeps
   mutations?: Mutations
+  outbox?: Outbox
 }
 
-export function createApp({ db, config, log, startedAt = Date.now(), mail, mutations }: AppDeps) {
+export function createApp({ db, config, log, startedAt = Date.now(), mail, mutations, outbox }: AppDeps) {
   const app = new Hono<AppEnv>()
 
   app.onError((error, c) => {
+    if (error instanceof DraftError) return c.json({ error: 'draft', message: error.message }, 400)
     if (error instanceof HTTPException) {
       return c.json({ error: error.message || 'error', message: error.message }, error.status)
     }
@@ -103,6 +108,7 @@ export function createApp({ db, config, log, startedAt = Date.now(), mail, mutat
   v1.route('/', tokenRoutes(db))
   if (mutations) v1.route('/', mutationRoutes(mutations))
   if (mail) {
+    if (outbox) v1.route('/compose', composeRoutes(mail, outbox))
     v1.route('/', mailRoutes(mail))
     v1.route('/', syncRoutes(mail, mutations))
 

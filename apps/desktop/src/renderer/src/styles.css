@@ -146,3 +146,21 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+.amc-compose-editor ul {
+  list-style: disc;
+  padding-inline-start: 1.5rem;
+}
+
+.amc-compose-editor ol {
+  list-style: decimal;
+  padding-inline-start: 1.5rem;
+}
+
+.amc-compose-editor p + p {
+  margin-block-start: 0.5em;
+}
+
+.amc-compose-editor a {
+  text-decoration: underline;
+}

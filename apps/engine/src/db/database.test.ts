@@ -14,13 +14,13 @@ describe('migrate', () => {
     expect(schemaVersion(db)).toBe(latest)
   })
 
-  it('upgrades a populated v7 database in one migration and preserves the v7 backup', () => {
+  it('upgrades a populated v7 database and preserves the v7 backup', () => {
     const dir = tempDir()
     const db = openDatabase(join(dir, 'mail.db'))
     try {
       expect(migrate(db, { migrations: MIGRATIONS.filter(({ version }) => version <= 7) })).toBe(7)
       expect(MIGRATIONS.filter(({ version }) => version > 7).map(({ version }) => version)).toEqual(
-        [8],
+        [8, 9],
       )
       db.exec(`
         INSERT INTO account (id, kind, address, credentials, created_at)
@@ -40,7 +40,7 @@ describe('migrate', () => {
         VALUES ('i', 'INBOX', '1', 2, 'i:m', 'i:INBOX', 1, 1, 'fixture-source');
       `)
       const backupDir = join(dir, 'backups')
-      expect(migrate(db, { backupDir })).toBe(8)
+      expect(migrate(db, { backupDir })).toBe(9)
       expect(db.prepare('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' })
       expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([])
       expect(
@@ -88,6 +88,23 @@ describe('migrate', () => {
       db.close()
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  it('upgrades legacy Organise v8 and rejects a different migration at the same version', () => {
+    const db = openDatabase(':memory:')
+    const compose = MIGRATIONS.find(({ version }) => version === 9)!
+    expect(migrate(db, { migrations: MIGRATIONS.slice(0, -1) })).toBe(8)
+    db.exec('DROP TABLE schema_migration')
+    expect(migrate(db)).toBe(9)
+    expect(db.prepare('SELECT * FROM organise_intent').all()).toEqual([])
+    expect(db.prepare('SELECT * FROM outbox').all()).toEqual([])
+
+    const wrong = openDatabase(':memory:')
+    migrate(wrong, { migrations: [...MIGRATIONS.slice(0, -2), { ...compose, version: 8 }] })
+    db.close()
+    wrong.exec('DROP TABLE schema_migration')
+    expect(() => migrate(wrong)).toThrow(/Schema migration v8 mismatch.*organise/)
+    wrong.close()
   })
 
   it('backs up an existing database before applying new migrations', () => {

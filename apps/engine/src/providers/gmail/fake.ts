@@ -1,4 +1,5 @@
 import { GmailHttpError } from './http.ts'
+import { simpleParser } from 'mailparser'
 import type {
   GmailApi,
   GmailDraft,
@@ -143,13 +144,19 @@ export class FakeGmail implements GmailApi {
   async listMessages(options: { pageToken?: string; q?: string; maxResults?: number }) {
     this.calls.list++
     const all = [...this.messages.values()]
-      .filter(
-        (m) =>
-          !options.q ||
-          (m.labelIds?.includes('INBOX') &&
-            !m.labelIds.includes('TRASH') &&
-            !m.labelIds.includes('SPAM')),
-      )
+      .filter((m) => {
+        if (!options.q) return true
+        if (options.q.startsWith('in:sent rfc822msgid:')) {
+          const id = options.q.slice('in:sent rfc822msgid:'.length).replace(/^<|>$/g, '')
+          return (
+            m.labelIds?.includes('SENT') &&
+            m.payload?.headers?.some(
+              (header) => header.name.toLowerCase() === 'message-id' && header.value === `<${id}>`,
+            )
+          )
+        }
+        return m.labelIds?.includes('INBOX') && !m.labelIds.includes('TRASH') && !m.labelIds.includes('SPAM')
+      })
       .sort((a, b) => Number(b.internalDate) - Number(a.internalDate))
     const start = Number(options.pageToken ?? 0)
     const size = options.maxResults ?? 500
@@ -282,8 +289,9 @@ export class FakeGmail implements GmailApi {
     const old = this.drafts.get(draftId)
     if (old) this.remove(old.messageId)
     const messageId = `draftmsg${++this.#draftSeq}`
-    const subject = /^Subject: (.*)$/m.exec(input.raw)?.[1] ?? ''
-    const body = Buffer.from(input.raw.split('\r\n\r\n')[1] ?? '', 'base64').toString('utf8')
+    const parsed = await simpleParser(input.raw)
+    const subject = parsed.subject ?? ''
+    const body = parsed.text ?? ''
     const m = this.add(messageId, {
       threadId: input.threadId ?? `t-${messageId}`,
       labels: ['DRAFT'],
@@ -294,6 +302,38 @@ export class FakeGmail implements GmailApi {
     })
     this.drafts.set(draftId, { raw: input.raw, messageId, threadId: m.threadId })
     return { id: draftId, message: { id: messageId, threadId: m.threadId } }
+  }
+
+  async listDrafts() {
+    return {
+      drafts: [...this.drafts].map(([id, draft]) => ({
+        id,
+        message: { id: draft.messageId, threadId: draft.threadId },
+      })),
+    }
+  }
+
+  async getDraft(id: string) {
+    const draft = this.drafts.get(id)
+    return draft ? { id, message: { id: draft.messageId, threadId: draft.threadId } } : null
+  }
+
+  #sentSeq = 0
+
+  async sendMessage(input: { raw: string; threadId?: string }) {
+    const parsed = await simpleParser(input.raw)
+    const id = `sent-${++this.#sentSeq}`
+    const message = this.add(id, {
+      threadId: input.threadId ?? `thread-${id}`,
+      labels: ['SENT'],
+      subject: parsed.subject ?? '',
+      from: this.address,
+      body: parsed.text ?? '',
+      date: Date.now(),
+    })
+    if (parsed.messageId)
+      message.payload?.headers?.push({ name: 'Message-ID', value: parsed.messageId })
+    return { id, threadId: message.threadId }
   }
 
   async deleteDraft(draftId: string) {

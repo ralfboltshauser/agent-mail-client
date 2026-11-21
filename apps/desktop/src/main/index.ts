@@ -1,7 +1,14 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { PairResponse } from '@amc/protocol'
+import type {
+  ComposePatch,
+  ComposeStart,
+  Draft,
+  OutboxItem,
+  PairResponse,
+  SendRequest,
+} from '@amc/protocol'
 import { app, BrowserWindow, ipcMain, Menu, nativeTheme, shell } from 'electron'
 import type { SyncStatus, ThreadQuery } from '../shared/api'
 import { clearPairing, loadPairing, savePairing } from './auth'
@@ -146,6 +153,7 @@ function registerIpc() {
   })
   ipcMain.handle('amc:organiseErrors', () => openReplica().organise.errors())
   registerReadIpc()
+  registerComposeIpc()
 }
 
 async function pair(engineUrl: string, code: string) {
@@ -175,6 +183,60 @@ async function pair(engineUrl: string, code: string) {
     broadcast('amc:changed')
   }
   connect(url, body.token)
+}
+
+function registerComposeIpc() {
+  const compose = '/v1/compose'
+  const draftPath = (id: string) => `${compose}/drafts/${encodeURIComponent(id)}`
+  const signaturePath = (id: string) => `${compose}/signature/${encodeURIComponent(id)}`
+  ipcMain.handle('amc:startCompose', (_e, body: ComposeStart) =>
+    requireEngine().request(`${compose}/drafts`, { method: 'POST', body }),
+  )
+  ipcMain.handle(
+    'amc:composeDrafts',
+    async () => (await requireEngine().get<{ drafts: Draft[] }>(`${compose}/drafts`)).drafts,
+  )
+  ipcMain.handle('amc:composeDraft', (_e, id: string) => requireEngine().get(draftPath(id)))
+  ipcMain.handle('amc:saveCompose', (_e, id: string, body: ComposePatch) =>
+    requireEngine().request(draftPath(id), { method: 'PUT', body }),
+  )
+  ipcMain.handle(
+    'amc:addComposeAttachment',
+    (_e, id: string, filename: string, mimeType: string, bytes: Uint8Array, inline?: boolean) =>
+      requireEngine().request(`${draftPath(id)}/attachments`, {
+        method: 'POST',
+        body: { filename, mimeType, inline, content: Buffer.from(bytes).toString('base64') },
+      }),
+  )
+  ipcMain.handle('amc:composeImage', (_e, id: string, contentId: string) =>
+    requireEngine().get(`${draftPath(id)}/inline?cid=${encodeURIComponent(contentId)}`),
+  )
+  ipcMain.handle('amc:sendDraft', (_e, body: SendRequest) =>
+    requireEngine().request(`${compose}/outbox`, { method: 'POST', body }),
+  )
+  ipcMain.handle(
+    'amc:outbox',
+    async () => (await requireEngine().get<{ items: OutboxItem[] }>(`${compose}/outbox`)).items,
+  )
+  ipcMain.handle('amc:resolveSend', (_e, id: string, action: 'check' | 'reopen') =>
+    requireEngine().request(`${compose}/outbox/${encodeURIComponent(id)}/resolve`, {
+      method: 'POST',
+      body: { action },
+    }),
+  )
+  ipcMain.handle('amc:cancelSend', async (_e, id: string) => {
+    await requireEngine().request(`${compose}/outbox/${encodeURIComponent(id)}/cancel`, {
+      method: 'POST',
+    })
+  })
+  ipcMain.handle('amc:signature', (_e, id: string) => requireEngine().get(signaturePath(id)))
+  ipcMain.handle('amc:saveSignature', (_e, id: string, signature: string) =>
+    requireEngine().request(signaturePath(id), { method: 'PUT', body: { signature } }),
+  )
+  ipcMain.handle('amc:sendSettings', () => requireEngine().get(`${compose}/settings`))
+  ipcMain.handle('amc:saveSendSettings', (_e, undoSendSeconds: number) =>
+    requireEngine().request(`${compose}/settings`, { method: 'PUT', body: { undoSendSeconds } }),
+  )
 }
 
 function registerReadIpc() {
@@ -218,6 +280,10 @@ function registerReadIpc() {
       if (error instanceof EngineError && error.status === 404) return null
       throw error
     }
+  })
+  ipcMain.handle('amc:inlineAttachment', async (_e, attachmentId: string) => {
+    const data = await requireEngine().bytes(`/v1/attachments/${encodeURIComponent(attachmentId)}`)
+    return data.toString('base64')
   })
   ipcMain.handle('amc:openAttachment', async (_e, attachmentId: string, filename: string) => {
     const data = await requireEngine().bytes(`/v1/attachments/${encodeURIComponent(attachmentId)}`)

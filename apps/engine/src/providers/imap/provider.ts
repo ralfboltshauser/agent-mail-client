@@ -1,6 +1,4 @@
-import type { Address } from '@amc/protocol'
-import MailComposer from 'nodemailer/lib/mail-composer'
-import { newMessageId, type OutgoingMessage } from '../../mail/mime.ts'
+import { compileMessage, newMessageId, type OutgoingMessage } from '../../mail/mime.ts'
 import {
   connectImap,
   createImapClient,
@@ -50,21 +48,7 @@ export class ImapProvider {
 
   async send(message: OutgoingMessage): Promise<ImapSendResult> {
     const messageId = message.messageId ?? newMessageId(message.from.address)
-    const address = (a: Address) => ({ address: a.address, name: a.name ?? '' })
-    const mime = new MailComposer({
-      from: address(message.from),
-      to: message.to.map(address),
-      cc: message.cc.map(address),
-      bcc: message.bcc.map(address),
-      subject: message.subject,
-      text: message.text,
-      messageId,
-      date: message.date ?? new Date(),
-      inReplyTo: message.inReplyTo ?? undefined,
-      references: message.references ?? undefined,
-      disableFileAccess: true,
-      disableUrlAccess: true,
-    }).compile()
+    const mime = compileMessage({ ...message, messageId })
     const envelope = mime.getEnvelope()
     if (!envelope.from || !envelope.to.length) {
       throw new Error('SMTP submission requires a sender and at least one recipient')
@@ -98,6 +82,70 @@ export class ImapProvider {
       // SMTP already accepted the message. An APPEND failure must never trigger another send.
       return { ...delivery, messageId, sentCopy: 'failed' }
     }
+  }
+
+  async findSent(messageId: string): Promise<ImapMessageLocation | null> {
+    return this.#withImap(async (client) => {
+      const sent = mapFolders(await client.list()).find(
+        (folder) => folder.label.providerId === 'SENT',
+      )
+      if (!sent) return null
+      const mailbox = await client.mailboxOpen(sent.path, { readOnly: true })
+      const matches = await client.search(
+        { header: { 'Message-ID': `<${messageId}>` } },
+        { uid: true },
+      )
+      if (!matches || matches.length === 0) return null
+      // IMAP SEARCH HEADER is a substring match. Verify the envelope's exact Message-ID.
+      for await (const item of client.fetch(matches.join(','), { envelope: true }, { uid: true })) {
+        if (item.envelope?.messageId?.replace(/^<|>$/g, '') === messageId) {
+          return { folder: sent.path, uidValidity: String(mailbox.uidValidity), uid: item.uid }
+        }
+      }
+      return null
+    })
+  }
+
+  saveDraft(raw: string): Promise<{ id: string; message: { id: string } }> {
+    return this.#withImap(async (client) => {
+      const folder = mapFolders(await client.list()).find(
+        (folder) => folder.label.providerId === 'DRAFT',
+      )
+      if (!folder) throw new Error('No IMAP Drafts folder')
+      if (!this.#supportsUidExpunge(client))
+        throw new Error('IMAP Draft replacement needs UID EXPUNGE')
+      const result = await client.append(folder.path, Buffer.from(raw), ['\\Draft', '\\Seen'])
+      if (!result || !result.uid || !result.uidValidity)
+        throw new Error('No UID for saved IMAP draft')
+      const id = JSON.stringify({
+        folder: folder.path,
+        uid: result.uid,
+        uidValidity: String(result.uidValidity),
+      })
+      return { id, message: { id } }
+    })
+  }
+
+  deleteDraft(id: string): Promise<void> {
+    return this.#withImap((client) => this.#removeDraft(client, id))
+  }
+
+  async #removeDraft(client: ImapClient, id: string): Promise<void> {
+    const location = JSON.parse(id) as ImapMessageLocation
+    const mailbox = await client.mailboxOpen(location.folder)
+    if (String(mailbox.uidValidity) !== location.uidValidity) return
+    // UID EXPUNGE is safe only when the server supports UIDPLUS or IMAP4rev2.
+    if (!this.#supportsUidExpunge(client))
+      throw new Error('IMAP Draft replacement needs UID EXPUNGE')
+    await client.messageDelete(String(location.uid), { uid: true })
+  }
+
+  #supportsUidExpunge(client: ImapClient): boolean {
+    return (
+      client.enabled.has('IMAP4REV2') ||
+      client.capabilities.has('UIDPLUS') ||
+      (client.capabilities.has('IMAP4rev2') && !client.capabilities.has('IMAP4rev1'))
+    )
   }
 
   appendSent(raw: Buffer): Promise<void> {

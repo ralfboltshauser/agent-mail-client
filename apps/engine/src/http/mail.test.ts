@@ -6,7 +6,9 @@ import { describe, expect, it, vi } from 'vitest'
 import { issueToken } from '../auth/tokens.ts'
 import { BlobStore } from '../blobs.ts'
 import { Sealer } from '../crypto.ts'
+import { gmailDelivery, publishSent } from '../mail/delivery.ts'
 import { Drafts } from '../mail/drafts.ts'
+import { Outbox } from '../mail/outbox.ts'
 import { MailQueries } from '../mail/queries.ts'
 import { MailStore } from '../mail/store.ts'
 import { FakeGmail } from '../providers/gmail/fake.ts'
@@ -41,9 +43,19 @@ function setup(
     pollMs: 10,
     ...options,
   })
+  const drafts = new Drafts(db, store, (id) => sync.gmailApi(id))
+  const outbox = new Outbox(
+    db,
+    (id) => {
+      const api = sync.gmailApi(id)
+      return api ? gmailDelivery(api) : null
+    },
+    (message, id, receipt) => publishSent(store, drafts, message, id, receipt),
+  )
   const app = createApp({
     db,
     config: testConfig(),
+    outbox,
     log: silentLog,
     mail: {
       db,
@@ -54,7 +66,7 @@ function setup(
       sync,
       oauthClient,
       verifyImap,
-      drafts: new Drafts(db, store, (id) => sync.gmailApi(id)),
+      drafts,
       log: silentLog,
     },
   })
@@ -66,7 +78,7 @@ function setup(
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     })
-  return { app, db, sealer, sync, gmail, imap, verifyImap, call, admin, reader }
+  return { app, db, sealer, sync, gmail, imap, verifyImap, call, admin, reader, outbox }
 }
 
 const login = {
@@ -405,10 +417,11 @@ it.each([false, true])(
 )
 
 it('has no SMTP submission dispatch through Agent tokens, HTTP, MCP or the CLI (ADR 0001)', async () => {
-  const { app, call, admin, db, imap, sync } = setup()
+  const { app, call, admin, db, imap, sync, outbox, gmail } = setup()
   const submit = vi
     .spyOn(ImapProvider.prototype, 'send')
     .mockRejectedValue(new Error('Unexpected send'))
+  const gmailSend = vi.spyOn(gmail, 'sendMessage')
   const limited = issueToken(db, {
     kind: 'agent',
     name: 'agent',
@@ -438,6 +451,15 @@ it('has no SMTP submission dispatch through Agent tokens, HTTP, MCP or the CLI (
       ]) {
         expect((await call(path, token, args)).status).toBe(404)
       }
+      for (const endpoint of [
+        '/outbox',
+        '/outbox/item/cancel',
+        '/outbox/item/resolve',
+        '/drafts',
+      ]) {
+        expect((await call(`/v1/compose${endpoint}`, token, args)).status).toBe(403)
+      }
+      expect((await call('/v1/compose/outbox', token)).status).toBe(403)
       for (const name of ['send', 'send_mail', 'send_message', 'send_draft']) {
         const reply = await app.request('/mcp', {
           method: 'POST',
@@ -471,9 +493,13 @@ it('has no SMTP submission dispatch through Agent tokens, HTTP, MCP or the CLI (
       expect(processResult.status).toBe(1)
       expect(processResult.stderr).toContain('unknown command')
     }
+    await outbox.runDue()
+    expect(db.prepare('SELECT COUNT(*) AS n FROM outbox').get()?.n).toBe(0)
+    expect(gmailSend).not.toHaveBeenCalled()
     expect(submit).not.toHaveBeenCalled()
     expect(imap.appended).toHaveLength(0)
   } finally {
+    gmailSend.mockRestore()
     submit.mockRestore()
     await sync.stop()
   }

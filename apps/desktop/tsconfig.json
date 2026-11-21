@@ -13,5 +13,5 @@
     "noUncheckedIndexedAccess": false
   },
   "include": ["src"],
-  "references": [{ "path": "../../packages/protocol" }]
+  "references": [{ "path": "../../packages/protocol" }, { "path": "../../packages/composer" }]
 }
