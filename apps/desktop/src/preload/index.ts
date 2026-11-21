@@ -20,6 +20,7 @@ const api: AmcApi = {
   },
   triageStatus: invoke('triageStatus') as AmcApi['triageStatus'],
   setAutoTriage: invoke('setAutoTriage') as AmcApi['setAutoTriage'],
+  triageCounts: invoke('triageCounts') as AmcApi['triageCounts'],
   triageNow: invoke('triageNow') as AmcApi['triageNow'],
   onTriageStatus(listener) {
     const handler = (_e: unknown, status: Awaited<ReturnType<AmcApi['triageStatus']>>) =>
@@ -34,6 +35,7 @@ const api: AmcApi = {
   activeHandoff: invoke('activeHandoff') as AmcApi['activeHandoff'],
   endHandoff: invoke('endHandoff') as AmcApi['endHandoff'],
   pair: invoke('pair') as AmcApi['pair'],
+  retrySavedPairing: invoke('retrySavedPairing') as AmcApi['retrySavedPairing'],
   unpair: invoke('unpair') as AmcApi['unpair'],
   status: invoke('status') as AmcApi['status'],
   syncNow: invoke('syncNow') as AmcApi['syncNow'],

@@ -112,3 +112,12 @@ it('skips low battery, then resumes pending work', async () => {
   await vi.advanceTimersByTimeAsync(10 * minute)
   expect(run).toHaveBeenCalledOnce()
 })
+
+it('limits manual runs to recent mail unless the account-wide scope is requested', async () => {
+  const { triage, run } = setup()
+  await triage.now('one')
+  expect(run).toHaveBeenCalledExactlyOnceWith('one', expect.any(AbortSignal), true)
+  await vi.advanceTimersByTimeAsync(10 * minute)
+  await triage.now('one', false)
+  expect(run).toHaveBeenLastCalledWith('one', expect.any(AbortSignal), false)
+})

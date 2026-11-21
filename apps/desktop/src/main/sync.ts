@@ -122,7 +122,9 @@ export class SyncLoop extends EventEmitter<{
     let backoff = 1000
     while (!signal.aborted) {
       try {
-        const me = await this.#engine.get<Me>('/v1/me', { signal })
+        const me = await this.#engine.get<Me>('/v1/me', {
+          signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+        })
         if (signal.aborted) return
         this.#set({ snoozeEnabled: me.features?.snooze === true })
         void this.#refreshHealth(signal)
@@ -155,6 +157,15 @@ export class SyncLoop extends EventEmitter<{
           this.#replica.clear({ keepNotificationHistory: true })
           this.emit('changed')
           continue
+        }
+        if (error instanceof EngineError && error.status === 401) {
+          this.#set({
+            phase: 'unpaired',
+            progress: null,
+            error:
+              'The Engine rejected this pairing. Generate a new desktop pairing code on the Host.',
+          })
+          return
         }
         const offline = error instanceof EngineError && error.code === 'unreachable'
         this.#set({

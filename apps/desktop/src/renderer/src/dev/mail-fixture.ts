@@ -180,6 +180,7 @@ export function createFixture(scenario: string): AmcApi {
       triage = { ...triage, enabled }
       for (const listener of triageListeners) listener(triage)
     },
+    triageCounts: async () => ({ recent: 0, older: 3 }),
     triageNow: async () => {},
     onTriageStatus: (listener) => {
       triageListeners.add(listener)
@@ -199,6 +200,7 @@ export function createFixture(scenario: string): AmcApi {
     pair: async () => {
       throw new Error('The pairing code has expired. Generate a new code on your Host.')
     },
+    retrySavedPairing: async () => {},
     unpair: async () => {},
     syncNow: async () => {},
     accounts: async () => [account],

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { app, safeStorage } from 'electron'
 
@@ -15,10 +15,17 @@ type LoadedPairing =
   | { engineUrl: string | null; token: null }
 
 export function loadPairing(): LoadedPairing | null {
-  if (!existsSync(file())) return null
+  let data: string
+  try {
+    data = readFileSync(file(), 'utf8')
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? null
+      : { engineUrl: null, token: null }
+  }
   let engineUrl: string | null = null
   try {
-    const stored = JSON.parse(readFileSync(file(), 'utf8')) as Stored
+    const stored = JSON.parse(data) as Stored
     engineUrl = new URL(stored.engineUrl).origin
     const token = safeStorage.decryptString(Buffer.from(stored.token, 'base64'))
     if (token) return { engineUrl, token }
@@ -33,7 +40,9 @@ export function savePairing(engineUrl: string, token: string): void {
   if (!safeStorage.isEncryptionAvailable())
     throw new Error('macOS Keychain encryption is not available')
   const stored: Stored = { engineUrl, token: safeStorage.encryptString(token).toString('base64') }
-  writeFileSync(file(), JSON.stringify(stored), { mode: 0o600 })
+  const path = file()
+  writeFileSync(`${path}.tmp`, JSON.stringify(stored), { mode: 0o600 })
+  renameSync(`${path}.tmp`, path)
 }
 
 export function clearPairing(): void {
