@@ -95,6 +95,13 @@ export interface T3Project {
   deletedAt?: string | null
 }
 
+export interface NotificationSettings {
+  enabled: boolean
+  showSnippet: boolean
+  quietStart: string
+  quietEnd: string
+}
+
 export interface TriageResult {
   assigned: number
   skipped: number
@@ -112,6 +119,9 @@ export interface TriageStatus {
 }
 
 export interface AmcApi {
+  notificationSettings(): Promise<NotificationSettings>
+  saveNotificationSettings(settings: NotificationSettings): Promise<void>
+  onOpenThread(listener: (thread: ThreadSummary) => void): () => void
   triageStatus(): Promise<TriageStatus>
   setAutoTriage(enabled: boolean): Promise<void>
   triageNow(accountId: string | null): Promise<void>

@@ -62,6 +62,7 @@ describe('fromGmail', () => {
     expect(m.bodyText).toBe('Hello\n\nthere')
     expect(m.bodyHtml).toBe('<p>Hello</p>')
     expect(m.sentAt).toBe(1700000000000)
+    expect(m.deliveredAt).toBe(1700000000000)
     expect(m.attachments).toHaveLength(2)
     expect(m.attachments[0]).toMatchObject({
       filename: 'plan.pdf',

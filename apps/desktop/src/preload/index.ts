@@ -1,4 +1,4 @@
-import type { ComposePatch } from '@amc/protocol'
+import type { ComposePatch, ThreadSummary } from '@amc/protocol'
 import { contextBridge, ipcRenderer } from 'electron'
 import type { AmcApi, SyncStatus } from '../shared/api'
 
@@ -8,6 +8,16 @@ const invoke =
     ipcRenderer.invoke(`amc:${channel}`, ...args)
 
 const api: AmcApi = {
+  notificationSettings: invoke('notificationSettings') as AmcApi['notificationSettings'],
+  saveNotificationSettings: invoke(
+    'saveNotificationSettings',
+  ) as AmcApi['saveNotificationSettings'],
+  onOpenThread(listener) {
+    const handler = (_e: unknown, thread: ThreadSummary) => listener(thread)
+    ipcRenderer.on('amc:openThread', handler)
+    ipcRenderer.send('amc:threadNavigationReady')
+    return () => ipcRenderer.off('amc:openThread', handler)
+  },
   triageStatus: invoke('triageStatus') as AmcApi['triageStatus'],
   setAutoTriage: invoke('setAutoTriage') as AmcApi['setAutoTriage'],
   triageNow: invoke('triageNow') as AmcApi['triageNow'],

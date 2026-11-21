@@ -10,6 +10,7 @@ import {
 } from '@amc/protocol'
 import type { SyncStatus } from '../shared/api'
 import { type EngineClient, EngineError } from './engine'
+import { newInboxMessages } from './notifications'
 import type { Replica } from './replica'
 
 const SNAPSHOT_ORDER: SyncEntity[] = ['account', 'label', 'draft', 'thread', 'message']
@@ -33,6 +34,7 @@ const sleep = (ms: number, signal: AbortSignal) =>
 export class SyncLoop extends EventEmitter<{
   status: [SyncStatus]
   changed: []
+  newMail: [ReturnType<typeof newInboxMessages>]
   arrivals: [Map<string, string>]
 }> {
   readonly #engine: EngineClient
@@ -124,7 +126,10 @@ export class SyncLoop extends EventEmitter<{
         if (signal.aborted) return
         this.#set({ snoozeEnabled: me.features?.snooze === true })
         void this.#refreshHealth(signal)
-        if (this.#replica.modseq === null) await this.#bootstrap()
+        if (this.#replica.modseq === null) {
+          await this.#bootstrap()
+          this.#set({ phase: 'live', progress: null })
+        }
         await this.pull()
         if (signal.aborted) return
         this.#set({ phase: 'live', error: null, progress: null })
@@ -147,7 +152,7 @@ export class SyncLoop extends EventEmitter<{
       } catch (error) {
         if (signal.aborted) return
         if (error instanceof EngineError && error.code === 'resync_required') {
-          this.#replica.clear()
+          this.#replica.clear({ keepNotificationHistory: true })
           this.emit('changed')
           continue
         }
@@ -169,7 +174,7 @@ export class SyncLoop extends EventEmitter<{
     this.#set({ phase: 'bootstrapping', progress: 0 })
     const state = await this.#engine.get<SyncState>('/v1/sync/state', { signal })
     signal.throwIfAborted()
-    this.#replica.clear()
+    this.#replica.clear({ keepNotificationHistory: true })
     let done = 0
     for (const entity of SNAPSHOT_ORDER) {
       let cursor: string | null = null
@@ -198,13 +203,18 @@ export class SyncLoop extends EventEmitter<{
     const signal = this.#controller.signal
     for (;;) {
       signal.throwIfAborted()
-      const since = this.#replica.modseq ?? 0
+      const cursor = this.#replica.modseq
+      const since = cursor ?? 0
       const res = await this.#engine.get<SyncChanges>(
         `/v1/sync/changes?since=${since}&limit=2000`,
         { signal },
       )
       signal.throwIfAborted()
       if (res.changes.length > 0 || res.modseq !== since) {
+        const notifications =
+          cursor !== null && this.#status.phase !== 'bootstrapping' && this.listenerCount('newMail')
+            ? newInboxMessages(this.#replica, res.changes)
+            : []
         let arrivals: Map<string, string> | undefined
         this.#replica.transaction(() => {
           arrivals = this.#replica.apply(res.changes)
@@ -212,6 +222,7 @@ export class SyncLoop extends EventEmitter<{
           if (res.organiseFailures) this.#replica.organise.notice(res.organiseFailures)
           this.#replica.organise.rebuild()
         })
+        if (notifications.length) this.emit('newMail', notifications)
         if (arrivals?.size) this.emit('arrivals', arrivals)
         if (res.changes.length > 0 || res.organiseFailures?.length) this.emit('changed')
       }

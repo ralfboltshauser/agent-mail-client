@@ -125,6 +125,7 @@ export function createFixture(scenario: string): AmcApi {
     },
   ]
   let undoSendSeconds = 10
+  let notificationSettings = { enabled: true, showSnippet: true, quietStart: '', quietEnd: '' }
   const message = (thread: ThreadSummary, older: boolean): ReplicaThreadMessage => ({
     id: `${thread.id}:${older ? 'older' : 'latest'}`,
     threadId: thread.id,
@@ -188,6 +189,7 @@ export function createFixture(scenario: string): AmcApi {
     },
     status: async () => status,
     onStatus: () => () => {},
+    onOpenThread: () => () => {},
     onChanged: (listener) => {
       changed.add(listener)
       return () => {
@@ -391,6 +393,10 @@ export function createFixture(scenario: string): AmcApi {
     saveSignature: async (_id, signature) => {
       draft = { ...draft, signature }
       return { signature }
+    },
+    notificationSettings: async () => notificationSettings,
+    saveNotificationSettings: async (settings) => {
+      notificationSettings = settings
     },
     sendSettings: async () => ({ undoSendSeconds }),
     saveSendSettings: async (seconds) => {

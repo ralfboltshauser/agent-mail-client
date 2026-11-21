@@ -36,6 +36,9 @@ export class Replica {
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = NORMAL;
+      CREATE TABLE IF NOT EXISTS notified_message (
+        account_id TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY (account_id, message_id)
+      );
       CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS account (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS label (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, data TEXT NOT NULL);
@@ -130,7 +133,8 @@ export class Replica {
         .run(String(value))
   }
 
-  clear(): void {
+  clear({ keepNotificationHistory = false } = {}): void {
+    if (!keepNotificationHistory) this.db.exec('DELETE FROM notified_message')
     this.db.exec('DELETE FROM organise_thread')
     this.db.exec(
       'DELETE FROM account; DELETE FROM label; DELETE FROM thread; DELETE FROM message; DELETE FROM draft; DELETE FROM html; DELETE FROM meta;',

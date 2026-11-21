@@ -34,10 +34,10 @@ import { CommandPalette } from './components/command-palette'
 import { DraftsView, OutboxView } from './components/compose-views'
 import { Composer } from './components/composer'
 import { HandoffDialog } from './components/handoff-dialog'
+import { MailSettings } from './components/mail-settings'
 import { MailLoading, MailState } from './components/mail-state'
 import { OrganisePicker, OrganiseToolbar, useOrganise } from './components/organise'
 import { PairScreen } from './components/pair-screen'
-import { SendSettings } from './components/send-settings'
 import { ShortcutsDialog } from './components/shortcuts-dialog'
 import { ThreadList } from './components/thread-list'
 import { ThreadView } from './components/thread-view'
@@ -97,12 +97,12 @@ function MailApp({
     if (view !== selectedView) setView(view)
   }, [view, selectedView])
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [notificationThread, setNotificationThread] = useState<ThreadSummary | null>(null)
   const [bucketPickerId, setBucketPickerId] = useState<string | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [agentOpen, setAgentOpen] = useState(false)
   const [sendSettings, setSendSettings] = useState<number | null>(null)
-  const searchRequest = useRef(0)
   const openSendSettings = () => {
     void getAmc()
       .sendSettings()
@@ -119,6 +119,7 @@ function MailApp({
   const [openingComposer, setOpeningComposer] = useState(false)
   const opening = useRef(false)
   const [minimised, setMinimised] = useState<{ id: string; subject: string } | null>(null)
+  const searchRequest = useRef(0)
   const searchInput = useRef<HTMLInputElement>(null)
   const readerScroll = useRef<HTMLDivElement>(null)
 
@@ -157,13 +158,20 @@ function MailApp({
     const byId = new Map(searchSummaries.map((summary) => [summary.id, summary]))
     return search.hits.map((hit) => byId.get(hit.id) ?? hit)
   }, [search?.hits, searchSummaries])
-  const threads: ThreadSummary[] = search
+  const listedThreads: ThreadSummary[] = search
     ? (searchThreads ?? [])
     : ((filtered && view.kind === 'bucket'
         ? filtered.filter((item) => item.bucket?.bucket === view.bucket)
         : filtered) ??
       viewThreads ??
       [])
+  const threads =
+    !search &&
+    !filterText.trim() &&
+    notificationThread?.id === selectedId &&
+    !listedThreads.some((item) => item.id === notificationThread.id)
+      ? [notificationThread, ...listedThreads]
+      : listedThreads
   const activeListQuery = filterText.trim() ? filterQuery : listQuery
   const selected = threads.find((item) => item.id === selectedId)
   const bucketPickerOpen = !!selected && bucketPickerId === selected.id
@@ -253,8 +261,20 @@ function MailApp({
     setFilterText('')
     setBucketPickerId(null)
     setView(next)
+    setNotificationThread(null)
     setSelectedId(null)
   }, [])
+
+  useEffect(
+    () =>
+      getAmc().onOpenThread((target) => {
+        setAccountId(null)
+        goTo(target.inInbox ? INBOX : { kind: 'all' })
+        setNotificationThread(target)
+        setSelectedId(target.id)
+      }),
+    [goTo],
+  )
 
   const runSearch = useCallback(
     async (text: string) => {
@@ -833,7 +853,7 @@ function MailApp({
         onCloseAutoFocus={restoreDialogFocus}
       />
       {sendSettings !== null && (
-        <SendSettings
+        <MailSettings
           initial={sendSettings}
           onClose={() => setSendSettings(null)}
           onCloseAutoFocus={restoreDialogFocus}

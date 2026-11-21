@@ -19,6 +19,7 @@ interface FakeMessage {
   flags: Set<string>
   modseq: bigint
   emailId?: string
+  internalDate?: Date
   structure?: MessageStructureObject
   parts?: Map<string, Buffer>
 }
@@ -223,6 +224,7 @@ export class FakeImap extends EventEmitter {
                 },
           bodyStructure: query.bodyStructure ? item.structure : undefined,
           emailId: query.emailId ? item.emailId : undefined,
+          internalDate: query.internalDate ? item.internalDate : undefined,
           source: query.source ? item.source : undefined,
         }
       }

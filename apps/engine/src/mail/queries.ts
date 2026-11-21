@@ -58,6 +58,7 @@ interface MessageRow {
   body_search_truncated: number
   html_blob: string | null
   sent_at: number
+  delivered_at: number | null
   unread: number
   starred: number
   label_ids: string
@@ -382,7 +383,7 @@ export class MailQueries {
         `SELECT m.id, m.thread_id, m.account_id, m.rfc_message_id, m.in_reply_to, m.from_json, m.to_json,
                 m.cc_json, m.bcc_json, m.reply_to_json, m.subject, m.snippet, CAST(${body} AS BLOB) AS body_text, m.body_parts, m.html_blob,
                 CASE WHEN m.body_search_limit IS NOT NULL THEN length(m.body_text) > m.body_search_limit ELSE 0 END AS body_search_truncated,
-                m.sent_at, m.unread, m.starred, m.label_ids, m.list_unsubscribe
+                m.sent_at, m.delivered_at, m.unread, m.starred, m.label_ids, m.list_unsubscribe
          FROM message m WHERE ${where}`,
       )
       .all(...params) as unknown as MessageRow[]
@@ -413,6 +414,7 @@ export class MailQueries {
         bodySearchTruncated: Boolean(bodyParts?.searchTruncated || m.body_search_truncated),
         hasHtml: m.html_blob !== null || Boolean(bodyParts?.html),
         sentAt: m.sent_at,
+        ...(m.delivered_at === null ? {} : { deliveredAt: m.delivered_at }),
         unread: m.unread === 1,
         starred: m.starred === 1,
         labelIds: JSON.parse(m.label_ids) as string[],
