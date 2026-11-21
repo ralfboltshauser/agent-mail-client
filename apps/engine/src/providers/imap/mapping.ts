@@ -36,7 +36,10 @@ export function mapFolders(list: ListResponse[]): Folder[] {
     if (folder.flags.has('\\Noselect') || folder.flags.has('\\NonExistent')) continue
     const path = /^inbox$/i.test(folder.path) ? 'INBOX' : folder.path
     const special = path === 'INBOX' ? '\\Inbox' : folder.specialUse
-    const system = special && systemLabels.get(special)
+    // ImapFlow also guesses special-use from names. Moves require server-designated folders.
+    const guessedMoveTarget =
+      folder.specialUseSource === 'name' && (special === '\\Archive' || special === '\\Trash')
+    const system = special && !guessedMoveTarget && systemLabels.get(special)
     const [systemId, name] = system || []
     const label: IncomingLabel =
       systemId && name && !labels.has(systemId)

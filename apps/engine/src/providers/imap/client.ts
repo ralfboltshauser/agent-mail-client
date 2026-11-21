@@ -22,6 +22,10 @@ export type ImapClient = Pick<
   | 'off'
   | 'append'
   | 'messageMove'
+  | 'messageCopy'
+  | 'messageDelete'
+  | 'messageFlagsAdd'
+  | 'messageFlagsRemove'
   | 'messageFlagsSet'
 >
 

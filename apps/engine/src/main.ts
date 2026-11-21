@@ -69,6 +69,7 @@ async function main(argv: string[]) {
       const drafts = new Drafts(db, store, (accountId) => sync.gmailApi(accountId))
       const mutations = new Mutations(store, (accountId) => sync.gmailApi(accountId), log, {
         snoozeEnabled,
+        imap: (accountId, work) => sync.organiseImap(accountId, work),
       })
       const app = createApp({
         db,

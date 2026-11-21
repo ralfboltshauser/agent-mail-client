@@ -378,25 +378,56 @@ export class MailStore extends EventEmitter<{ change: [] }> {
 
   refreshMessageLabels(id: string): boolean {
     const row = this.db
-      .prepare('SELECT account_id, label_ids, provider_label_ids FROM message WHERE id = ?')
+      .prepare(`SELECT m.account_id, m.label_ids, m.provider_label_ids, m.unread, m.starred, a.kind
+        FROM message m JOIN account a ON a.id = m.account_id WHERE m.id = ?`)
       .get(id) as
-      | { account_id: string; label_ids: string; provider_label_ids: string | null }
+      | {
+          account_id: string
+          label_ids: string
+          provider_label_ids: string | null
+          unread: number
+          starred: number
+          kind: string
+        }
       | undefined
     if (!row) return false
-    const labels = this.projectLabels(
-      id,
-      JSON.parse(row.provider_label_ids ?? row.label_ids) as string[],
-    ).sort()
-    if (JSON.stringify(labels) === JSON.stringify((JSON.parse(row.label_ids) as string[]).sort()))
+    const unreadId = labelId(row.account_id, 'UNREAD')
+    const starredId = labelId(row.account_id, 'STARRED')
+    const imap = row.kind === 'imap'
+    let base: string[]
+    if (imap) {
+      const location = this.db
+        .prepare(`
+        SELECT json_group_array(DISTINCT label_id) AS labels,
+          max(unread) AS unread, max(starred) AS starred
+        FROM imap_location WHERE message_id = ?`)
+        .get(id) as {
+        labels: string
+        unread: number | null
+        starred: number | null
+      }
+      if (location.unread === null) return false
+      base = JSON.parse(location.labels) as string[]
+      if (location.unread) base.push(unreadId)
+      if (location.starred) base.push(starredId)
+    } else {
+      base = JSON.parse(row.provider_label_ids ?? row.label_ids) as string[]
+    }
+    const projected = this.projectLabels(id, base).sort()
+    const unread = Number(projected.includes(unreadId))
+    const starred = Number(projected.includes(starredId))
+    const labels = imap
+      ? projected.filter((label) => label !== unreadId && label !== starredId)
+      : projected
+    if (
+      unread === row.unread &&
+      starred === row.starred &&
+      JSON.stringify(labels) === JSON.stringify((JSON.parse(row.label_ids) as string[]).sort())
+    )
       return false
     this.db
       .prepare('UPDATE message SET label_ids = ?, unread = ?, starred = ? WHERE id = ?')
-      .run(
-        JSON.stringify(labels),
-        Number(labels.includes(labelId(row.account_id, 'UNREAD'))),
-        Number(labels.includes(labelId(row.account_id, 'STARRED'))),
-        id,
-      )
+      .run(JSON.stringify(labels), unread, starred, id)
     this.recordChange('message', id, 'upsert')
     return true
   }

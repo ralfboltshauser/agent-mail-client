@@ -1,12 +1,14 @@
 import { EventEmitter } from 'node:events'
 import { Readable } from 'node:stream'
 import type {
+  CopyResponseObject,
   DownloadOptions,
   FetchMessageObject,
   FetchOptions,
   FetchQueryObject,
   ListResponse,
   MailboxObject,
+  MessageRangeOptions,
   MessageStructureObject,
   SearchObject,
 } from 'imapflow'
@@ -50,6 +52,8 @@ export class FakeImap extends EventEmitter {
   readonly searches: { path: string; uids: number[] }[] = []
   readonly downloads: { path: string; uid: number; part: string | undefined }[] = []
   readonly idles: string[] = []
+  readonly writes: { command: string; path: string; uid: number }[] = []
+  reportCopyUid = true
   onSearch?: (path: string) => void
   onDownload?: (path: string, uid: number, part: string | undefined) => void
   onIdle?: (path: string) => void
@@ -128,6 +132,7 @@ export class FakeImap extends EventEmitter {
   }
 
   async connect(): Promise<void> {
+    if (this.usable) throw new Error('Mailbox permits one connection')
     this.usable = true
   }
 
@@ -146,7 +151,8 @@ export class FakeImap extends EventEmitter {
   }
 
   async mailboxOpen(path: string): Promise<MailboxObject> {
-    const selected = this.folder(path)
+    const selected = this.folders.get(path)
+    if (!selected) throw Object.assign(new Error('No such test folder'), { mailboxMissing: true })
     this.#selected = selected
     this.mailbox = {
       path,
@@ -220,6 +226,72 @@ export class FakeImap extends EventEmitter {
         }
       }
     }
+  }
+
+  async messageFlagsAdd(range: string, flags: string[], options: MessageRangeOptions) {
+    const { path, uid } = this.#write('UID STORE +FLAGS', range, options)
+    const message = this.folder(path).messages.get(uid)
+    if (!message) return false
+    this.flag(path, uid, [...message.flags, ...flags])
+    return true
+  }
+
+  async messageFlagsRemove(range: string, flags: string[], options: MessageRangeOptions) {
+    const { path, uid } = this.#write('UID STORE -FLAGS', range, options)
+    const message = this.folder(path).messages.get(uid)
+    if (!message) return false
+    this.flag(
+      path,
+      uid,
+      [...message.flags].filter((flag) => !flags.includes(flag)),
+    )
+    return true
+  }
+
+  async messageMove(range: string, destination: string, options: MessageRangeOptions) {
+    if (!this.capabilities.has('MOVE')) throw new Error('MOVE is unavailable')
+    const { path, uid } = this.#write('UID MOVE', range, options)
+    const copied = this.#copy(path, uid, destination)
+    if (copied) this.expunge(path, uid)
+    return copied
+  }
+
+  async messageCopy(range: string, destination: string, options: MessageRangeOptions) {
+    const { path, uid } = this.#write('UID COPY', range, options)
+    return this.#copy(path, uid, destination)
+  }
+
+  async messageDelete(range: string, options: MessageRangeOptions) {
+    if (!this.capabilities.has('UIDPLUS')) throw new Error('A mailbox-wide EXPUNGE is unsafe')
+    if (!(await this.messageFlagsAdd(range, ['\\Deleted'], options))) return false
+    const { path, uid } = this.#write('UID EXPUNGE', range, options)
+    this.expunge(path, uid)
+    return true
+  }
+
+  #copy(path: string, uid: number, destination: string): CopyResponseObject | false {
+    const message = this.folder(path).messages.get(uid)
+    if (!message) return false
+    const target = this.folder(destination)
+    const newUid = target.nextUid++
+    target.messages.set(newUid, {
+      ...message,
+      flags: new Set(message.flags),
+      modseq: ++target.modseq,
+    })
+    return this.reportCopyUid
+      ? { path, destination, uidValidity: target.validity, uidMap: new Map([[uid, newUid]]) }
+      : { path, destination }
+  }
+
+  #write(command: string, range: string, options: MessageRangeOptions) {
+    const path = this.#selected?.path
+    if (!this.usable || !path || !options.uid || !/^\d+$/.test(range)) {
+      throw new Error('Expected an exact UID write on the active connection')
+    }
+    const uid = Number(range)
+    this.writes.push({ command, path, uid })
+    return { path, uid }
   }
 
   async append(folder: string, raw: Buffer, flags: string[]): Promise<{ path: string } | false> {

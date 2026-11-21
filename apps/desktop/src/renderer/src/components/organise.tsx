@@ -1,4 +1,10 @@
-import { type Label, type OrganiseAction, SNOOZED_LABEL, type ThreadSummary } from '@amc/protocol'
+import {
+  type AccountSummary,
+  type Label,
+  type OrganiseAction,
+  SNOOZED_LABEL,
+  type ThreadSummary,
+} from '@amc/protocol'
 import {
   Archive,
   BellOff,
@@ -24,7 +30,12 @@ import {
 import { Input } from '@/components/ui/input'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
-type Picker = { kind: 'labels' | 'snooze'; thread: ThreadSummary; trigger: HTMLElement | null }
+type Picker = {
+  kind: 'labels' | 'snooze'
+  thread: ThreadSummary
+  trigger: HTMLElement | null
+  imap?: boolean
+}
 type Control = {
   name: string
   key: string
@@ -55,7 +66,14 @@ const run = async (action: OrganiseAction, description: string) => {
     toast.error(message)
   }
 }
-export function useOrganise(thread: ThreadSummary | null, snoozeEnabled = false) {
+export function useOrganise(
+  thread: ThreadSummary | null,
+  snoozeEnabled = false,
+  account?: AccountSummary,
+  labels: Label[] = [],
+) {
+  const imap = account?.kind === 'imap'
+  const canMove = !imap || account.imapMoves !== false
   const [picker, setPicker] = useState<Picker | null>(null)
 
   useEffect(() => {
@@ -83,14 +101,26 @@ export function useOrganise(thread: ThreadSummary | null, snoozeEnabled = false)
 
   const openPicker = (kind: Picker['kind'], thread: ThreadSummary, trigger?: HTMLElement) => {
     const active = document.activeElement
-    setPicker({ kind, thread, trigger: trigger ?? (active instanceof HTMLElement ? active : null) })
+    setPicker({
+      kind,
+      thread,
+      imap,
+      trigger: trigger ?? (active instanceof HTMLElement ? active : null),
+    })
   }
   const undo = () => void run({ kind: 'undo' }, '')
   const controls: Control[] = []
   if (thread) {
     const threadId = thread.id
     const trashed = thread.labelIds.includes(`${thread.accountId}:TRASH`)
-    if (!trashed)
+    const accountLabels = labels.filter((label) => label.accountId === thread.accountId)
+    const has = (id: string) =>
+      accountLabels.some((label) => label.id === `${thread.accountId}:${id}`)
+    if (
+      !trashed &&
+      (!imap ||
+        (canMove && has('ARCHIVE') && thread.labelIds.includes(`${thread.accountId}:INBOX`)))
+    )
       controls.push({
         name: 'Archive',
         key: 'e',
@@ -98,7 +128,7 @@ export function useOrganise(thread: ThreadSummary | null, snoozeEnabled = false)
         icon: Archive,
         run: () => void run({ kind: 'archive', threadId }, 'Archived'),
       })
-    if (!trashed && snoozeEnabled)
+    if (!trashed && snoozeEnabled && !imap)
       controls.push({
         name: 'Snooze',
         key: 'h',
@@ -106,8 +136,8 @@ export function useOrganise(thread: ThreadSummary | null, snoozeEnabled = false)
         icon: Clock3,
         run: (trigger) => openPicker('snooze', thread, trigger),
       })
-    controls.push(
-      {
+    if (!imap || (canMove && has('TRASH') && (!trashed || has('INBOX')))) {
+      controls.push({
         name: trashed ? 'Restore from Trash' : 'Move to Trash',
         key: '#',
         shortcut: '#',
@@ -117,7 +147,9 @@ export function useOrganise(thread: ThreadSummary | null, snoozeEnabled = false)
             { kind: 'trash', threadId, value: !trashed },
             trashed ? 'Restored from Trash' : 'Moved to Trash',
           ),
-      },
+      })
+    }
+    controls.push(
       {
         name: thread.starred ? 'Remove star' : 'Star',
         key: 's',
@@ -141,13 +173,19 @@ export function useOrganise(thread: ThreadSummary | null, snoozeEnabled = false)
             thread.unreadCount > 0 ? 'Marked as read' : 'Marked as unread',
           ),
       },
-      {
-        name: 'Labels',
-        key: 'l',
-        shortcut: 'L',
-        icon: Tag,
-        run: (trigger) => openPicker('labels', thread, trigger),
-      },
+      ...(!imap ||
+      (canMove &&
+        accountLabels.some((label) => label.kind === 'user' && label.name !== SNOOZED_LABEL))
+        ? [
+            {
+              name: imap ? 'Move to folder' : 'Labels',
+              key: 'l',
+              shortcut: 'L',
+              icon: Tag,
+              run: (trigger?: HTMLElement) => openPicker('labels', thread, trigger),
+            },
+          ]
+        : []),
       {
         name: thread.muted ? 'Unmute' : 'Mute',
         key: 'm',
@@ -270,7 +308,13 @@ export function OrganisePicker({ picker, labels, onClose, focusFallback, run }: 
         }}
       >
         <DialogHeader>
-          <DialogTitle>{picker.kind === 'labels' ? 'Labels' : 'Snooze Thread'}</DialogTitle>
+          <DialogTitle>
+            {picker.kind === 'labels'
+              ? picker.imap
+                ? 'Move to folder'
+                : 'Labels'
+              : 'Snooze Thread'}
+          </DialogTitle>
           <DialogDescription className="truncate">
             {thread.subject || '(no subject)'}
           </DialogDescription>
@@ -289,15 +333,24 @@ export function OrganisePicker({ picker, labels, onClose, focusFallback, run }: 
                   className="justify-start"
                   onClick={() =>
                     commit(
-                      { kind: 'label', threadId: thread.id, labelId: label.id, value: !applied },
-                      applied ? `Removed Label “${label.name}”` : `Added Label “${label.name}”`,
+                      {
+                        kind: 'label',
+                        threadId: thread.id,
+                        labelId: label.id,
+                        value: picker.imap || !applied,
+                      },
+                      picker.imap
+                        ? `Moved to “${label.name}”`
+                        : applied
+                          ? `Removed Label “${label.name}”`
+                          : `Added Label “${label.name}”`,
                     )
                   }
                 >
                   <Tag />
                   <span className="truncate">{label.name}</span>
                   <span className="ml-auto text-xs text-muted-foreground">
-                    {applied ? 'Remove' : 'Add'}
+                    {picker.imap ? 'Move' : applied ? 'Remove' : 'Add'}
                   </span>
                 </Button>
               )

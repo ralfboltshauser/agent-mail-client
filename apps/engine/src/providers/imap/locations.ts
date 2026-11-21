@@ -15,6 +15,11 @@ export interface Location {
   source_blob: string | null
 }
 
+export interface MessageLocation extends Location {
+  path_key: string
+  validity: string
+}
+
 export const PAGE = 32
 
 export class ImapLocations {
@@ -116,7 +121,15 @@ export class ImapLocations {
     transaction(this.store.db, () => {
       const gone = this.store.db
         .prepare(
-          'DELETE FROM imap_location WHERE account_id = ? AND path_key = ? AND validity = ? AND uid = ? RETURNING message_id',
+          `DELETE FROM imap_location WHERE account_id = ? AND path_key = ? AND validity = ? AND uid = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM mutation m, json_each(m.write_journal) j
+           WHERE m.account_id = imap_location.account_id AND m.status = 'pending'
+             AND json_extract(j.value, '$.pending.move.source.message_id') = imap_location.message_id
+             AND json_extract(j.value, '$.pending.move.source.path_key') = imap_location.path_key
+             AND json_extract(j.value, '$.pending.move.source.validity') = imap_location.validity
+             AND json_extract(j.value, '$.pending.move.source.uid') = imap_location.uid
+         ) RETURNING message_id`,
         )
         .get(this.accountId, encodeURIComponent(path), validity, uid) as
         | { message_id: string }
@@ -128,13 +141,21 @@ export class ImapLocations {
   clear(path: string): void {
     const { db } = this.store
     const next = db.prepare(
-      'SELECT validity, uid FROM imap_location WHERE account_id = ? AND path_key = ? LIMIT ?',
+      'SELECT rowid, validity, uid FROM imap_location WHERE account_id = ? AND path_key = ? AND rowid > ? ORDER BY rowid LIMIT ?',
     )
-    let rows: { validity: string; uid: number }[]
-    do {
-      rows = next.all(this.accountId, encodeURIComponent(path), PAGE) as typeof rows
-      for (const { validity, uid } of rows) this.remove(path, validity, uid)
-    } while (rows.length)
+    let after = 0
+    for (;;) {
+      const rows = next.all(this.accountId, encodeURIComponent(path), after, PAGE) as {
+        rowid: number
+        validity: string
+        uid: number
+      }[]
+      if (!rows.length) return
+      for (const { rowid, validity, uid } of rows) {
+        this.remove(path, validity, uid)
+        after = rowid
+      }
+    }
   }
 
   flags(path: string, validity: string, uid: number, unread: boolean, starred: boolean): void {
@@ -186,29 +207,52 @@ export class ImapLocations {
     }
   }
 
+  forMessage(mid: string): MessageLocation[] {
+    return this.store.db
+      .prepare('SELECT * FROM imap_location WHERE account_id = ? AND message_id = ?')
+      .all(this.accountId, mid) as unknown as MessageLocation[]
+  }
+
+  moved(
+    source: MessageLocation,
+    destination: Folder,
+    validity: string,
+    uid: number,
+    flags: {
+      unread: boolean
+      starred: boolean
+    },
+  ): void {
+    this.store.db
+      .prepare(`
+      UPDATE imap_location SET path_key = ?, validity = ?, uid = ?, label_id = ?, unread = ?, starred = ?
+      WHERE account_id = ? AND path_key = ? AND validity = ? AND uid = ?`)
+      .run(
+        encodeURIComponent(destination.path),
+        validity,
+        uid,
+        labelId(this.accountId, destination.label.providerId),
+        Number(flags.unread),
+        Number(flags.starred),
+        this.accountId,
+        source.path_key,
+        source.validity,
+        source.uid,
+      )
+    this.#refresh(source.message_id)
+  }
+
   #refresh(mid: string): void {
     const { db } = this.store
-    const { labels, unread, starred } = db
-      .prepare(
-        `SELECT json_group_array(DISTINCT label_id ORDER BY label_id) AS labels,
-         max(unread) AS unread, max(starred) AS starred FROM imap_location WHERE message_id = ?`,
-      )
-      .get(mid) as { labels: string; unread: number | null; starred: number | null }
-    if (unread === null) {
+    if (!db.prepare('SELECT 1 FROM imap_location WHERE message_id = ? LIMIT 1').get(mid)) {
       this.store.deleteMessage(this.accountId, mid.slice(this.accountId.length + 1))
       return
     }
-    const changed = db
-      .prepare(
-        `UPDATE message SET label_ids = ?, unread = ?, starred = ?
-       WHERE id = ? AND (label_ids != ? OR unread != ? OR starred != ?) RETURNING thread_id`,
-      )
-      .get(labels, unread, starred, mid, labels, unread, starred) as
-      | { thread_id: string }
-      | undefined
-    if (changed) {
-      this.store.recordChange('message', mid, 'upsert')
-      this.store.refreshThread(changed.thread_id)
+    if (this.store.refreshMessageLabels(mid)) {
+      const row = db.prepare('SELECT thread_id FROM message WHERE id = ?').get(mid) as {
+        thread_id: string
+      }
+      this.store.refreshThread(row.thread_id)
     }
   }
 }

@@ -5,6 +5,8 @@ import type { ImapClient } from './client.ts'
 import { ImapLocations, PAGE } from './locations.ts'
 import { type Folder, mapFolders, messageFlags, parseMessage } from './mapping.ts'
 
+import { imapMoveSupport } from './organise.ts'
+
 const RECONCILE_PAGE = 512
 const INBOX_WINDOW_INTERVAL = 1000
 
@@ -19,9 +21,12 @@ interface FolderCursor {
 
 /** Owns a single connection. Inbox IDLE and other folders alternate at page boundaries. */
 export class ImapAccountSync {
-  readonly #locations: ImapLocations
+  readonly locations: ImapLocations
   readonly #cursor: Map<string, FolderCursor>
   #folders: Folder[] = []
+  #moveSupport: boolean | undefined
+  #organise: (() => Promise<void>) | undefined
+  #cancelOrganise: (() => void) | undefined
   #inboxSnapshot: { exists: number; uidNext: number; highestModseq: bigint | undefined } | undefined
   #inboxChanged = false
   #sequenceEpoch = 0
@@ -35,11 +40,12 @@ export class ImapAccountSync {
     this.client = client
     this.store = store
     this.accountId = accountId
-    this.#locations = new ImapLocations(store, accountId, address)
+    this.locations = new ImapLocations(store, accountId, address)
     const row = store.db.prepare('SELECT cursor FROM account WHERE id = ?').get(accountId) as {
       cursor: string
     }
-    const saved = JSON.parse(row.cursor) as { folders?: FolderCursor[] }
+    const saved = JSON.parse(row.cursor) as { folders?: FolderCursor[]; imapMoves?: boolean }
+    this.#moveSupport = saved.imapMoves
     this.#cursor = new Map(saved.folders?.map((folder) => [folder.path, folder]))
     client.on('exists', this.#changed).on('flags', this.#changed).on('expunge', this.#changed)
     client.on('close', this.#closed)
@@ -55,7 +61,39 @@ export class ImapAccountSync {
 
   #closed = () => this.#wake?.()
 
+  queueOrganise(work: (sync: ImapAccountSync) => Promise<void>): Promise<boolean> {
+    if (!this.client.usable || this.#organise) return Promise.resolve(false)
+    return new Promise((resolve, reject) => {
+      this.#cancelOrganise = () => resolve(false)
+      this.#organise = async () => {
+        try {
+          await work(this)
+          resolve(true)
+        } catch (error) {
+          reject(error)
+        }
+      }
+      this.#wake?.()
+    })
+  }
+
+  async runQueuedOrganise(): Promise<boolean> {
+    const work = this.#organise
+    if (!work) return false
+    this.#organise = undefined
+    this.#cancelOrganise = undefined
+    await work()
+    return true
+  }
+
+  async refreshOrganiseFolder(folder: Folder): Promise<void> {
+    await this.#syncFolder(folder, true)
+  }
+
   dispose(): void {
+    this.#cancelOrganise?.()
+    this.#organise = undefined
+    this.#cancelOrganise = undefined
     this.client
       .off('exists', this.#changed)
       .off('flags', this.#changed)
@@ -94,7 +132,7 @@ export class ImapAccountSync {
   }
 
   async waitForInbox(ms: number, signal: AbortSignal): Promise<number> {
-    if (signal.aborted || this.#inboxChanged || !this.client.usable) return 0
+    if (signal.aborted || this.#inboxChanged || this.#organise || !this.client.usable) return 0
     const selected = this.client.mailbox
     if (!selected || selected.path !== 'INBOX') {
       const box = await this.client.mailboxOpen('INBOX', { readOnly: true })
@@ -109,7 +147,7 @@ export class ImapAccountSync {
         this.#inboxChanged = true
       }
     }
-    if (signal.aborted || this.#inboxChanged || !this.client.usable) return 0
+    if (signal.aborted || this.#inboxChanged || this.#organise || !this.client.usable) return 0
 
     const start = Date.now()
     await new Promise<void>((resolve, reject) => {
@@ -181,21 +219,28 @@ export class ImapAccountSync {
       for (const old of missing) {
         const renamed = renames.get(old.path)
         if (renamed) {
-          this.#locations.relabel(old.path, renamed)
+          this.locations.relabel(old.path, renamed)
           this.#cursor.set(renamed.path, { ...old, path: renamed.path })
         } else {
-          this.#locations.clear(old.path)
+          this.locations.clear(old.path)
         }
         this.#cursor.delete(old.path)
       }
-      for (const folder of folders) this.#locations.relabel(folder.path, folder)
+      for (const folder of folders) this.locations.relabel(folder.path, folder)
+      const moves = imapMoveSupport(this.client).available
+      const changed = moves !== this.#moveSupport
+      this.#moveSupport = moves
       this.#saveCursor()
+      if (changed) this.store.recordChange('account', this.accountId, 'upsert')
     })
     this.#folders = folders
   }
 
   #saveCursor(): void {
-    const json = JSON.stringify({ folders: [...this.#cursor.values()] })
+    const json = JSON.stringify({
+      folders: [...this.#cursor.values()],
+      imapMoves: this.#moveSupport,
+    })
     this.store.db
       .prepare('UPDATE account SET cursor = ? WHERE id = ? AND cursor != ?')
       .run(json, this.accountId, json)
@@ -241,7 +286,7 @@ export class ImapAccountSync {
       cursor.validity !== validity ||
       (cursor.mailboxId && box.mailboxId && cursor.mailboxId !== box.mailboxId)
     ) {
-      this.#locations.clear(path)
+      this.locations.clear(path)
       cursor = {
         path,
         validity,
@@ -338,12 +383,12 @@ export class ImapAccountSync {
 
   async #fetchMessages(folder: Folder, validity: string, uids: number[]): Promise<void> {
     for (const uid of uids) {
-      if (this.#locations.get(folder.path, validity, uid)?.verified) continue
+      if (this.locations.get(folder.path, validity, uid)?.verified) continue
       const item = await this.#metadata(uid)
       if (!item) continue
       const source = await this.#downloadSource(uid, item.size)
       const message = await parseMessage(folder, validity, item, this.store.blobs, source)
-      this.#locations.put(folder, validity, item, message, source)
+      this.locations.put(folder, validity, item, message, source)
     }
   }
 
@@ -362,7 +407,7 @@ export class ImapAccountSync {
         : null
     let after = 0
     for (;;) {
-      const rows = this.#locations.page(path, validity, after, RECONCILE_PAGE)
+      const rows = this.locations.page(path, validity, after, RECONCILE_PAGE)
       if (!rows.length) return
       after = rows[rows.length - 1]?.uid ?? after
       // SEARCH is authoritative even when QRESYNC's VANISHED is limited to the FETCH
@@ -373,7 +418,7 @@ export class ImapAccountSync {
       const present: number[] = []
       const legacy: number[] = []
       for (const { uid, verified } of rows) {
-        if (!remote.has(uid)) this.#locations.remove(path, validity, uid)
+        if (!remote.has(uid)) this.locations.remove(path, validity, uid)
         else if (!verified) legacy.push(uid)
         else present.push(uid)
       }
@@ -384,7 +429,7 @@ export class ImapAccountSync {
           delta ? { uid: true, changedSince: delta } : { uid: true },
         )) {
           const { unread, starred } = messageFlags(item.flags)
-          this.#locations.flags(path, validity, item.uid, unread, starred)
+          this.locations.flags(path, validity, item.uid, unread, starred)
         }
       }
       await yieldToInbox()

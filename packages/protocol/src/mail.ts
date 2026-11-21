@@ -16,6 +16,7 @@ export const AccountSummary = z.object({
   lastSyncAt: z.number().nullable(),
   lastError: z.string().nullable(),
   messageCount: z.number(),
+  imapMoves: z.boolean().optional(),
   backfill: z.object({
     phase: z.enum(['recent', 'all', 'done']).nullable(),
     fetched: z.number(),

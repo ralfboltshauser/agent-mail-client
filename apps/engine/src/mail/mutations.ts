@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import {
   actionLabels,
+  imapActionError,
+  imapActionLabels,
   type LabelPatch,
   type MutationMessageResult,
   type MutationRequest,
@@ -18,6 +20,13 @@ import type {
   GmailMessage,
   GmailMessageState,
 } from '../providers/gmail/types.ts'
+import type { MessageLocation } from '../providers/imap/locations.ts'
+import {
+  executeImap,
+  type ImapJournalEntry,
+  type ImapMutationRunner,
+  imapLocationRevision,
+} from '../providers/imap/organise.ts'
 import { labelId, type MailStore, messageId } from './store.ts'
 
 const INTERNAL = 'engine'
@@ -264,6 +273,7 @@ export class Mutations {
   readonly #store: MailStore
   readonly #api: (accountId: string) => GmailApi | null
   readonly #log: Logger
+  readonly #imap: ImapMutationRunner | undefined
   readonly #now: () => number
   readonly snoozeEnabled: boolean
   readonly #running = new Map<string, Promise<void>>()
@@ -273,11 +283,20 @@ export class Mutations {
     store: MailStore,
     api: (accountId: string) => GmailApi | null,
     log: Logger,
-    { now = Date.now, snoozeEnabled = false }: { now?: () => number; snoozeEnabled?: boolean } = {},
+    {
+      now = Date.now,
+      snoozeEnabled = false,
+      imap,
+    }: {
+      now?: () => number
+      snoozeEnabled?: boolean
+      imap?: ImapMutationRunner
+    } = {},
   ) {
     this.#store = store
     this.#api = api
     this.#log = log
+    this.#imap = imap
     this.#now = now
     this.snoozeEnabled = snoozeEnabled
   }
@@ -346,8 +365,6 @@ export class Mutations {
       )
       .get(id ?? '') as ThreadRow | undefined
     if (!thread) throw new MutationError('Thread is no longer available')
-    if (thread.kind !== 'gmail')
-      throw new MutationError('Organise is currently available for Gmail Accounts')
     return thread
   }
 
@@ -427,6 +444,22 @@ export class Mutations {
     }
 
     const thread = this.#thread(action.threadId)
+    if (thread.kind === 'imap') {
+      const labels = this.#db
+        .prepare('SELECT id FROM label WHERE account_id = ?')
+        .all(thread.account_id) as { id: string }[]
+      const account = this.#db
+        .prepare('SELECT cursor FROM account WHERE id = ?')
+        .get(thread.account_id) as { cursor: string }
+      const { imapMoves } = JSON.parse(account.cursor) as { imapMoves?: boolean }
+      const error = imapActionError(
+        action,
+        thread.account_id,
+        new Set(labels.map(({ id }) => id)),
+        imapMoves,
+      )
+      if (error) throw new MutationError(error)
+    }
     if (action.kind === 'label') {
       const allowed = this.#db
         .prepare(
@@ -443,7 +476,9 @@ export class Mutations {
       this.#state(thread),
       request.id,
     )
-    return this.#insert(request.id, principal, body, thread, statePatch, () => patch)
+    return this.#insert(request.id, principal, body, thread, statePatch, (_, labels) =>
+      thread.kind === 'imap' ? imapActionLabels(action, thread.account_id, labels) : patch,
+    )
   }
 
   #actionPatch(
@@ -480,7 +515,7 @@ export class Mutations {
     body: string,
     thread: ThreadRow,
     statePatch: Partial<ThreadState>,
-    patchFor: (messageId: string) => LabelPatch,
+    patchFor: (messageId: string, labels: string[]) => LabelPatch,
     undoOf: string | null = null,
     intentId: string | null = null,
   ): MutationResult {
@@ -504,14 +539,35 @@ export class Mutations {
         intentId,
       )
     const rows = this.#db
-      .prepare('SELECT id, label_ids FROM message WHERE thread_id = ? ORDER BY id')
-      .all(thread.id) as { id: string; label_ids: string }[]
+      .prepare('SELECT id, label_ids, unread, starred FROM message WHERE thread_id = ? ORDER BY id')
+      .all(thread.id) as { id: string; label_ids: string; unread: number; starred: number }[]
     for (const row of rows) {
       const labels = JSON.parse(row.label_ids) as string[]
       if (labels.includes(labelId(thread.account_id, 'DRAFT'))) continue
-      const patch = patchFor(row.id)
-      const before = this.#before(thread.account_id, patch, labels)
+      const patch = patchFor(row.id, labels)
       if (Object.keys(patch).length === 0) continue
+      if (thread.kind === 'imap') {
+        const locations = this.#db
+          .prepare('SELECT * FROM imap_location WHERE message_id = ?')
+          .all(row.id) as unknown as MessageLocation[]
+        const [source] = locations
+        const revisions =
+          locations.length === 1 && source && labels.includes(source.label_id)
+            ? Object.fromEntries(Object.keys(patch).map((id) => [id, imapLocationRevision(source)]))
+            : {}
+        const before = {
+          ...Object.fromEntries(labels.map((id) => [id, true])),
+          ...Object.fromEntries(Object.keys(patch).map((id) => [id, labels.includes(id)])),
+          [labelId(thread.account_id, 'UNREAD')]: Boolean(row.unread),
+          [labelId(thread.account_id, 'STARRED')]: Boolean(row.starred),
+        }
+        this.#db
+          .prepare('INSERT INTO mutation_message VALUES (?, ?, ?, ?, ?)')
+          .run(id, row.id, JSON.stringify(patch), JSON.stringify(before), JSON.stringify(revisions))
+        this.#store.refreshMessageLabels(row.id)
+        continue
+      }
+      const before = this.#before(thread.account_id, patch, labels)
       // Preserve the pre-M3 label baseline even if the message has never been refreshed from Gmail.
       this.#db
         .prepare(
@@ -876,11 +932,11 @@ export class Mutations {
     const now = this.#now()
     const rows = this.#db
       .prepare(
-        `SELECT m.* FROM mutation m JOIN (
+        `SELECT m.*, a.kind, a.status AS account_status FROM mutation m JOIN account a ON a.id = m.account_id JOIN (
         SELECT MIN(seq) AS seq FROM mutation WHERE status = 'pending' GROUP BY account_id
        ) head ON head.seq = m.seq WHERE m.next_attempt <= ?`,
       )
-      .all(now) as unknown as MutationRow[]
+      .all(now) as unknown as (MutationRow & { kind: string; account_status: string })[]
     const started: Promise<void>[] = []
     for (const row of rows) {
       if (this.#running.has(row.account_id)) continue
@@ -895,6 +951,16 @@ export class Mutations {
       if (nonOwner) {
         const message = 'Organise requires a paired owner Client'
         this.#finish(row, 'failed', message)
+        continue
+      }
+      if (row.kind === 'imap') {
+        if (row.account_status === 'auth_expired') {
+          this.#finish(row, 'failed', 'Sign in to IMAP again to organise this Account')
+        } else {
+          const task = this.#writeImap(row).finally(() => this.#running.delete(row.account_id))
+          this.#running.set(row.account_id, task)
+          started.push(task)
+        }
         continue
       }
       const api = this.#api(row.account_id)
@@ -915,6 +981,53 @@ export class Mutations {
       started.push(task)
     }
     await Promise.all(started)
+  }
+
+  async #writeImap(row: MutationRow) {
+    const original = row.undo_of ? this.#row(row.undo_of) : undefined
+    if (original && (!['applied', 'partial'].includes(original.status) || !original.prepared)) {
+      this.#finish(row, 'failed', 'The original IMAP action has no verified changes to undo')
+      return
+    }
+    const changes = original ? this.#undoChanges(original) : this.#patches(row.id).map(fromPatch)
+    const journal = readJournal(row)
+    const entry: ImapJournalEntry = journal[0] ?? { applied: [], superseded: [], failed: [] }
+    journal[0] = entry
+    try {
+      if (changes.length) {
+        const ran = await this.#imap?.(row.account_id, (sync) =>
+          executeImap(sync, changes, entry, () => this.#saveJournal(row, journal)),
+        )
+        if (!ran) return
+      }
+    } catch (error) {
+      if (this.#retry(row, error)) return
+      entry.error ??= 'Could not verify the change with the IMAP server'
+      if (entry.pending) {
+        entry.uncertain ??= []
+        entry.uncertain.push(entry.pending.change)
+      }
+      const done = new Set(messageResults(journal).map(({ messageId }) => messageId))
+      entry.failed.push(...changes.filter(({ message_id }) => !done.has(message_id)))
+    }
+    transaction(this.#db, () => {
+      this.#db.prepare('UPDATE mutation SET prepared = 1 WHERE id = ?').run(row.id)
+      // Undo may have been queued before the original's partial result was known.
+      if (original) {
+        row.state_patch = JSON.stringify(
+          this.#undoState(original, this.#committedState(row.thread_id)),
+        )
+        this.#db
+          .prepare('UPDATE mutation SET state_patch = ? WHERE id = ?')
+          .run(row.state_patch, row.id)
+      }
+      this.#finish(
+        row,
+        entry.error ? (entry.applied.length ? 'partial' : 'failed') : 'applied',
+        entry.error ?? null,
+        journal,
+      )
+    })
   }
 
   #snoozedLabel(account: string): string | undefined {

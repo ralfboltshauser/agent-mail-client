@@ -91,13 +91,16 @@ function MailApp() {
   const selected = threads.find((item) => item.id === selectedId)
   const activeThread = selected && thread?.thread.id === selectedId ? thread : null
   const organiseAccountId = selected?.accountId ?? accountId
-  const canUndoOrganise = accounts.some(
-    (account) =>
-      account.kind === 'gmail' && (!organiseAccountId || account.id === organiseAccountId),
-  )
+  const organiseAccount = accounts.find((account) => account.id === organiseAccountId)
+  const canUndoOrganise = organiseAccountId ? Boolean(organiseAccount) : accounts.length > 0
   const canOrganise =
     canUndoOrganise && activeThread?.messages.length === activeThread?.thread.messageCount
-  const organise = useOrganise(canOrganise ? (activeThread?.thread ?? null) : null, snoozeEnabled)
+  const organise = useOrganise(
+    canOrganise ? (activeThread?.thread ?? null) : null,
+    snoozeEnabled,
+    organiseAccount,
+    labels,
+  )
   const organisePicker =
     canOrganise && organise.picker?.thread.id === activeThread?.thread.id ? organise.picker : null
   const matchSnippets = useMemo(

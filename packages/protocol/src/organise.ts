@@ -92,3 +92,54 @@ export function actionLabels(
       return { [action.labelId]: action.value }
   }
 }
+
+/** IMAP folder actions replace the source folder membership. */
+export function imapActionLabels(
+  action: Exclude<OrganiseAction, { kind: 'undo' }>,
+  accountId: string,
+  folders: readonly string[],
+): LabelPatch {
+  const inbox = `${accountId}:INBOX`
+  const trash = `${accountId}:TRASH`
+  let destination: string
+  switch (action.kind) {
+    case 'mute':
+    case 'snooze':
+      return {}
+    case 'archive':
+      if (!folders.includes(inbox)) return {}
+      destination = `${accountId}:ARCHIVE`
+      break
+    case 'trash':
+      if (!action.value && !folders.includes(trash)) return {}
+      destination = action.value ? trash : inbox
+      break
+    case 'label':
+      if (!action.value) return {}
+      destination = action.labelId
+      break
+    default:
+      return actionLabels(action, accountId)
+  }
+  return Object.fromEntries([
+    ...folders.filter((id) => id !== destination).map((id) => [id, false]),
+    ...(!folders.includes(destination) ? [[destination, true]] : []),
+  ])
+}
+
+export function imapActionError(
+  action: OrganiseAction,
+  accountId: string,
+  folderIds: ReadonlySet<string>,
+  moves: boolean | undefined = undefined,
+): string | undefined {
+  const has = (id: string) => folderIds.has(`${accountId}:${id}`)
+  if (action.kind === 'archive' && !has('ARCHIVE')) return 'This IMAP Account has no Archive folder'
+  if (action.kind === 'trash' && (!has('TRASH') || (!action.value && !has('INBOX'))))
+    return 'This IMAP Account has no folder for this Trash action'
+  if (action.kind === 'label' && !action.value)
+    return 'Choose a destination folder to move IMAP mail'
+  if (action.kind === 'snooze') return 'Snooze is unavailable for IMAP Accounts'
+  if (moves === false && ['archive', 'trash', 'label'].includes(action.kind))
+    return 'This IMAP server does not support safe moves'
+}
