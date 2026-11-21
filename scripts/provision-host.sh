@@ -76,10 +76,12 @@ fi
 
 # 6. Service and admin commands.
 sudo install -m 644 "$S/amc-engine.service" /etc/systemd/system/amc-engine.service
+sudo install -m 644 "$S/amc-backup.service" "$S/amc-backup.timer" /etc/systemd/system/
 sudo install -m 755 "$S/amc-engine-wrapper.sh" /usr/local/bin/amc-engine
 sudo install -m 755 "$S/amc-cli-wrapper.sh" /usr/local/bin/amc
 sudo systemctl daemon-reload
 sudo systemctl enable amc-engine.service >/dev/null 2>&1
+sudo systemctl enable --now amc-backup.timer
 
 # 7. Tailnet-only HTTPS on :4443 → the Engine (never Funnel).
 sudo tailscale serve --bg --https=4443 http://127.0.0.1:4410 >/dev/null

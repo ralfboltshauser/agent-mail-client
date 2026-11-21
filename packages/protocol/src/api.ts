@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { ACCOUNT_STATUSES } from './mail.ts'
 import { SCOPES, TOKEN_KINDS } from './scopes.ts'
 
 export const PairRequest = z.object({
@@ -33,6 +34,19 @@ export const Health = PublicHealth.extend({
   uptimeSeconds: z.number(),
   schemaVersion: z.number(),
   database: z.object({ path: z.string(), bytes: z.number() }),
+  lastBackup: z.object({ at: z.number(), bytes: z.number() }).nullable().optional(),
+  accounts: z
+    .array(
+      z.object({
+        address: z.string(),
+        status: z.enum(ACCOUNT_STATUSES),
+        syncLagSeconds: z.number().nullable(),
+        lastError: z.string().nullable(),
+      }),
+    )
+    .optional(),
+  outboxDepth: z.number().optional(),
+  mutationQueueDepth: z.number().optional(),
   disks: z.array(z.object({ path: z.string(), freeBytes: z.number(), totalBytes: z.number() })),
 })
 export type Health = z.infer<typeof Health>
