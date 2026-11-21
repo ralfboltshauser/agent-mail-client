@@ -1280,12 +1280,12 @@ export class Mutations {
   #messageHistory(
     account: string,
     id: string,
-    observed: ProviderObservation | undefined,
+    observedHistoryId: string | undefined,
     snoozedId: string | undefined,
     history: HistorySnapshot | null,
   ): MessageHistory | null {
     if (!history) return null
-    if (observed?.historyId && !this.#historyIncludes(history.watermark, observed.historyId))
+    if (observedHistoryId && !this.#historyIncludes(history.watermark, observedHistoryId))
       throw new Error('Gmail history has not caught up with the message')
     const raw = id.slice(account.length + 1)
     const events: LabelEvent[] = []
@@ -1313,6 +1313,43 @@ export class Mutations {
       }
     }
     return { events, deleted, delivered }
+  }
+
+  async #acknowledgedRevisions(
+    api: GmailApi,
+    account: string,
+    change: Change,
+    snoozedId: string | undefined,
+    start: string | undefined,
+    message: GmailMessageState,
+  ): Promise<Record<string, string>> {
+    if (message.historyId) return this.#revisions(change.after, message.historyId)
+    if (!start) return {}
+
+    // Gmail can acknowledge a write without historyId. Use the next message read
+    // to bound the search, then retain only unambiguous transitions in that window.
+    const id = change.message_id
+    try {
+      const observed = await api.getMessageState(id.slice(account.length + 1), true)
+      const end = observed?.historyId
+      if (!end || this.#historyIncludes(start, end)) return {}
+      const snapshot = await this.#readHistory(api, start)
+      const history = this.#messageHistory(account, id, end, snoozedId, snapshot)
+      if (!history || history.deleted) return {}
+      const revisions: Record<string, string> = {}
+      for (const [label, present] of Object.entries(change.after)) {
+        const events = history.events.filter(
+          (event) => event.label === label && this.#historyIncludes(end, event.revision),
+        )
+        const [event] = events
+        if (events.length === 1 && event?.present === present) revisions[label] = event.revision
+      }
+      return revisions
+    } catch {
+      // The write was acknowledged. If the history read fails, preserve the
+      // acknowledgement and leave Undo unverified for these labels.
+      return {}
+    }
   }
 
   #saveJournal(row: MutationRow, journal: JournalEntry[]) {
@@ -1454,10 +1491,16 @@ export class Mutations {
         return request
       }
       const history = async (id: string, start: string, force = false) => {
-        const observed = current.get(id)
-        if (!force && start === observed?.historyId)
+        const observedHistoryId = current.get(id)?.historyId
+        if (!force && start === observedHistoryId)
           return { events: [], deleted: false, delivered: false }
-        return this.#messageHistory(account, id, observed, snoozedId, await snapshot(start))
+        return this.#messageHistory(
+          account,
+          id,
+          observedHistoryId,
+          snoozedId,
+          await snapshot(start),
+        )
       }
 
       const pending = entry.pending
@@ -1656,7 +1699,15 @@ export class Mutations {
       const historyId = current.get(message_id)?.historyId
       entry.pending = { change: candidate, historyId }
       save()
-      const acknowledge = (message: GmailMessageState) => {
+      const acknowledge = async (message: GmailMessageState) => {
+        const revisions = await this.#acknowledgedRevisions(
+          api,
+          account,
+          candidate,
+          snoozedId,
+          historyId,
+          message,
+        )
         transaction(this.#db, () => {
           this.#bumpEpoch(account)
           this.#store.putProviderLabels(
@@ -1665,17 +1716,14 @@ export class Mutations {
             message.labelIds ?? [],
             message.historyId,
           )
-          entry.applied = combine([
-            ...entry.applied,
-            { ...candidate, revisions: this.#revisions(after, message.historyId) },
-          ])
+          entry.applied = combine([...entry.applied, { ...candidate, revisions }])
           delete entry.pending
           save()
         })
       }
       try {
         if (step.trash !== undefined) {
-          acknowledge(await api.setTrashed(rawId(message_id), step.trash))
+          await acknowledge(await api.setTrashed(rawId(message_id), step.trash))
         } else {
           const add: string[] = []
           const remove: string[] = []
@@ -1683,7 +1731,7 @@ export class Mutations {
             const label = key === snoozed ? snoozedId : rawId(key)
             if (label) (present ? add : remove).push(label)
           }
-          acknowledge(
+          await acknowledge(
             beforeDispatch
               ? await api.modifyMessage(rawId(message_id), add, remove, beforeDispatch)
               : await api.modifyMessage(rawId(message_id), add, remove),

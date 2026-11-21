@@ -361,6 +361,46 @@ describe('Gmail Organise writeback', () => {
     expect(thread()).toMatchObject({ inInbox: true, messageCount: 3 })
   })
 
+  it.each(['none', 'during acknowledgement', 'after archive'] as const)(
+    'attributes Archive without a Gmail acknowledgement history ID with owner edits %s',
+    async (ownerEdit) => {
+      const { gmail, queue, submit, lookup, sync, thread } = await setup()
+      gmail.setLabels('m2', ['INBOX', 'SENT'])
+      await sync.incremental()
+      const restoreAndArchive = () => {
+        gmail.setLabels('m2', ['INBOX', 'SENT'])
+        gmail.setLabels('m2', ['SENT'])
+      }
+      const modify = gmail.modifyMessage.bind(gmail)
+      vi.spyOn(gmail, 'modifyMessage').mockImplementation(
+        async (id, add, remove, beforeDispatch) => {
+          const { labelIds } = await modify(id, add, remove, beforeDispatch)
+          if (id === 'm2' && remove.includes('INBOX') && ownerEdit === 'during acknowledgement')
+            restoreAndArchive()
+          return { labelIds, historyId: undefined }
+        },
+      )
+
+      const archive = submit({ kind: 'archive', threadId: THREAD })
+      await queue.tick()
+      expect(lookup(archive.id)).toMatchObject({ status: 'applied', superseded: [] })
+      if (ownerEdit === 'after archive') restoreAndArchive()
+      await sync.incremental()
+
+      const undo = submit({ kind: 'undo', mutationId: archive.id })
+      await queue.tick()
+      await sync.incremental()
+      const ownerChanged = ownerEdit !== 'none'
+      expect(lookup(undo.id)).toMatchObject({
+        status: 'applied',
+        superseded: ownerChanged ? ['a:m2'] : [],
+      })
+      expect(await gmail.getMessageLabels('m1')).toContain('INBOX')
+      expect((await gmail.getMessageLabels('m2'))?.includes('INBOX')).toBe(!ownerChanged)
+      expect(thread()?.inInbox).toBe(true)
+    },
+  )
+
   it('projects changes immediately, writes both messages, and restores per-message state on undo', async () => {
     const { gmail, queue, thread, submit, lookup, db } = await setup()
     const before = thread()?.messages.map((m) => m.labelIds)
