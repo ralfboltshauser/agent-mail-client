@@ -66,10 +66,6 @@ function parseCursor(cursor: string | null): [number | null, string | null] {
   return [Number(cursor.slice(0, at)), cursor.slice(at + 1)]
 }
 
-const THREAD_COLUMNS = `t.id, t.account_id, t.subject, t.snippet, t.participants, t.message_count,
-  t.unread_count, t.starred, t.in_inbox, t.has_attachments, t.label_ids, t.last_message_at,
-  t.snoozed_until, t.muted`
-
 function toThread(row: ThreadRow): ThreadSummary {
   return {
     id: row.id,
@@ -105,8 +101,25 @@ export interface ThreadQuery {
 export class MailQueries {
   readonly db: Db
 
-  constructor(db: Db) {
+  readonly #inbox: string
+  readonly #threadColumns: string
+
+  constructor(db: Db, snoozeEnabled = false) {
     this.db = db
+    // Old Gmail summaries may have suppressed Inbox membership while Snooze was enabled.
+    this.#inbox = snoozeEnabled
+      ? '(t.in_inbox AND t.snoozed_until IS NULL)'
+      : `CASE WHEN t.in_inbox = 0 AND t.snoozed_until IS NOT NULL AND t.muted = 0 THEN EXISTS (
+          SELECT 1 FROM message m WHERE m.thread_id = t.id
+            AND t.account_id || ':INBOX' IN (SELECT value FROM json_each(m.label_ids))
+            AND NOT EXISTS (
+              SELECT 1 FROM json_each(m.label_ids)
+              WHERE value IN (t.account_id || ':TRASH', t.account_id || ':SPAM')
+            )
+        ) ELSE t.in_inbox END`
+    this.#threadColumns = `t.id, t.account_id, t.subject, t.snippet, t.participants, t.message_count,
+      t.unread_count, t.starred, ${this.#inbox} AS in_inbox, t.has_attachments, t.label_ids,
+      t.last_message_at, ${snoozeEnabled ? 't.snoozed_until' : 'NULL'} AS snoozed_until, t.muted`
   }
 
   accounts(): AccountSummary[] {
@@ -184,7 +197,7 @@ export class MailQueries {
       params.push(query.accountId)
     }
     if (query.inbox) {
-      where.push('t.in_inbox = 1')
+      where.push(`(${this.#inbox}) = 1`)
     } else if (query.labelId) {
       where.push('EXISTS (SELECT 1 FROM json_each(t.label_ids) WHERE value = ?)')
       params.push(query.labelId)
@@ -196,7 +209,7 @@ export class MailQueries {
     }
     const rows = this.db
       .prepare(
-        `SELECT ${THREAD_COLUMNS} FROM thread t
+        `SELECT ${this.#threadColumns} FROM thread t
          ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
          ORDER BY t.last_message_at DESC LIMIT ?`,
       )
@@ -207,9 +220,9 @@ export class MailQueries {
   }
 
   thread(id: string): ThreadDetail | null {
-    const row = this.db.prepare(`SELECT ${THREAD_COLUMNS} FROM thread t WHERE t.id = ?`).get(id) as
-      | ThreadRow
-      | undefined
+    const row = this.db
+      .prepare(`SELECT ${this.#threadColumns} FROM thread t WHERE t.id = ?`)
+      .get(id) as ThreadRow | undefined
     if (!row) return null
     return {
       ...toThread(row),
@@ -218,9 +231,9 @@ export class MailQueries {
   }
 
   threadSummary(id: string): ThreadSummary | null {
-    const row = this.db.prepare(`SELECT ${THREAD_COLUMNS} FROM thread t WHERE t.id = ?`).get(id) as
-      | ThreadRow
-      | undefined
+    const row = this.db
+      .prepare(`SELECT ${this.#threadColumns} FROM thread t WHERE t.id = ?`)
+      .get(id) as ThreadRow | undefined
     return row ? toThread(row) : null
   }
 
@@ -244,7 +257,7 @@ export class MailQueries {
     const [at, id] = parseCursor(cursor)
     const rows = this.db
       .prepare(
-        `SELECT ${THREAD_COLUMNS} FROM thread t
+        `SELECT ${this.#threadColumns} FROM thread t
          WHERE (?1 IS NULL OR t.last_message_at < ?1 OR (t.last_message_at = ?1 AND t.id < ?2))
          ORDER BY t.last_message_at DESC, t.id DESC LIMIT ?3`,
       )
@@ -342,7 +355,7 @@ export class MailQueries {
          ), best AS (
            SELECT thread_id, min(rank) AS rank, match_snippet FROM hits GROUP BY thread_id
          )
-         SELECT ${THREAD_COLUMNS}, best.match_snippet
+         SELECT ${this.#threadColumns}, best.match_snippet
          FROM best JOIN thread t ON t.id = best.thread_id
          ORDER BY best.rank + (strftime('%s','now') * 1000 - t.last_message_at) / 3.15e12 ASC
          LIMIT ?`,

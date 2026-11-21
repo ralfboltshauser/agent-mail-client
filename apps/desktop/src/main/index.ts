@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { OrganiseAction, type PairResponse } from '@amc/protocol'
+import type { PairResponse } from '@amc/protocol'
 import { app, BrowserWindow, ipcMain, Menu, nativeTheme, shell } from 'electron'
 import type { SyncStatus, ThreadQuery } from '../shared/api'
 import { clearPairing, loadPairing, savePairing } from './auth'
@@ -75,8 +75,7 @@ function registerIpc() {
   })
   ipcMain.handle('amc:organise', (_event, input: unknown) => {
     if (!organise) throw new Error('Pair with the Engine first')
-    const action = OrganiseAction.parse(input)
-    const id = organise.enqueue(action)
+    const id = organise.enqueue(input, sync?.status.snoozeEnabled)
     broadcast('amc:changed')
     void organise.flush()
     return id

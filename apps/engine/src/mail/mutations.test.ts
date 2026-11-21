@@ -28,7 +28,7 @@ async function setup(blobDir = tempDir(), db = testDb(), snoozeEnabled = true) {
   db.prepare(
     "INSERT INTO account (id, kind, address, credentials, created_at) VALUES ('a', 'gmail', 'owner@example.com', x'00', 0)",
   ).run()
-  const store = new MailStore(db, new BlobStore(blobDir), () => now)
+  const store = new MailStore(db, new BlobStore(blobDir), { now: () => now, snoozeEnabled })
   const gmail = new FakeGmail()
   gmail.labelList.push({ id: 'Label_work', name: 'Work', type: 'user' })
   gmail.add('m1', { threadId: 'thread', labels: ['INBOX', 'UNREAD'] })
@@ -37,7 +37,7 @@ async function setup(blobDir = tempDir(), db = testDb(), snoozeEnabled = true) {
   const sync = new GmailAccountSync(gmail, store, state, silentLog, snoozeEnabled)
   await sync.start()
   while (await sync.backfillStep()) {}
-  const queries = new MailQueries(db)
+  const queries = new MailQueries(db, snoozeEnabled)
   const queue = new Mutations(store, () => gmail, silentLog, { now: () => now, snoozeEnabled })
   const request = (action: OrganiseAction): MutationRequest => ({ id: randomUUID(), action })
   return {
@@ -829,7 +829,7 @@ describe.each([
       advance(2000)
       db.close()
       db = openDatabase(path)
-      const store = new MailStore(db, new BlobStore(directory), now)
+      const store = new MailStore(db, new BlobStore(directory), { now, snoozeEnabled: true })
       const restarted = new Mutations(store, () => gmail, silentLog, { now, snoozeEnabled: true })
       await restarted.tick()
       expect(write.mock.calls).toEqual([

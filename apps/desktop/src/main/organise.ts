@@ -8,7 +8,7 @@ import {
   type MutationRequest,
   MutationResponse,
   type MutationResult,
-  type OrganiseAction,
+  OrganiseAction,
   SNOOZED_LABEL,
   type ThreadSummary,
 } from '@amc/protocol'
@@ -432,7 +432,16 @@ export class OrganiseSync extends EventEmitter<{ changed: [] }> {
     this.#controller.abort()
   }
 
-  enqueue(action: OrganiseAction): string {
+  enqueue(input: unknown, snoozeEnabled = false): string {
+    if (
+      !snoozeEnabled &&
+      input !== null &&
+      typeof input === 'object' &&
+      'kind' in input &&
+      (input.kind === 'snooze' || input.kind === 'unsnooze')
+    )
+      throw new Error('Snooze is disabled on this Engine')
+    const action = OrganiseAction.parse(input)
     if (this.#refusal) throw new Error(this.#refusal)
     return this.#local.enqueue(action)
   }

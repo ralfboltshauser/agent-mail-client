@@ -57,14 +57,14 @@ async function main(argv: string[]) {
     case 'serve': {
       const sealer = Sealer.fromSecretsDir(config.secretsDir)
       const blobs = new BlobStore(config.blobDir)
-      const store = new MailStore(db, blobs)
-      const queries = new MailQueries(db)
+      const snoozeEnabled = config.features.snooze
+      const store = new MailStore(db, blobs, { snoozeEnabled })
+      const queries = new MailQueries(db, snoozeEnabled)
       let oauth: OAuthClient | null = null
       const oauthClient = () => {
         oauth ??= loadOAuthClient(config.secretsDir)
         return oauth
       }
-      const snoozeEnabled = config.features.snooze
       const sync = new SyncManager({ db, store, sealer, log, oauthClient, snoozeEnabled })
       const drafts = new Drafts(db, store, (accountId) => sync.gmailApi(accountId))
       const mutations = new Mutations(store, (accountId) => sync.gmailApi(accountId), log, {

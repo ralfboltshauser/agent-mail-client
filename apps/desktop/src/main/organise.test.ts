@@ -70,6 +70,26 @@ function seed(replica: Replica, kind: 'gmail' | 'imap' = 'gmail') {
 const inbox = { view: { kind: 'inbox' }, accountId: null } as const
 
 describe('desktop Organise outbox', () => {
+  it('rejects Snooze and Unsnooze before changing the replica when disabled', () => {
+    const replica = new Replica(':memory:')
+    try {
+      seed(replica)
+      const engine = new EngineClient('http://example.invalid', 'synthetic-token')
+      const sync = new OrganiseSync(replica.organise, engine, async () => {})
+      for (const action of [
+        { kind: 'snooze', threadId: THREAD.id, until: Date.now() + 1000 },
+        { kind: 'unsnooze', threadId: THREAD.id },
+      ]) {
+        expect(() => sync.enqueue(action, false)).toThrow('Snooze is disabled on this Engine')
+      }
+      expect(replica.organise.unsent()).toBeNull()
+      expect(replica.threads(inbox)).toHaveLength(1)
+      expect(replica.thread(THREAD.id)?.thread.snoozedUntil).toBeNull()
+    } finally {
+      replica.db.close()
+    }
+  })
+
   it('leaves IMAP threads out of the Gmail writeback queue', () => {
     const replica = new Replica(':memory:')
     try {
