@@ -24,6 +24,7 @@ export function ShortcutsDialog({
         ['Next / previous thread', 'J / K'],
         ['Next / previous Inbox section', '⇧J / ⇧K'],
         ['Page down in reader', 'Space'],
+        ['Triage Inbox', 'T'],
         ['Switch accounts', '⌘0–9'],
       ],
     },
@@ -36,6 +37,20 @@ export function ShortcutsDialog({
         ['Forward', 'F'],
         ['Hand off', '⇧T'],
         ['Send in composer', '⌘↵'],
+      ],
+    },
+    {
+      title: 'Triage review',
+      keys: [
+        ['Accept sender', 'A'],
+        ['Block sender', 'X'],
+        ['Choose a Bucket', '1–6'],
+        ['Archive this Thread', 'E'],
+        ...(snoozeEnabled ? [['Snooze this Thread', 'S']] : []),
+        ['Reply', 'R'],
+        ['Skip card', 'Space'],
+        ['Undo review action', 'U'],
+        ['Exit and keep position', 'Esc'],
       ],
     },
     {

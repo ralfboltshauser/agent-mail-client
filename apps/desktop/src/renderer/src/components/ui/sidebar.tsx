@@ -94,7 +94,7 @@ function SidebarProvider({
         event.key !== SIDEBAR_KEYBOARD_SHORTCUT ||
         !(event.metaKey || event.ctrlKey) ||
         (event.target instanceof HTMLElement &&
-          (event.target.isContentEditable || event.target.closest('input, textarea')))
+          (event.target.isContentEditable || event.target.closest('input, textarea, [role="dialog"]')))
       )
         return
       event.preventDefault()

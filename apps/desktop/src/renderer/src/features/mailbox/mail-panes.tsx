@@ -72,7 +72,13 @@ export function MailPanes({
       <ResizablePanel defaultSize="40%" minSize="25%" maxSize="60%">
         <div className="flex h-full flex-col">
           <header className="app-drag app-toolbar gap-2 px-3.5">
-            <h2 className="truncate text-[15px] font-semibold tracking-tight">{title}</h2>
+            <h2
+              data-mailbox-heading
+              tabIndex={-1}
+              className="truncate text-[15px] font-semibold tracking-tight"
+            >
+              {title}
+            </h2>
             {!search && view.kind === 'inbox' && <InboxCount accountId={accountId} />}
             <SearchInput mailSearch={mailSearch} move={move} />
           </header>

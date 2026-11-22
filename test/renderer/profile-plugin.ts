@@ -17,6 +17,8 @@ const components: Record<string, string> = {
   'features/sender-avatar/sender-avatar.tsx': 'SenderAvatar',
   'features/thread-list/inbox-chrome.tsx': 'InboxSectionHeader',
   'features/thread-list/thread-row.tsx': 'ThreadRow',
+  'features/triage-review/review-card.tsx': 'ReviewCard',
+  'features/triage-review/triage-review.tsx': 'ReviewProgress',
 }
 
 function getMemoRender(declaration: ts.VariableDeclaration) {

@@ -17,9 +17,8 @@ export const row = (subject: string) =>
   within(listbox()).getByRole('option', { name: (name) => name.includes(subject) })
 export const selected = () => within(listbox()).getByRole('option', { selected: true })
 
-export async function mount() {
+export async function mount(adapter = rendererAdapter()) {
   commits.clear()
-  const adapter = rendererAdapter()
   vi.stubGlobal('amc', adapter.api)
   await act(async () => {
     render(

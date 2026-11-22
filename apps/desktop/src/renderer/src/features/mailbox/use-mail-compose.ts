@@ -5,7 +5,11 @@ import { DRAFT_POLL_INTERVAL, isMissingDraft } from '@/features/composer/draft-a
 import { getAmc } from '@/lib/amc'
 import { showQueuedSend } from './send-undo'
 
-export function useMailCompose(thread: ThreadSummary | null, composeAccountId: string | undefined) {
+export function useMailCompose(
+  thread: ThreadSummary | null,
+  composeAccountId: string | undefined,
+  onQueued?: (item: OutboxItem, elapsed: number) => (() => void) | undefined,
+) {
   const [draft, setDraft] = useState<ComposeDraft | null>(null)
   const [handoffThread, setHandoffThread] = useState<string | null>(null)
   const [openingComposer, setOpeningComposer] = useState(false)
@@ -54,10 +58,10 @@ export function useMailCompose(thread: ThreadSummary | null, composeAccountId: s
     }
   }
 
-  const startCompose = async (mode: ComposeStart['mode']) => {
-    if (opening.current || draft || (mode !== 'new' && !thread)) return
+  const startCompose = async (mode: ComposeStart['mode'], target = thread) => {
+    if (opening.current || draft || (mode !== 'new' && !target)) return
     if (mode === 'new' && minimised) return openDraft(minimised.id)
-    const from = mode !== 'new' ? thread?.accountId : composeAccountId
+    const from = mode !== 'new' ? target?.accountId : composeAccountId
     if (!from) {
       toast.error('Add an Account before composing.')
       return
@@ -65,13 +69,13 @@ export function useMailCompose(thread: ThreadSummary | null, composeAccountId: s
     opening.current = true
     setOpeningComposer(true)
     try {
-      setDraft(
-        await getAmc().startCompose({
-          mode,
-          accountId: from,
-          threadId: mode === 'new' ? undefined : thread?.id,
-        }),
-      )
+      const next = await getAmc().startCompose({
+        mode,
+        accountId: from,
+        threadId: mode === 'new' ? undefined : target?.id,
+      })
+      setDraft(next)
+      return next
     } catch (cause) {
       toast.error((cause as Error).message)
     } finally {
@@ -81,9 +85,11 @@ export function useMailCompose(thread: ThreadSummary | null, composeAccountId: s
   }
 
   const queued = (item: OutboxItem, requestElapsedMs: number) => {
+    const onCancelled = onQueued?.(item, requestElapsedMs)
     setDraft(null)
     showQueuedSend(item, requestElapsedMs, () => {
       setMinimised({ id: item.draftId, subject: item.subject })
+      onCancelled?.()
     })
   }
 

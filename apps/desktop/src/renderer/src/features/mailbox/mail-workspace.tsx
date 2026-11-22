@@ -13,6 +13,8 @@ import { useReplicaSelector, useSyncField } from '@/hooks/use-amc'
 import { getAmc } from '@/lib/amc'
 import type { View } from '../../../../shared/api'
 import { useMailSearch } from '../search/use-mail-search'
+import { TriageReview } from '../triage-review/triage-review'
+import { useTriageReview } from '../triage-review/use-triage-review'
 import { ComposeOverlays } from './compose-overlays'
 import { MailPanes, MailReader } from './mail-panes'
 import {
@@ -125,7 +127,9 @@ export function MailWorkspace({
     snoozeEnabled,
   })
   const { organise, organisePicker, canUndoOrganise, setBucketPickerId } = actions
-  const compose = useMailCompose(activeThread, accountId ?? accounts[0]?.id)
+  const review = useTriageReview(accountId)
+  const { close: closeReview } = review
+  const compose = useMailCompose(activeThread, accountId ?? accounts[0]?.id, review.onQueued)
   const { openingComposer, openDraft, startCompose, setMinimised } = compose
   const dialogs = useMailDialogs()
   const { rememberFocus, restoreDialogFocus, openSendSettings } = dialogs
@@ -143,6 +147,7 @@ export function MailWorkspace({
   useEffect(
     () =>
       getAmc().onOpenThread((target) => {
+        closeReview(false)
         const next = target.inInbox ? INBOX : { kind: 'all' as const }
         resetSearch(true)
         openSender(null)
@@ -160,6 +165,7 @@ export function MailWorkspace({
       setBucketPickerId,
       setSelection,
       openSender,
+      closeReview,
     ],
   )
 
@@ -187,6 +193,23 @@ export function MailWorkspace({
     searchInput,
     readerScroll,
     clearSearch,
+    reviewOpen: review.open,
+    openReview:
+      sectioned &&
+      getAmc().smartInbox?.review &&
+      !compose.draft &&
+      !compose.handoffThread &&
+      !openingComposer &&
+      !organisePicker &&
+      !actions.bucketPickerOpen &&
+      !dialogs.shortcutsOpen &&
+      !dialogs.agentOpen &&
+      dialogs.sendSettings === null
+        ? () =>
+            review.enter(
+              dialogs.paletteOpen ? dialogs.paletteInvoker.current : document.activeElement,
+            )
+        : undefined,
   })
   const title = search
     ? `Search: ${search.text}`
@@ -324,6 +347,26 @@ export function MailWorkspace({
         }))}
         undo={canUndoOrganise ? organise.undo : undefined}
       />
+      {review.open && (
+        <TriageReview
+          store={review.store}
+          accountId={accountId}
+          labels={labels}
+          suspended={!!compose.draft || openingComposer}
+          snoozeEnabled={snoozeEnabled}
+          onClose={() => closeReview()}
+          onOutbox={() => {
+            closeReview(false)
+            goTo({ kind: 'outbox' })
+          }}
+          onReply={async (card) => {
+            await review.store.validate(card)
+            const record = review.store.prepareReply(card)
+            const draft = await compose.startCompose('reply', card.detail.thread)
+            if (draft) review.rememberReply(record, draft.id)
+          }}
+        />
+      )}
     </SidebarProvider>
   )
 }

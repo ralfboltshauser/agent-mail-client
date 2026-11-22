@@ -4,6 +4,7 @@ import type {
   AgentAction,
   Bucket,
   BucketInput,
+  BucketReviewInput,
   ComposeAttachment,
   ComposeDraft,
   ComposePatch,
@@ -25,7 +26,7 @@ import type {
   ThreadMessage,
   ThreadSummary,
   TriageQueuePage,
-  TriageQueueQuery,
+  TriageQueueRequest,
   VersionedDraft,
 } from '@amc/protocol'
 
@@ -144,11 +145,25 @@ export interface TriageStatus {
   notice: string | null
 }
 
+export type ReviewOrganiseAction = Extract<OrganiseAction, { kind: 'archive' | 'snooze' | 'undo' }>
+export interface ReviewOrganiseStatus {
+  status: 'pending' | 'applied' | 'failed' | 'partial'
+  error: string | null
+}
+
 export interface DesktopSenderAvatarResults {
   rows: (SenderAvatarResults['rows'][number] & { image?: string | null })[]
 }
 
+export interface ReviewApi {
+  reviewPairing(): Promise<string>
+  reviewBucket(input: BucketReviewInput): Promise<OwnerActionStatus>
+  reviewOrganise(input: ReviewOrganiseAction, id: string, messageId?: string): Promise<string>
+  reviewOrganiseStatus(id: string): Promise<ReviewOrganiseStatus | null>
+}
+
 export interface SmartInboxApi {
+  review?: ReviewApi
   listSenders(query: Partial<SenderListQuery>): Promise<SenderList>
   decideSender(input: SenderDecision): Promise<OwnerActionStatus>
   adoptScreenedDestination(
@@ -156,7 +171,7 @@ export interface SmartInboxApi {
   ): Promise<{ accountId: string; providerId: string }>
   ownerAction(id: string): Promise<OwnerActionStatus>
   undoOwnerAction(id: string): Promise<OwnerActionStatus>
-  triageQueue(query: Partial<TriageQueueQuery>): Promise<TriageQueuePage>
+  triageQueue(query: TriageQueueRequest): Promise<TriageQueuePage>
   resolveSenderAvatars(
     input: SenderAvatarResolve,
     knownDigests?: readonly string[],

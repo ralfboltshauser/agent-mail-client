@@ -1,7 +1,7 @@
 import type { TriageQueuePage, TriageQueueQuery } from '@amc/protocol'
 import { z } from 'zod'
 import { type Db, transaction } from '../../db/database.ts'
-import { SenderError } from '../senders/actions.ts'
+import { SenderError, senderSuggestions } from '../senders/actions.ts'
 import { senderStatusSql } from '../senders/index.ts'
 import { latestInboxMessageSql } from './input.ts'
 
@@ -40,9 +40,18 @@ export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
     const revision = Number(
       db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'change_log'").get()?.seq ?? 0,
     )
-    if (boundary && revision !== boundary[1])
+    if (boundary && revision !== boundary[1] && !input.nextBatch)
       throw new SenderError('Triage queue changed. Start a fresh snapshot.', 409)
 
+    // Point reads use stable indexed values before computing the representative.
+    const inboxScope = input.threadId
+      ? 'AND t.id = ?6'
+      : input.senderAddress && account
+        ? `AND t.account_id = ?1 AND t.id IN (
+           SELECT m.thread_id FROM sender_index i JOIN message m ON m.id = i.message_id
+           WHERE i.account_id = ?1 AND i.address = ?7 AND i.in_inbox = 1
+         )`
+        : ''
     const rows = db
       .prepare(`
       WITH inbox AS MATERIALIZED (
@@ -56,11 +65,14 @@ export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
              AND EXISTS (SELECT 1 FROM json_each(m.label_ids) WHERE value = m.account_id || ':INBOX')
            ORDER BY m.sent_at DESC, m.id DESC LIMIT 1) AS sender
         FROM thread t WHERE t.in_inbox = 1 AND (?1 IS NULL OR t.account_id = ?1)
+          ${inboxScope}
       ), new_senders AS (
         SELECT t.*, row_number() OVER (
           PARTITION BY account_id, sender ->> 'address' ORDER BY last_message_at DESC, id DESC
         ) AS sender_rank
-        FROM inbox t WHERE sender ->> 'status' = 'new'
+        FROM inbox t WHERE sender ->> 'status' = 'new' AND ?6 IS NULL
+          AND (?7 IS NULL OR sender ->> 'address' = ?7)
+          AND NOT EXISTS (SELECT 1 FROM json_each(?8) WHERE value = t.id)
       ), cards AS (
         SELECT 0 AS tier, id AS threadId, modseq AS threadRevision, account_id AS accountId,
           sender ->> 'id' AS messageId, sender ->> 'address' AS address,
@@ -70,7 +82,7 @@ export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
         SELECT 1, t.id, t.modseq, t.account_id, t.bucket_input_message_id, null, 0,
           t.bucket_reason, t.last_message_at
         FROM inbox t LEFT JOIN owner_handled h ON h.thread_id = t.id
-        WHERE t.bucket_confidence = 'low' AND t.sender ->> 'status' IS NOT 'new'
+        WHERE ?7 IS NULL AND t.bucket_confidence = 'low' AND t.sender ->> 'status' IS NOT 'new'
           AND t.bucket_input_message_id = ${latestInboxMessageSql}
           AND h.message_id IS NOT t.bucket_input_message_id
       )
@@ -84,10 +96,14 @@ export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
         3: boundary?.[3] ?? null,
         4: boundary?.[4] ?? null,
         5: input.limit + 1,
+        6: input.threadId ?? null,
+        7: input.senderAddress ?? null,
+        8: input.omitThreads ?? '[]',
       }) as unknown as QueueRow[]
     const page = rows.slice(0, input.limit)
     const last = page.at(-1)
     return {
+      reviewLookup: true,
       revision,
       cards: page.map(
         ({ address, accountId, threadId, threadRevision, messageId, ruleRevision, reason }) => ({
@@ -98,6 +114,9 @@ export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
           messageId,
           revision: address ? ruleRevision : threadRevision,
           reason,
+          ...(input.senderAddress && address
+            ? { suggestions: senderSuggestions(db, accountId, address) }
+            : {}),
         }),
       ),
       cursor:

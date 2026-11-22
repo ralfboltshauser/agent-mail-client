@@ -97,6 +97,36 @@ row geometry and headers subscribe to their counts. The cross-section test
 checks the actual row, listbox, selection, reader and focus nodes in addition
 to the commit budget.
 
+## Desktop triage review
+
+The Engine owns queue eligibility, Thread revisions, and provider outcomes.
+The renderer review store owns the capped card IDs, cursor, and action journal,
+saved under the pairing and Account. The card, progress, and history subscribe
+to their own snapshots. Organise owns local Archive and Snooze writeback.
+
+| Settled action | Review card | Progress | Workspace | Sidebar | List | Row bodies | Reader | Composer |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Space skips to a validated next card | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+The App harness covers focus return, exit and restart, Account switching
+during an older read, notification-open, stale cards, retry and empty states,
+Handoff, representative Thread targeting, and exact Undo. It also exercises
+the real composer and checks that an explicit Send keeps the Outbox ID.
+
+An offscreen Electron 45.4.1 run used the production App at 1280 × 900,
+a fresh temporary profile, forced reduced motion, and 100,000 synthetic Inbox
+Threads. There were 21 mounted options and one review card. Review entry and
+six Space keypresses took 0.8–16.6 ms from the keydown to the animation frame
+after the progress update. During a scroll sample, 29 of 30 animation-frame
+intervals were 16.6–16.8 ms and one was 50 ms. Reply opened the composer,
+minimising kept the card, and Esc restored focus to the listbox. This measures
+local renderer behavior with in-memory replies.
+
+The automated Engine and CLI suites cover provider fakes, exact-message
+Screened out writeback and recovery, notification suppression, and queue JSON.
+Live Gmail and IMAP Accounts, fresh Host pairing, VoiceOver, network capture,
+and the Host migration and rollback drill still require verification.
+
 ## Sender avatars
 
 The production Inbox fixture renders 48 Threads with a New senders card.

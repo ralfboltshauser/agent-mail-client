@@ -46,6 +46,17 @@ registration. Desktop upgrades move the previous app bundle to the Trash.
 
 ### Mail triage
 
+In the desktop Inbox, press **T** or choose **Triage Inbox** in the command
+palette. Review starts with new Senders and continues with low-confidence
+Threads. **Esc** keeps your place for this pairing and Account. **U** undoes
+the latest reversible review action. Open **Action history** for queued or
+partial writeback and retries. **R** opens the composer and returns to
+review when you close it. Hand off uses **Shift+T**.
+
+Desktop review requires an Engine with per-card queue validation. With an
+older Engine, the review window shows an upgrade message and offers a retry.
+The paired CLI can inspect the same queue with `amc triage queue --json`.
+
 Automatic desktop triage selects unbucketed Inbox threads whose latest
 provider-recorded delivery is within 24 hours. It uses Gmail's internalDate
 and IMAP's INTERNALDATE. Messages with no recorded delivery time do not count.

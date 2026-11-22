@@ -80,12 +80,28 @@ export const TriageQueueQuery = z.object({
   accountId: id.optional(),
   cursor: z.string().max(2048).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(100),
+  threadId: id.optional(),
+  senderAddress: id.optional(),
+  nextBatch: z.enum(['1']).optional(),
+  omitThreads: z
+    .string()
+    .max(52000)
+    .refine((raw) => {
+      try {
+        return z.array(id).max(100).safeParse(JSON.parse(raw)).success
+      } catch {
+        return false
+      }
+    }, 'Invalid omitted Threads')
+    .optional(),
 })
 export type TriageQueueQuery = z.infer<typeof TriageQueueQuery>
+export type TriageQueueRequest = z.input<typeof TriageQueueQuery>
 export type TriageCardId =
   | { kind: 'sender'; accountId: string; address: string }
   | { kind: 'thread'; threadId: string }
 export interface TriageQueuePage {
+  reviewLookup?: true
   revision: number
   cards: {
     id: TriageCardId
@@ -95,6 +111,7 @@ export interface TriageQueuePage {
     revision: number
     threadRevision: number
     reason: string
+    suggestions?: SenderSuggestion[]
   }[]
   cursor: string | null
 }

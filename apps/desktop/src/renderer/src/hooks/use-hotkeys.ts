@@ -21,8 +21,9 @@ export function useHotkeys(map: HotkeyMap, enabled = true): void {
     let pending: string | null = null
     let pendingTimer: number | undefined
     const onKey = (event: KeyboardEvent) => {
-      const inDialog = event.target instanceof Element && event.target.closest('[role="dialog"]')
-      if (event.isComposing || event.defaultPrevented || inDialog) return
+      const inOverlay =
+        event.target instanceof Element && event.target.closest('[role="dialog"], [role="menu"]')
+      if (event.isComposing || event.keyCode === 229 || event.defaultPrevented || inOverlay) return
       const key = event.key === ' ' ? 'space' : event.key.toLowerCase()
       if (
         key === 'space' &&
