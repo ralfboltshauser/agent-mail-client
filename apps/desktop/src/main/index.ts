@@ -53,6 +53,7 @@ import {
   parseNotificationSettings,
 } from './notifications'
 import { OrganiseSync } from './organise'
+import { createQuitHandler } from './quit'
 import { loadRenderer } from './renderer-load'
 import { Replica } from './replica'
 import { resolveSenderAvatars } from './sender-avatars'
@@ -696,9 +697,6 @@ function registerReadIpc() {
   })
 }
 
-let quitting = false
-let flushingBeforeQuit = false
-
 async function flushDrafts() {
   await replica?.draftUpdates.flush(engine)
 }
@@ -772,7 +770,7 @@ function createWindow() {
   let closing = false
   let flushed = false
   current.on('close', (event) => {
-    if (quitting || flushed) return
+    if (flushed) return
     event.preventDefault()
     if (closing) return
     closing = true
@@ -908,19 +906,19 @@ if (!app.requestSingleInstanceLock()) {
     app.on('activate', openWindow)
     app.on('browser-window-focus', refreshTray)
   })
-  app.on('before-quit', (event) => {
-    if (quitting) return
-    event.preventDefault()
-    if (flushingBeforeQuit) return
-    flushingBeforeQuit = true
-    quittingTriage.abort()
-    const stoppingTriage = stopSync()
-    if (changedTimer) clearTimeout(changedTimer)
-    void Promise.allSettled([flushDrafts(), stoppingTriage]).then(() => {
-      quitting = true
-      app.quit()
-    })
-  })
+  app.on(
+    'before-quit',
+    createQuitHandler(
+      () => {
+        quittingTriage.abort()
+        const stoppingTriage = stopSync()
+        if (changedTimer) clearTimeout(changedTimer)
+        return Promise.allSettled([flushDrafts(), stoppingTriage])
+      },
+      // The replica already has each staged edit. Exit even if the Engine or triage stalls.
+      () => app.exit(0),
+    ),
+  )
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit()
   })
