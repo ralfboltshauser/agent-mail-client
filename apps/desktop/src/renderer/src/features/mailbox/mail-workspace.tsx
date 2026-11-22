@@ -43,8 +43,13 @@ export function MailWorkspace({
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const readerScroll = useRef<HTMLDivElement>(null)
   const snoozeEnabled = status.snoozeEnabled === true
-  // Main retains progress on an interrupted bootstrap until the snapshot completes.
-  const snapshotPending = status.phase === 'bootstrapping' || status.progress != null
+  const [wasSnapshotPending, setWasSnapshotPending] = useState(false)
+  // Pausing and restarting sync can clear progress before the replica is complete.
+  const snapshotPending =
+    status.phase === 'bootstrapping' ||
+    status.progress != null ||
+    (wasSnapshotPending && status.phase !== 'live')
+  if (snapshotPending !== wasSnapshotPending) setWasSnapshotPending(snapshotPending)
   const { accountId, setAccountId, view, setView, notification, setNotification } =
     useMailboxNavigation(snoozeEnabled)
   const accountQuery = useMailboxQuery('accounts', () => getAmc().accounts(), !snapshotPending)
