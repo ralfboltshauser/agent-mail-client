@@ -1,17 +1,20 @@
 import type { ThreadSummary } from '@amc/protocol'
-import type { AmcApi, ThreadQuery } from '../../../shared/api'
+import type { AmcApi, DesktopThreadSummary, ThreadQuery } from '../../../shared/api'
 import type { ReplicaQuery } from './query-cache'
 import { shareReply } from './share-reply'
 
 export interface ThreadIndex {
   inbox?: InboxIndex
   ids: readonly string[]
-  summaries: ReadonlyMap<string, ThreadSummary>
+  summaries: ReadonlyMap<string, DesktopThreadSummary>
 }
 
-function indexThreads(previous: ThreadIndex | undefined, rows: ThreadSummary[]): ThreadIndex {
+function indexThreads(
+  previous: ThreadIndex | undefined,
+  rows: DesktopThreadSummary[],
+): ThreadIndex {
   const ids: string[] = []
-  const summaries = new Map<string, ThreadSummary>()
+  const summaries = new Map<string, DesktopThreadSummary>()
   let changed = previous?.summaries.size !== rows.length
   for (const row of rows) {
     ids.push(row.id)
@@ -99,6 +102,7 @@ export interface SenderCardData {
   name: string
   subject: string
   representativeId: string
+  messageId?: string
   threadIds: readonly string[]
   unread: boolean
 }
@@ -161,6 +165,7 @@ function groupSenders(threads: ThreadSummary[], previous: InboxIndex | undefined
         participants.find((person) => person.address.toLowerCase() === address)?.name || address,
       subject,
       representativeId: newest.id,
+      messageId: newest.inboxSender?.messageId,
       threadIds: group.sort(compareThreads).map(({ id }) => id),
       unread: group.some((thread) => thread.unreadCount > 0),
     })

@@ -14,6 +14,7 @@ import type {
 import { RECENT_THREAD_BODIES, TRIAGE_RECENT_WINDOW_MS } from '@amc/protocol'
 import type {
   Counts,
+  DesktopThreadSummary,
   ReplicaThreadMessage,
   ThreadQuery,
   ThreadWithMessages,
@@ -27,6 +28,23 @@ const RECENT_DELIVERY = `(
   SELECT MAX(json_extract(message.data, '$.deliveredAt'))
   FROM message WHERE message.thread_id = thread.id
 ) BETWEEN :cutoff AND :now`
+
+const THREAD_LIST_COLUMNS = `data, (
+  SELECT json_object('messageId', m.id, 'from', json_extract(m.data, '$.from'))
+  FROM message m WHERE m.thread_id = effective_thread.id
+  ORDER BY m.sent_at DESC, m.id DESC LIMIT 1
+) AS latest_sender`
+
+type ThreadListRow = {
+  data: string
+  latest_sender: string | null
+}
+
+function readThreadListRow(row: ThreadListRow): DesktopThreadSummary {
+  const thread = JSON.parse(row.data) as DesktopThreadSummary
+  if (row.latest_sender) thread.latestSender = JSON.parse(row.latest_sender)
+  return thread
+}
 
 function triageWindow() {
   const now = Date.now()
@@ -310,7 +328,7 @@ export class Replica {
     ).map((r) => JSON.parse(r.data))
   }
 
-  threads(query: ThreadQuery): ThreadSummary[] {
+  threads(query: ThreadQuery): DesktopThreadSummary[] {
     const where: string[] = []
     const params: (string | number)[] = []
     if (query.accountId) {
@@ -359,11 +377,11 @@ export class Replica {
     }
     const rows = this.db
       .prepare(
-        `SELECT data FROM effective_thread ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+        `SELECT ${THREAD_LIST_COLUMNS} FROM effective_thread ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
          ORDER BY last_message_at DESC LIMIT ?`,
       )
-      .all(...params, query.limit ?? 5000) as { data: string }[]
-    return rows.map((r) => JSON.parse(r.data))
+      .all(...params, query.limit ?? 5000) as ThreadListRow[]
+    return rows.map(readThreadListRow)
   }
 
   thread(id: string): ThreadWithMessages | null {
@@ -400,11 +418,11 @@ export class Replica {
     return { thread: JSON.parse(row.data), messages, drafts }
   }
 
-  summaries(ids: string[]): ThreadSummary[] {
-    const get = this.db.prepare('SELECT data FROM effective_thread WHERE id = ?')
+  summaries(ids: string[]): DesktopThreadSummary[] {
+    const get = this.db.prepare(`SELECT ${THREAD_LIST_COLUMNS} FROM effective_thread WHERE id = ?`)
     return ids.slice(0, 100).flatMap((id) => {
-      const row = get.get(id) as { data: string } | undefined
-      return row ? [JSON.parse(row.data) as ThreadSummary] : []
+      const row = get.get(id) as ThreadListRow | undefined
+      return row ? [readThreadListRow(row)] : []
     })
   }
 
@@ -445,17 +463,17 @@ export class Replica {
     }
   }
 
-  filter(text: string, accountId: string | null): ThreadSummary[] {
+  filter(text: string, accountId: string | null): DesktopThreadSummary[] {
     const words = text.toLowerCase().split(/\s+/).filter(Boolean)
     if (words.length === 0) return []
     const rows = this.db
       .prepare(
-        `SELECT data FROM effective_thread WHERE (?1 IS NULL OR account_id = ?1)
+        `SELECT ${THREAD_LIST_COLUMNS} FROM effective_thread WHERE (?1 IS NULL OR account_id = ?1)
          ${words.map(() => 'AND haystack LIKE ?').join(' ')}
          ORDER BY last_message_at DESC LIMIT 200`,
       )
-      .all(accountId, ...words.map((w) => `%${w.replace(/[%_]/g, '')}%`)) as { data: string }[]
-    return rows.map((r) => JSON.parse(r.data))
+      .all(accountId, ...words.map((w) => `%${w.replace(/[%_]/g, '')}%`)) as ThreadListRow[]
+    return rows.map(readThreadListRow)
   }
 
   messageText(messageId: string): string | null {

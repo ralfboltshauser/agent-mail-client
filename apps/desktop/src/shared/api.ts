@@ -49,6 +49,10 @@ export interface ThreadQuery {
   limit?: number
 }
 
+export type DesktopThreadSummary = ThreadSummary & {
+  latestSender?: { messageId: string; from: ThreadMessage['from'] }
+}
+
 export type ReplicaThreadMessage = ThreadMessage & { bodyRevision: string }
 
 export interface ThreadWithMessages {
@@ -189,11 +193,11 @@ export interface AmcApi {
   accounts(): Promise<AccountSummary[]>
   labels(accountId: string | null): Promise<Label[]>
   counts(accountId: string | null): Promise<Counts>
-  threads(query: ThreadQuery): Promise<ThreadSummary[]>
+  threads(query: ThreadQuery): Promise<DesktopThreadSummary[]>
   thread(id: string): Promise<ThreadWithMessages | null>
-  summaries(ids: string[]): Promise<ThreadSummary[]>
+  summaries(ids: string[]): Promise<DesktopThreadSummary[]>
   /** Instant local filter over subject, people and snippet. */
-  filter(text: string, accountId: string | null): Promise<ThreadSummary[]>
+  filter(text: string, accountId: string | null): Promise<DesktopThreadSummary[]>
   /** Full-text search over the entire history, on the Engine. */
   search(text: string, accountId: string | null): Promise<SearchHit[]>
   contacts(text: string): Promise<Contact[]>
