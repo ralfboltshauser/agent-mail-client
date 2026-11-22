@@ -10,6 +10,8 @@ const components: Record<string, string[]> = {
   'components/thread-view.tsx': ['ThreadView'],
   'components/composer.tsx': ['Composer'],
   'components/recipient-field.tsx': ['RecipientField'],
+  'features/composer/footer.tsx': ['ComposerFooter'],
+  'features/composer/header-fields.tsx': ['SubjectField'],
 }
 
 // The renderer project adds probes to the real return values before JSX compilation.
@@ -34,24 +36,35 @@ export function profileRenderer() {
           (node): node is ts.FunctionDeclaration =>
             ts.isFunctionDeclaration(node) && node.name?.text === name,
         )
-        if (!component?.body) throw new Error(`Update the renderer Profiler probe for ${name}`)
+        const memoized = source.statements
+          .filter(ts.isVariableStatement)
+          .flatMap((statement) => [...statement.declarationList.declarations])
+          .find((declaration) => declaration.name.getText(source) === name)?.initializer
+        const memoBody =
+          memoized &&
+          ts.isCallExpression(memoized) &&
+          memoized.expression.getText(source) === 'memo'
+            ? memoized.arguments[0]
+            : undefined
+        const body =
+          component?.body ??
+          (memoBody && ts.isFunctionExpression(memoBody) ? memoBody.body : undefined)
+        if (!body) throw new Error(`Update the renderer Profiler probe for ${name}`)
+        const region = name === 'ComposerFooter' ? 'footer' : name
 
         function visit(node: ts.Node) {
           if (ts.isFunctionLike(node)) return
           if (ts.isReturnStatement(node) && node.expression) {
-            wrap(node.expression, `__amcProfile('${name}', `, ')')
+            wrap(node.expression, `__amcProfile('${region}', `, ')')
           }
           ts.forEachChild(node, visit)
         }
-        visit(component.body)
+        visit(body)
 
-        // Today the row bodies and compose footer are inline. Give each its own probe.
+        // Row bodies are inline. Give each its own probe.
         function visitInline(node: ts.Node) {
           if (ts.isJsxElement(node)) {
-            const { tagName, attributes } = node.openingElement
-            if (name === 'Composer' && tagName.getText(source) === 'footer') {
-              wrap(node, "{__amcProfile('footer', ", ')}')
-            }
+            const { attributes } = node.openingElement
             if (name === 'ThreadList') {
               const role = attributes.properties.find(
                 (prop) => ts.isJsxAttribute(prop) && prop.name.getText(source) === 'role',
@@ -78,7 +91,7 @@ export function profileRenderer() {
           }
           ts.forEachChild(node, visitInline)
         }
-        visitInline(component.body)
+        visitInline(body)
       }
 
       let instrumented = code

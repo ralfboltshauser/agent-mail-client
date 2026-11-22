@@ -122,8 +122,7 @@ export function useComposerSession(draft: ComposeDraft) {
     try {
       await session.whenSaved()
       const next = await getAmc().composeDraft(session.id)
-      session.apply(next.update)
-      session.adopt(next)
+      session.rebase(next)
       showConflict(false)
       setError('')
       session.changed()
@@ -195,8 +194,7 @@ export function useComposerSession(draft: ComposeDraft) {
           showConflict(true)
           try {
             const next = await getAmc().composeDraft(session.id)
-            session.apply(next.update)
-            session.adopt(next)
+            session.rebase(next)
             showConflict(false)
           } catch {
             // Keep the review message and allow a manual reload.

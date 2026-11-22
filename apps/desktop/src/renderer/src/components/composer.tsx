@@ -89,11 +89,24 @@ export function Composer({
     [session, reportError],
   )
 
+  const minimiseDraft = () => {
+    const focused = document.activeElement
+    if (
+      focused instanceof HTMLInputElement &&
+      focused.hasAttribute('data-recipient-input') &&
+      surface.current?.contains(focused)
+    ) {
+      // Escape dismisses without moving focus. Let the field commit a valid address.
+      focused.blur()
+    }
+    void minimise(onMinimise)
+  }
+
   return (
     <Dialog
       open
       onOpenChange={(open) => {
-        if (!open && !confirmDiscard) void minimise(onMinimise)
+        if (!open && !confirmDiscard) minimiseDraft()
       }}
     >
       <DialogContent
@@ -140,7 +153,7 @@ export function Composer({
             variant="ghost"
             aria-label="Minimise and save draft"
             disabled={busy || uploading}
-            onClick={() => void minimise(onMinimise)}
+            onClick={minimiseDraft}
           >
             <Minus />
           </Button>

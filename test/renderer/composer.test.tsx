@@ -1,5 +1,8 @@
 import { act, fireEvent, screen, within } from '@testing-library/react'
 import { expect, it, vi } from 'vitest'
+import { DRAFT_CHANGED, type SendRequest } from '../../packages/protocol/src/index'
+
+import { deferred } from './adapter'
 import { commits, expectBudget } from './profile'
 import { mount } from './workspace'
 
@@ -10,7 +13,7 @@ async function openComposer() {
   const subject = dialog.getByRole<HTMLInputElement>('textbox', { name: 'Subject' })
   const editor = dialog.getByRole('textbox', { name: 'Message body' })
   const recipient = dialog.getByRole('combobox', { name: 'To' })
-  for (const region of ['Composer', 'RecipientField', 'footer']) {
+  for (const region of ['Composer', 'RecipientField', 'footer', 'SubjectField']) {
     expect(commits.get(region)).toBeGreaterThan(0)
   }
   commits.clear()
@@ -29,6 +32,7 @@ it('applies one subject character without replacing the composer fields', async 
   expect(dialog.getByRole('combobox', { name: 'To' })).toBe(recipient)
   expect(adapter.api.saveCompose).not.toHaveBeenCalled()
   expect(adapter.api.stageComposeBody).not.toHaveBeenCalled()
+  expect(commits.get('SubjectField')).toBe(1)
   expectBudget(keystrokeBudget)
 })
 
@@ -52,6 +56,7 @@ it('stages one body character without replacing the editor', async () => {
   expect(dialog.getByRole('textbox', { name: 'Message body' })).toBe(editor)
   expect(dialog.getByRole('combobox', { name: 'To' })).toBe(recipient)
   expect(adapter.api.saveCompose).not.toHaveBeenCalled()
+  expect(commits.get('SubjectField') ?? 0).toBe(0)
   expectBudget(keystrokeBudget)
 })
 
@@ -76,7 +81,7 @@ it('processes an unchanged draft poll while keeping the editor and subject mount
   expect(dialog.getByRole('textbox', { name: 'Message body' })).toBe(editor)
   expect(editor.textContent).toBe(initialBody)
   expect(adapter.api.saveCompose).not.toHaveBeenCalled()
-  expectBudget({ workspace: 0, list: 0, reader: 0, rows: 0, composer: 1, recipient: 1, footer: 1 })
+  expectBudget({ workspace: 0, list: 0, reader: 0, rows: 0, composer: 0, recipient: 0, footer: 0 })
 })
 
 it('saves one local burst and adopts a newer remote subject without replacing the editor', async () => {
@@ -108,12 +113,80 @@ const keystrokeBudget = {
   list: 0,
   reader: 0,
   rows: 0,
-  composer: 1,
-  recipient: 1,
-  footer: 1,
+  composer: 0,
+  recipient: 0,
+  footer: 0,
 }
 
-it.todo(
-  'Phase 2: a subject or body character commits no mailbox, recipient or unchanged footer and at most one edited region',
-)
-it.todo('Phase 2: an unchanged clean-draft poll commits zero composer content')
+it('keeps later header edits through a send racing an older autosave', async () => {
+  const { adapter, dialog, subject, recipient } = await openComposer()
+  const finishSave = deferred<void>()
+  const save = adapter.api.saveCompose.getMockImplementation()
+  if (!save) throw new Error('Missing draft save fixture')
+  adapter.api.saveCompose.mockImplementationOnce(async (id, patch) => {
+    const saved = await save(id, patch)
+    await finishSave.promise
+    return saved
+  })
+  const submit = adapter.api.sendDraft
+  const send = vi
+    .spyOn(adapter.api, 'sendDraft')
+    .mockImplementation(async (request: SendRequest) => {
+      const current = await adapter.api.composeDraft(request.draftId)
+      if (request.revision !== current.revision) throw new Error(DRAFT_CHANGED)
+      return submit(request)
+    })
+  const sendButton = dialog.getByRole('button', { name: /^Send ⌘/ })
+  await act(async () => fireEvent.change(subject, { target: { value: 'Older subject' } }))
+  await act(async () => vi.advanceTimersByTimeAsync(550))
+  expect(adapter.api.saveCompose).toHaveBeenCalledOnce()
+
+  await act(async () => {
+    fireEvent.change(subject, { target: { value: 'Reviewed subject' } })
+    fireEvent.change(recipient, { target: { value: 'reviewed@example.test' } })
+    fireEvent.keyDown(recipient, { key: 'Enter' })
+  })
+  await act(async () => fireEvent.click(sendButton))
+  expect(send).not.toHaveBeenCalled()
+  await act(async () => finishSave.resolve())
+  expect(send).toHaveBeenCalledOnce()
+  const first = send.mock.calls[0][0]
+  expect(first.revision).toBeLessThan((await adapter.api.composeDraft('draft-1')).revision)
+  expect(dialog.getByRole('alert').textContent).toContain(DRAFT_CHANGED)
+  expect(subject.value).toBe('Reviewed subject')
+  expect(dialog.getByRole('button', { name: 'Remove reviewed@example.test' })).toBeTruthy()
+
+  await act(async () => fireEvent.click(sendButton))
+  expect(send).toHaveBeenCalledTimes(2)
+  expect(send.mock.calls[1][0]).toMatchObject({
+    revision: first.revision + 1,
+    edits: {
+      fields: {
+        subject: 'Reviewed subject',
+        to: [{ address: 'reviewed@example.test', name: null }],
+      },
+    },
+  })
+  expect(send.mock.calls[1][0].id).not.toBe(first.id)
+  expect(screen.queryByRole('dialog', { name: 'Compose' })).toBeNull()
+})
+
+it('saves a focused recipient and subject on Escape before the autosave timer', async () => {
+  const { adapter, subject, recipient } = await openComposer()
+  await act(async () => {
+    fireEvent.change(subject, { target: { value: 'Save before closing' } })
+    recipient.focus()
+    fireEvent.change(recipient, { target: { value: 'focused@example.test' } })
+    fireEvent.keyDown(recipient, { key: 'Escape' })
+  })
+  expect(screen.queryByRole('dialog', { name: 'Compose' })).toBeNull()
+  expect(adapter.api.saveCompose).toHaveBeenCalledExactlyOnceWith(
+    'draft-1',
+    expect.objectContaining({
+      fields: expect.objectContaining({
+        subject: 'Save before closing',
+        to: [{ address: 'focused@example.test', name: null }],
+      }),
+    }),
+  )
+})

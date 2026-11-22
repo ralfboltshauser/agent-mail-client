@@ -441,7 +441,7 @@ function registerComposeIpc() {
   )
   ipcMain.handle('amc:composeDraft', async (_e, id: string) => {
     await draftRecovery
-    return requireEngine().get(draftPath(id))
+    return requireEngine().get(draftPath(id), { signal: AbortSignal.timeout(15_000) })
   })
   ipcMain.handle('amc:discardDraft', async (_e, id: string, revision: number) => {
     const client = requireEngine()
@@ -468,6 +468,7 @@ function registerComposeIpc() {
     const saved = await requireEngine().request<ComposeDraft>(draftPath(id), {
       method: 'PUT',
       body,
+      signal: AbortSignal.timeout(15_000),
     })
     openReplica().draftUpdates.acknowledge(id, body.update)
     return saved

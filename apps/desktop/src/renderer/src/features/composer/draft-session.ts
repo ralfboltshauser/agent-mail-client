@@ -84,12 +84,23 @@ function sameDraft(left: ComposeDraft, right: ComposeDraft) {
   )
 }
 
-function adoptFields(current: ComposeFields, next: ComposeFields) {
+function rebaseFields(current: ComposeFields, next: ComposeFields, before: ComposeFields) {
   return {
     ...next,
-    to: sameAddresses(current.to, next.to) ? current.to : next.to,
-    cc: sameAddresses(current.cc, next.cc) ? current.cc : next.cc,
-    bcc: sameAddresses(current.bcc, next.bcc) ? current.bcc : next.bcc,
+    accountId: current.accountId === before.accountId ? next.accountId : current.accountId,
+    subject: current.subject === before.subject ? next.subject : current.subject,
+    to:
+      sameAddresses(current.to, before.to) && !sameAddresses(current.to, next.to)
+        ? next.to
+        : current.to,
+    cc:
+      sameAddresses(current.cc, before.cc) && !sameAddresses(current.cc, next.cc)
+        ? next.cc
+        : current.cc,
+    bcc:
+      sameAddresses(current.bcc, before.bcc) && !sameAddresses(current.bcc, next.bcc)
+        ? next.bcc
+        : current.bcc,
   }
 }
 
@@ -176,10 +187,22 @@ export class DraftSession {
     )
   }
 
-  adopt(next: ComposeDraft) {
+  rebase(next: ComposeDraft, before = headerFields(this.#baseline)) {
+    this.apply(next.update)
     this.#baseline = this.#reviewed = this.#mirror = next
-    this.#fields = adoptFields(this.#fields, headerFields(next))
-    if (!sameAttachments(this.#attachments, next.attachments)) this.#attachments = next.attachments
+    this.#fields = rebaseFields(this.#fields, headerFields(next), before)
+    const currentIds = this.#attachments.map((part) => part.id)
+    const attachments = [
+      ...next.attachments.filter(
+        (part) => !before.attachmentIds.includes(part.id) || currentIds.includes(part.id),
+      ),
+      ...this.#attachments.filter(
+        (part) =>
+          !before.attachmentIds.includes(part.id) &&
+          !next.attachments.some(({ id }) => id === part.id),
+      ),
+    ]
+    if (!sameAttachments(this.#attachments, attachments)) this.#attachments = attachments
     this.#publish()
   }
 
@@ -211,11 +234,11 @@ export class DraftSession {
         return this.#baseline
       }
       const started = this.#version
-      const updated = await this.#getApi().saveCompose(this.id, this.patch(this.#baseline.revision))
-      this.apply(updated.update)
-      this.#baseline = updated
+      const patch = this.patch(this.#baseline.revision)
+      const submitted = patch.fields ?? headerFields(this.#baseline)
+      const updated = await this.#getApi().saveCompose(this.id, patch)
       this.#saved = started
-      if (this.#version === started) this.adopt(updated)
+      this.rebase(updated, submitted)
       return updated
     })
     this.#saveChain = pending
@@ -303,11 +326,13 @@ export class DraftSession {
           const same = sameDraft(this.#reviewed, next)
           const mirrorChanged = !sameMirror(this.#mirror, next)
           if (same && !mirrorChanged) return
-          if (next.update !== this.#reviewed.update) this.apply(next.update)
-          if (!uploadInFlight()) this.adopt(next)
-          else if (mirrorChanged) {
-            this.#mirror = next
-            this.#publish()
+          if (!uploadInFlight()) this.rebase(next)
+          else {
+            if (next.update !== this.#reviewed.update) this.apply(next.update)
+            if (mirrorChanged) {
+              this.#mirror = next
+              this.#publish()
+            }
           }
         })
         .catch(() => {})
