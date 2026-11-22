@@ -1,5 +1,6 @@
 import { useEffect, useId, useState } from 'react'
 import { toast } from 'sonner'
+import { setLoadRemoteImagesAutomatically, useRemoteImages } from '@/data/remote-image-preferences'
 import { getAmc } from '@/lib/amc'
 import type { NotificationSettings } from '../../../shared/api'
 import { AutoTriageSetting } from './triage-status'
@@ -32,9 +33,7 @@ export function MailSettings({
       >
         <DialogHeader>
           <DialogTitle>Settings</DialogTitle>
-          <DialogDescription>
-            Manage undo send, auto-triage and Mac notifications.
-          </DialogDescription>
+          <DialogDescription>Manage mail preferences and Mac notifications.</DialogDescription>
         </DialogHeader>
         <form
           className="grid gap-4"
@@ -79,9 +78,32 @@ export function MailSettings({
         <div className="border-t pt-4">
           <AutoTriageSetting />
         </div>
+        <PrivacyPreferences />
         <NotificationPreferences />
       </DialogContent>
     </Dialog>
+  )
+}
+
+function PrivacyPreferences() {
+  const id = useId()
+  const automatic = useRemoteImages()
+  return (
+    <section aria-label="Privacy" className="grid gap-2 border-t pt-4">
+      <h3 className="text-sm font-medium">Privacy</h3>
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={automatic}
+          aria-describedby={id}
+          onChange={(event) => setLoadRemoteImagesAutomatically(event.target.checked)}
+        />
+        Load remote images automatically
+      </label>
+      <p id={id} className="text-xs text-muted-foreground">
+        Remote images can tell senders when you opened their mail.
+      </p>
+    </section>
   )
 }
 

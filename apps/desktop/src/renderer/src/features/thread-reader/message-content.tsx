@@ -3,6 +3,7 @@ import type { AttachmentSummary } from '@amc/protocol'
 import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import { HtmlBody, MIN_HTML_BODY_HEIGHT, TextBody } from '@/components/message-body'
 import { Skeleton } from '@/components/ui/skeleton'
+import { senderPreferenceKey } from '@/data/remote-image-preferences'
 import { getAmc } from '@/lib/amc'
 import type { ReplicaThreadMessage } from '../../../../shared/api'
 
@@ -108,7 +109,10 @@ export function MessageContent({ message }: { message: ReplicaThreadMessage }) {
   )
   const [reserveTextSpace] = useState(bodyText === null)
 
-  if (hasHtml && html.value) return <HtmlBody html={html.value} />
+  if (hasHtml && html.value) {
+    const senderKey = senderPreferenceKey(message.accountId, message.from?.address ?? null)
+    return <HtmlBody html={html.value} senderKey={senderKey} />
+  }
   if (deferred.value !== null && (!hasHtml || html.hasResult)) {
     return (
       <div className={reserveTextSpace ? 'min-h-11' : undefined}>

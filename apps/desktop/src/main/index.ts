@@ -37,6 +37,7 @@ import {
   Menu,
   Notification,
   nativeTheme,
+  session,
   shell,
 } from 'electron'
 import type { SyncStatus, ThreadQuery, TriageStatus } from '../shared/api'
@@ -45,6 +46,7 @@ import { AutoTriage } from './auto-triage'
 import { composeDraftPath } from './draft-updates'
 import { EngineClient, EngineError } from './engine'
 import { Handoff, type T3Launcher, t3NavigationLink } from './handoff'
+import { protectRemoteImageRequests } from './message-image-requests'
 import {
   DEFAULT_NOTIFICATION_SETTINGS,
   NewMailNotifications,
@@ -744,6 +746,9 @@ function createWindow() {
   current.webContents.on('will-navigate', (event, url) => {
     if (url !== current.webContents.getURL()) event.preventDefault()
   })
+  current.webContents.on('will-frame-navigate', (event) => {
+    if (!event.isMainFrame && event.url !== 'about:srcdoc') event.preventDefault()
+  })
   const devUrl = app.isPackaged ? undefined : process.env.ELECTRON_RENDERER_URL
   loadRenderer(
     current,
@@ -823,6 +828,7 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   app.on('second-instance', openWindow)
   app.whenReady().then(() => {
+    protectRemoteImageRequests(session.defaultSession)
     buildMenu()
     triage = new AutoTriage({
       enabled: !existsSync(triageOffFile()),
