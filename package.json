@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "pnpm -r build",
-    "typecheck": "tsc -b",
+    "typecheck": "tsc -b && tsc -p test/renderer",
     "lint": "biome check .",
     "format": "biome check --write .",
     "test": "vitest run",
@@ -19,8 +19,13 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.2.4",
+    "@testing-library/react": "^16.3.3",
     "@types/node": "^24.19.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "jsdom": "^26.1.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "typescript": "^5.9.3",
     "vitest": "^3.2.7"
   }
