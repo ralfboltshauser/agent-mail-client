@@ -385,8 +385,10 @@ describe('Gmail Organise writeback', () => {
         return { labelIds }
       })
 
+      const history = vi.spyOn(gmail, 'history')
       const archive = submit({ kind: 'archive', threadId: THREAD })
       await queue.tick()
+      expect(history).not.toHaveBeenCalled()
       expect(lookup(archive.id)).toMatchObject({ status: 'applied', superseded: [] })
       expect(await gmail.getMessageLabels('m1')).toEqual(['UNREAD'])
       if (scenario === 'expired history') gmail.setLabels('m1', ['UNREAD', 'STARRED'])
@@ -411,6 +413,51 @@ describe('Gmail Organise writeback', () => {
       expect(thread()?.inInbox).toBe(true)
     },
   )
+
+  it('skips a deleted Thread when choosing the global Undo target', async () => {
+    await withFixture(async ({ gmail, queue, submit, lookup, sync, db }) => {
+      gmail.add('newer', { threadId: 'newer', labels: ['INBOX'] })
+      await sync.incremental()
+
+      submit({ kind: 'archive', threadId: THREAD })
+      await queue.tick()
+      const newer = submit({ kind: 'archive', threadId: 'a:newer' })
+      await queue.tick()
+      gmail.remove('newer')
+      await sync.incremental()
+      expect(db.prepare("SELECT 1 FROM thread WHERE id = 'a:newer'").get()).toBeUndefined()
+      expect(lookup(newer.id)?.status).toBe('applied')
+
+      const undo = submit({ kind: 'undo' })
+      await queue.tick()
+      expect(lookup(undo.id)?.status).toBe('applied')
+      expect(await gmail.getMessageLabels('m1')).toContain('INBOX')
+    })
+  })
+
+  it('removes and restores an existing AMC/Snoozed user Label without setting Snooze', async () => {
+    await withFixture(async ({ gmail, queue, submit, lookup, sync, thread }) => {
+      const providerId = 'Label_existing'
+      const labelId = 'a:Label_existing'
+      gmail.labelList.push({ name: SNOOZED_LABEL, id: providerId, type: 'user' })
+      gmail.setLabels('m1', ['INBOX', 'UNREAD', providerId])
+      await sync.syncLabels()
+      await sync.incremental()
+      expect(thread()?.labelIds).toContain(labelId)
+
+      const remove = submit({ kind: 'label', threadId: THREAD, labelId, value: false })
+      await queue.tick()
+      expect(lookup(remove.id)?.status).toBe('applied')
+      expect(await gmail.getMessageLabels('m1')).not.toContain(providerId)
+
+      const undo = submit({ kind: 'undo', mutationId: remove.id })
+      await queue.tick()
+      expect(lookup(undo.id)?.status).toBe('applied')
+      expect(await gmail.getMessageLabels('m1')).toContain(providerId)
+      expect(await gmail.getMessageLabels('m2')).not.toContain(providerId)
+      expect(thread()?.snoozedUntil).toBeNull()
+    })
+  })
 
   it('projects changes immediately, writes both messages, and restores per-message state on undo', async () => {
     const { gmail, queue, thread, submit, lookup, db } = await setup()

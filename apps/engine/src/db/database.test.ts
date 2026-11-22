@@ -20,7 +20,7 @@ describe('migrate', () => {
     try {
       expect(migrate(db, { migrations: MIGRATIONS.filter(({ version }) => version <= 7) })).toBe(7)
       expect(MIGRATIONS.filter(({ version }) => version > 7).map(({ version }) => version)).toEqual(
-        [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+        [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
       )
       db.exec(`
         INSERT INTO account (id, kind, address, credentials, created_at)
@@ -40,7 +40,7 @@ describe('migrate', () => {
         VALUES ('i', 'INBOX', '1', 2, 'i:m', 'i:INBOX', 1, 1, 'fixture-source');
       `)
       const backupDir = join(dir, 'backups')
-      expect(migrate(db, { backupDir })).toBe(19)
+      expect(migrate(db, { backupDir })).toBe(20)
       expect(db.prepare('SELECT bucket FROM thread WHERE id = ?').get('a:t')).toEqual({
         bucket: null,
       })
@@ -105,7 +105,7 @@ describe('migrate', () => {
     if (!compose) throw new Error('Compose migration missing')
     expect(migrate(db, { migrations: MIGRATIONS.filter(({ version }) => version <= 8) })).toBe(8)
     db.exec('DROP TABLE schema_migration')
-    expect(migrate(db)).toBe(19)
+    expect(migrate(db)).toBe(20)
     expect(db.prepare('SELECT * FROM organise_intent').all()).toEqual([])
     expect(db.prepare('SELECT * FROM outbox').all()).toEqual([])
 
@@ -132,7 +132,9 @@ describe('migrate', () => {
         VALUES ('g', 'gmail-draft', 'gmail-hash', 'draft'),
                ('i', 'imap-draft', 'imap-hash', 'draft');
       `)
-      expect(migrate(db)).toBe(19)
+      expect(migrate(db, { migrations: MIGRATIONS.filter(({ version }) => version <= 19) })).toBe(
+        19,
+      )
       expect(
         db
           .prepare('SELECT account_id, mirror_hash FROM draft_mirror_removal ORDER BY account_id')
@@ -141,6 +143,7 @@ describe('migrate', () => {
         { account_id: 'g', mirror_hash: 'gmail-hash' },
         { account_id: 'i', mirror_hash: null },
       ])
+      expect(migrate(db)).toBe(20)
     } finally {
       db.close()
     }
@@ -166,7 +169,7 @@ describe('migrate', () => {
         INSERT INTO mutation_message (mutation_id, message_id, patch, before)
         VALUES ('old', 'a:m1', '{"a:INBOX":false,"a:AMC/Snoozed":true}', '{"a:INBOX":true}');
       `)
-      expect(migrate(db)).toBe(19)
+      expect(migrate(db)).toBe(20)
       expect(db.prepare('SELECT label_ids FROM message ORDER BY id').all()).toEqual([
         { label_ids: '["a:INBOX"]' },
         { label_ids: '["a:AMC/Snoozed"]' },
@@ -182,6 +185,47 @@ describe('migrate', () => {
       ])
       expect(db.prepare("SELECT entity_id FROM change_log WHERE entity = 'thread'").all()).toEqual([
         { entity_id: 'a:t' },
+      ])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('publishes canonical Gmail user Label memberships when upgrading from v18', () => {
+    const db = openDatabase(':memory:')
+    try {
+      migrate(db, { migrations: MIGRATIONS.filter(({ version }) => version <= 18) })
+      db.exec(`
+        INSERT INTO account (id, kind, address, credentials, created_at)
+        VALUES ('a', 'gmail', 'fixture@example.com', x'00', 0);
+        INSERT INTO label (id, account_id, provider_id, name, kind)
+        VALUES ('a:Label_existing', 'a', 'Label_existing', 'AMC/Snoozed', 'user');
+        INSERT INTO thread (id, account_id, provider_thread_id, label_ids)
+        VALUES ('a:t', 'a', 't', '["a:AMC/Snoozed","a:INBOX","a:Label_existing"]');
+        INSERT INTO message (id, account_id, thread_id, provider_id, sent_at, label_ids, provider_label_ids)
+        VALUES ('a:m1', 'a', 'a:t', 'm1', 1, '["a:AMC/Snoozed","a:INBOX"]', '["a:AMC/Snoozed","a:INBOX"]'),
+               ('a:m2', 'a', 'a:t', 'm2', 2, '[]', NULL);
+      `)
+      expect(migrate(db)).toBe(20)
+      expect(
+        db.prepare('SELECT label_ids, provider_label_ids, modseq FROM message ORDER BY id').all(),
+      ).toEqual([
+        {
+          label_ids: '["a:Label_existing","a:INBOX"]',
+          provider_label_ids: '["a:Label_existing","a:INBOX"]',
+          modseq: 1,
+        },
+        { label_ids: '[]', provider_label_ids: null, modseq: 0 },
+      ])
+      expect(db.prepare('SELECT label_ids, modseq FROM thread').get()).toEqual({
+        label_ids: '["a:Label_existing","a:INBOX"]',
+        modseq: 2,
+      })
+      expect(
+        db.prepare('SELECT entity, entity_id, op FROM change_log ORDER BY modseq').all(),
+      ).toEqual([
+        { entity: 'message', entity_id: 'a:m1', op: 'upsert' },
+        { entity: 'thread', entity_id: 'a:t', op: 'upsert' },
       ])
     } finally {
       db.close()
