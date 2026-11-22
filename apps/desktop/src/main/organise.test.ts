@@ -293,6 +293,25 @@ describe('desktop Organise outbox', () => {
     }
   })
 
+  it('skips a deleted Thread when choosing global Undo from the local queue', () => {
+    const replica = new Replica(':memory:')
+    try {
+      seed(replica)
+      const newer = { ...THREAD, id: 'account:newer', messageCount: 1 }
+      replica.put('thread', newer)
+      replica.put('message', { ...message('3', THREAD.labelIds), threadId: newer.id })
+      const older = replica.organise.enqueue({ kind: 'archive', threadId: THREAD.id })
+      replica.organise.enqueue({ kind: 'archive', threadId: newer.id })
+      replica.apply([{ entity: 'thread', id: newer.id, op: 'delete', modseq: 11 }])
+
+      const undo = replica.organise.enqueue({ kind: 'undo' })
+      const row = replica.db.prepare('SELECT undo_of FROM organise_queue WHERE id = ?').get(undo)
+      expect(row).toEqual({ undo_of: older })
+    } finally {
+      replica.db.close()
+    }
+  })
+
   it('preserves the projected Snooze and the provider marker when archiving and undoing offline', () => {
     const replica = new Replica(':memory:')
     try {

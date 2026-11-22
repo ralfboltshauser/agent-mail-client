@@ -495,6 +495,7 @@ export class Mutations {
           .prepare(
             `SELECT m.* FROM mutation m JOIN account a ON a.id = m.account_id
          WHERE m.principal = ? AND (?2 IS NULL OR m.thread_id = ?2)
+           AND (?2 IS NOT NULL OR EXISTS (SELECT 1 FROM thread t WHERE t.id = m.thread_id))
            AND m.status != 'failed' AND m.undo_of IS NULL
            AND NOT (
              a.kind = 'imap' AND m.status = 'applied' AND m.prepared = 1
@@ -583,10 +584,8 @@ export class Mutations {
       )
         throw new MutationPermissionError('Only the owner can move mail to or from Trash')
       const allowed = this.#db
-        .prepare(
-          "SELECT 1 FROM label WHERE id = ? AND account_id = ? AND kind = 'user' AND name != ?",
-        )
-        .get(action.labelId, thread.account_id, SNOOZED_LABEL)
+        .prepare("SELECT 1 FROM label WHERE id = ? AND account_id = ? AND kind = 'user'")
+        .get(action.labelId, thread.account_id)
       if (!allowed) throw new MutationError('Choose a user Label from this Account')
     }
     if (action.kind === 'snooze' && action.until <= this.#now())

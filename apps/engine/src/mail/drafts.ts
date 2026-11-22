@@ -575,7 +575,9 @@ export class Drafts {
     }
     const row = this.#row(id)
     if (!row || row.modseq !== message.revision) throw new DraftError(DRAFT_CHANGED, 409)
-    if (row.provider_draft_id && this.#isImap(row.account_id) && !row.mirror_written_hash) {
+    const importedImapDraft =
+      row.provider_draft_id && this.#isImap(row.account_id) && !row.mirror_written_hash
+    if (importedImapDraft) {
       // Keep the imported copy linked until send completes so a pull cannot reimport it
       // while the message is in the Outbox.
       this.#markMirrorLeft(id)
@@ -599,7 +601,13 @@ export class Drafts {
         WHERE id = ? AND account_id = ? AND provider_draft_id = ?`)
         .run(id, row.account_id, row.provider_draft_id)
     }
-    return outbox.enqueue(principal, input, () => this.freeze(id, message.revision))
+    return outbox.enqueue(principal, input, () => ({
+      ...this.freeze(id, message.revision),
+      // Keep the source when the composer cannot faithfully reproduce it.
+      ...(importedImapDraft &&
+        row.mirror_hash &&
+        this.#canReplaceContent(row) && { importedImapDraftHash: row.mirror_hash }),
+    }))
   }
 
   #isImap(accountId: string): boolean {
@@ -675,9 +683,20 @@ export class Drafts {
     return message
   }
 
-  finishSend(message: FrozenMessage): void {
+  finishSend(message: FrozenMessage, allRecipientsAccepted = false): void {
     const row = this.#row(message.draftId)
     if (row?.modseq !== message.revision) return
+    if (
+      allRecipientsAccepted &&
+      message.importedImapDraftHash &&
+      row.account_id === message.accountId &&
+      row.provider_draft_id &&
+      row.provider_draft_id === message.providerDraftId &&
+      row.mirror_hash === message.importedImapDraftHash &&
+      !row.mirror_written_hash &&
+      this.#isImap(row.account_id)
+    )
+      this.#queueMirrorRemoval(row, message.importedImapDraftHash)
     this.#db.prepare('DELETE FROM draft WHERE id = ?').run(row.id)
     this.#store.recordChange('draft', row.id, 'delete')
   }
@@ -1031,10 +1050,10 @@ export class Drafts {
     return baseline === mirrorHash(remote.message.id)
   }
 
-  #queueMirrorRemoval(row: DraftRow) {
+  #queueMirrorRemoval(row: DraftRow, hash = this.#removalHash(row)) {
     this.#db
       .prepare('INSERT OR IGNORE INTO draft_mirror_removal VALUES (?, ?, ?, ?)')
-      .run(row.account_id, row.provider_draft_id, this.#removalHash(row), row.id)
+      .run(row.account_id, row.provider_draft_id, hash, row.id)
   }
 
   #removalHash(row: DraftRow): string | null {
@@ -1301,7 +1320,16 @@ export class Drafts {
     return this.get(id) as VersionedDraft
   }
 
-  async delete(id: string, expectedRevision?: number): Promise<DiscardDraftResult> {
+  async delete(
+    id: string,
+    {
+      expectedRevision,
+      removeImportedImapDraft = false,
+    }: {
+      expectedRevision?: number
+      removeImportedImapDraft?: boolean
+    } = {},
+  ): Promise<DiscardDraftResult> {
     return this.#withMirror(id, async () => {
       this.#checkEditable(id)
       const row = this.#row(id)
@@ -1316,6 +1344,10 @@ export class Drafts {
         provider === 'Gmail' &&
         row.provider_draft_id &&
         !this.#awaitingRemoval(row.account_id, row.provider_draft_id)
+          ? row.provider_draft_id
+          : null
+      const importedImapId =
+        removeImportedImapDraft && provider === 'IMAP' && !row.mirror_written_hash
           ? row.provider_draft_id
           : null
       const removal: MirrorRemoval | null =
@@ -1341,7 +1373,7 @@ export class Drafts {
       const kept = new Set(
         pending.map(({ account_id }) => (this.#isImap(account_id) ? 'IMAP' : 'Gmail')),
       )
-      if (row.mirror_left) kept.add('IMAP')
+      if (row.mirror_left && !importedImapId) kept.add('IMAP')
       let providerRemoved: 'Gmail' | 'IMAP' | undefined
       let retry = false
       if (gmailDraftId && row.mirror_written_hash) {
@@ -1352,6 +1384,14 @@ export class Drafts {
         ).catch(() => false)
         if (removed) providerRemoved = 'Gmail'
         else kept.add('Gmail')
+      } else if (importedImapId) {
+        const removed = await this.#removeImapMirror(
+          this.#api(row.account_id),
+          importedImapId,
+          row.mirror_hash,
+        ).catch(() => false)
+        if (removed) providerRemoved = 'IMAP'
+        else kept.add('IMAP')
       } else if (removal) {
         try {
           const outcome = await this.#removeOldMirror(removal)

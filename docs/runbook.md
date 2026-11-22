@@ -108,14 +108,27 @@ Snooze is enabled by default. Set `features.snooze` to `false` to disable it. Th
    (owner `amc:amc`, mode `0600`). The setup script creates only Cloud resources
    and IAM bindings. Gmail's existing mailbox OAuth scope authorizes the watch.
    The subscriber credential authorizes pull and acknowledge independently, so
-   existing users keep their Gmail sign-in. The Gmail Desktop OAuth client must
-   belong to the Pub/Sub topic's project.
+   existing users keep their Gmail sign-in. In Google Cloud Console, select the
+   topic's project and check that the existing Desktop OAuth client ID from
+   `/etc/amc/google-oauth-client.json` is listed under **Google Auth Platform →
+   Clients**. Gmail requires the watch topic and the OAuth client to belong to
+   the same project. [Gmail watch reference](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users/watch)
 3. Add `"gmailPubSubProject": "amc-mail-x097y3"` to `/etc/amc/config.json` and
    restart the Engine. The Host opens outbound HTTPS connections to Pub/Sub.
    Check Engine logs for watch or pull failures. While both are healthy, incremental
    sync runs on notifications with a 60-second fallback for missed notifications.
-   On a watch or pull failure, the fallback is 15 seconds. Remove the config
-   entry and restart to return to polling alone.
+   On a watch or pull failure, the fallback is 15 seconds.
+4. Run `amc status` and confirm that Gmail Pub/Sub is pulling and the Gmail
+   Account shows a future watch expiry and a 60-second poll interval. With the
+   Account caught up, send a test message from another Account. Verify that
+   the receiving Account's last notification time advances and the message
+   appears in AMC before the next scheduled poll. Repeat during a fresh poll
+   interval if the first delivery coincides with a poll.
+
+To roll back, remove `gmailPubSubProject` and restart the Engine. This restores
+15-second polling on restart and stops watch renewal. Gmail can continue to
+publish to the topic until the existing remote watch expires.
+[Gmail watch expiration](https://developers.google.com/workspace/gmail/api/guides/push#stop_mailbox_updates)
 
 ## T3 Handoff
 
@@ -140,9 +153,13 @@ after a UIDVALIDITY reset. When the bytes differ or several copies match,
 AMC imports the new copies separately and flags the previous draft so you
 can compare them.
 
-AMC keeps edits to imported IMAP drafts on the Host. The original stays in
-the Account's Drafts folder after editing, sending, or discarding from AMC.
-Remove that copy in the Account's other mail client when you are done with it.
+AMC keeps edits to imported IMAP drafts on the Host. AMC attempts to remove
+the original server copy when the owner discards it from the desktop, or
+when the composer can faithfully represent the draft and SMTP confirms
+acceptance for every recipient. A Sent-folder lookup can confirm that a
+message was sent, but provides no per-recipient acceptance evidence.
+Removal requires a matching UIDVALIDITY, UID, Draft flag, and full message
+hash, plus server support for UID EXPUNGE.
 
 ## Rolling back
 

@@ -853,8 +853,9 @@ it('authenticates the Composer Link for exactly one editable draft and denies al
   }
 })
 
-it('mints a separate four-hour Agent grant per handoff and revokes the previous grant for that Thread', async () => {
-  const { db, app, agentToken, draftId, otherThread, threadId, start } = await setupHandoff()
+it('mints a four-hour Agent grant and revokes both credentials when replacing an unconfirmed handoff', async () => {
+  const { db, app, agentToken, draftId, otherThread, threadId, start, token, session } =
+    await setupHandoff()
   try {
     const grant = authenticate(db, agentToken)
     expect(grant).toMatchObject({
@@ -873,9 +874,12 @@ it('mints a separate four-hour Agent grant per handoff and revokes the previous 
 
     const other = await start(otherThread)
     expect(authenticate(db, agentToken)).not.toBeNull()
+    expect((await session(draftId, token)).status).toBe(204)
     const renewed = await start()
     expect(renewed.draftId).toBe(draftId)
     expect(renewed.agentToken).not.toBe(agentToken)
+    expect((await session(draftId, token)).status).toBe(403)
+    expect((await session(draftId, renewed.token)).status).toBe(204)
     expect(authenticate(db, agentToken)).toBeNull()
     expect(authenticate(db, other.agentToken)?.threadId).toBe(otherThread)
     expect(authenticate(db, renewed.agentToken)?.threadId).toBe(threadId)
@@ -912,7 +916,7 @@ it('keeps confirmed handoffs across recovery and revokes both grants when the ow
     app.request(url, { method: 'DELETE', headers: { Authorization: `Bearer ${owner}` } })
   try {
     const { draftId, agentToken, token } = await start(threadId, id)
-    expect(await (await active()).json()).toEqual({ active: null })
+    expect(await (await active()).json()).toMatchObject({ active: { id } })
     const confirmed = await app.request(path, {
       method: 'PUT',
       headers: { Authorization: `Bearer ${owner}`, 'Content-Type': 'application/json' },
@@ -934,8 +938,29 @@ it('keeps confirmed handoffs across recovery and revokes both grants when the ow
   }
 })
 
+it('lets the owner find and end an unconfirmed handoff', async () => {
+  const { db, app, call, owner, threadId, start, session } = await setupHandoff()
+  const id = randomUUID()
+  const active = () => call(`/v1/compose/handoff?threadId=${encodeURIComponent(threadId)}`, owner)
+  try {
+    const { draftId, agentToken, token } = await start(threadId, id)
+    const { active: pending } = await (await active()).json()
+    expect(pending.id).toBe(id)
+    const ended = await app.request(`/v1/compose/handoff/${pending.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${owner}` },
+    })
+    expect(ended.status).toBe(200)
+    expect(authenticate(db, agentToken)).toBeNull()
+    expect((await session(draftId, token)).status).toBe(403)
+    expect(await (await active()).json()).toEqual({ active: null })
+  } finally {
+    db.close()
+  }
+})
+
 it('rotates both grants after a lost Engine reply and revokes the replacements on pending recovery', async () => {
-  const { db, app, call, owner, threadId, start } = await setupHandoff()
+  const { db, app, call, owner, threadId, otherThread, start } = await setupHandoff()
   const id = randomUUID()
   const remove = (requestId: string) =>
     app.request(`/v1/compose/handoff/${requestId}?pending=1`, {
@@ -961,8 +986,14 @@ it('rotates both grants after a lost Engine reply and revokes the replacements o
     expect((await post(id)).status).toBe(409)
 
     const delayed = randomUUID()
+    const drafts = () => db.prepare('SELECT id FROM draft WHERE thread_id = ?').all(otherThread)
+    expect(drafts()).toEqual([])
     expect((await remove(delayed)).status).toBe(200)
-    expect((await post(delayed)).status).toBe(409)
+    expect(
+      (await call('/v1/compose/handoff', owner, { threadId: otherThread, requestId: delayed }))
+        .status,
+    ).toBe(409)
+    expect(drafts()).toEqual([])
     expect(
       db
         .prepare(

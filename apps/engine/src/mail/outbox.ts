@@ -16,6 +16,7 @@ export interface FrozenMessage extends Omit<OutgoingMessage, 'date' | 'messageId
   revision: number
   threadId: string | null
   providerDraftId: string | null
+  importedImapDraftHash?: string
   originalDraftLeft?: boolean
   attachments: NonNullable<OutgoingMessage['attachments']>
 }
@@ -24,6 +25,7 @@ export interface Receipt {
   providerId: string
   providerThreadId: string
   detail?: string
+  allRecipientsAccepted?: boolean
 }
 
 type SubmitResult =

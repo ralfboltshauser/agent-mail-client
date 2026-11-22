@@ -15,16 +15,16 @@ import { FakeGmail } from '../providers/gmail/fake.ts'
 import { fromGmail } from '../providers/gmail/mapping.ts'
 import type { GmailPart } from '../providers/gmail/types.ts'
 import { FakeImap } from '../providers/imap/fake.ts'
-import { draftSourceHash, ImapProvider } from '../providers/imap/provider.ts'
+import { draftSourceHash, ImapProvider, SmtpRejection } from '../providers/imap/provider.ts'
 import { silentLog, tempDir, testConfig, testDb } from '../test-support.ts'
-import { gmailDelivery, imapDraftMirror, publishSent } from './delivery.ts'
-import { Drafts } from './drafts.ts'
+import { gmailDelivery, imapDelivery, imapDraftMirror, publishSent } from './delivery.ts'
+import { type DraftMirror, Drafts } from './drafts.ts'
 import { buildMessage } from './mime.ts'
-import { Outbox } from './outbox.ts'
+import { type Delivery, Outbox } from './outbox.ts'
 import { MailQueries } from './queries.ts'
 import { MailStore } from './store.ts'
 
-function setup() {
+function setup(imap?: { mirror: () => DraftMirror; delivery: () => Delivery }) {
   const db = testDb()
   const blobs = new BlobStore(tempDir())
   const store = new MailStore(db, blobs)
@@ -34,11 +34,11 @@ function setup() {
   db.prepare(
     "INSERT INTO account (id, kind, address, credentials, created_at) VALUES (?, 'gmail', ?, X'00', 0)",
   ).run(account, gmail.address)
-  const drafts = new Drafts(db, store, () => gmail)
+  const drafts = new Drafts(db, store, (id) => (id === account ? gmail : (imap?.mirror() ?? null)))
   let now = 50_000
   const outbox = new Outbox(
     db,
-    () => gmailDelivery(gmail),
+    (id) => (id === account ? gmailDelivery(gmail) : (imap?.delivery() ?? null)),
     (message, id, receipt) => publishSent(store, drafts, message, id, receipt),
     () => now,
   )
@@ -822,16 +822,18 @@ function draftCredentials(host = 'imap.example.test') {
 }
 
 function imapDraftSetup() {
-  const { db, store, outbox } = setup()
   const address = 'owner-imap@example.com'
   const sealer = new Sealer(Buffer.alloc(32))
   const fake = new FakeImap()
   const folder = fake.addFolder('Drafts', '\\Drafts')
   fake.capabilities.set('UIDPLUS', true)
   const credentials = draftCredentials()
-  const { id: account } = upsertImapAccount(db, store, sealer, { address, credentials })
   let provider = new ImapProvider(credentials, () => fake.client)
-  const drafts = new Drafts(db, store, () => imapDraftMirror(provider))
+  const { db, store, drafts, outbox, call, advance } = setup({
+    mirror: () => imapDraftMirror(provider),
+    delivery: () => imapDelivery(provider),
+  })
+  const { id: account } = upsertImapAccount(db, store, sealer, { address, credentials })
   const relink = (replacement: FakeImap) => {
     const credentials = draftCredentials('replacement.example.test')
     expect(upsertImapAccount(db, store, sealer, { address, credentials }).id).toBe(account)
@@ -841,7 +843,7 @@ function imapDraftSetup() {
   const addPlainDraft = (body: string) => {
     const uid = fake.add(
       'Drafts',
-      'Subject: Original\r\nContent-Type: text/plain; charset=utf-8',
+      'Subject: Original\r\nTo: reviewed@example.test\r\nContent-Type: text/plain; charset=utf-8',
       body,
       ['\\Draft'],
     )
@@ -851,7 +853,19 @@ function imapDraftSetup() {
     }
     return uid
   }
-  return { account, addPlainDraft, db, drafts, fake, folder, outbox, provider, relink }
+  return {
+    account,
+    addPlainDraft,
+    db,
+    drafts,
+    fake,
+    folder,
+    outbox,
+    provider,
+    relink,
+    call,
+    advance,
+  }
 }
 
 const draftOwner: Principal = {
@@ -861,6 +875,157 @@ const draftOwner: Principal = {
   subject: null,
   scopes: ['send'],
 }
+
+it.each([
+  'unchanged',
+  'changed bytes',
+  'new UIDVALIDITY',
+  'missing Draft flag',
+  'no UIDPLUS',
+  'non-desktop discard',
+])('verifies an imported IMAP draft at discard with %s', async (scenario) => {
+  const { account, addPlainDraft, call, db, drafts, fake, folder, provider } = imapDraftSetup()
+  try {
+    const uid = addPlainDraft('Imported content')
+    const other = fake.add('Drafts', 'Subject: Unrelated deleted message', '', ['\\Deleted'])
+    await drafts.pullImap(account, provider)
+    const draft = fixture(drafts.list()[0])
+    await drafts.update(draft.id, { subject: 'Edited in AMC' }, 'owner')
+    await drafts.mirrorPending()
+    const expunge = vi.spyOn(fake, 'uidExpunge')
+    const source = fixture(folder.messages.get(uid))
+    if (scenario === 'changed bytes')
+      source.source = Buffer.concat([Buffer.from('X-Provider-Header: changed\r\n'), source.source])
+    if (scenario === 'new UIDVALIDITY') folder.validity += 1n
+    if (scenario === 'missing Draft flag') fake.flag('Drafts', uid, ['\\Seen'])
+    if (scenario === 'no UIDPLUS') fake.capabilities.delete('UIDPLUS')
+
+    const path = `/drafts/${draft.id}`
+    const result =
+      scenario === 'non-desktop discard'
+        ? await drafts.delete(draft.id)
+        : await (scenario === 'revision-checked discard'
+            ? await call(`${path}/discard`, 'POST', {
+                revision: fixture(drafts.get(draft.id)).revision,
+              })
+            : await call(path, 'DELETE')
+          ).json()
+    expect(drafts.get(draft.id)).toBeNull()
+    const removed = scenario === 'unchanged' || scenario === 'revision-checked discard'
+    if (removed) {
+      expect(result).toEqual({ deleted: draft.id, providerRemoved: 'IMAP' })
+      expect(expunge).toHaveBeenCalledExactlyOnceWith(uid)
+      await drafts.pullImap(account, provider)
+      expect(drafts.list()).toHaveLength(0)
+    } else {
+      expect(result).toMatchObject({ deleted: draft.id, warning: expect.any(String) })
+      expect(expunge).not.toHaveBeenCalled()
+      expect(folder.messages.get(uid)?.flags.has('\\Deleted')).toBe(false)
+    }
+    expect(folder.messages.has(uid)).toBe(!removed)
+    expect(folder.messages.has(other)).toBe(true)
+  } finally {
+    db.close()
+  }
+})
+
+it.each([
+  'accepted',
+  'cancelled',
+  'rejected',
+  'partially accepted',
+  'reconciled',
+  'changed on server',
+])(
+  'only removes an unchanged imported IMAP draft after confirmed owner send (%s)',
+  async (scenario) => {
+    const { account, addPlainDraft, advance, call, db, drafts, fake, folder, provider, outbox } =
+      imapDraftSetup()
+    try {
+      const uid = addPlainDraft('Imported content')
+      if (scenario === 'partially accepted') {
+        const source = fixture(folder.messages.get(uid))
+        source.source = Buffer.concat([Buffer.from('Cc: rejected@example.test\r\n'), source.source])
+      }
+      await drafts.pullImap(account, provider)
+      const draft = fixture(drafts.compose(fixture(drafts.list()[0]).id))
+      const expunge = vi.spyOn(fake, 'uidExpunge')
+      const send = vi.spyOn(provider, 'send')
+      if (scenario === 'rejected') send.mockRejectedValue(new SmtpRejection('Fixture rejection'))
+      else if (scenario === 'reconciled') {
+        send.mockRejectedValue(new Error('Lost SMTP response'))
+        vi.spyOn(provider, 'findSent').mockResolvedValue({
+          folder: 'Sent',
+          uidValidity: '1',
+          uid: 1,
+        })
+      } else {
+        send.mockResolvedValue({
+          messageId: 'sent@example.test',
+          accepted: ['reviewed@example.test'],
+          rejected: scenario === 'partially accepted' ? ['rejected@example.test'] : [],
+          sentCopy: 'server-managed',
+        })
+      }
+
+      expect(
+        (
+          await call('/outbox', 'POST', {
+            id: 'imap-send',
+            draftId: draft.id,
+            revision: draft.revision,
+          })
+        ).status,
+      ).toBe(202)
+      if (scenario === 'changed on server') {
+        const source = fixture(folder.messages.get(uid))
+        source.source = Buffer.concat([
+          Buffer.from('X-Provider-Header: changed\r\n'),
+          source.source,
+        ])
+      }
+      advance(9_999)
+      await outbox.runDue()
+      await drafts.mirrorPending()
+      expect(send).not.toHaveBeenCalled()
+      expect(expunge).not.toHaveBeenCalled()
+      expect(folder.messages.has(uid)).toBe(true)
+      if (scenario === 'cancelled')
+        expect((await call('/outbox/imap-send/cancel', 'POST')).ok).toBe(true)
+
+      advance(1)
+      await outbox.runDue()
+      if (scenario === 'reconciled') {
+        expect(outbox.get('imap-send')?.status).toBe('dispatching')
+        await drafts.mirrorPending()
+        expect(folder.messages.has(uid)).toBe(true)
+        advance(15_000)
+        await outbox.runDue()
+      }
+      expect(send).toHaveBeenCalledTimes(scenario === 'cancelled' ? 0 : 1)
+      const status =
+        scenario === 'cancelled' ? 'cancelled' : scenario === 'rejected' ? 'failed' : 'sent'
+      expect(outbox.get('imap-send')?.status).toBe(status)
+      expect(folder.messages.has(uid)).toBe(true)
+      await drafts.pullImap(account, provider)
+      expect(drafts.list()).toHaveLength(
+        status === 'sent' && scenario !== 'partially accepted' && scenario !== 'reconciled' ? 0 : 1,
+      )
+
+      await drafts.mirrorPending()
+      if (scenario === 'accepted') {
+        expect(expunge).toHaveBeenCalledExactlyOnceWith(uid)
+        await drafts.pullImap(account, provider)
+        expect(drafts.list()).toHaveLength(0)
+      } else {
+        expect(expunge).not.toHaveBeenCalled()
+      }
+      expect(folder.messages.has(uid)).toBe(scenario !== 'accepted')
+    } finally {
+      db.close()
+    }
+  },
+)
 
 it('imports a colliding draft after relink and leaves both servers alone when queueing the old draft', async () => {
   const { account, addPlainDraft, db, drafts, folder, outbox, provider, relink } = imapDraftSetup()
@@ -1124,7 +1289,8 @@ it('keeps distinct IMAP draft UIDs when multiple new copies match the missing so
 })
 
 it('leaves unsupported MIME on IMAP and flags it on edit and send', async () => {
-  const { account, addPlainDraft, db, drafts, fake, folder, outbox, provider } = imapDraftSetup()
+  const { account, addPlainDraft, advance, db, drafts, fake, folder, outbox, provider } =
+    imapDraftSetup()
   const uid = addPlainDraft('Some content')
   fixture(folder.messages.get(uid)).structure = {
     type: 'multipart/signed',
@@ -1144,6 +1310,16 @@ it('leaves unsupported MIME on IMAP and flags it on edit and send', async () => 
     outbox,
   )
   expect(outbox.get(item.id)).toMatchObject({ originalDraftLeft: true })
+  vi.spyOn(provider, 'send').mockResolvedValue({
+    messageId: 'sent@example.test',
+    accepted: ['reviewed@example.test'],
+    rejected: [],
+    sentCopy: 'server-managed',
+  })
+  advance(10_000)
+  await outbox.runDue()
+  expect(outbox.get(item.id)?.status).toBe('sent')
+  await drafts.mirrorPending()
   expect(folder.messages.has(uid)).toBe(true)
   db.close()
 })

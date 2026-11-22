@@ -5,7 +5,9 @@ import { act, createElement, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useHotkeys } from '../hooks/use-hotkeys'
+import { navigableLabels } from './app-sidebar'
 import { OrganisePicker, OrganiseToolbar, useOrganise } from './organise'
+import { ThreadView } from './thread-view'
 import { TooltipProvider } from './ui/tooltip'
 
 const thread = {
@@ -130,6 +132,46 @@ describe('Organise picker', () => {
       await vi.waitFor(() => expect(document.activeElement).toBe(trigger))
     })
     expect(document.querySelector('[role="dialog"]')).toBeNull()
+  })
+
+  it('shows an existing AMC/Snoozed Label in navigation, Thread display and the picker', async () => {
+    const label = {
+      id: 'a:Label_existing',
+      providerId: 'Label_existing',
+      name: 'AMC/Snoozed',
+      accountId: 'a',
+      kind: 'user',
+      color: null,
+    } as const
+    const labeledThread = { ...thread, labelIds: [label.id] }
+    expect(navigableLabels([label], [])).toEqual([label])
+    await act(async () =>
+      root.render(
+        createElement(ThreadView, {
+          data: { thread: labeledThread, messages: [], drafts: [] },
+          labelNames: new Map([[label.id, label.name]]),
+          snoozeEnabled: false,
+          scrollRef: { current: null },
+        }),
+      ),
+    )
+    expect(document.body.textContent).toContain(label.name)
+
+    await act(async () =>
+      root.render(
+        createElement(OrganisePicker, {
+          picker: { kind: 'labels', thread: labeledThread, trigger: null },
+          labels: [label],
+          onClose: () => {},
+          run: mockRun,
+        }),
+      ),
+    )
+    await open(button('AMC/SnoozedRemove'))
+    expect(mockRun).toHaveBeenCalledWith(
+      { kind: 'label', threadId: thread.id, labelId: label.id, value: false },
+      'Removed Label “AMC/Snoozed”',
+    )
   })
 
   it('snoozes from the first Zurich 02:30 to the second when choosing In an hour', async () => {

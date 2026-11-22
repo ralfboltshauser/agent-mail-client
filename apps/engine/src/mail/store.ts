@@ -1,11 +1,5 @@
 import { EventEmitter } from 'node:events'
-import {
-  type Address,
-  applyLabelPatch,
-  type BucketInput,
-  type LabelPatch,
-  SNOOZED_LABEL,
-} from '@amc/protocol'
+import { type Address, applyLabelPatch, type BucketInput, type LabelPatch } from '@amc/protocol'
 import type { BlobStore } from '../blobs.ts'
 import { type Db, transaction } from '../db/database.ts'
 import type { BodyParts } from './body-blobs.ts'
@@ -175,12 +169,7 @@ export class MailStore extends EventEmitter<{ change: [] }> {
   }
 
   providerLabels(accountId: string, labels: string[]): string[] {
-    const snoozed = this.db
-      .prepare(
-        "SELECT l.provider_id FROM label l JOIN account a ON a.id = l.account_id WHERE a.kind = 'gmail' AND l.account_id = ? AND l.name = ?",
-      )
-      .get(accountId, SNOOZED_LABEL) as { provider_id: string } | undefined
-    return labels.map((id) => labelId(accountId, id === snoozed?.provider_id ? SNOOZED_LABEL : id))
+    return labels.map((id) => labelId(accountId, id))
   }
 
   /** Inserts or fully replaces one message, then refreshes its Thread. */

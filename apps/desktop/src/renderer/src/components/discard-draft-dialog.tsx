@@ -49,7 +49,8 @@ export function DiscardDraftDialog({
         <DialogTitle>Discard draft?</DialogTitle>
         <DialogDescription className="wrap-anywhere">
           “{subject || '(No subject)'}” will be deleted from AMC. A matching copy that AMC wrote in
-          Gmail or IMAP will also be permanently deleted.
+          Gmail or IMAP will also be permanently deleted. An unchanged draft imported from IMAP can
+          also be permanently deleted.
         </DialogDescription>
         <DialogFooter>
           <Button variant="outline" disabled={pending} onClick={onClose}>

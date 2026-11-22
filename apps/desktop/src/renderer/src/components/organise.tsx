@@ -1,10 +1,4 @@
-import {
-  type AccountSummary,
-  type Label,
-  type OrganiseAction,
-  SNOOZED_LABEL,
-  type ThreadSummary,
-} from '@amc/protocol'
+import type { AccountSummary, Label, OrganiseAction, ThreadSummary } from '@amc/protocol'
 import {
   Archive,
   BellOff,
@@ -181,9 +175,7 @@ export function useOrganise(
             thread.unreadCount > 0 ? 'Marked as read' : 'Marked as unread',
           ),
       },
-      ...(!imap ||
-      (canMove &&
-        accountLabels.some((label) => label.kind === 'user' && label.name !== SNOOZED_LABEL))
+      ...(!imap || (canMove && accountLabels.some((label) => label.kind === 'user'))
         ? [
             {
               name: imap ? 'Move to folder' : 'Labels',
@@ -291,9 +283,7 @@ export function OrganisePicker({ picker, labels, onClose, focusFallback, run }: 
     onClose()
     void run(action, description)
   }
-  const choices = labels.filter(
-    (l) => l.kind === 'user' && l.accountId === thread.accountId && l.name !== SNOOZED_LABEL,
-  )
+  const choices = labels.filter((l) => l.kind === 'user' && l.accountId === thread.accountId)
   return (
     <Dialog
       open

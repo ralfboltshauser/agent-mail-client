@@ -1,4 +1,4 @@
-import { type AccountSummary, BUCKETS, type Label, SNOOZED_LABEL } from '@amc/protocol'
+import { type AccountSummary, BUCKETS, type Label } from '@amc/protocol'
 import {
   Activity,
   Archive,
@@ -80,7 +80,7 @@ export function navigableLabels(labels: Label[], accounts: AccountSummary[]): La
   return labels.filter((label) =>
     imapAccounts.has(label.accountId)
       ? label.kind === 'user' || !['INBOX', 'SENT', 'DRAFT'].includes(label.providerId)
-      : label.kind === 'user' && label.name !== SNOOZED_LABEL,
+      : label.kind === 'user',
   )
 }
 

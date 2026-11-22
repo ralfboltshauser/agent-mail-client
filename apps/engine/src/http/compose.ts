@@ -99,8 +99,7 @@ export function composeRoutes(deps: MailDeps, outbox: Outbox, composerOrigin?: s
     const active = deps.db
       .prepare(
         `SELECT h.id, t.expires_at AS expiresAt FROM handoff h JOIN token t ON t.id = h.agent_id
-       WHERE h.thread_id = ? AND h.t3_thread_id IS NOT NULL
-         AND t.revoked_at IS NULL AND t.expires_at > ?`,
+       WHERE h.thread_id = ? AND t.revoked_at IS NULL AND t.expires_at > ?`,
       )
       .get(threadId.data, Date.now())
     return c.json({ active: active ?? null })
@@ -126,10 +125,17 @@ export function composeRoutes(deps: MailDeps, outbox: Outbox, composerOrigin?: s
     if (!draft) throw new HTTPException(404, { message: 'Draft does not exist' })
     return c.json(draft)
   })
-  r.delete('/drafts/:id', async (c) => c.json(await deps.drafts.delete(c.req.param('id'))))
+  r.delete('/drafts/:id', async (c) =>
+    c.json(await deps.drafts.delete(c.req.param('id'), { removeImportedImapDraft: true })),
+  )
   r.post('/drafts/:id/discard', async (c) => {
     const { revision } = await body(c, z.object({ revision: z.number().int().nonnegative() }))
-    return c.json(await deps.drafts.delete(c.req.param('id'), revision))
+    return c.json(
+      await deps.drafts.delete(c.req.param('id'), {
+        expectedRevision: revision,
+        removeImportedImapDraft: true,
+      }),
+    )
   })
   r.put('/drafts/:id', async (c) =>
     c.json(deps.drafts.saveCompose(c.req.param('id'), await body<ComposePatch>(c, patch))),
