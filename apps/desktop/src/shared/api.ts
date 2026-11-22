@@ -181,6 +181,12 @@ export interface SmartInboxApi {
   ): Promise<{ accountId: string; providerId: string }>
   ownerAction(id: string, includeReason?: boolean): Promise<OwnerActionStatus>
   undoOwnerAction(id: string): Promise<OwnerActionStatus>
+  triageHistory?(query: {
+    before?: number
+    includeReasons?: '1'
+  }): Promise<import('@amc/protocol').TriageHistoryPage>
+  forgetTriageDecision?(id: string): Promise<void>
+  exportTriageHistory?(input: import('@amc/protocol').TriageExportInput): Promise<boolean>
   triageQueue(query: TriageQueueRequest): Promise<TriageQueuePage>
   resolveSenderAvatars(
     input: SenderAvatarResolve,

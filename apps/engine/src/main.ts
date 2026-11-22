@@ -1,6 +1,7 @@
 import { setMaxListeners } from 'node:events'
 import { mkdirSync } from 'node:fs'
 import { createServer } from 'node:http'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { serve } from '@hono/node-server'
 import { createPairingCode } from './auth/tokens.ts'
@@ -23,6 +24,8 @@ import { Outbox } from './mail/outbox.ts'
 import { MailQueries } from './mail/queries.ts'
 import { MailStore } from './mail/store.ts'
 import { correctionActions, markConfirmedReply } from './mail/triage/corrections.ts'
+import { ERASURE_LEDGER_FILE, openErasureLedger } from './mail/triage/erasure.ts'
+import { backfillLegacyBatch } from './mail/triage/legacy.ts'
 import { loadOAuthClient, type OAuthClient } from './providers/gmail/oauth.ts'
 import { gmailPubSub } from './providers/gmail/pubsub.ts'
 import { SyncManager } from './sync/manager.ts'
@@ -93,6 +96,7 @@ async function main(argv: string[]) {
     return
   }
 
+  process.env.SQLITE_TMPDIR = config.dataDir
   const db = openDatabase(dbPath)
   const version = migrate(db, { backupDir: config.backupDir, log })
 
@@ -112,6 +116,17 @@ async function main(argv: string[]) {
       return
     }
     case 'serve': {
+      const closeErasureLedger = openErasureLedger(db, join(config.dataDir, ERASURE_LEDGER_FILE))
+      const bridge = setInterval(() => {
+        try {
+          if (!backfillLegacyBatch(db)) clearInterval(bridge)
+        } catch {
+          clearInterval(bridge)
+          log.error('Legacy triage history backfill paused until Engine restart')
+        }
+      }, 100)
+      bridge.unref()
+
       const sealer = Sealer.fromSecretsDir(config.secretsDir)
       const blobs = new BlobStore(config.blobDir)
       const snoozeEnabled = config.features.snooze
@@ -235,6 +250,7 @@ async function main(argv: string[]) {
       const shutdown = (signal: string) => {
         if (stopping.signal.aborted) return
         log.info({ signal }, 'shutting down')
+        clearInterval(bridge)
         clearInterval(sends)
         clearInterval(mirrors)
         clearInterval(imports)
@@ -260,6 +276,7 @@ async function main(argv: string[]) {
               log.error({ signal }, 'Could not drain Engine work during shutdown')
               process.exit(1)
             }
+            closeErasureLedger()
             db.close()
             guard.close()
             process.exit(0)

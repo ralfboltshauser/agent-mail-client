@@ -36,7 +36,11 @@ export function TriageReview({
   onReply,
 }: Props) {
   const [picker, setPicker] = useState<Preview | null>(null)
-  const [reasonTarget, setReasonTarget] = useState<{ card: Preview; key: 'f' | 'x' } | null>(null)
+  const [reasonTarget, setReasonTarget] = useState<{
+    card: Preview
+    key: 'f' | 'x'
+    id: string
+  } | null>(null)
   const [message, setMessage] = useState('')
   const openingReply = useRef(false)
   const heading = useRef<HTMLHeadingElement>(null)
@@ -78,10 +82,14 @@ export function TriageReview({
       }
     }
   }
-  const senderDecision = (card: Preview, decision: 'accept' | 'block', reason?: string) => {
+  const senderDecision = (
+    card: Preview,
+    decision: 'accept' | 'block',
+    reason?: string,
+    id: string = crypto.randomUUID(),
+  ) => {
     if (!card.sender) return
-    const id = crypto.randomUUID()
-    void store.decide(
+    return store.decide(
       card,
       id,
       {
@@ -118,7 +126,7 @@ export function TriageReview({
     setReasonTarget(null)
     focus()
   }
-  const run = (key: string, ownerReason?: string) => {
+  const run = (key: string, ownerReason?: string, actionId: string = crypto.randomUUID()) => {
     setMessage('')
     if (store.view.card !== card || openingReply.current) return
     if (key === 'u') {
@@ -135,7 +143,7 @@ export function TriageReview({
     }
     if (!card) return
     if (key === 'a') senderDecision(card, 'accept')
-    else if (key === 'x') senderDecision(card, 'block', ownerReason)
+    else if (key === 'x') return senderDecision(card, 'block', ownerReason, actionId)
     else if (key === 's') setPicker(card)
     else if (key === 'r') {
       openingReply.current = true
@@ -145,11 +153,11 @@ export function TriageReview({
           openingReply.current = false
         })
     } else {
-      const id = crypto.randomUUID()
+      const id = actionId
       const bucket = BUCKETS[Number(key) - 1]
       if (key === ' ') void store.decide(card, id, { kind: 'skip' }, 'Skip')
       else if (key === 'f')
-        void store.decide(
+        return store.decide(
           card,
           id,
           {
@@ -212,12 +220,12 @@ export function TriageReview({
     if (event.shiftKey) {
       const key = event.key.toLowerCase()
       if ((key === 'f' || key === 'x') && card) {
-        if (import.meta.env.VITE_AMC_PRIVATE_TRIAGE_REASONS !== '1') return
+        if (import.meta.env.VITE_AMC_PRIVATE_TRIAGE_REASONS === '0') return
         event.preventDefault()
         if (event.repeat || !canActOn(card)) return
         const reason = unavailable(key)
         if (reason) setMessage(reason)
-        else setReasonTarget({ card, key })
+        else setReasonTarget({ card, key, id: crypto.randomUUID() })
       }
       return
     }
@@ -283,9 +291,10 @@ export function TriageReview({
                     <ReasonInput
                       label={activeReason.key === 'f' ? 'Filter out reason' : 'Block sender reason'}
                       onCancel={closeReason}
-                      onSave={(reason) => {
+                      onSave={async (reason) => {
+                        if (!(await run(activeReason.key, reason, activeReason.id)))
+                          throw new Error('Decision was not accepted')
                         closeReason()
-                        run(activeReason.key, reason)
                       }}
                     />
                   ),

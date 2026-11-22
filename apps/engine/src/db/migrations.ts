@@ -1,4 +1,5 @@
 import { filteringMigration } from '../mail/triage/filtering-migration.ts'
+import { historyMigration } from '../mail/triage/history-migration.ts'
 import { triageMigration } from '../mail/triage/migration.ts'
 
 export interface Migration {
@@ -778,4 +779,5 @@ export const MIGRATIONS: readonly Migration[] = [
   },
   triageMigration,
   filteringMigration,
+  historyMigration,
 ]

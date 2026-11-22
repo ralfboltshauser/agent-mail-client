@@ -34,6 +34,14 @@ export class EngineClient {
     path: string,
     init: { method: string; body?: unknown; signal?: AbortSignal; redirect?: RequestRedirect },
   ): Promise<T> {
+    const res = await this.response(path, init)
+    return res.status === 204 ? (undefined as T) : ((await res.json()) as T)
+  }
+
+  async response(
+    path: string,
+    init: { method: string; body?: unknown; signal?: AbortSignal; redirect?: RequestRedirect },
+  ): Promise<Response> {
     let res: Response
     try {
       res = await fetch(new URL(path, this.baseUrl), {
@@ -57,7 +65,7 @@ export class EngineClient {
       const body = (await res.json().catch(() => ({}))) as Partial<ApiError>
       throw new EngineError(res.status, body.error ?? 'error', body.message ?? res.statusText)
     }
-    return (await res.json()) as T
+    return res
   }
 
   authenticatedGet(path: string, signal: AbortSignal): Promise<Response> {

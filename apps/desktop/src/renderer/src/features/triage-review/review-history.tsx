@@ -46,10 +46,9 @@ export function ReviewHistory({
                   Open Outbox
                 </Button>
               )}
-              {import.meta.env.VITE_AMC_PRIVATE_TRIAGE_REASONS === '1' &&
-                (action.decision.kind === 'filter' ||
-                  (action.decision.kind === 'sender' &&
-                    action.decision.input.decision === 'block')) &&
+              {(action.decision.kind === 'filter' ||
+                (action.decision.kind === 'sender' &&
+                  action.decision.input.decision === 'block')) &&
                 action.undo === undefined &&
                 action.error &&
                 /adopt|already in use/.test(action.error) &&
@@ -82,7 +81,7 @@ export function ReviewHistory({
                   {action.status === 'unconfirmed' ? 'Retry decision' : 'Review card'}
                 </Button>
               )}
-              {import.meta.env.VITE_AMC_PRIVATE_TRIAGE_REASONS === '1' &&
+              {import.meta.env.VITE_AMC_PRIVATE_TRIAGE_REASONS !== '0' &&
                 (action.decision.kind === 'filter' ||
                   (action.decision.kind === 'sender' &&
                     action.decision.input.decision === 'block')) &&
@@ -105,11 +104,6 @@ export function ReviewHistory({
 function HistoryReason({ action, store }: { action: ReviewAction; store: ReviewStore }) {
   const [editing, setEditing] = useState<{ reason: string; revision: string | null } | null>(null)
   const [error, setError] = useState(false)
-  const original =
-    action.decision.kind === 'filter' || action.decision.kind === 'sender'
-      ? action.decision.input.reason
-      : undefined
-  const reason = action.ownerReason === undefined ? original : action.ownerReason
   if (editing)
     return (
       <ReasonInput
@@ -126,14 +120,13 @@ function HistoryReason({ action, store }: { action: ReviewAction; store: ReviewS
     <Button
       size="sm"
       variant="outline"
-      aria-label={error ? 'Retry loading reason' : reason ? 'Edit reason' : 'Add reason'}
-      title={reason ?? undefined}
+      aria-label={error ? 'Retry loading reason' : 'View or edit reason'}
       onClick={() => {
         setError(false)
         void store.loadReason(action).then(setEditing, () => setError(true))
       }}
     >
-      {error ? 'Retry loading reason' : reason ? 'Edit reason' : 'Add reason'}
+      {error ? 'Retry loading reason' : 'View or edit reason'}
     </Button>
   )
 }

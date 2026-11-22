@@ -19,11 +19,11 @@ export class EngineError extends Error {
   }
 }
 
-export async function request<T>(
+export async function response(
   engineUrl: string,
   path: string,
   init: RequestOptions & { token?: string } = {},
-): Promise<T> {
+): Promise<Response> {
   const url = new URL(path, engineUrl)
   let res: Response
   try {
@@ -44,13 +44,21 @@ export async function request<T>(
       `Cannot reach the Engine at ${url.origin}: ${(error as Error).message}`,
     )
   }
-  const text = await res.text()
-  const data = text ? JSON.parse(text) : null
   if (!res.ok) {
-    const err = (data ?? {}) as Partial<ApiError>
+    const err = (await res.json().catch(() => ({}))) as Partial<ApiError>
     throw new EngineError(res.status, err.error ?? 'error', err.message ?? res.statusText)
   }
-  return data as T
+  return res
+}
+
+export async function request<T>(
+  engineUrl: string,
+  path: string,
+  init: RequestOptions & { token?: string } = {},
+): Promise<T> {
+  const res = await response(engineUrl, path, init)
+  const body = await res.text()
+  return (body ? JSON.parse(body) : null) as T
 }
 
 export function authed(config: CliConfig) {

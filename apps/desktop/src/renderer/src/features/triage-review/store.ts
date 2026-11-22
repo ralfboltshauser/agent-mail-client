@@ -330,15 +330,14 @@ export class ReviewStore {
       void this.#advance(action, false)
       return
     }
-    if (
-      this.#history.some(
-        (entry) =>
-          entry.batch === action.batch &&
-          entry.index === action.index &&
-          entry.threadId === action.threadId &&
-          entry.status === 'unconfirmed',
-      )
-    ) {
+    const unconfirmed = this.#history.find(
+      (entry) =>
+        entry.batch === action.batch &&
+        entry.index === action.index &&
+        entry.threadId === action.threadId &&
+        entry.status === 'unconfirmed',
+    )
+    if (unconfirmed && unconfirmed.id !== id) {
       this.#publish({
         notice: 'Retry the unconfirmed decision from action history before making another.',
       })
@@ -348,9 +347,9 @@ export class ReviewStore {
     this.#working = true
     this.#publish({ busy: true })
     try {
-      await this.validate(card)
+      if (!unconfirmed) await this.validate(card)
       if (generation !== this.#read || this.#view.card !== card) return
-      await this.#submit(action)
+      return await this.#submit(action)
     } catch (error) {
       if (generation === this.#read) this.#publish({ error: reviewError(error) })
     } finally {
@@ -360,17 +359,22 @@ export class ReviewStore {
   }
 
   async #submit(action: ReviewAction) {
+    const decision = action.decision
+    let publicAction = action
+    if (decision.kind === 'filter' || decision.kind === 'sender') {
+      const { reason, ...input } = decision.input
+      publicAction = {
+        ...action,
+        decision: { ...decision, input } as Decision,
+        privateReasonDraft: reason ? true : undefined,
+      }
+    }
     try {
-      this.#update(action, { status: 'unconfirmed', error: null }, true)
+      this.#update(publicAction, { status: 'unconfirmed', error: null }, true)
       const smart = await this.#ownerApi()
       const result = await submit(smart, action)
-      const decision = action.decision
-      const saved =
-        decision.kind === 'filter' || decision.kind === 'sender'
-          ? ({ ...decision, input: { ...decision.input, reason: undefined } } as Decision)
-          : decision
-      const updated = this.#update(action, {
-        decision: saved,
+      const updated = this.#update(publicAction, {
+        privateReasonDraft: undefined,
         status: result.status,
         error: result.error,
       })
@@ -381,11 +385,13 @@ export class ReviewStore {
           action.card.kind === 'sender' && action.decision.kind !== 'sender',
         )
       }
+      return true
     } catch (error) {
       const message = reviewError(error)
       const rejected = message.startsWith('Review rejected: ')
       this.#announce(
-        this.#update(action, {
+        this.#update(publicAction, {
+          privateReasonDraft: rejected ? undefined : publicAction.privateReasonDraft,
           status: rejected ? 'rejected' : 'unconfirmed',
           error: message.replace(/^Review rejected: /, ''),
         }),
@@ -447,13 +453,11 @@ export class ReviewStore {
   async editReason(action: ReviewAction, reason: string, expectedReasonRevision: string | null) {
     const smart = await this.#ownerApi()
     if (!smart.editOwnerReason) throw new Error('Reason editing is unavailable')
-    const result = await smart.editOwnerReason(action.id, {
+    await smart.editOwnerReason(action.id, {
       editId: crypto.randomUUID(),
       expectedReasonRevision,
       reason: reason || null,
     })
-    const updated = this.#history.find(({ id }) => id === action.id)
-    if (updated) this.#update(updated, { ownerReason: result.reason })
   }
 
   async adoptDestination(action: ReviewAction, providerId: string) {
