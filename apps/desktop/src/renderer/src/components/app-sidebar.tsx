@@ -16,8 +16,6 @@ import {
   Tag,
   Trash2,
 } from 'lucide-react'
-import { useEffect, useMemo } from 'react'
-import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -42,15 +40,13 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from '@/components/ui/sidebar'
-import { replicaStoreFor } from '@/data/replica-store'
 import { shareReply } from '@/data/share-reply'
 import { accountsQuery, countsQuery, labelsQuery } from '@/features/mailbox/mailbox-queries'
-import { useReplicaSelector, useSyncField } from '@/hooks/use-amc'
-import { getAmc } from '@/lib/amc'
+import { useReplicaSelector } from '@/hooks/use-amc'
 import { cn } from '@/lib/utils'
 import type { Counts, View } from '../../../shared/api'
 import { SyncIndicator } from './sync-indicator'
-import { LastTriageRun, useTriageStatus } from './triage-status'
+import { SidebarTriage } from './triage-status'
 import { Kbd } from './ui/kbd'
 
 const NO_LABELS: Label[] = []
@@ -131,33 +127,12 @@ export function AppSidebar({
   snoozeEnabled,
 }: Props) {
   const { open } = useSidebar()
-  const triage = useTriageStatus()
-  const api = getAmc()
-  const triageQuery = useMemo(
-    () => ({
-      key: JSON.stringify(['triage-counts', accountId]),
-      load: () => api.triageCounts(accountId),
-    }),
-    [api, accountId],
-  )
-  const triageCounts = useReplicaSelector(triageQuery, ({ data }) => data)
-  useEffect(() => {
-    const timer = setInterval(() => void replicaStoreFor(api).refresh(triageQuery), 60_000)
-    return () => clearInterval(timer)
-  }, [api, triageQuery])
-  const syncIsLive = useSyncField((status) => status?.phase === 'live')
-  const triageDisabled = !syncIsLive || !triage || triage.running
   const accounts = useReplicaSelector(
     accountsQuery(),
     ({ data }) => data?.map(({ id, address, kind }) => ({ id, address, kind })) ?? [],
     (left, right) => shareReply(left, right) === left,
   )
   const labels = useReplicaSelector(labelsQuery(accountId), ({ data }) => data ?? NO_LABELS)
-  const runTriage = (scope: 'recent' | 'account') => {
-    void getAmc()
-      .triageNow(accountId, scope)
-      .catch(() => toast.error('Could not start triage.'))
-  }
   const current = accounts.find((a) => a.id === accountId) ?? null
   const folderLabels = navigableLabels(labels, accounts).sort((a, b) => {
     const name = (label: Label) => (label.managed === 'filtered' ? SCREENED_OUT_LABEL : label.name)
@@ -252,36 +227,7 @@ export function AppSidebar({
         </SidebarGroup>
 
         <SidebarGroup>
-          <SidebarGroupLabel>Triage</SidebarGroupLabel>
-          {triageCounts && (
-            <p className="px-2 pb-1 text-xs text-muted-foreground">
-              {triageCounts.recent
-                ? `${triageCounts.recent.toLocaleString()} new to triage`
-                : 'No new mail to triage'}
-              {' · '}
-              {triageCounts.older.toLocaleString()} older untriaged
-            </p>
-          )}
-          <div className="flex flex-wrap gap-x-1 px-1">
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={triageDisabled}
-              onClick={() => runTriage('recent')}
-              title="Triage Inbox Threads delivered in the last 24 hours"
-            >
-              Triage recent
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={triageDisabled || triageCounts?.older === 0}
-              onClick={() => runTriage('account')}
-            >
-              Triage older…
-            </Button>
-          </div>
-          <LastTriageRun status={triage} />
+          <SidebarTriage accountId={accountId} />
           <SidebarGroupContent>
             <SidebarMenu className="gap-0.5">
               {BUCKETS.map((bucket) => {

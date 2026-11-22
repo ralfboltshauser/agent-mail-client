@@ -28,7 +28,7 @@ export function useHotkeys(map: HotkeyMap, enabled = true): void {
       if (
         key === 'space' &&
         event.target instanceof Element &&
-        event.target.closest('button, a, [role="button"], [role="menuitem"]')
+        event.target.closest('button, a, summary, [role="button"], [role="menuitem"]')
       )
         return
       const combo = [
