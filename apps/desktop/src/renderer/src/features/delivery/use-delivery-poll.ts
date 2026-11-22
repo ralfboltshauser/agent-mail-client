@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 type DeliveryRow = { id: string } & Record<string, string | number | boolean | null>
 type PollSnapshot<Row> = { rows?: Row[]; error: string }
@@ -23,17 +23,19 @@ export function useDeliveryPoll<Row extends DeliveryRow>(
   const [snapshot, setSnapshot] = useState<PollSnapshot<Row>>({ error: '' })
 
   const lastSnapshot = useRef(snapshot)
+  const refreshPoll = useRef<(() => Promise<void>) | null>(null)
+  const refresh = useCallback(async () => {
+    await refreshPoll.current?.()
+  }, [])
 
   useEffect(() => {
     let active = true
-    let pending = false
+    let pending: Promise<void> | undefined
     const publish = (next: PollSnapshot<Row>) => {
       lastSnapshot.current = next
       setSnapshot(next)
     }
-    const refresh = async () => {
-      if (pending) return
-      pending = true
+    const poll = async () => {
       try {
         const incoming = await load()
         if (!active) return
@@ -45,18 +47,28 @@ export function useDeliveryPoll<Row extends DeliveryRow>(
         const error = cause instanceof Error && cause.message ? cause.message : 'Refresh failed.'
         const previous = lastSnapshot.current
         if (previous.error !== error) publish({ ...previous, error })
-      } finally {
-        pending = false
       }
     }
+    const pollOnce = () => {
+      pending ??= poll().finally(() => {
+        pending = undefined
+      })
+      return pending
+    }
 
-    void refresh()
-    const timer = window.setInterval(() => void refresh(), interval)
+    refreshPoll.current = async () => {
+      // A poll already underway may have read the Outbox before the cancellation.
+      await pending
+      if (active) await pollOnce()
+    }
+    void pollOnce()
+    const timer = window.setInterval(() => void pollOnce(), interval)
     return () => {
       active = false
+      refreshPoll.current = null
       window.clearInterval(timer)
     }
   }, [load, interval])
 
-  return snapshot
+  return { ...snapshot, refresh }
 }

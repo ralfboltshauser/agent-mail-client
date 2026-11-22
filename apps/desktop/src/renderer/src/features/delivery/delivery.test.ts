@@ -3,6 +3,7 @@
 import type { OutboxItem, VersionedDraft } from '@amc/protocol'
 import { act, createElement, Profiler, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
+import { toast } from 'sonner'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { DraftsView, OutboxView } from '@/components/compose-views'
 
@@ -87,12 +88,14 @@ async function click(text: string) {
 
 async function mountOutbox(item: OutboxItem) {
   let current = item
-  const outbox = vi.fn(async () => [
-    structuredClone({
-      ...current,
-      undoRemainingMs: Math.max(0, current.undoUntil - Date.now()),
-    }),
-  ])
+  const outbox = vi.fn(
+    async (): Promise<OutboxItem[]> => [
+      structuredClone({
+        ...current,
+        undoRemainingMs: current.undoRemainingMs ?? Math.max(0, current.undoUntil - Date.now()),
+      }),
+    ],
+  )
   const cancelSend = vi.fn(async () => {
     current = { ...current, status: 'cancelled' }
   })
@@ -127,7 +130,7 @@ async function mountOutbox(item: OutboxItem) {
   }
 }
 
-it('keeps queued rows stable and expires cancellation during failed polls', async () => {
+it('keeps queued rows stable and disables cancellation until refresh succeeds', async () => {
   const { commits, row, outbox, cancelSend, setItem } = await mountOutbox(queued)
   const cancel = button('Cancel send')
   expect(cancel).toBeDefined()
@@ -143,24 +146,96 @@ it('keeps queued rows stable and expires cancellation during failed polls', asyn
   expect(container.querySelector('[role="alert"]')?.textContent).toContain('Engine unavailable')
   expect(container.querySelector('article')).toBe(row)
   expect(button('Cancel send')).toBe(cancel)
+  expect(cancel?.disabled).toBe(true)
+  expect(row?.textContent).toContain('Delivery status is stale')
+  await click('Cancel send')
 
   await advance(500)
   expect(outbox).toHaveBeenCalledTimes(3)
-  expect(row?.textContent).toContain('Waiting for delivery')
-  expect(button('Cancel send')).toBeUndefined()
+  expect(row?.textContent).toContain('Delivery status is stale')
+  expect(cancel?.disabled).toBe(true)
   expect(button('Undo')).toBeUndefined()
   expect(cancelSend).not.toHaveBeenCalled()
 
   await advance(250)
   expect(container.querySelector('[role="alert"]')?.textContent).toBe('')
-  expect(row?.textContent).toContain('Waiting for delivery')
-  expect(button('Cancel send')).toBeUndefined()
+  expect(row?.textContent).toContain('Sending…')
+  expect(button('Cancel send')).toBe(cancel)
+  expect(cancel?.disabled).toBe(false)
 
   setItem({ ...queued, status: 'sent' })
   await advance(750)
   expect(row?.textContent).toContain('Sent')
   expect(button('Cancel send')).toBeUndefined()
   expect(button('Undo')).toBeUndefined()
+})
+
+it('disables cancel when the Engine sends with the desktop clock behind and the next poll fails', async () => {
+  const { row, outbox, cancelSend, setItem } = await mountOutbox({
+    ...queued,
+    sendAt: initialTime + 62_000,
+    undoUntil: initialTime + 62_000,
+    undoRemainingMs: 2000,
+  })
+  const cancel = button('Cancel send')
+  expect(cancel?.disabled).toBe(false)
+  expect(row?.textContent).toContain('Scheduled')
+
+  await advance(1500)
+  setItem({ ...queued, status: 'sent' })
+  outbox.mockRejectedValueOnce(new Error('Outbox refresh failed'))
+  await advance(750)
+  expect(container.querySelector('article')).toBe(row)
+  expect(row?.textContent).toContain('Delivery status is stale')
+  expect(row?.textContent).not.toContain('Scheduled')
+  expect(cancel?.disabled).toBe(true)
+  await click('Cancel send')
+  expect(cancelSend).not.toHaveBeenCalled()
+
+  await advance(750)
+  expect(row?.textContent).toContain('Sent')
+  expect(row?.textContent).not.toContain('stale')
+  expect(button('Cancel send')).toBeUndefined()
+})
+
+it('lets the owner cancel a previously due send still queued for retry', async () => {
+  const { row, cancelSend, onRestore } = await mountOutbox({
+    ...queued,
+    sendAt: initialTime - 500,
+    undoUntil: initialTime - 500,
+  })
+  expect(row?.textContent).toContain('Sending…')
+  expect(button('Cancel send')?.disabled).toBe(false)
+  await click('Cancel send')
+  expect(cancelSend).toHaveBeenCalledExactlyOnceWith(queued.id)
+  expect(onRestore).toHaveBeenCalledExactlyOnceWith(queued.draftId)
+})
+
+it('reports a rejected cancel and refreshes after a poll already in flight', async () => {
+  const notify = vi.spyOn(toast, 'error').mockImplementation(() => '')
+  const { row, outbox, cancelSend, onRestore, setItem } = await mountOutbox(queued)
+  let finishPoll!: (items: OutboxItem[]) => void
+  outbox.mockReturnValueOnce(
+    new Promise((resolve) => {
+      finishPoll = resolve
+    }),
+  )
+  await advance(750)
+  cancelSend.mockRejectedValueOnce(new Error('Send can no longer be cancelled'))
+  setItem({ ...queued, status: 'sent' })
+
+  await click('Cancel send')
+  expect(notify).toHaveBeenCalledWith('Could not cancel send', {
+    description: 'Send can no longer be cancelled',
+  })
+  expect(button('Cancel send')?.disabled).toBe(true)
+  expect(outbox).toHaveBeenCalledTimes(2)
+
+  await act(async () => finishPoll([queued]))
+  expect(outbox).toHaveBeenCalledTimes(3)
+  expect(row?.textContent).toContain('Sent')
+  expect(button('Cancel send')).toBeUndefined()
+  expect(onRestore).not.toHaveBeenCalled()
 })
 
 it('keeps uncertain and resolved rows mounted through equal and failed polls', async () => {

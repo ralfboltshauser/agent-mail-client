@@ -34,7 +34,7 @@ export function QueuedDeliveryLabel({ sendAt }: { sendAt: number }) {
   const due = useDeadline(sendAt)
   return (
     <p className="mt-1 text-xs">
-      {due ? 'Waiting for delivery' : `Scheduled · ${new Date(sendAt).toLocaleString()}`}
+      {due ? 'Sending…' : `Scheduled · ${new Date(sendAt).toLocaleString()}`}
     </p>
   )
 }
@@ -44,35 +44,43 @@ export function CancelQueuedDelivery({
   draftId,
   sendAt,
   undoUntil,
+  disabled,
+  refresh,
   onRestore,
 }: {
   id: string
   draftId: string
   sendAt: number
   undoUntil: number
+  disabled: boolean
+  refresh: () => Promise<void>
   onRestore: (id: string) => void
 }) {
-  const due = useDeadline(sendAt)
   const [cancelling, setCancelling] = useState(false)
 
   async function cancel() {
-    // A delayed timer can leave a stale button on screen. Engine also rechecks queued status.
-    if (cancelling || Date.now() >= sendAt) return
+    if (disabled || cancelling) return
     setCancelling(true)
     try {
       await getAmc().cancelSend(id)
     } catch (cause) {
-      toast.error((cause as Error).message)
+      toast.error('Could not cancel send', {
+        description: cause instanceof Error ? cause.message : undefined,
+      })
+      await refresh()
       setCancelling(false)
       return
     }
     onRestore(draftId)
   }
 
-  if (due) return null
-
   return (
-    <Button size="sm" variant="outline" disabled={cancelling} onClick={() => void cancel()}>
+    <Button
+      size="sm"
+      variant="outline"
+      disabled={disabled || cancelling}
+      onClick={() => void cancel()}
+    >
       {sendAt > undoUntil ? 'Cancel and reopen to reschedule' : 'Cancel send'}
     </Button>
   )

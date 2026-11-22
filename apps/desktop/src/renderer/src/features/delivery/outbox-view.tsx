@@ -9,8 +9,7 @@ import { CancelQueuedDelivery, QueuedDeliveryLabel } from './queued-delivery'
 import { ResolveDelivery } from './resolve-delivery'
 import { useDeliveryPoll } from './use-delivery-poll'
 
-const statusText: Record<OutboxItem['status'], string> = {
-  queued: 'Scheduled',
+const statusText: Record<Exclude<OutboxItem['status'], 'queued'>, string> = {
   dispatching: 'Checking delivery',
   sent: 'Sent',
   cancelled: 'Cancelled',
@@ -20,7 +19,7 @@ const statusText: Record<OutboxItem['status'], string> = {
 
 async function loadOutbox() {
   const items = await getAmc().outbox()
-  // Engine's undoRemainingMs changes on each reply. Outbox uses the absolute send deadline.
+  // The relative undo timer changes on each reply and is only used by the send toast.
   return items.map((item) => ({
     id: item.id,
     accountId: item.accountId,
@@ -50,7 +49,7 @@ export function OutboxView({
   onThread: (id: string) => void
   onSettings: () => void
 }) {
-  const { rows, error } = useDeliveryPoll(loadOutbox, 750)
+  const { rows, error, refresh } = useDeliveryPoll(loadOutbox, 750)
   const items = rows?.filter((item) => !accountId || item.accountId === accountId)
 
   return (
@@ -70,7 +69,14 @@ export function OutboxView({
         </MailState>
       )}
       {items?.map((item) => (
-        <OutboxRow key={item.id} item={item} onRestore={onRestore} onThread={onThread} />
+        <OutboxRow
+          key={item.id}
+          item={item}
+          stale={Boolean(error)}
+          refresh={refresh}
+          onRestore={onRestore}
+          onThread={onThread}
+        />
       ))}
     </DeliveryView>
   )
@@ -78,10 +84,14 @@ export function OutboxView({
 
 const OutboxRow = memo(function OutboxRow({
   item,
+  stale,
+  refresh,
   onRestore,
   onThread,
 }: {
   item: Delivery
+  stale: boolean
+  refresh: () => Promise<void>
   onRestore: (id: string) => void
   onThread: (id: string) => void
 }) {
@@ -92,7 +102,7 @@ const OutboxRow = memo(function OutboxRow({
         <h3 className="truncate text-sm font-medium">{item.subject || '(No subject)'}</h3>
         <p className="truncate text-xs text-muted-foreground">{item.recipients}</p>
         {item.status === 'queued' ? (
-          <QueuedDeliveryLabel sendAt={item.sendAt} />
+          !stale && <QueuedDeliveryLabel sendAt={item.sendAt} />
         ) : (
           <p className="mt-1 text-xs">
             {item.detail === SEND_ACCOUNT_UNAVAILABLE
@@ -100,6 +110,7 @@ const OutboxRow = memo(function OutboxRow({
               : statusText[item.status]}
           </p>
         )}
+        {stale && <p className="mt-1 text-xs text-muted-foreground">Delivery status is stale</p>}
         {item.detail && (
           <p className="mt-1 max-w-prose text-xs text-muted-foreground">{item.detail}</p>
         )}
@@ -113,6 +124,8 @@ const OutboxRow = memo(function OutboxRow({
           draftId={item.draftId}
           sendAt={item.sendAt}
           undoUntil={item.undoUntil}
+          disabled={stale}
+          refresh={refresh}
           onRestore={onRestore}
         />
       )}
