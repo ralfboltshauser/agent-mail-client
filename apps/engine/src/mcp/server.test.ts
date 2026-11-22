@@ -93,7 +93,8 @@ describe('MCP tools', () => {
         expect(reply).toMatchObject({ isError: true })
       }
       for (const tool of tools) {
-        expect(tool.name).not.toMatch(/send|deliver|submit|dispatch/i)
+        if (tool.name !== 'suggest_sender_rule')
+          expect(tool.name).not.toMatch(/send|deliver|submit|dispatch/i)
         expect(`${tool.description}`).not.toMatch(/\bsends? (the|an|a) (mail|email|message)\b/i)
       }
     }
@@ -625,4 +626,99 @@ describe('MCP tools', () => {
       actions: [{ tool: 'star' }, { mutations: [{ undo: { status: 'applied' } }] }],
     })
   })
+})
+
+it('records scoped Sender suggestions without giving the Agent authority to screen', async () => {
+  const { client, db, token, gmail, store } = await connect(['read', 'organize'], setup(), 'a')
+  const tool = (message_id = 'a:m1') =>
+    client.callTool({
+      name: 'suggest_sender_rule',
+      arguments: { message_id, decision: 'block', reason: 'Owner review requested' },
+    })
+  const first = JSON.parse(text(await tool()))
+  expect(first.actionId).toEqual(expect.any(String))
+  expect(JSON.parse(text(await tool()))).toEqual(first)
+  expect(db.prepare('SELECT decision, reason FROM sender_suggestion').all()).toEqual([
+    { decision: 'block', reason: 'Owner review requested' },
+  ])
+  expect(
+    db.prepare('SELECT tool FROM agent_action WHERE id = ?').get(first.actionId),
+  ).toMatchObject({ tool: 'suggest_sender_rule' })
+  expect(db.prepare('SELECT 1 FROM sender_rule').get()).toBeUndefined()
+  expect(db.prepare('SELECT 1 FROM mutation').get()).toBeUndefined()
+  db.exec(
+    "INSERT INTO account (id, kind, address, credentials, created_at) VALUES ('b', 'gmail', 'other@example.com', X'00', 0)",
+  )
+  store.putMessage('b', [], fromGmail(gmail.add('other')))
+  expect(await tool('b:other')).toMatchObject({ isError: true })
+
+  db.exec(`
+    INSERT INTO label (id, account_id, provider_id, name, kind) VALUES ('a:managed', 'a', 'managed', 'Screened out', 'user');
+    INSERT INTO screened_destination (account_id, provider_id, state) VALUES ('a', 'managed', 'ready');
+  `)
+  expect(
+    await client.callTool({
+      name: 'add_label',
+      arguments: { thread_ids: ['a:t-m1'], label_id: 'a:managed' },
+    }),
+  ).toMatchObject({ isError: true })
+  expect(db.prepare('SELECT 1 FROM mutation').get()).toBeUndefined()
+  revokeToken(db, token.id)
+  expect(await tool()).toMatchObject({ isError: true })
+})
+
+it('requires both a paired owner kind and owner scope for Smart Inbox HTTP routes', async () => {
+  const deps = setup()
+  const { db, mutations } = deps
+  const app = createApp({
+    db,
+    config: testConfig(),
+    log: silentLog,
+    mutations,
+    mail: deps as never,
+  })
+  try {
+    const cli = issueToken(db, { kind: 'cli', name: 'Owner', scopes: ['admin'] })
+    const readOnly = issueToken(db, { kind: 'desktop', name: 'Read only', scopes: ['read'] })
+    const agent = issueToken(db, {
+      kind: 'agent',
+      name: 'Agent',
+      scopes: ['read', 'organize'],
+      expiresAt: Date.now() + DAY_MS,
+    })
+    const body = JSON.stringify({
+      accountId: 'a',
+      address: 'alice@example.com',
+      decision: 'accept',
+      expectedRevision: 0,
+      clientActionId: 'da6532af-9274-4b57-8225-c25d04ed74d1',
+    })
+    const call = (secret: string, path: string, method = 'GET') =>
+      app.request(path, {
+        method,
+        headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' },
+        ...(method === 'POST' ? { body } : {}),
+      })
+    for (const { secret } of [readOnly, agent]) {
+      expect((await call(secret, '/v1/senders')).status).toBe(403)
+      expect((await call(secret, '/v1/senders/decisions', 'POST')).status).toBe(403)
+      expect((await call(secret, '/v1/owner-actions/nope/undo', 'POST')).status).toBe(403)
+      expect((await call(secret, '/v1/sender-avatars/resolve', 'POST')).status).toBe(403)
+      expect((await call(secret, '/v1/triage/queue')).status).toBe(403)
+    }
+    const accepted = await call(cli.secret, '/v1/senders/decisions', 'POST')
+    expect(accepted.status).toBe(200)
+    const { actionId } = await accepted.json()
+    expect(await (await call(cli.secret, `/v1/owner-actions/${actionId}`)).json()).toMatchObject({
+      status: 'applied',
+    })
+    expect(
+      await (await call(cli.secret, `/v1/owner-actions/${actionId}/undo`, 'POST')).json(),
+    ).toMatchObject({ revision: 2, undo: { status: 'applied' } })
+    expect((await call(cli.secret, '/v1/sender-avatars/resolve', 'POST')).status).toBe(501)
+    expect((await call(cli.secret, '/v1/triage/queue')).status).toBe(501)
+  } finally {
+    await mutations.stop()
+    db.close()
+  }
 })

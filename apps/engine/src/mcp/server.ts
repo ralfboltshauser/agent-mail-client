@@ -22,6 +22,7 @@ import {
 import { DraftError, DraftRevisionConflict, type Drafts, searchContacts } from '../mail/drafts.ts'
 import type { Mutations } from '../mail/mutations.ts'
 import type { MailQueries } from '../mail/queries.ts'
+import { suggestSenderRule } from '../mail/senders/suggestions.ts'
 import type { MailStore } from '../mail/store.ts'
 import { VERSION } from '../version.ts'
 
@@ -108,6 +109,25 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
         accountId: accountId ?? null,
       }),
   )
+
+  if (agent && can('read')) {
+    server.registerTool(
+      'suggest_sender_rule',
+      {
+        description:
+          'Suggest an Accept or Block decision for the Sender of a message. The owner reviews the suggestion.',
+        inputSchema: {
+          message_id: z.string().min(1).max(512),
+          decision: z.enum(['accept', 'block']),
+          reason: z.string().trim().min(1).max(240),
+        },
+      },
+      ({ message_id, decision, reason }) => {
+        const result = suggestSenderRule(db, agent, message_id, decision, reason)
+        return 'error' in result ? failure(result.error) : json(result)
+      },
+    )
+  }
 
   if (agent && can('organize')) {
     server.registerTool(

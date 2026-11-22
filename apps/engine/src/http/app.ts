@@ -17,6 +17,7 @@ import type { Logger } from '../log.ts'
 import { DraftError } from '../mail/drafts.ts'
 import type { Mutations } from '../mail/mutations.ts'
 import type { Outbox } from '../mail/outbox.ts'
+import { assertOwner, SenderError } from '../mail/senders/actions.ts'
 import { buildMcpServer } from '../mcp/server.ts'
 import { VERSION } from '../version.ts'
 import { agentActionRoutes } from './agent-actions.ts'
@@ -25,6 +26,7 @@ import { composeRoutes } from './compose.ts'
 import { composerLinkRoutes } from './composer-link.ts'
 import { type MailDeps, mailRoutes } from './mail.ts'
 import { mutationRoutes } from './mutations.ts'
+import { type OwnerActionHandler, ownerActionRoutes, senderRoutes } from './senders.ts'
 import { syncRoutes } from './sync.ts'
 import { tokenRoutes } from './tokens.ts'
 import { triageLeaseRoutes } from './triage-lease.ts'
@@ -43,6 +45,11 @@ export interface AppDeps {
   mutations?: Mutations
   outbox?: Outbox
   composerScript?: () => Promise<string>
+  smartInbox?: {
+    avatars?: Hono<AppEnv>
+    triage?: Hono<AppEnv>
+    ownerActions?: Readonly<Record<string, OwnerActionHandler>>
+  }
 }
 
 export function createApp({
@@ -55,10 +62,13 @@ export function createApp({
   mutations,
   outbox,
   composerScript,
+  smartInbox,
 }: AppDeps) {
   const app = new Hono<AppEnv>()
 
   app.onError((error, c) => {
+    if (error instanceof SenderError)
+      return c.json({ error: 'sender', message: error.message }, error.status)
     if (error instanceof DraftError)
       return c.json({ error: 'draft', message: error.message }, error.status)
     if (error instanceof HTTPException) {
@@ -171,7 +181,29 @@ export function createApp({
   if (mutations) {
     v1.route('/', mutationRoutes(mutations))
     v1.route('/', agentActionRoutes(db, mutations))
+    if (mail) {
+      v1.route('/senders', senderRoutes(mail.store, mutations))
+      v1.route('/owner-actions', ownerActionRoutes(mail.store, mutations, smartInbox?.ownerActions))
+    }
   }
+  const smartInboxOwner: MiddlewareHandler<AppEnv> = async (c, next) => {
+    assertOwner(db, c.get('principal'))
+    await next()
+  }
+  v1.use('/sender-avatars/*', smartInboxOwner)
+  v1.use('/triage/queue', smartInboxOwner)
+  v1.route(
+    '/sender-avatars',
+    smartInbox?.avatars ??
+      new Hono<AppEnv>()
+        .post('/resolve', (c) => c.json({ error: 'not_implemented' }, 501))
+        .get('/:digest', (c) => c.json({ error: 'not_implemented' }, 501)),
+  )
+  v1.route(
+    '/triage',
+    smartInbox?.triage ??
+      new Hono<AppEnv>().get('/queue', (c) => c.json({ error: 'not_implemented' }, 501)),
+  )
   if (mail) {
     app.route('/compose', composerLinkRoutes(db, mail.drafts, config, composerScript))
     if (outbox)

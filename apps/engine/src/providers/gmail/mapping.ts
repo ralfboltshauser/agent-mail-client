@@ -1,4 +1,5 @@
-import { cleanMessageId, parseAddress, parseAddressList } from '../../mail/addresses.ts'
+import { cleanMessageId, parseAddressList } from '../../mail/addresses.ts'
+import { senderMailbox } from '../../mail/senders/identity.ts'
 import type { IncomingAttachment, IncomingMessage } from '../../mail/store.ts'
 import { decodeEntities, htmlToText, normalizeWhitespace } from '../../mail/text.ts'
 import type { GmailHeader, GmailMessage, GmailPart } from './types.ts'
@@ -6,6 +7,11 @@ import type { GmailHeader, GmailMessage, GmailPart } from './types.ts'
 function header(headers: GmailHeader[] | undefined, name: string): string | null {
   const lower = name.toLowerCase()
   return headers?.find((h) => h.name.toLowerCase() === lower)?.value ?? null
+}
+
+export function gmailSender(message: GmailMessage) {
+  const from = (message.payload?.headers ?? []).filter(({ name }) => name.toLowerCase() === 'from')
+  return from.length === 1 ? senderMailbox(from[0]?.value) : null
 }
 
 function charsetOf(part: GmailPart): string {
@@ -98,7 +104,7 @@ export function fromGmail(message: GmailMessage): IncomingMessage {
     rfcMessageId: cleanMessageId(header(headers, 'Message-ID')),
     inReplyTo: cleanMessageId(header(headers, 'In-Reply-To')),
     references: header(headers, 'References'),
-    from: parseAddress(header(headers, 'From')),
+    from: gmailSender(message),
     to: parseAddressList(header(headers, 'To')),
     cc: parseAddressList(header(headers, 'Cc')),
     bcc: parseAddressList(header(headers, 'Bcc')),

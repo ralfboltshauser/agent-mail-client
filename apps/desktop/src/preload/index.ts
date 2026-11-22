@@ -1,6 +1,6 @@
 import type { ComposePatch, ThreadSummary } from '@amc/protocol'
 import { contextBridge, ipcRenderer } from 'electron'
-import type { AmcApi, SyncStatus } from '../shared/api'
+import type { AmcApi, SmartInboxApi, SyncStatus } from '../shared/api'
 
 const invoke =
   (channel: string) =>
@@ -8,6 +8,17 @@ const invoke =
     ipcRenderer.invoke(`amc:${channel}`, ...args)
 
 const api: AmcApi = {
+  smartInbox: {
+    listSenders: invoke('listSenders') as SmartInboxApi['listSenders'],
+    decideSender: invoke('decideSender') as SmartInboxApi['decideSender'],
+    adoptScreenedDestination: invoke(
+      'adoptScreenedDestination',
+    ) as SmartInboxApi['adoptScreenedDestination'],
+    ownerAction: invoke('ownerAction') as SmartInboxApi['ownerAction'],
+    undoOwnerAction: invoke('undoOwnerAction') as SmartInboxApi['undoOwnerAction'],
+    triageQueue: invoke('triageQueue') as SmartInboxApi['triageQueue'],
+    resolveSenderAvatars: invoke('resolveSenderAvatars') as SmartInboxApi['resolveSenderAvatars'],
+  },
   notificationSettings: invoke('notificationSettings') as AmcApi['notificationSettings'],
   saveNotificationSettings: invoke(
     'saveNotificationSettings',

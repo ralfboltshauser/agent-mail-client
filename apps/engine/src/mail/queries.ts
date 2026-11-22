@@ -3,6 +3,7 @@ import type {
   Address,
   AttachmentSummary,
   Bucket,
+  InboxSender,
   Label,
   MessageDetail,
   SearchHit,
@@ -14,6 +15,7 @@ import { RECENT_THREAD_BODIES } from '@amc/protocol'
 import type { BlobStore } from '../blobs.ts'
 import type { Db } from '../db/database.ts'
 import { type BodyParts, readBodyParts, readTextBody } from './body-blobs.ts'
+import { senderStatusSql } from './senders/index.ts'
 
 interface ThreadRow {
   id: string
@@ -34,6 +36,8 @@ interface ThreadRow {
   bucket_reason: string
   bucket_set_by: string
   bucket_set_at: number
+  inbox_sender: string | null
+  owner_handled_message_id: string | null
 }
 
 type MessageWithBody<Body extends string | null> = Omit<MessageDetail, 'bodyText'> & {
@@ -63,6 +67,7 @@ interface MessageRow {
   starred: number
   label_ids: string
   list_unsubscribe: string | null
+  screening_disposition: MessageDetail['screeningDisposition'] | null
 }
 
 interface AttachmentRow {
@@ -96,6 +101,10 @@ function toThread(row: ThreadRow): ThreadSummary {
     lastMessageAt: row.last_message_at,
     snoozedUntil: row.snoozed_until,
     muted: row.muted === 1,
+    ...(row.inbox_sender ? { inboxSender: JSON.parse(row.inbox_sender) as InboxSender } : {}),
+    ...(row.owner_handled_message_id
+      ? { ownerHandledMessageId: row.owner_handled_message_id }
+      : {}),
     bucket: row.bucket
       ? {
           bucket: row.bucket,
@@ -139,7 +148,17 @@ export class MailQueries {
     this.#threadColumns = `t.id, t.account_id, t.subject, t.snippet, t.participants, t.message_count,
       t.unread_count, t.starred, t.in_inbox, t.has_attachments, t.label_ids,
       t.last_message_at, ${snoozeEnabled ? 't.snoozed_until' : 'NULL'} AS snoozed_until, t.muted,
-      t.bucket, t.bucket_reason, t.bucket_set_by, t.bucket_set_at`
+      t.bucket, t.bucket_reason, t.bucket_set_by, t.bucket_set_at,
+      (SELECT h.message_id FROM owner_handled h WHERE h.thread_id = t.id) AS owner_handled_message_id,
+      CASE WHEN t.in_inbox = 1 THEN (
+        SELECT json_object('accountId', i.account_id, 'address', i.address, 'messageId', m.id,
+          'status', ${senderStatusSql}, 'revision', coalesce(r.revision, 0))
+        FROM message m JOIN sender_index i ON i.message_id = m.id
+        LEFT JOIN sender_rule r ON r.account_id = i.account_id AND r.address = i.address
+        WHERE m.thread_id = t.id AND i.in_inbox = 1
+          AND m.account_id || ':INBOX' IN (SELECT value FROM json_each(m.label_ids))
+        ORDER BY m.sent_at DESC, m.id DESC LIMIT 1
+      ) END AS inbox_sender`
   }
 
   accounts(): AccountSummary[] {
@@ -383,7 +402,20 @@ export class MailQueries {
         `SELECT m.id, m.thread_id, m.account_id, m.rfc_message_id, m.in_reply_to, m.from_json, m.to_json,
                 m.cc_json, m.bcc_json, m.reply_to_json, m.subject, m.snippet, CAST(${body} AS BLOB) AS body_text, m.body_parts, m.html_blob,
                 CASE WHEN m.body_search_limit IS NOT NULL THEN length(m.body_text) > m.body_search_limit ELSE 0 END AS body_search_truncated,
-                m.sent_at, m.delivered_at, m.unread, m.starred, m.label_ids, m.list_unsubscribe
+                m.sent_at, m.delivered_at, m.unread, m.starred, m.label_ids, m.list_unsubscribe,
+                CASE WHEN EXISTS (
+                  SELECT 1 FROM screened_destination d WHERE d.account_id = m.account_id
+                    AND m.account_id || ':' || d.provider_id IN (SELECT value FROM json_each(m.label_ids))
+                    AND m.account_id || ':INBOX' NOT IN (SELECT value FROM json_each(m.label_ids))
+                ) THEN 'screened' ELSE (
+                  SELECT CASE WHEN w.status = 'pending' THEN 'pending'
+                              WHEN w.status IN ('partial', 'failed') THEN 'failed'
+                              WHEN w.status = 'applied' THEN 'returned' END
+                  FROM sender_index i JOIN sender_rule r USING(account_id, address)
+                  JOIN screening_work w ON w.action_id = r.action_id
+                    AND w.identity = coalesce(m.imap_fingerprint, i.message_id)
+                  WHERE i.message_id = m.id AND i.in_inbox = 1 AND r.decision = 'block'
+                ) END AS screening_disposition
          FROM message m WHERE ${where}`,
       )
       .all(...params) as unknown as MessageRow[]
@@ -415,6 +447,7 @@ export class MailQueries {
         hasHtml: m.html_blob !== null || Boolean(bodyParts?.html),
         sentAt: m.sent_at,
         ...(m.delivered_at === null ? {} : { deliveredAt: m.delivered_at }),
+        ...(m.screening_disposition ? { screeningDisposition: m.screening_disposition } : {}),
         unread: m.unread === 1,
         starred: m.starred === 1,
         labelIds: JSON.parse(m.label_ids) as string[],

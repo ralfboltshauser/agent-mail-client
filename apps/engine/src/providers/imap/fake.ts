@@ -82,6 +82,12 @@ export class FakeImap extends EventEmitter {
     return folder
   }
 
+  async mailboxCreate(path: string) {
+    if (this.folders.has(path)) return { path, created: false }
+    this.addFolder(path)
+    return { path, created: true }
+  }
+
   renameFolder(old: string, path: string): void {
     const folder = this.folder(old)
     this.folders.delete(old)

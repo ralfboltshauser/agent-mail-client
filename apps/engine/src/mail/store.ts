@@ -3,6 +3,7 @@ import { type Address, applyLabelPatch, type BucketInput, type LabelPatch } from
 import type { BlobStore } from '../blobs.ts'
 import { type Db, transaction } from '../db/database.ts'
 import type { BodyParts } from './body-blobs.ts'
+import { observeSender } from './senders/index.ts'
 
 /** A message as any provider connector hands it to the store. */
 export interface IncomingMessage {
@@ -264,6 +265,7 @@ export class MailStore extends EventEmitter<{ change: [] }> {
         msg.deliveredAt ?? null,
       )
 
+    observeSender(this, mid, providerLabels, ownAddresses)
     this.#putAttachments(mid, msg.attachments)
     if (!previous) this.#noteContacts(ownAddresses, msg)
     this.recordChange('message', mid, 'upsert')
@@ -375,6 +377,7 @@ export class MailStore extends EventEmitter<{ change: [] }> {
       this.db
         .prepare('UPDATE message SET provider_label_ids = ?, provider_history_id = ? WHERE id = ?')
         .run(JSON.stringify(providerLabels), historyId ?? null, mid)
+      observeSender(this, mid, providerLabels)
       if (this.refreshMessageLabels(mid)) this.refreshThread(stored.thread_id)
     }
     return { labels: providerLabels, historyId }
@@ -384,7 +387,8 @@ export class MailStore extends EventEmitter<{ change: [] }> {
     const pending = this.db
       .prepare(
         `SELECT p.patch FROM mutation_message p JOIN mutation m ON m.id = p.mutation_id
-       WHERE p.message_id = ? AND m.status = 'pending' ORDER BY m.seq`,
+       WHERE p.message_id = ? AND m.status = 'pending'
+         AND json_extract(m.request, '$.work') IS NOT 'screen' ORDER BY m.seq`,
       )
       .all(id) as { patch: string }[]
     return pending.reduce(
@@ -430,6 +434,7 @@ export class MailStore extends EventEmitter<{ change: [] }> {
     } else {
       base = JSON.parse(row.provider_label_ids ?? row.label_ids) as string[]
     }
+    if (imap) observeSender(this, id, base)
     const projected = this.projectLabels(id, base).sort()
     const unread = Number(projected.includes(unreadId))
     const starred = Number(projected.includes(starredId))

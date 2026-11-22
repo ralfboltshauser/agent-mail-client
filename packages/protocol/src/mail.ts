@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { BucketAssignment } from './buckets.ts'
 import type { MutationResult } from './organise.ts'
+import { InboxSender, ScreeningDisposition } from './smart-inbox.ts'
 
 export const Address = z.object({ name: z.string().nullable(), address: z.string() })
 export type Address = z.infer<typeof Address>
@@ -52,6 +53,8 @@ export const ThreadSummary = z.object({
   snoozedUntil: z.number().nullable().default(null),
   muted: z.boolean().default(false),
   bucket: BucketAssignment.nullable().optional(),
+  inboxSender: InboxSender.optional(),
+  ownerHandledMessageId: z.string().nullable().optional(),
 })
 export type ThreadSummary = z.infer<typeof ThreadSummary>
 
@@ -87,6 +90,7 @@ export const MessageDetail = z.object({
   starred: z.boolean(),
   labelIds: z.array(z.string()),
   listUnsubscribe: z.string().nullable(),
+  screeningDisposition: ScreeningDisposition.optional(),
   attachments: z.array(AttachmentSummary),
 })
 export type MessageDetail = z.infer<typeof MessageDetail>

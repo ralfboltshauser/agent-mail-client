@@ -11,10 +11,11 @@ import {
   type OrganiseAction,
   SNOOZED_LABEL,
 } from '@amc/protocol'
-import { agentGrantActive } from '../auth/tokens.ts'
+import { agentGrantActive, type Principal } from '../auth/tokens.ts'
 import { transaction } from '../db/database.ts'
 import type { Logger } from '../log.ts'
 import { GmailHttpError } from '../providers/gmail/http.ts'
+import { gmailSender } from '../providers/gmail/mapping.ts'
 import { OAuthError } from '../providers/gmail/oauth.ts'
 import type {
   GmailApi,
@@ -22,6 +23,7 @@ import type {
   GmailMessage,
   GmailMessageState,
 } from '../providers/gmail/types.ts'
+import { imapMoveSupport } from '../providers/imap/client.ts'
 import type { MessageLocation } from '../providers/imap/locations.ts'
 import { mapFolders } from '../providers/imap/mapping.ts'
 import {
@@ -34,6 +36,9 @@ import {
   imapLocationRevision,
 } from '../providers/imap/organise.ts'
 import type { ImapAccountSync } from '../providers/imap/sync.ts'
+import { assertOwner, liveOwner, SenderError } from './senders/actions.ts'
+import { gmailDestination, imapDestination } from './senders/destination.ts'
+import { normalizeSender, scanSenderEnvelopes } from './senders/index.ts'
 import { labelId, type MailStore, messageId } from './store.ts'
 
 const INTERNAL = 'engine'
@@ -276,6 +281,7 @@ const GRANT_EXPIRED = 'Agent grant expired'
 
 export class MutationError extends Error {}
 export class MutationPermissionError extends MutationError {}
+class ScreeningCanceled extends MutationError {}
 
 export class Mutations {
   readonly #store: MailStore
@@ -551,6 +557,8 @@ export class Mutations {
     }
 
     const thread = this.#thread(action.threadId)
+    if (!allowTrash && this.#managedAgentAction(thread, action))
+      throw new MutationPermissionError('Only the owner can organise mail involving Screened out')
     if (thread.kind === 'imap') {
       const labels = this.#db
         .prepare('SELECT id FROM label WHERE account_id = ?')
@@ -733,6 +741,30 @@ export class Mutations {
     this.#db.prepare('UPDATE mutation SET modseq = ? WHERE id = ?').run(row.modseq, mutationId)
   }
 
+  #managedAgentAction(
+    thread: Pick<ThreadRow, 'account_id'> & { id: string },
+    action: OrganiseAction,
+  ): boolean {
+    const managed = this.#db
+      .prepare('SELECT provider_id FROM screened_destination WHERE account_id = ?')
+      .get(thread.account_id)
+    if (!managed?.provider_id) return false
+    const destination = labelId(thread.account_id, String(managed.provider_id))
+    if (action.kind === 'label' && action.labelId === destination) return true
+    if (
+      !this.#db
+        .prepare("SELECT 1 FROM account WHERE id = ? AND kind = 'imap'")
+        .get(thread.account_id)
+    )
+      return false
+    return !!this.#db
+      .prepare(`
+      SELECT 1 FROM imap_location l JOIN message m ON m.id = l.message_id
+      WHERE m.thread_id = ? AND l.label_id = ? LIMIT 1
+    `)
+      .get(thread.id, destination)
+  }
+
   #imapTrashLabels(accountId: string): Set<string> {
     const account = this.#db.prepare('SELECT cursor FROM account WHERE id = ?').get(accountId)
     const { imapTrashLabels = [] } = JSON.parse(String(account?.cursor ?? '{}')) as {
@@ -761,7 +793,7 @@ export class Mutations {
 
   #hasVerifiedImapUndo(original: MutationRow): boolean {
     const { kind } = JSON.parse(original.request)
-    if (!['archive', 'trash', 'label'].includes(kind)) return true
+    if (!['archive', 'trash', 'label'].includes(kind) && !this.#screenRequest(original)) return true
     const moves: ImapChange[] = readJournal(original).flatMap((entry) => entry.applied)
     return (
       moves.length > 0 &&
@@ -809,7 +841,16 @@ export class Mutations {
     const checkpoint = needsCheckpoint ? (await api.profile()).historyId : undefined
     if (needsCheckpoint && !checkpoint)
       throw new Error('Gmail did not provide a history checkpoint')
-    const messages = await this.#gmailThread(api, row)
+    const screen = this.#screenRequest(row)
+    const messages =
+      screen?.work === 'screen'
+        ? await api
+            .getMessage(screen.mid.slice(account.length + 1), true)
+            .then((message) => (message ? [message] : []))
+        : screen
+          ? await this.#gmailScreenMessages(api, account, [screen.mid])
+          : await this.#gmailThread(api, row)
+    const from = screen?.work === 'screen' && messages[0] ? gmailSender(messages[0]) : null
     transaction(this.#db, () => {
       const state = this.#committedState(row.thread_id)
       let statePatch: Partial<ThreadState>
@@ -822,6 +863,19 @@ export class Mutations {
         statePatch = this.#undoState(original, state)
         for (const change of this.#undoChanges(original)) undo.set(change.message_id, change)
         patchFor = (id) => undo.get(id)?.after ?? {}
+      } else if (screen) {
+        statePatch = {}
+        patchFor = (id, labels) =>
+          id === screen.mid &&
+          screen.destination &&
+          from &&
+          normalizeSender(from.address) === screen.address &&
+          labels.includes(inbox) &&
+          !['SPAM', 'TRASH', 'SENT', 'DRAFT'].some((label) =>
+            labels.includes(labelId(account, label)),
+          )
+            ? { [screen.destination]: true, [inbox]: false }
+            : {}
       } else if (row.intent_id) {
         statePatch = {}
         const scoped = new Set(this.#intentMessages(row.intent_id, 'suppress'))
@@ -908,7 +962,22 @@ export class Mutations {
       }
       for (const patch of projected) this.#store.refreshMessageLabels(patch.message_id)
       row.prepared = 1
-      row.write_journal = '[]'
+      row.write_journal =
+        screen?.work === 'screen' && !this.#patches(row.id).length
+          ? JSON.stringify([
+              {
+                applied: [],
+                failed: [],
+                superseded: [
+                  {
+                    message_id: screen.mid,
+                    before: {},
+                    after: { [inbox]: false },
+                  },
+                ],
+              },
+            ])
+          : '[]'
       row.state_patch = JSON.stringify(statePatch)
       row.state_before = JSON.stringify(stateBefore)
       this.#db
@@ -1058,7 +1127,258 @@ export class Mutations {
     }
   }
 
+  async verifyScreeningCapability(accountId: string, clientActionId: string) {
+    if (this.#db.prepare('SELECT 1 FROM owner_action WHERE id = ?').get(clientActionId)) return
+    const account = this.#db.prepare('SELECT kind, cursor FROM account WHERE id = ?').get(accountId)
+    if (account?.kind !== 'imap') return
+    const unsupported = () => new SenderError('This IMAP Account does not support safe moves')
+    if (!JSON.parse(String(account.cursor)).imapMoves) throw unsupported()
+    const verified = await this.#imap?.(accountId, async ({ client }) => {
+      if (!imapMoveSupport(client).available) throw unsupported()
+    })
+    if (!verified)
+      throw new SenderError(
+        'Cannot verify safe IMAP moves. Retry when the Account is connected.',
+        503,
+      )
+  }
+
+  async adoptScreenedDestination(principal: Principal, accountId: string, providerId: string) {
+    assertOwner(this.#db, principal)
+    const account = this.#db.prepare('SELECT kind FROM account WHERE id = ?').get(accountId)
+    if (!account) throw new SenderError('Account unavailable', 404)
+    if (this.#running.has(accountId))
+      throw new SenderError('Account writeback is busy. Retry shortly.')
+    const allow = () => liveOwner(this.#db, principal.tokenId)
+    const work = async () => {
+      let adopted = false
+      if (account.kind === 'imap') {
+        await this.#imap?.(accountId, async (sync) => {
+          adopted = !!(await imapDestination(sync, allow, providerId))
+        })
+      } else {
+        const api = this.#api(accountId)
+        if (api)
+          adopted = !!(await gmailDestination(this.#store, accountId, api, allow, providerId))
+      }
+      assertOwner(this.#db, principal)
+      if (!adopted) throw new SenderError('The Account is offline. Retry when connected.', 503)
+    }
+    const task = work().finally(() => this.#running.delete(accountId))
+    this.#running.set(accountId, task)
+    await task
+    this.kick()
+    return { accountId, providerId }
+  }
+
+  #screeningStatus(actionId: string, mid: string, status: string, error: string | null = null) {
+    this.#db
+      .prepare(
+        'UPDATE screening_work SET status = ?, error = ? WHERE action_id = ? AND message_id = ?',
+      )
+      .run(status, error, actionId, mid)
+    if (this.#db.prepare('SELECT 1 FROM message WHERE id = ?').get(mid))
+      this.#store.recordChange('message', mid, 'upsert')
+  }
+
+  #screeningAllowed(actionId: string, mid: string): boolean {
+    return !!this.#db
+      .prepare(`
+      SELECT 1 FROM sender_rule r JOIN sender_index i USING (account_id, address)
+      WHERE r.action_id = ? AND r.decision = 'block' AND i.message_id = ? AND i.in_inbox = 1
+    `)
+      .get(actionId, mid)
+  }
+
+  #screenRequest(row: MutationRow): {
+    work: 'screen' | 'screen-undo'
+    actionId: string
+    mid: string
+    destination?: string
+    address?: string
+  } | null {
+    const request = JSON.parse(row.request)
+    return request.work === 'screen' || request.work === 'screen-undo' ? request : null
+  }
+
+  #checkScreenDispatch(row: MutationRow) {
+    const request = this.#screenRequest(row)
+    if (!request) return
+    if (request.work === 'screen') {
+      const destination = this.#db
+        .prepare(`
+        SELECT provider_id FROM screened_destination WHERE account_id = ? AND state = 'ready'
+      `)
+        .get(row.account_id)
+      if (
+        destination?.provider_id &&
+        labelId(row.account_id, String(destination.provider_id)) === request.destination &&
+        this.#screeningAllowed(request.actionId, request.mid)
+      )
+        return
+      throw new ScreeningCanceled('The Sender rule or original Inbox membership changed')
+    }
+    const owner = this.#db
+      .prepare('SELECT undo_token_id FROM owner_action WHERE id = ?')
+      .get(request.actionId)?.undo_token_id
+    if (!owner || !liveOwner(this.#db, String(owner)))
+      throw new ScreeningCanceled('The owner credentials for Undo are no longer active')
+  }
+
+  #stageScreeningUndo(accountId: string) {
+    const rows = this.#db
+      .prepare(`
+      SELECT w.action_id, w.message_id, w.mutation_id, a.undo_token_id
+      FROM screening_work w JOIN owner_action a ON a.id = w.action_id JOIN mutation m ON m.id = w.mutation_id
+      WHERE a.account_id = ? AND a.undo_requested_at IS NOT NULL AND w.undo_id IS NULL AND w.undo_error IS NULL
+        AND m.status IN ('applied', 'partial')
+        AND EXISTS (SELECT 1 FROM json_each(m.write_journal) j WHERE json_array_length(j.value, '$.applied') > 0)
+      ORDER BY m.seq LIMIT 50
+    `)
+      .all(accountId) as {
+      action_id: string
+      message_id: string
+      mutation_id: string
+      undo_token_id: string
+    }[]
+    for (const row of rows) {
+      const original = this.#row(row.mutation_id)
+      if (!original) continue
+      const id = randomUUID()
+      try {
+        transaction(this.#db, () => {
+          if (!liveOwner(this.#db, row.undo_token_id))
+            throw new MutationError('The owner credentials for Undo are no longer active')
+          const thread = this.#thread(original.thread_id)
+          if (thread.kind === 'imap' && !this.#hasVerifiedImapUndo(original))
+            throw new MutationError(IMAP_UNDO_UNVERIFIED)
+          const inverses = new Map(
+            this.#undoChanges(original).map((change) => [change.message_id, change.after]),
+          )
+          this.#insert(
+            id,
+            INTERNAL,
+            JSON.stringify({
+              work: 'screen-undo',
+              actionId: row.action_id,
+              mid: row.message_id,
+            }),
+            thread,
+            {},
+            (mid) => inverses.get(mid) ?? {},
+            original.id,
+          )
+          this.#db
+            .prepare('UPDATE screening_work SET undo_id = ? WHERE mutation_id = ?')
+            .run(id, original.id)
+        })
+      } catch (error) {
+        if (!(error instanceof MutationError)) throw error
+        this.#db
+          .prepare('UPDATE screening_work SET undo_error = ? WHERE mutation_id = ?')
+          .run(error.message, original.id)
+      }
+    }
+    return rows.length > 0
+  }
+
+  async #stageScreening(accountId: string, kind: string, status: string) {
+    const rows = this.#db
+      .prepare(`
+      SELECT w.action_id, w.message_id FROM screening_work w JOIN owner_action a ON a.id = w.action_id
+      WHERE a.account_id = ? AND w.mutation_id IS NULL AND w.status = 'pending'
+      ORDER BY w.rowid LIMIT 50
+    `)
+      .all(accountId) as { action_id: string; message_id: string }[]
+    const eligible = rows.filter(({ action_id, message_id }) => {
+      if (this.#screeningAllowed(action_id, message_id)) return true
+      this.#screeningStatus(action_id, message_id, 'superseded')
+      return false
+    })
+    if (!eligible.length) return
+    const allow = () =>
+      eligible.some(({ action_id, message_id }) => this.#screeningAllowed(action_id, message_id))
+    const stage = (providerId: string) =>
+      transaction(this.#db, () => {
+        const destination = labelId(accountId, providerId)
+        const inbox = labelId(accountId, 'INBOX')
+        for (const { action_id, message_id } of eligible) {
+          if (!this.#screeningAllowed(action_id, message_id)) continue
+          const source = this.#db
+            .prepare(`
+          SELECT m.thread_id, i.address FROM message m JOIN sender_index i ON i.message_id = m.id WHERE m.id = ?
+        `)
+            .get(message_id)
+          if (!source) continue
+          const id = randomUUID()
+          this.#insert(
+            id,
+            INTERNAL,
+            JSON.stringify({
+              work: 'screen',
+              actionId: action_id,
+              mid: message_id,
+              destination,
+              address: source.address,
+            }),
+            this.#thread(String(source.thread_id)),
+            {},
+            (mid) => (mid === message_id ? { [destination]: true, [inbox]: false } : {}),
+          )
+          this.#db
+            .prepare(
+              'UPDATE screening_work SET mutation_id = ? WHERE action_id = ? AND message_id = ?',
+            )
+            .run(id, action_id, message_id)
+        }
+      })
+    try {
+      if (status === 'auth_expired')
+        throw new SenderError('Sign in again to screen mail on this Account')
+      if (kind === 'imap') {
+        await this.#imap?.(accountId, async (sync) => {
+          const found = await imapDestination(sync, allow)
+          if (found) stage(found.label.providerId)
+        })
+      } else {
+        const api = this.#api(accountId)
+        if (!api) return
+        const found = await gmailDestination(this.#store, accountId, api, allow)
+        if (found) stage(found.label.providerId)
+      }
+    } catch (error) {
+      if (!(error instanceof SenderError)) throw error
+      for (const { action_id, message_id } of eligible) {
+        if (this.#screeningAllowed(action_id, message_id))
+          this.#screeningStatus(action_id, message_id, 'failed', error.message)
+      }
+    }
+  }
+
+  #queueScreening(): Promise<void>[] {
+    const accounts = this.#db
+      .prepare(`
+      SELECT DISTINCT a.id, a.kind, a.status
+      FROM account a JOIN owner_action o ON o.account_id = a.id JOIN screening_work w ON w.action_id = o.id
+      WHERE (w.status = 'pending' AND w.mutation_id IS NULL OR
+        o.undo_requested_at IS NOT NULL AND w.undo_id IS NULL AND w.undo_error IS NULL AND EXISTS (
+          SELECT 1 FROM mutation original, json_each(original.write_journal) j
+          WHERE original.id = w.mutation_id AND original.status IN ('applied', 'partial')
+            AND json_array_length(j.value, '$.applied') > 0
+        ))
+        AND NOT EXISTS (SELECT 1 FROM mutation m WHERE m.account_id = a.id AND m.status = 'pending')
+    `)
+      .all() as { id: string; kind: string; status: string }[]
+    return accounts.flatMap(({ id, kind, status }) => {
+      if (this.#running.has(id) || this.#stageScreeningUndo(id)) return []
+      const task = this.#stageScreening(id, kind, status).finally(() => this.#running.delete(id))
+      this.#running.set(id, task)
+      return [task]
+    })
+  }
+
   async tick(): Promise<void> {
+    scanSenderEnvelopes(this.#store)
     transaction(this.#db, () => {
       if (!this.snoozeEnabled) {
         const pending = this.#db
@@ -1083,7 +1403,7 @@ export class Mutations {
        ) head ON head.seq = m.seq WHERE m.next_attempt <= ?`,
       )
       .all(now) as unknown as (MutationRow & { kind: string; account_status: string })[]
-    const started: Promise<void>[] = []
+    const started: Promise<void>[] = this.#queueScreening()
     for (const row of rows) {
       if (this.#running.has(row.account_id)) continue
       const nonOwner = this.#db
@@ -1092,6 +1412,16 @@ export class Mutations {
       if (!row.agent_action_id && nonOwner) {
         const message = 'Organise requires a paired owner Client'
         this.#finish(row, 'failed', message)
+        continue
+      }
+      if (
+        row.agent_action_id &&
+        this.#managedAgentAction(
+          { id: row.thread_id, account_id: row.account_id },
+          JSON.parse(row.request),
+        )
+      ) {
+        this.#finish(row, 'failed', 'Only the owner can organise mail involving Screened out')
         continue
       }
       if (row.agent_action_id && !this.#agentGrantActive(row)) {
@@ -1171,8 +1501,10 @@ export class Mutations {
       )
     `)
       .get(row.principal)
-    const allowTrash = !row.agent_action_id && !original?.agent_action_id && !restricted
+    const screen = this.#screenRequest(row)
+    const allowTrash = !screen && !row.agent_action_id && !original?.agent_action_id && !restricted
     const beforeWrite = () => {
+      this.#checkScreenDispatch(row)
       if (row.agent_action_id && !this.#agentGrantActive(row))
         throw new MutationPermissionError(GRANT_EXPIRED)
     }
@@ -1187,12 +1519,25 @@ export class Mutations {
             allowTrash,
             beforeWrite,
             this.#log.child({ mutation: row.id }),
-            snoozing,
+            snoozing || !!this.#screenRequest(row),
+            screen ? { ...(screen.address ? { address: screen.address } : {}) } : undefined,
           ),
         )
         if (!ran) return
       }
     } catch (error) {
+      if (error instanceof ScreeningCanceled) {
+        const copied = entry.pending?.copied
+        if (copied && entry.pending) entry.uncertain = [entry.pending.change]
+        if (!copied) entry.superseded.push(...changes)
+        this.#finish(
+          row,
+          copied || this.#screenRequest(row)?.work === 'screen-undo' ? 'failed' : 'applied',
+          copied ? IMAP_COPY_INCOMPLETE : null,
+          journal,
+        )
+        return
+      }
       if (error instanceof MutationPermissionError) {
         this.#stopAgentWrite(row, journal, entry.pending?.copied ? IMAP_COPY_INCOMPLETE : undefined)
         return
@@ -1376,21 +1721,38 @@ export class Mutations {
     return Boolean(cursor && revision && BigInt(revision) <= BigInt(cursor))
   }
 
+  async #gmailScreenMessages(
+    api: GmailApi,
+    account: string,
+    ids: string[],
+  ): Promise<GmailMessage[]> {
+    const rows = await Promise.all(
+      ids.map(async (mid) => {
+        const id = mid.slice(account.length + 1)
+        const state = await api.getMessageState(id, true)
+        return state ? { id, threadId: '', ...state } : null
+      }),
+    )
+    return rows.filter((row): row is NonNullable<typeof row> => row !== null)
+  }
+
   async #observe(api: GmailApi, row: MutationRow, ids: string[], thread?: GmailMessage[]) {
     const account = row.account_id
     if (!ids.length && !thread?.length) return new Map<string, ProviderObservation>()
     const messages = new Map(
-      (thread ?? (await this.#gmailThread(api, row))).map((message) => [
-        messageId(account, message.id),
-        message,
-      ]),
+      (
+        thread ??
+        (this.#screenRequest(row)
+          ? await this.#gmailScreenMessages(api, account, ids)
+          : await this.#gmailThread(api, row))
+      ).map((message) => [messageId(account, message.id), message]),
     )
     const observed = new Map(thread ? messages : [])
     for (const id of ids) {
       const rawId = id.slice(account.length + 1)
       const message = messages.get(id)
       if (message) observed.set(id, message)
-      else {
+      else if (!this.#screenRequest(row)) {
         const state = await api.getMessageState(rawId, true)
         if (state) observed.set(id, { id: rawId, threadId: row.thread_id, ...state })
       }
@@ -1637,6 +1999,17 @@ export class Mutations {
             continue
           }
         }
+        if (
+          this.#screenRequest(row)?.work === 'screen' &&
+          (!labels?.includes(inbox) ||
+            ['SPAM', 'TRASH', 'SENT', 'DRAFT'].some((label) =>
+              labels.includes(labelId(account, label)),
+            ) ||
+            (await touched(change, inbox)))
+        ) {
+          entry.superseded = combine([...entry.superseded, change])
+          continue
+        }
         for (const [key, value] of Object.entries(change.after)) {
           if (key in done || key in superseded || key === labelId(account, SNOOZED_LABEL)) continue
           const revision = change.revisions?.[key]
@@ -1666,11 +2039,14 @@ export class Mutations {
         return true
       }
 
-      const beforeDispatch = row.agent_action_id
-        ? () => {
-            if (!this.#agentGrantActive(row)) throw new MutationPermissionError(GRANT_EXPIRED)
-          }
-        : undefined
+      const beforeDispatch =
+        row.agent_action_id || this.#screenRequest(row)
+          ? () => {
+              this.#checkScreenDispatch(row)
+              if (row.agent_action_id && !this.#agentGrantActive(row))
+                throw new MutationPermissionError(GRANT_EXPIRED)
+            }
+          : undefined
       beforeDispatch?.()
       const { message_id, after } = candidate
       const historyId = current.get(message_id)?.historyId
@@ -1698,7 +2074,32 @@ export class Mutations {
             checkpoint.labelIds ?? [],
             checkpoint.historyId,
           )
-          entry.applied = combine([...entry.applied, { ...candidate, revisions }])
+          if (this.#screenRequest(row)) {
+            const verified = Object.fromEntries(
+              Object.entries(after).filter(
+                ([label, present]) =>
+                  (checkpoint.labelIds ?? []).includes(rawId(label)) === present,
+              ),
+            )
+            const failed = Object.fromEntries(
+              Object.entries(after).filter(([label]) => !(label in verified)),
+            )
+            if (Object.keys(verified).length)
+              entry.applied = combine([
+                ...entry.applied,
+                {
+                  ...candidate,
+                  after: verified,
+                  revisions: this.#revisions(verified, checkpoint.historyId),
+                },
+              ])
+            if (Object.keys(failed).length) {
+              entry.failed = combine([...entry.failed, { ...candidate, after: failed }])
+              entry.error = 'Gmail did not acknowledge every screening label change'
+            }
+          } else {
+            entry.applied = combine([...entry.applied, { ...candidate, revisions }])
+          }
           delete entry.pending
           save()
         })
@@ -1720,7 +2121,7 @@ export class Mutations {
           )
         }
       } catch (error) {
-        if (error instanceof MutationPermissionError) {
+        if (error instanceof MutationPermissionError || error instanceof ScreeningCanceled) {
           // The request never started. Clear the journal marker before stopping the grant.
           delete entry.pending
           throw error
@@ -1736,7 +2137,7 @@ export class Mutations {
         if (this.#retry(row, error)) return false
         entry.error ??= this.#writeError(error)
         // Re-read an unacknowledged Trash before publishing a terminal result.
-        if (step.trash !== undefined && ambiguous) {
+        if ((step.trash !== undefined || this.#screenRequest(row)) && ambiguous) {
           save()
           return true
         }
@@ -1901,6 +2302,20 @@ export class Mutations {
         row.progress = progress + 1
       }
     } catch (error) {
+      if (error instanceof ScreeningCanceled) {
+        for (const [index, step] of steps.entries()) {
+          const entry = journal[index] ?? { applied: [], superseded: [], failed: [] }
+          journal[index] = entry
+          if (!entry.applied.length && !entry.uncertain?.length)
+            entry.superseded = combine([...entry.superseded, ...step.changes])
+        }
+        this.#finishWrite(
+          row,
+          journal,
+          this.#screenRequest(row)?.work === 'screen-undo' ? error.message : null,
+        )
+        return
+      }
       if (error instanceof MutationPermissionError) {
         this.#stopAgentWrite(row, journal)
         return
@@ -1987,6 +2402,8 @@ export class Mutations {
       const uncertainty = 'A change to Trash may have been applied'
       error = error ? `${uncertainty}. ${error}` : uncertainty
     }
+    if (this.#screenRequest(row) && journal.some((entry) => entry.uncertain?.length))
+      error ??= 'Gmail screening changes could not be verified'
     const applied = journal.some((entry) => entry.applied.length)
     this.#finish(row, error ? (applied ? 'partial' : 'failed') : 'applied', error, journal)
   }
@@ -2082,6 +2499,9 @@ export class Mutations {
         }
       }
       for (const patch of this.#patches(row.id)) this.#store.refreshMessageLabels(patch.message_id)
+      const screen = this.#screenRequest(row)
+      if (screen?.work === 'screen')
+        this.#screeningStatus(screen.actionId, screen.mid, status, error)
       this.#refreshThread(row.thread_id, row.id)
     })
   }

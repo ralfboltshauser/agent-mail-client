@@ -297,3 +297,22 @@ describe('notification batching', () => {
     expect(show).not.toHaveBeenCalled()
   })
 })
+
+it('checks the disposition of each arrival before collecting it and again before displaying it', async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(now)
+  const first = message('same-thread-1')
+  const second = message('same-thread-2')
+  const pending = change(message('pending', { screeningDisposition: 'pending' }))
+  const failed = change(message('failed', { screeningDisposition: 'failed' }))
+  const changes = [change(first), change(second), pending, failed]
+  const candidates = newInboxMessages(replica, changes, now)
+  expect(candidates.map(({ id }) => id)).toEqual([first.id, second.id])
+  const show = vi.fn()
+  const notices = new NewMailNotifications(replica, () => DEFAULT_NOTIFICATION_SETTINGS, show)
+  replica.apply(changes)
+  notices.add(candidates)
+  replica.put('message', { ...first, screeningDisposition: 'pending' })
+  await vi.advanceTimersByTimeAsync(10_000)
+  expect(show).toHaveBeenCalledTimes(1)
+})
