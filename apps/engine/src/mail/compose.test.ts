@@ -196,7 +196,10 @@ it('composes a threaded Gmail reply, merges Yjs updates, schedules, and publishe
   const item = (await queued.json()) as OutboxItem
   expect(item).toMatchObject({ sendAt: 80_000, undoUntil: 60_000, status: 'queued' })
   expect(gmail.drafts.size).toBe(0)
-  expect(await (await call('/outbox', 'POST', request)).json()).toEqual(item)
+  expect(await (await call('/outbox', 'POST', request)).json()).toEqual({
+    ...item,
+    undoResponseElapsedMs: expect.any(Number),
+  })
   expect((await call('/outbox', 'POST', { ...request, id: 'another-operation' })).status).toBe(409)
   advance(29_999)
   await outbox.runDue()
@@ -341,7 +344,7 @@ it.each(['unchanged', 'edited remotely', 'edited and synced'])(
         : undefined
       expect(JSON.parse(text ?? 'null')).toEqual({
         deleted: draft.id,
-        ...(edited && { warning: 'The copy in Gmail was changed elsewhere and was kept' }),
+        ...(edited ? { warning: 'Draft left in Gmail' } : { providerRemoved: 'Gmail' }),
       })
       expect(await call(`/drafts/${draft.id}`)).toMatchObject({ status: 404 })
       expect(gmail.drafts.has(mirror)).toBe(edited)
@@ -371,10 +374,110 @@ it('discards an imported Gmail draft in Desktop without deleting the provider co
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({
       deleted: draft.id,
-      warning: 'The copy in Gmail was changed elsewhere and was kept',
+      warning: 'Draft left in Gmail',
     })
     expect(await call(`/drafts/${draft.id}`)).toMatchObject({ status: 404 })
     expect(gmail.drafts.has(remote.id)).toBe(true)
+  } finally {
+    db.close()
+  }
+})
+
+it.each(['getDraft', 'deleteDraft'] as const)(
+  'leaves the Gmail copy in place when %s fails during discard',
+  async (method) => {
+    const { account, call, db, drafts, gmail } = setup()
+    try {
+      const draft = await drafts.create({ accountId: account, body: 'Test draft' }, 'owner')
+      const [mirror] = gmail.drafts.keys()
+      if (!mirror) throw new Error('Missing draft mirror')
+      const read = vi.spyOn(gmail, 'getDraft')
+      const remove = vi.spyOn(gmail, 'deleteDraft')
+      const failingCall = method === 'getDraft' ? read : remove
+      failingCall.mockRejectedValueOnce(new Error('Offline'))
+      const path = `/drafts/${draft.id}`
+      expect(await (await call(path, 'DELETE')).json()).toEqual({
+        deleted: draft.id,
+        warning: 'Draft left in Gmail',
+      })
+      expect(await (await call(path, 'DELETE')).json()).toEqual({ absent: draft.id })
+
+      await drafts.mirrorPending()
+      expect(read).toHaveBeenCalledOnce()
+      expect(remove).toHaveBeenCalledTimes(method === 'getDraft' ? 0 : 1)
+      expect(gmail.drafts.has(mirror)).toBe(true)
+      await drafts.pullGmail(account, gmail)
+      expect(drafts.list()).toHaveLength(1)
+    } finally {
+      db.close()
+    }
+  },
+)
+
+it('clears a legacy Gmail discard retry without touching the provider copy', async () => {
+  const { account, db, drafts, gmail } = setup()
+  try {
+    const draft = await drafts.create({ accountId: account, body: 'Test draft' }, 'owner')
+    db.prepare(`INSERT INTO draft_mirror_removal (account_id, provider_draft_id, mirror_hash, draft_id)
+      SELECT account_id, provider_draft_id, mirror_written_hash, id FROM draft WHERE id = ?`).run(
+      draft.id,
+    )
+    db.prepare('DELETE FROM draft WHERE id = ?').run(draft.id)
+    const read = vi.spyOn(gmail, 'getDraft')
+    const remove = vi.spyOn(gmail, 'deleteDraft')
+
+    await drafts.mirrorPending()
+    expect(read).not.toHaveBeenCalled()
+    expect(remove).not.toHaveBeenCalled()
+    expect(db.prepare('SELECT * FROM draft_mirror_removal').all()).toEqual([])
+    expect(gmail.drafts.size).toBe(1)
+  } finally {
+    db.close()
+  }
+})
+
+it('keeps a newer draft revision when the owner confirms discard of a stale selection', async () => {
+  const { account, call, drafts, db, gmail } = setup()
+  try {
+    const draft = await drafts.create({ accountId: account, body: 'Original' }, 'owner')
+    const shown = drafts.compose(draft.id) as ComposeDraft
+    const changed = drafts.saveCompose(draft.id, {
+      baseRevision: shown.revision,
+      update: edit(shown, 'Edited elsewhere'),
+    })
+    const remove = vi.spyOn(gmail, 'deleteDraft')
+    const response = await call(`/drafts/${draft.id}/discard`, 'POST', {
+      revision: shown.revision,
+    })
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({
+      message: 'Draft changed. Review it before discarding.',
+    })
+    expect(drafts.get(draft.id)?.revision).toBe(changed.revision)
+    expect(remove).not.toHaveBeenCalled()
+  } finally {
+    db.close()
+  }
+})
+
+it('reports a draft that disappeared after delivery', async () => {
+  const { account, call, db, drafts, outbox, advance } = setup()
+  try {
+    const draft = await drafts.create({ accountId: account, to: reader, body: 'Body' }, 'owner')
+    const response = await call('/outbox', 'POST', {
+      id: 'sent-discard',
+      draftId: draft.id,
+      revision: draft.revision,
+    })
+    expect(response.status).toBe(202)
+    advance(60_000)
+    await outbox.runDue()
+    expect(outbox.get('sent-discard')?.status).toBe('sent')
+    expect(
+      await (
+        await call(`/drafts/${draft.id}/discard`, 'POST', { revision: draft.revision })
+      ).json(),
+    ).toEqual({ absent: draft.id })
   } finally {
     db.close()
   }
@@ -583,13 +686,13 @@ it.each(['before discard', 'after STORE', 'still a draft'])(
       const result = await drafts.delete(draft.id)
       expect(drafts.get(draft.id)).toBeNull()
       if (state === 'still a draft') {
-        expect(result).toEqual({ deleted: draft.id })
+        expect(result).toEqual({ deleted: draft.id, providerRemoved: 'IMAP' })
         expect(expunge).toHaveBeenCalledExactlyOnceWith(uid)
         expect(folder.messages.has(uid)).toBe(false)
       } else {
         expect(result).toEqual({
           deleted: draft.id,
-          warning: 'The copy in IMAP was changed elsewhere and was kept',
+          warning: 'A copy in IMAP was left untouched.',
         })
         expect(expunge).not.toHaveBeenCalled()
         expect(folder.messages.get(uid)?.flags).toEqual(new Set(['\\Seen']))
@@ -667,14 +770,27 @@ it.each([-60_000, 60_000])(
     const { account, call, drafts, db, gmail, outbox, advance } = setup()
     const draft = await drafts.create({ accountId: account, to: reader, body: 'Test' }, 'owner')
     const shown = drafts.compose(draft.id) as ComposeDraft
-    const response = await call('/outbox', 'POST', {
-      id: 'clock-skew',
-      draftId: draft.id,
-      revision: shown.revision,
+    let monotonicOffset = 0
+    const performanceNow = performance.now.bind(performance)
+    const engineClock = vi
+      .spyOn(performance, 'now')
+      .mockImplementation(() => performanceNow() + monotonicOffset)
+    const getDraft = gmail.getDraft.bind(gmail)
+    vi.spyOn(gmail, 'getDraft').mockImplementationOnce((id) => {
+      monotonicOffset = 12_000
+      return getDraft(id)
     })
+    const response = await Promise.resolve(
+      call('/outbox', 'POST', {
+        id: 'clock-skew',
+        draftId: draft.id,
+        revision: shown.revision,
+      }),
+    ).finally(() => engineClock.mockRestore())
     const item = (await response.json()) as OutboxItem
     const desktopNow = 50_000 + skew
     expect(item.undoRemainingMs).toBe(10_000)
+    expect(item.undoResponseElapsedMs).toBeGreaterThanOrEqual(12_000)
     expect(item.undoUntil - desktopNow).not.toBe(item.undoRemainingMs)
     advance(5000)
     const { items } = (await (await call('/outbox')).json()) as { items: OutboxItem[] }
@@ -784,13 +900,20 @@ it.each([
     if (scenario === 'missing Draft flag') fake.flag('Drafts', uid, ['\\Seen'])
     if (scenario === 'no UIDPLUS') fake.capabilities.delete('UIDPLUS')
 
+    const path = `/drafts/${draft.id}`
     const result =
       scenario === 'non-desktop discard'
         ? await drafts.delete(draft.id)
-        : await (await call(`/drafts/${draft.id}`, 'DELETE')).json()
+        : await (scenario === 'revision-checked discard'
+            ? await call(`${path}/discard`, 'POST', {
+                revision: fixture(drafts.get(draft.id)).revision,
+              })
+            : await call(path, 'DELETE')
+          ).json()
     expect(drafts.get(draft.id)).toBeNull()
-    if (scenario === 'unchanged') {
-      expect(result).toEqual({ deleted: draft.id })
+    const removed = scenario === 'unchanged' || scenario === 'revision-checked discard'
+    if (removed) {
+      expect(result).toEqual({ deleted: draft.id, providerRemoved: 'IMAP' })
       expect(expunge).toHaveBeenCalledExactlyOnceWith(uid)
       await drafts.pullImap(account, provider)
       expect(drafts.list()).toHaveLength(0)
@@ -799,7 +922,7 @@ it.each([
       expect(expunge).not.toHaveBeenCalled()
       expect(folder.messages.get(uid)?.flags.has('\\Deleted')).toBe(false)
     }
-    expect(folder.messages.has(uid)).toBe(scenario !== 'unchanged')
+    expect(folder.messages.has(uid)).toBe(!removed)
     expect(folder.messages.has(other)).toBe(true)
   } finally {
     db.close()

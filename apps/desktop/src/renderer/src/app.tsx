@@ -101,6 +101,67 @@ type SearchState = {
   failed?: boolean
 } | null
 
+export function showQueuedSend(
+  item: OutboxItem,
+  requestElapsedMs: number,
+  onCancelled: () => void,
+) {
+  if (item.originalDraftLeft) toast.warning(ORIGINAL_DRAFT_LEFT)
+  if (item.status !== 'queued') {
+    toast.info(item.status === 'sent' ? 'Message sent' : 'Check the Outbox for delivery status')
+    return
+  }
+  const message = item.sendAt > item.undoUntil ? 'Send scheduled' : 'Message queued'
+  // The round trip minus measured Engine work bounds the response transit.
+  const transitBudget = Math.max(0, requestElapsedMs - (item.undoResponseElapsedMs ?? 0))
+  const remaining = Math.floor((item.undoRemainingMs ?? 0) - transitBudget) - 1
+  if (remaining <= 0) {
+    toast(message, { duration: 3000 })
+    return
+  }
+
+  const deadline = performance.now() + remaining
+  const wallDeadline = Date.now() + remaining
+  const expired = () => performance.now() >= deadline || Date.now() >= wallDeadline
+  const expire = () => {
+    stop()
+    toast(message, { id, action: undefined, duration: 3000 })
+  }
+  const checkExpiry = () => {
+    if (expired()) expire()
+  }
+  const stop = () => {
+    clearTimeout(expiry)
+    window.removeEventListener('focus', checkExpiry)
+    document.removeEventListener('visibilitychange', checkExpiry)
+  }
+  const id = toast(message, {
+    duration: Infinity,
+    onDismiss: stop,
+    action: {
+      label: 'Undo',
+      onClick: () => {
+        stop()
+        if (expired()) {
+          toast.info('The Undo window has closed')
+          return
+        }
+        void getAmc()
+          .cancelSend(item.id)
+          .then(() => {
+            onCancelled()
+            toast.success('Send cancelled. Draft saved.')
+          })
+          .catch((cause: Error) => toast.error(cause.message))
+      },
+    },
+  })
+  // Sonner pauses its own timer while hovered or hidden.
+  const expiry = setTimeout(expire, remaining)
+  window.addEventListener('focus', checkExpiry)
+  document.addEventListener('visibilitychange', checkExpiry)
+}
+
 function MailApp({
   status,
   dark,
@@ -110,6 +171,7 @@ function MailApp({
   dark: boolean
   onToggleTheme: () => void
 }) {
+  const [sidebarOpen, setSidebarOpen] = useState(true)
   const [accountId, setAccountId] = useState<string | null>(null)
   const snoozeEnabled = status?.snoozeEnabled === true
   const [selectedView, setView] = useState<View>(INBOX)
@@ -379,31 +441,10 @@ function MailApp({
     }
   }
 
-  const queued = (item: OutboxItem) => {
-    if (item.originalDraftLeft) toast.warning(ORIGINAL_DRAFT_LEFT)
+  const queued = (item: OutboxItem, requestElapsedMs: number) => {
     setDraft(null)
-    const remaining = item.undoRemainingMs ?? 0
-    const scheduled = item.sendAt > item.undoUntil
-    if (item.status !== 'queued') {
-      toast.info(item.status === 'sent' ? 'Message sent' : 'Check the Outbox for delivery status')
-      return
-    }
-    toast(scheduled ? 'Send scheduled' : 'Message queued', {
-      duration: remaining || 3000,
-      action: remaining
-        ? {
-            label: 'Undo',
-            onClick: () => {
-              void getAmc()
-                .cancelSend(item.id)
-                .then(async () => {
-                  setMinimised({ id: item.draftId, subject: item.subject })
-                  toast.success('Send cancelled. Draft saved.')
-                })
-                .catch((cause: Error) => toast.error(cause.message))
-            },
-          }
-        : undefined,
+    showQueuedSend(item, requestElapsedMs, () => {
+      setMinimised({ id: item.draftId, subject: item.subject })
     })
   }
 
@@ -566,6 +607,8 @@ function MailApp({
 
   return (
     <SidebarProvider
+      open={sidebarOpen}
+      onOpenChange={setSidebarOpen}
       className="h-full"
       style={{ '--sidebar-width': '13.5rem' } as React.CSSProperties}
     >
@@ -590,7 +633,8 @@ function MailApp({
         labels={labels}
         status={status}
       />
-      <SidebarInset className="overflow-hidden">
+      <SidebarInset className="min-w-0 overflow-hidden">
+        {!sidebarOpen && <div className="app-drag h-11 shrink-0" />}
         {view.kind === 'drafts' && !search ? (
           <DraftsView
             accountId={accountId}

@@ -7,8 +7,9 @@ import type {
   ComposePatch,
   ComposeStart,
   Contact,
-  Draft,
+  DiscardDraftResult,
   SendRequest,
+  VersionedDraft,
 } from '@amc/protocol'
 import { DRAFT_CHANGED, MIRROR_CHANGED } from '@amc/protocol'
 import type { MessageStructureObject } from 'imapflow'
@@ -30,8 +31,6 @@ import {
 import { buildMessage, replySubject } from './mime.ts'
 import type { FrozenMessage, Outbox } from './outbox.ts'
 import type { IncomingMessage, MailStore } from './store.ts'
-
-export type VersionedDraft = Draft & { revision: number }
 
 export interface DraftInput {
   /** Reply in this Thread (recipients, subject and threading headers default from it). */
@@ -244,7 +243,7 @@ export class Drafts {
 
   list(
     options: { threadId?: string; accountId?: string; limit?: number; editable?: boolean } = {},
-  ): Draft[] {
+  ): VersionedDraft[] {
     const rows = this.#db
       .prepare(
         `SELECT * FROM draft WHERE (?1 IS NULL OR thread_id = ?1) AND (?4 IS NULL OR account_id = ?4)
@@ -571,8 +570,8 @@ export class Drafts {
       .prepare('SELECT * FROM draft_mirror_removal WHERE draft_id = ?')
       .all(id) as unknown as MirrorRemoval[]
     for (const old of oldMirrors) {
-      if ((await this.#removeOldMirror(old)) === 'changed')
-        throw new DraftError(MIRROR_CHANGED, 409)
+      const outcome = await this.#removeOldMirror(old)
+      if (outcome === 'changed' || outcome === 'absent') throw new DraftError(MIRROR_CHANGED, 409)
     }
     const row = this.#row(id)
     if (!row || row.modseq !== message.revision) throw new DraftError(DRAFT_CHANGED, 409)
@@ -629,10 +628,11 @@ export class Drafts {
     this.#db.prepare('UPDATE draft SET mirror_left = 1 WHERE id = ?').run(id)
   }
 
-  async #removeOldMirror(row: MirrorRemoval): Promise<'removed' | 'changed' | 'left'> {
+  async #removeOldMirror(row: MirrorRemoval): Promise<'removed' | 'changed' | 'left' | 'absent'> {
     const pending = this.#db
-      .prepare('SELECT 1 FROM draft_mirror_removal WHERE account_id = ? AND provider_draft_id = ?')
-      .get(row.account_id, row.provider_draft_id)
+      .prepare(`SELECT 1 FROM draft_mirror_removal
+        WHERE account_id = ? AND provider_draft_id = ? AND draft_id = ? AND mirror_hash IS ?`)
+      .get(row.account_id, row.provider_draft_id, row.draft_id, row.mirror_hash)
     if (!pending) return 'removed'
     const api = this.#api(row.account_id)
     if (this.#isImap(row.account_id)) {
@@ -641,11 +641,17 @@ export class Drafts {
       if (!removed) this.#markMirrorLeft(row.draft_id)
       return removed ? 'removed' : 'left'
     }
-    if (!api)
+    // Older builds queued Gmail discard retries after deleting the local draft.
+    if (!this.#row(row.draft_id)) {
+      this.#clearRemoval(row)
+      return 'left'
+    }
+    if (!api?.getDraft)
       throw new DraftError('Could not remove the provider draft. Sign in again before sending.')
-    const remote = api.getDraft ? await api.getDraft(row.provider_draft_id) : undefined
+    const remote = await api.getDraft(row.provider_draft_id)
     const changed = remote && row.mirror_hash !== mirrorHash(remote.message.id)
-    const removed = remote !== null && !changed && (await api.deleteDraft(row.provider_draft_id))
+    // Gmail offers no conditional delete. Check the latest message ID before deleting.
+    const removed = remote && !changed && (await api.deleteDraft(row.provider_draft_id))
     this.#clearRemoval(row)
     if (
       changed &&
@@ -653,7 +659,7 @@ export class Drafts {
         .changes
     )
       this.#store.recordChange('draft', row.draft_id, 'upsert')
-    return removed ? 'removed' : 'changed'
+    return changed ? 'changed' : removed ? 'removed' : 'absent'
   }
 
   #clearRemoval(row: MirrorRemoval): void {
@@ -1316,58 +1322,107 @@ export class Drafts {
 
   async delete(
     id: string,
-    { removeImportedImapDraft = false } = {},
-  ): Promise<{ deleted: string; warning?: string }> {
+    {
+      expectedRevision,
+      removeImportedImapDraft = false,
+    }: {
+      expectedRevision?: number
+      removeImportedImapDraft?: boolean
+    } = {},
+  ): Promise<DiscardDraftResult> {
     return this.#withMirror(id, async () => {
-      const row = this.#row(id)
-      if (!row) return { deleted: id }
       this.#checkEditable(id)
+      const row = this.#row(id)
+      if (!row) return { absent: id }
+      if (expectedRevision !== undefined && row.modseq !== expectedRevision)
+        throw new DraftError('Draft changed. Review it before discarding.', 409)
       const pending = this.#db
-        .prepare('SELECT account_id FROM draft_mirror_removal WHERE draft_id = ? LIMIT 1')
-        .get(id) as { account_id: string } | undefined
+        .prepare('SELECT DISTINCT account_id FROM draft_mirror_removal WHERE draft_id = ?')
+        .all(id) as { account_id: string }[]
+      const provider = this.#isImap(row.account_id) ? 'IMAP' : 'Gmail'
+      const gmailDraftId =
+        provider === 'Gmail' &&
+        row.provider_draft_id &&
+        !this.#awaitingRemoval(row.account_id, row.provider_draft_id)
+          ? row.provider_draft_id
+          : null
+      const importedImapId =
+        removeImportedImapDraft && provider === 'IMAP' && !row.mirror_written_hash
+          ? row.provider_draft_id
+          : null
+      const removal: MirrorRemoval | null =
+        provider === 'IMAP' && row.provider_draft_id && row.mirror_written_hash
+          ? {
+              account_id: row.account_id,
+              provider_draft_id: row.provider_draft_id,
+              mirror_hash: row.mirror_written_hash,
+              draft_id: id,
+            }
+          : null
       transaction(this.#db, () => {
-        // Cancel pending cleanup when discarding the current version.
+        // Cancel older cleanup and target only the current copy AMC wrote.
         this.#db.prepare('DELETE FROM draft_mirror_removal WHERE draft_id = ?').run(id)
+        if (removal)
+          this.#db
+            .prepare('INSERT INTO draft_mirror_removal VALUES (?, ?, ?, ?)')
+            .run(removal.account_id, removal.provider_draft_id, removal.mirror_hash, id)
         this.#db.prepare('DELETE FROM draft WHERE id = ?').run(id)
         this.#store.recordChange('draft', id, 'delete')
       })
 
-      const provider = this.#isImap(row.account_id) ? 'IMAP' : 'Gmail'
-      const removeImported =
-        removeImportedImapDraft && provider === 'IMAP' && !row.mirror_written_hash
-      let kept: string | undefined
-      if (row.mirror_left && !(removeImported && row.provider_draft_id)) kept = 'IMAP'
-      if (pending) kept = this.#isImap(pending.account_id) ? 'IMAP' : 'Gmail'
-      if (
-        row.provider_draft_id &&
-        !(await this.#discardMirror(row, removeImported).catch(() => false))
+      const kept = new Set(
+        pending.map(({ account_id }) => (this.#isImap(account_id) ? 'IMAP' : 'Gmail')),
       )
-        kept = provider
+      if (row.mirror_left && !importedImapId) kept.add('IMAP')
+      let providerRemoved: 'Gmail' | 'IMAP' | undefined
+      let retry = false
+      if (gmailDraftId && row.mirror_written_hash) {
+        const removed = await this.#discardGmailMirror(
+          row.account_id,
+          gmailDraftId,
+          row.mirror_written_hash,
+        ).catch(() => false)
+        if (removed) providerRemoved = 'Gmail'
+        else kept.add('Gmail')
+      } else if (importedImapId) {
+        const removed = await this.#removeImapMirror(
+          this.#api(row.account_id),
+          importedImapId,
+          row.mirror_hash,
+        ).catch(() => false)
+        if (removed) providerRemoved = 'IMAP'
+        else kept.add('IMAP')
+      } else if (removal) {
+        try {
+          const outcome = await this.#removeOldMirror(removal)
+          if (outcome === 'removed' || outcome === 'absent') providerRemoved = provider
+          else kept.add(provider)
+        } catch {
+          retry = true
+        }
+      } else if (row.provider_draft_id) {
+        kept.add(provider)
+      }
 
+      const warnings = [...kept].map((name) =>
+        name === 'Gmail' ? 'Draft left in Gmail' : `A copy in ${name} was left untouched.`,
+      )
+      if (retry) warnings.push(`AMC will retry removing the copy in ${provider}.`)
       return {
         deleted: id,
-        ...(kept && { warning: `The copy in ${kept} was changed elsewhere and was kept` }),
+        ...(providerRemoved && { providerRemoved }),
+        ...(warnings.length > 0 && { warning: warnings.join(' ') }),
       }
     })
   }
 
-  async #discardMirror(row: DraftRow, removeImportedImapDraft: boolean): Promise<boolean> {
-    const id = row.provider_draft_id
-    if (!id) return true
-    const api = this.#api(row.account_id)
-    const hash = row.mirror_written_hash
-    if (this.#isImap(row.account_id))
-      return this.#removeImapMirror(
-        api,
-        id,
-        hash ?? (removeImportedImapDraft ? row.mirror_hash : null),
-      )
+  async #discardGmailMirror(accountId: string, id: string, writtenHash: string): Promise<boolean> {
+    const api = this.#api(accountId)
     if (!api?.getDraft) return false
     const remote = await api.getDraft(id)
     if (!remote) return true
-    if (hash !== mirrorHash(remote.message.id)) return false
-    // Gmail has no conditional draft delete. An edit can still replace the message
-    // under the same draft ID in the window between this GET and DELETE.
+    if (mirrorHash(remote.message.id) !== writtenHash) return false
+    // Gmail deletes by stable draft ID. Make one attempt after the fresh read.
     await api.deleteDraft(id)
     return true
   }

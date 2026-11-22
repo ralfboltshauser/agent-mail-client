@@ -34,6 +34,19 @@ interface QueueRow {
   error: string | null
 }
 
+const IMAP_FLAG_NOOP = `
+  q.status = 'applied' AND q.messages IS NOT NULL
+  AND json_extract(q.request, '$.action.kind') IN ('read', 'star')
+  AND EXISTS (
+    SELECT 1 FROM thread t JOIN account a ON a.id = t.account_id
+    WHERE t.id = q.thread_id AND json_extract(a.data, '$.kind') = 'imap'
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM json_each(q.messages) j
+    WHERE json_array_length(j.value, '$.appliedLabels') > 0
+  )
+`
+
 export const ORGANISE_SCHEMA = `
   CREATE TABLE IF NOT EXISTS organise_queue (
     seq INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, thread_id TEXT, request TEXT NOT NULL,
@@ -162,26 +175,22 @@ export class LocalOrganise {
         .prepare(
           `SELECT q.* FROM organise_queue q
          LEFT JOIN thread t ON t.id = q.thread_id
-         LEFT JOIN account a ON a.id = t.account_id
          WHERE q.status != 'failed' AND q.undo_of IS NULL
            AND json_extract(q.request, '$.action.kind') != 'undo'
            AND (?1 IS NULL OR q.thread_id = ?1)
            AND (?1 IS NOT NULL OR ?2 IS NOT NULL OR t.id IS NOT NULL)
-           AND NOT (
-             COALESCE(json_extract(a.data, '$.kind') = 'imap', 0)
-             AND q.status = 'applied' AND q.messages IS NOT NULL
-             AND json_extract(q.request, '$.action.kind') IN ('read', 'star')
-             AND NOT EXISTS (
-               SELECT 1 FROM json_each(q.messages) j
-               WHERE json_array_length(j.value, '$.appliedLabels') > 0
-             )
-           )
+           AND NOT (${IMAP_FLAG_NOOP})
            AND NOT EXISTS (SELECT 1 FROM organise_queue u WHERE u.undo_of = q.id AND u.status != 'failed')
          ORDER BY q.seq DESC LIMIT 1`,
         )
         .get(threadId ?? null, action.mutationId ?? null) as unknown as QueueRow | undefined
-      if (action.mutationId && row?.id !== action.mutationId)
+      if (action.mutationId && row?.id !== action.mutationId) {
+        const noop = this.#db
+          .prepare(`SELECT 1 FROM organise_queue q WHERE q.id = ? AND (${IMAP_FLAG_NOOP})`)
+          .get(action.mutationId)
+        if (noop) throw new Error('No IMAP flags changed')
         throw new Error('Undo the newer action on this Thread first')
+      }
       if (row) {
         threadId = row.thread_id ?? undefined
         patch = JSON.parse(row.inverse)
@@ -347,15 +356,18 @@ export class LocalOrganise {
   errors(): OrganiseNotice[] {
     const rows = this.#db
       .prepare(
-        `UPDATE organise_queue SET notified = 1 WHERE notified = 0 AND error IS NOT NULL
+        `UPDATE organise_queue AS q SET notified = 1 WHERE notified = 0
+           AND (error IS NOT NULL OR (${IMAP_FLAG_NOOP}))
            AND (status != 'partial' OR modseq <= ?)
          RETURNING id, error AS message, status, request, messages, thread_id, undo_of`,
       )
       .all(this.replica.modseq ?? -1) as unknown as (QueueRow & {
-      message: string
+      message: string | null
       undo_of: string | null
     })[]
     const failures = rows.map((row): OrganiseNotice => {
+      if (row.message === null)
+        return { id: row.id, message: 'No IMAP flags changed', quiet: true, updateOnly: true }
       if (row.status !== 'partial' || !row.messages) return { id: row.id, message: row.message }
       const outcomes = JSON.parse(row.messages) as NonNullable<MutationResult['messages']>
       const { action } = JSON.parse(row.request) as MutationRequest

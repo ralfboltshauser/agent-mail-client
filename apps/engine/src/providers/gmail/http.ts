@@ -405,6 +405,7 @@ export class GmailHttpApi implements GmailApi {
         method: 'DELETE',
         cost: 'draftDelete',
         submission: true,
+        writeback: true,
       })
       return true
     } catch (error) {

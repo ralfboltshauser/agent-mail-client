@@ -40,6 +40,7 @@ import {
   SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
+  useSidebar,
 } from '@/components/ui/sidebar'
 import { useReplicaQuery } from '@/hooks/use-amc'
 import { getAmc } from '@/lib/amc'
@@ -127,6 +128,7 @@ export function AppSidebar({
   labels,
   status,
 }: Props) {
+  const { open } = useSidebar()
   const triage = useTriageStatus()
   const { value: backlog, refresh: refreshBacklog } = useReplicaQuery(
     async () => ({ accountId, ...(await getAmc().triageCounts(accountId)) }),
@@ -155,6 +157,7 @@ export function AppSidebar({
     return null
   }
 
+  if (!open) return null
   return (
     <Sidebar
       variant="sidebar"

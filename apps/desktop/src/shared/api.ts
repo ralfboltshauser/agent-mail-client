@@ -8,6 +8,7 @@ import type {
   ComposePatch,
   ComposeStart,
   Contact,
+  DiscardDraftResult,
   Draft,
   Label,
   OrganiseAction,
@@ -16,6 +17,7 @@ import type {
   SendRequest,
   ThreadMessage,
   ThreadSummary,
+  VersionedDraft,
 } from '@amc/protocol'
 
 /** Which Threads a list shows. */
@@ -82,6 +84,7 @@ export interface OrganiseNotice {
   id: string
   message: string
   quiet?: boolean
+  updateOnly?: boolean
   undo?: Extract<OrganiseAction, { kind: 'undo' }>
 }
 
@@ -166,9 +169,9 @@ export interface AmcApi {
   search(text: string, accountId: string | null): Promise<SearchHit[]>
   contacts(text: string): Promise<Contact[]>
   startCompose(input: ComposeStart): Promise<ComposeDraft>
-  composeDrafts(): Promise<Draft[]>
+  composeDrafts(): Promise<VersionedDraft[]>
   composeDraft(id: string): Promise<ComposeDraft>
-  discardDraft(id: string): Promise<{ warning?: string }>
+  discardDraft(id: string, revision: number): Promise<DiscardDraftResult>
   stageComposeBody(id: string, patch: ComposePatch): void
   saveCompose(id: string, patch: ComposePatch): Promise<ComposeDraft>
   addComposeAttachment(

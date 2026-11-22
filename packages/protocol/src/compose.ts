@@ -8,8 +8,11 @@ export interface ComposeAttachment {
   size: number
 }
 
-export interface ComposeDraft extends Draft {
+export interface VersionedDraft extends Draft {
   revision: number
+}
+
+export interface ComposeDraft extends VersionedDraft {
   update: string
   attachments: ComposeAttachment[]
   quote: string
@@ -18,6 +21,10 @@ export interface ComposeDraft extends Draft {
   mirrorConflict: boolean
   originalDraftLeft?: boolean
 }
+
+export type DiscardDraftResult =
+  | { absent: string }
+  | { deleted: string; providerRemoved?: 'Gmail' | 'IMAP'; warning?: string }
 
 export interface ComposeStart {
   accountId?: string
@@ -69,6 +76,8 @@ export interface OutboxItem {
   undoUntil: number
   /** Time remaining on the Engine clock when it produced this item. */
   undoRemainingMs?: number
+  /** Engine request time up to the Undo window measurement, on enqueue responses only. */
+  undoResponseElapsedMs?: number
   originalDraftLeft?: boolean
   detail: string | null
   canResolve: boolean

@@ -1,8 +1,14 @@
 import { randomUUID } from 'node:crypto'
-import { type AgentAction, type BucketInput, hasScope, type OrganiseAction } from '@amc/protocol'
+import {
+  type AgentAction,
+  type BucketInput,
+  hasScope,
+  type OrganiseAction,
+  type VersionedDraft,
+} from '@amc/protocol'
 import { agentGrantActive, type Principal, withinAccount } from '../auth/tokens.ts'
 import { type Db, transaction } from '../db/database.ts'
-import { DraftError, type VersionedDraft } from './drafts.ts'
+import { DraftError } from './drafts.ts'
 import { MutationError, type Mutations } from './mutations.ts'
 import type { MailStore } from './store.ts'
 

@@ -157,6 +157,13 @@ describe('desktop Organise outbox', () => {
           messages: [],
         })),
       )
+      expect(replica.organise.errors()).toEqual([
+        { id: unstar, message: 'No IMAP flags changed', quiet: true, updateOnly: true },
+      ])
+      expect(replica.organise.errors()).toEqual([])
+      expect(() =>
+        replica.organise.enqueue({ kind: 'undo', threadId: THREAD.id, mutationId: unstar }),
+      ).toThrow('No IMAP flags changed')
       replica.organise.enqueue({ kind: 'undo', threadId: THREAD.id })
       expect(replica.organise.unsent()?.action).toMatchObject({ kind: 'undo', mutationId: mute })
     } finally {

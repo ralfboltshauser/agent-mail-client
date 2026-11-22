@@ -1,8 +1,8 @@
 import {
-  type Draft,
   type OutboxItem,
   SEND_ACCOUNT_UNAVAILABLE,
   SEND_NEEDS_SIGN_IN,
+  type VersionedDraft,
 } from '@amc/protocol'
 import { CircleAlert, FileText, SendHorizontal, Settings2, Trash2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
@@ -74,8 +74,11 @@ export function DraftsView({
   onOpen: (id: string) => void
   onDiscarded: (id: string) => void
 }) {
-  const { data, error } = usePolling<Draft[]>(loadDrafts, 1500)
-  const [discardId, setDiscardId] = useState<string | null>(null)
+  const { data, error } = usePolling<VersionedDraft[]>(loadDrafts, 1500)
+  const [discard, setDiscard] = useState<Pick<
+    VersionedDraft,
+    'id' | 'subject' | 'revision'
+  > | null>(null)
   const [discarded, setDiscarded] = useState<string[]>([])
   const drafts = data?.filter(
     (draft) => (!accountId || draft.accountId === accountId) && !discarded.includes(draft.id),
@@ -119,21 +122,24 @@ export function DraftsView({
               variant="ghost"
               aria-label={`Discard draft: ${draft.subject || '(No subject)'}`}
               title="Discard draft"
-              onClick={() => setDiscardId(draft.id)}
+              onClick={() =>
+                setDiscard({ id: draft.id, subject: draft.subject, revision: draft.revision })
+              }
             >
               <Trash2 />
             </Button>
           </div>
         ))}
       </div>
-      {discardId && (
+      {discard && (
         <DiscardDraftDialog
-          onClose={() => setDiscardId(null)}
+          subject={discard.subject}
+          onClose={() => setDiscard(null)}
           onConfirm={async () => {
-            const { warning } = await getAmc().discardDraft(discardId)
-            setDiscarded((ids) => [...ids, discardId])
-            onDiscarded(discardId)
-            if (warning) toast.warning(warning)
+            const result = await getAmc().discardDraft(discard.id, discard.revision)
+            setDiscarded((ids) => [...ids, discard.id])
+            onDiscarded(discard.id)
+            return result
           }}
         />
       )}

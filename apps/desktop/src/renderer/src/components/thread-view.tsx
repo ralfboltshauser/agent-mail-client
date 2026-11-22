@@ -252,12 +252,13 @@ function Message({
           <div className="flex items-baseline gap-2">
             <span className="truncate text-sm font-semibold">{personName(m.from)}</span>
             {isDraft && <Badge className="h-4 px-1.5 text-[10px]">Draft</Badge>}
-            <span
+            <time
               className="ml-auto shrink-0 text-xs text-muted-foreground tabular-nums"
-              title={fullDate(m.sentAt)}
+              dateTime={new Date(m.sentAt).toISOString()}
+              title={open ? undefined : fullDate(m.sentAt)}
             >
-              {listDate(m.sentAt)}
-            </span>
+              {open ? fullDate(m.sentAt) : listDate(m.sentAt)}
+            </time>
           </div>
           {open ? (
             <div className="truncate text-xs text-muted-foreground" title={m.from?.address}>

@@ -26,7 +26,6 @@ import {
 } from '@tiptap/react'
 import { Bold, Italic, List, Minus, Paperclip, Trash2, X } from 'lucide-react'
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
-import { toast } from 'sonner'
 import * as Y from 'yjs'
 import { getAmc } from '@/lib/amc'
 import { DiscardDraftDialog } from './discard-draft-dialog'
@@ -103,7 +102,7 @@ export function Composer({
   draft: ComposeDraft
   accounts: AccountSummary[]
   onMinimise: (subject: string) => void
-  onQueued: (item: OutboxItem) => void
+  onQueued: (item: OutboxItem, requestElapsedMs: number) => void
   onDiscarded: () => void
 }) {
   const [doc] = useState(() => {
@@ -126,7 +125,10 @@ export function Composer({
   const savedRef = useRef(0)
   const [saved, setSaved] = useState(0)
   const [busy, setBusy] = useState(false)
-  const [confirmDiscard, setConfirmDiscard] = useState(false)
+  const [confirmDiscard, setConfirmDiscard] = useState<{
+    subject: string
+    revision: number
+  } | null>(null)
   const [uploading, setUploading] = useState(false)
   const [conflict, setConflict] = useState(false)
   const [error, setError] = useState('')
@@ -345,14 +347,17 @@ export function Composer({
     }
   }
 
-  const discard = async () => {
+  const confirmDiscardDraft = () =>
+    setConfirmDiscard({ subject: fields.subject, revision: reviewedRevision })
+
+  const discard = async (revision: number) => {
     submitting.current = true
     setBusy(true)
     try {
       await saveChain.current.catch(() => {})
-      const { warning } = await getAmc().discardDraft(draft.id)
-      if (warning) toast.warning(warning)
+      const result = await getAmc().discardDraft(draft.id, revision)
       onDiscarded()
+      return result
     } finally {
       submitting.current = false
       setBusy(false)
@@ -360,7 +365,7 @@ export function Composer({
   }
 
   const send = async () => {
-    if (!editor || submitting.current || uploadInFlight.current) return
+    if (!editor || confirmDiscard || submitting.current || uploadInFlight.current) return
     const pendingRecipient = [
       ...(surface.current?.querySelectorAll<HTMLInputElement>('[data-recipient-input]') ?? []),
     ].find((input) => input.value.trim())
@@ -393,8 +398,10 @@ export function Composer({
           ...(schedule ? { sendAt: new Date(sendAt).getTime() } : {}),
         }
       }
+      const startedAt = performance.now()
+      const wallStart = Date.now()
       const item = await getAmc().sendDraft(request.current)
-      onQueued(item)
+      onQueued(item, Math.max(performance.now() - startedAt, Date.now() - wallStart))
     } catch (cause) {
       const message = (cause as Error).message
       if (message.includes(DRAFT_CHANGED)) {
@@ -456,7 +463,7 @@ export function Composer({
           ) {
             event.preventDefault()
             event.stopPropagation()
-            if (!event.repeat && !locked && !uploading) setConfirmDiscard(true)
+            if (!event.repeat && !locked && !uploading && !confirmDiscard) confirmDiscardDraft()
           }
         }}
         onKeyDown={(event) => {
@@ -739,7 +746,7 @@ export function Composer({
               aria-keyshortcuts="Meta+Backspace"
               title="Discard draft (⌘⌫)"
               disabled={locked || uploading}
-              onClick={() => setConfirmDiscard(true)}
+              onClick={confirmDiscardDraft}
             >
               <Trash2 />
             </Button>
@@ -781,7 +788,11 @@ export function Composer({
         </footer>
       </DialogContent>
       {confirmDiscard && (
-        <DiscardDraftDialog onConfirm={discard} onClose={() => setConfirmDiscard(false)} />
+        <DiscardDraftDialog
+          subject={confirmDiscard.subject}
+          onConfirm={() => discard(confirmDiscard.revision)}
+          onClose={() => setConfirmDiscard(null)}
+        />
       )}
     </Dialog>
   )

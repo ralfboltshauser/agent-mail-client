@@ -48,3 +48,17 @@ it('aborts a Gmail retry delay before issuing another HTTP request', async () =>
   })
   expect(request).toHaveBeenCalledTimes(1)
 })
+
+it('invalidates the Gmail token after a draft delete returns 401 without retrying the delete', async () => {
+  const access = tokens()
+  const invalidate = vi.spyOn(access, 'invalidate').mockImplementation(() => {})
+  const request = vi
+    .fn<typeof fetch>()
+    .mockResolvedValueOnce(new Response('', { status: 401 }))
+    .mockResolvedValueOnce(new Response(null, { status: 204 }))
+  const api = new GmailHttpApi(access, request)
+
+  await expect(api.deleteDraft('draft-1')).rejects.toMatchObject({ status: 401 })
+  expect(invalidate).toHaveBeenCalledOnce()
+  expect(request).toHaveBeenCalledOnce()
+})
