@@ -84,9 +84,6 @@ function SavedPairingState({ retrying }: { retrying: boolean }) {
       ) : (
         <div className="grid justify-items-center gap-3 px-6 text-center">
           <h1 className="text-lg font-semibold">AMC couldn't read its saved pairing</h1>
-          <p className="text-sm text-muted-foreground">
-            Make sure your Mac’s Keychain is unlocked, then retry.
-          </p>
           <Button onClick={() => void getAmc().retrySavedPairing()}>Retry</Button>
         </div>
       )}

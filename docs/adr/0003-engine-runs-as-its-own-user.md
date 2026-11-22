@@ -11,7 +11,7 @@ The Engine's own agent runner is the only AMC process that runs as `ralf`, becau
 - Owner sending requires the desktop owner token. For interactive Agent sends in M6, the separate-identity forwarder holds the scoped bearer. The Engine requires the live send grant, Dangerously Allow Send, and single-use owner approval for the exact draft version and recipient envelope.
 - Deploys need `sudo` on the Host to install releases and restart the system service.
 - The owner's `amc` CLI on the Host authenticates with a token like any other Client; it does not read the database directly.
-- On the Mac, the owner token lives in the Keychain, restricted to the AMC app, for the same reason.
+- On the Mac, the owner token lives in a mode `0600` file in a mode `0700` directory. Processes running as the Mac owner can read it.
 
 ## Open risk: passwordless sudo
 

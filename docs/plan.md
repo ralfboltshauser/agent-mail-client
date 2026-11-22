@@ -14,7 +14,7 @@ Scope: everything in AMC v1 ([What exactly is in AMC v1?](https://github.com/ral
  ┌──────────── Mac ─────────────┐            ┌──────────────── Host: ralfs-ubuntu ────────────────┐
  │ AMC desktop (Electron)        │  sync API  │ Engine (Node, system user `amc`, systemd)           │
  │  main: replica (SQLite),      │◀──────────▶│  provider connectors: Gmail API, IMAP (imapflow),   │
- │        sync client, keychain  │  WebSocket │                       SMTP (Nodemailer)             │
+ │        sync client, auth      │  WebSocket │                       SMTP (Nodemailer)             │
  │  renderer: React + shadcn     │            │  store: SQLite (NVMe) + blobs (/srv HDD)            │
  │                               │            │  sync: change log, mutation queue, writeback        │
  │ T3 Code / Codex / Claude ─────┼── MCP ────▶│  agent API: MCP + `amc` CLI, scoped tokens          │
@@ -40,7 +40,7 @@ Scope: everything in AMC v1 ([What exactly is in AMC v1?](https://github.com/ral
 | Gmail | `googleapis` Gmail API: `history.list`, `messages.get`, `modify`, `drafts`, `send` | Research ticket #3 |
 | IMAP / SMTP | `imapflow` (IDLE, CONDSTORE/QRESYNC), `nodemailer` | Research ticket #3 |
 | MIME | `postal-mime` (parse), `nodemailer` MailComposer (build) | Small, permissive licences |
-| Desktop shell | **Electron** via `electron-vite` | Shares TypeScript with the Engine; `better-sqlite3` in the main process; mature notifications, menus, global shortcuts, Keychain. T3 Code ships the same way |
+| Desktop shell | **Electron** via `electron-vite` | Shares TypeScript with the Engine; `better-sqlite3` in the main process; mature notifications, menus, global shortcuts. T3 Code ships the same way |
 | Desktop UI | React 19, Tailwind v4, **shadcn/ui** (Sidebar, Command, Resizable, Sonner, Dialog), TanStack Virtual, `cmdk` | The shadcn sidebar look Ralf wants; virtual lists for 100k+ Threads |
 | Composer | TipTap (ProseMirror) + Yjs, served by Hocuspocus | Rich text, live co-editing between owner and Agent, change attribution for "what changed" |
 | Mail HTML | Sandboxed `iframe`, DOMPurify, strict CSP, remote images off by default and proxied by the Engine when allowed | Safety and tracking-pixel blocking |
@@ -53,7 +53,7 @@ Scope: everything in AMC v1 ([What exactly is in AMC v1?](https://github.com/ral
 
 ```
 apps/engine        Engine service (Host)
-apps/desktop       Electron app (Mac): main/ (replica, sync, keychain), renderer/ (React + shadcn)
+apps/desktop       Electron app (Mac): main/ (replica, sync, auth), renderer/ (React + shadcn)
 apps/cli           `amc` CLI (owner and Agents)
 packages/protocol  zod schemas: entities, sync API, mutations, MCP tool shapes
 packages/mail      MIME parse/build, threading, HTML sanitising, address handling
@@ -138,9 +138,9 @@ JMAP-style "changes since state X" over one global `modseq`. This was the top pi
 ## 6. Security and principals
 
 - The Engine listens on `127.0.0.1` only. `tailscale serve` exposes it over HTTPS to the tailnet. It is never on the public internet. The Engine also checks the `Tailscale-User-Login` header that `tailscale serve` adds, so a leaked token alone isn't enough from another device.
-- **The Engine runs as system user `amc`.** Its data and secrets are readable by no one else (ADR 0003). The owner token on the Mac sits in the Keychain, restricted to the AMC app.
+- **The Engine runs as system user `amc`.** Its data and secrets are readable by no one else (ADR 0003).
 - **Principals and tokens:**
-  - **Owner device:** the desktop app, paired once with a code shown by `amc pair`. Its token lives in the macOS Keychain. It can do everything, including sending.
+  - **Owner device:** the desktop app, paired once with a code shown by `amc pair`. Its token lives in a mode `0600` file in a mode `0700` directory. It can do everything, including sending.
   - **Agent token:** in M6, bound to an owner-approved job with explicit operations, Accounts, targets and expiry. [M6 permissions](agents/permissions.md)
   - **Composer link:** a capability token for one draft, edit only, expiring after two hours. It cannot send, list or read other mail.
 - **Dangerously Allow Send:** toggled only in the desktop app, behind a confirmation. Every send by an Agent is logged, and turning the setting on is announced in a notification.

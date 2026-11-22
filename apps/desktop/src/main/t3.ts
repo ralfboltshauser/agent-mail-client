@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
@@ -13,8 +13,9 @@ import type {
   OAuthClientInformationMixed,
   OAuthTokens,
 } from '@modelcontextprotocol/sdk/shared/auth.js'
-import { app, safeStorage, shell } from 'electron'
+import { app, shell } from 'electron'
 import type { T3Project } from '../shared/api'
+import { archiveLegacyCredentials, credentialPath, writeCredentials } from './credential-files'
 import type { T3Launch, T3Launcher, T3Thread } from './handoff'
 
 interface Credentials {
@@ -24,10 +25,11 @@ interface Credentials {
   tokens?: OAuthTokens
 }
 
-const pairingFile = () => join(app.getPath('userData'), 't3-pairing.json')
+const pairingFile = () => credentialPath(app.getPath('userData'), 't3-pairing.json')
 function loadPairing(): Credentials | null {
   try {
-    return JSON.parse(safeStorage.decryptString(readFileSync(pairingFile()))) as Credentials
+    archiveLegacyCredentials(join(app.getPath('userData'), 't3-pairing.json'))
+    return JSON.parse(readFileSync(pairingFile(), 'utf8')) as Credentials
   } catch {
     return null
   }
@@ -109,9 +111,7 @@ function oauthProvider(
     tokens: () => state.tokens,
     saveTokens(tokens) {
       state.tokens = tokens
-      writeFileSync(pairingFile(), safeStorage.encryptString(JSON.stringify(state)), {
-        mode: 0o600,
-      })
+      writeCredentials(pairingFile(), state)
     },
     redirectToAuthorization,
     saveCodeVerifier: (code) => {
@@ -123,8 +123,6 @@ function oauthProvider(
 }
 
 async function pairT3(url: URL): Promise<Client> {
-  if (!safeStorage.isEncryptionAvailable())
-    throw new Error('macOS Keychain encryption is not available')
   const callback = createServer()
   await new Promise<void>((resolve, reject) => {
     callback.once('error', reject)

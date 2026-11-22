@@ -22,17 +22,22 @@ if Finder offers the confirmation. On newer macOS versions, try opening AMC,
 then use **Open Anyway** under **System Settings → Privacy & Security**.
 [Apple's Gatekeeper instructions](https://support.apple.com/en-us/102445)
 
-On first launch of the stably signed app, choose **Always Allow** if macOS asks
-whether **AMC** can access **@amc/desktop Safe Storage**. Keychain remembers the
-app's bundle ID and certificate, so updates signed with the same identity keep
-that approval. This is a separate prompt from the signing prompt during builds.
-
 Quit the electron-vite dev instance before switching to the installed app. Both
-use the same Safe Storage item and the same profile at
-`~/Library/Application Support/@amc/desktop`. Use **Allow** for a one-time dev
-session. If Keychain Access already lists Electron as permanently trusted for
-this item, review that access there. If the installed app cannot decrypt the
-saved token, pair again using the same Engine URL to keep the replica.
+use the same profile at `~/Library/Application Support/@amc/desktop`. The desktop
+stores its Engine token in `credentials/pairing.json`, using the same file
+permissions as the CLI (mode `0600` in a `0700` directory). Code running as your
+Mac user can read these credentials.
+
+On upgrade, AMC renames an encrypted `pairing.json` in the profile root to
+`pairing.json.legacy` and opens the pairing screen. Use the same Engine URL to
+keep the local replica. For an unattended first launch or re-pair, quit AMC,
+generate a one-time code with `sudo amc-engine pair --desktop` on the Host, and
+launch the installed app from the Mac:
+
+```sh
+open -a "$HOME/Applications/AMC.app" --args \
+  --engine-url=https://your-engine.example:4443 --pairing-code=YOUR-CODE
+```
 
 Closing the window keeps sync running in the menu bar. **Pause Sync** persists
 across restarts. **Launch at Login** is enabled on first run. If macOS requests
@@ -139,6 +144,10 @@ publish to the topic until the existing remote watch expires.
 2. In AMC, open a Thread and choose **Hand off** or press **T**. On first use, paste the
    MCP URL from T3's **Settings → Environments** and approve **Supervised** access.
    Choose the T3 project and launch the handoff.
+
+T3 credentials use the same private directory in `credentials/t3-pairing.json`.
+When AMC next looks up the T3 connection, it moves a legacy encrypted file to
+`t3-pairing.json.legacy` in the profile root. Sign in to T3 again to use Handoff.
 
 The launched T3 thread gets a four-hour Agent grant to read the selected Thread and edit
 its reply body. The Composer Link in the prompt lasts up to two hours. A new handoff for
