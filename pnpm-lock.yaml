@@ -6,7 +6,7 @@ settings:
 
 patchedDependencies:
   agentation@3.1.2:
-    hash: cbb653d9e67aeb81e10f7293f7d09d3c5a2a08853c62acff0a250af1329c0e29
+    hash: b4a6d13e4f5b2b0ee3aabd2faed245cb3df7c58f3714288da764938d856c4ad7
     path: patches/agentation@3.1.2.patch
   mailparser@3.15.0:
     hash: c27c9ad50ece9b3311a6568cc09248c09ffaeba36966b43123bbaa03842e5930
@@ -103,7 +103,7 @@ importers:
         version: 3.35.0(@floating-ui/dom@1.8.0)(@tiptap/core@3.35.0(@tiptap/pm@3.35.0))(@tiptap/pm@3.35.0)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
       agentation:
         specifier: 3.1.2
-        version: 3.1.2(patch_hash=cbb653d9e67aeb81e10f7293f7d09d3c5a2a08853c62acff0a250af1329c0e29)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
+        version: 3.1.2(patch_hash=b4a6d13e4f5b2b0ee3aabd2faed245cb3df7c58f3714288da764938d856c4ad7)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
@@ -6911,7 +6911,7 @@ snapshots:
 
   agent-base@7.1.4: {}
 
-  agentation@3.1.2(patch_hash=cbb653d9e67aeb81e10f7293f7d09d3c5a2a08853c62acff0a250af1329c0e29)(react-dom@19.3.1(react@19.3.1))(react@19.3.1):
+  agentation@3.1.2(patch_hash=b4a6d13e4f5b2b0ee3aabd2faed245cb3df7c58f3714288da764938d856c4ad7)(react-dom@19.3.1(react@19.3.1))(react@19.3.1):
     optionalDependencies:
       react: 19.3.1
       react-dom: 19.3.1(react@19.3.1)

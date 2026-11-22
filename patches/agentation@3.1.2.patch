@@ -33,7 +33,7 @@ index d4953237a56ae05359c5ea8f6fd5d02f8aba8829..1e78a23684afb191b5357e504003355c
      demoDelay?: number;
      enableDemoMode?: boolean;
 diff --git a/dist/index.js b/dist/index.js
-index 7082d5c43e122c12fce669b1c65b17f4156ef5a2..44cd9625056623d87fc796fd881c7569fd22d832 100644
+index 7082d5c43e122c12fce669b1c65b17f4156ef5a2..afb2c8a49b3eba46ed6d558ccbc7d442161f19bf 100644
 --- a/dist/index.js
 +++ b/dist/index.js
 @@ -174,9 +174,9 @@ function isAgentationElement(el) {
@@ -212,6 +212,24 @@ index 7082d5c43e122c12fce669b1c65b17f4156ef5a2..44cd9625056623d87fc796fd881c7569
    const unfreezeAnimations = (0, import_react19.useCallback)(() => {
      if (!isFrozen) return;
      unfreeze();
+@@ -10805,7 +10812,7 @@ function PageFeedbackToolbarForRoute({
+     const style = document.createElement("style");
+     style.id = "agentation-cursor";
+     style.textContent = `
+-      body { cursor: crosshair !important; }
++      body { cursor: crosshair !important; ${localSession ? "user-select: text !important;" : ""} }
+       body :is(${textElementsSelector}) { cursor: text !important; }
+     `;
+     document.head.appendChild(style);
+@@ -10813,7 +10820,7 @@ function PageFeedbackToolbarForRoute({
+       const existingStyle = document.getElementById("agentation-cursor");
+       if (existingStyle) existingStyle.remove();
+     };
+-  }, [isActive]);
++  }, [isActive, localSession]);
+   (0, import_react19.useEffect)(() => {
+     if (hoveredDrawingIdx !== null && isActive) {
+       document.documentElement.setAttribute("data-drawing-hover", "");
 @@ -11437,6 +11444,7 @@ function PageFeedbackToolbarForRoute({
    ]);
    const fireWebhook = (0, import_react19.useCallback)(
@@ -315,7 +333,7 @@ index 7082d5c43e122c12fce669b1c65b17f4156ef5a2..44cd9625056623d87fc796fd881c7569
                  )
                ]
 diff --git a/dist/index.mjs b/dist/index.mjs
-index f716ae8b6527d7c6476503c741cffb47e9d9a740..ac50e1faa99014bee0c08477f1f02aa2cb2edac5 100644
+index f716ae8b6527d7c6476503c741cffb47e9d9a740..a697d208fe685482011db1f2849cad6c6124155c 100644
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
 @@ -90,9 +90,9 @@ function isAgentationElement(el) {
@@ -494,6 +512,24 @@ index f716ae8b6527d7c6476503c741cffb47e9d9a740..ac50e1faa99014bee0c08477f1f02aa2
    const unfreezeAnimations = useCallback8(() => {
      if (!isFrozen) return;
      unfreeze();
+@@ -10737,7 +10744,7 @@ function PageFeedbackToolbarForRoute({
+     const style = document.createElement("style");
+     style.id = "agentation-cursor";
+     style.textContent = `
+-      body { cursor: crosshair !important; }
++      body { cursor: crosshair !important; ${localSession ? "user-select: text !important;" : ""} }
+       body :is(${textElementsSelector}) { cursor: text !important; }
+     `;
+     document.head.appendChild(style);
+@@ -10745,7 +10752,7 @@ function PageFeedbackToolbarForRoute({
+       const existingStyle = document.getElementById("agentation-cursor");
+       if (existingStyle) existingStyle.remove();
+     };
+-  }, [isActive]);
++  }, [isActive, localSession]);
+   useEffect8(() => {
+     if (hoveredDrawingIdx !== null && isActive) {
+       document.documentElement.setAttribute("data-drawing-hover", "");
 @@ -11369,6 +11376,7 @@ function PageFeedbackToolbarForRoute({
    ]);
    const fireWebhook = useCallback8(
