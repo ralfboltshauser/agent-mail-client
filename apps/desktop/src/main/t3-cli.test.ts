@@ -9,41 +9,59 @@ import { cliLauncher, detectT3Cli } from './t3-cli'
 const home = mkdtempSync(join(tmpdir(), 'amc-t3-cli-'))
 afterEach(() => rmSync(home, { recursive: true, force: true }))
 
-it('skips a stale CLI and detects the bundled CLI in the desktop profile', async () => {
-  const oldHome = join(home, '.t3')
-  const baseDir = join(home, '.local', 'share', 't3code-personal-mac')
-  const executable = join(baseDir, 'bin', 't3')
-  for (const dir of [oldHome, baseDir]) {
-    mkdirSync(join(dir, 'bin'), { recursive: true })
-    mkdirSync(join(dir, 'userdata'))
-    writeFileSync(join(dir, 'userdata', 'statev2.sqlite'), '')
-    writeFileSync(join(dir, 'bin', 't3'), '#!/bin/sh\n', { mode: 0o700 })
-  }
-  const run = vi
-    .fn()
-    .mockResolvedValueOnce('Old t3 help')
-    .mockResolvedValueOnce('t3 thread start [flags] <project> <message>\n--json')
+it.each([false, true])(
+  'detects the bundled CLI and its runtime-mode flag (%s)',
+  async (supportsRuntimeMode) => {
+    const oldHome = join(home, '.t3')
+    const baseDir = join(home, '.local', 'share', 't3code-personal-mac')
+    const executable = join(baseDir, 'bin', 't3')
+    for (const dir of [oldHome, baseDir]) {
+      mkdirSync(join(dir, 'bin'), { recursive: true })
+      mkdirSync(join(dir, 'userdata'))
+      writeFileSync(join(dir, 'userdata', 'statev2.sqlite'), '')
+      writeFileSync(join(dir, 'bin', 't3'), '#!/bin/sh\n', { mode: 0o700 })
+    }
+    const run = vi
+      .fn()
+      .mockResolvedValueOnce('Old t3 help')
+      .mockResolvedValueOnce(
+        `t3 thread start [flags] <project> <message>\n--json\n${supportsRuntimeMode ? '  --runtime-mode choice' : ''}`,
+      )
 
-  await expect(detectT3Cli(home, '', run)).resolves.toEqual({ executable, baseDir })
-  expect(run.mock.calls).toEqual([
-    [join(oldHome, 'bin', 't3'), ['thread', 'start', '--help']],
-    [executable, ['thread', 'start', '--help']],
-  ])
-})
+    await expect(detectT3Cli(home, '', run)).resolves.toEqual({
+      executable,
+      baseDir,
+      supportsRuntimeMode,
+    })
+    expect(run.mock.calls).toEqual([
+      [join(oldHome, 'bin', 't3'), ['thread', 'start', '--help']],
+      [executable, ['thread', 'start', '--help']],
+    ])
+  },
+)
 
 it('falls back to Connect when no local CLI supports thread start', async () => {
   await expect(detectT3Cli(home, '', vi.fn())).resolves.toBeNull()
 })
 
-it('passes the grant and link over stdin and recovers a lost launch response', async () => {
-  const baseDir = join(home, 'T3 test profile')
-  const state = join(baseDir, 'userdata')
-  const executable = join(baseDir, 'bin', 't3')
-  mkdirSync(state, { recursive: true })
-  writeFileSync(join(state, 'environment-id'), 'local-env\n')
-  {
-    using db = new DatabaseSync(join(state, 'statev2.sqlite'))
-    db.exec(`
+it.each([false, true])(
+  'passes the prompt over stdin and forwards runtime mode when supported (%s)',
+  async (supportsRuntimeMode) => {
+    const baseDir = join(home, 'T3 test profile')
+    const state = join(baseDir, 'userdata')
+    const executable = join(baseDir, 'bin', 't3')
+    mkdirSync(state, { recursive: true })
+    writeFileSync(join(state, 'environment-id'), 'local-env\n')
+    writeFileSync(
+      join(state, 'settings.json'),
+      JSON.stringify({
+        defaultRuntimeMode: 'auto',
+        projectSettingsOverrides: { active: { defaultRuntimeMode: 'full-access' } },
+      }),
+    )
+    {
+      using db = new DatabaseSync(join(state, 'statev2.sqlite'))
+      db.exec(`
       CREATE TABLE projection_projects (
         project_id TEXT, title TEXT, workspace_root TEXT, deleted_at TEXT, archived_at TEXT
       );
@@ -53,39 +71,56 @@ it('passes the grant and link over stdin and recovers a lost launch response', a
         ('archived', 'Archived', '/tmp/archived', NULL, 'today'),
         ('scratch', 'No project', '', NULL, NULL);
     `)
-  }
+    }
 
-  const request = handoffRequest(
-    'active',
-    'request-id',
-    'mail-thread',
-    'draft-id',
-    'https://example.test/compose/draft-id#token=synthetic',
-    'https://example.test/mcp',
-    'synthetic-grant',
-  )
-  const title = 'Draft an AMC reply · request-id'
-  const run = vi
-    .fn()
-    .mockResolvedValueOnce('[]')
-    .mockRejectedValueOnce(new Error('lost response with synthetic-grant'))
-    .mockResolvedValueOnce(JSON.stringify([{ threadId: 'mcp:created', title }]))
-  const launcher = cliLauncher({ executable, baseDir }, run)
+    const request = handoffRequest(
+      'active',
+      'request-id',
+      'mail-thread',
+      'draft-id',
+      'https://example.test/compose/draft-id#token=synthetic',
+      'https://example.test/mcp',
+      'synthetic-grant',
+    )
+    const run = vi
+      .fn()
+      .mockResolvedValueOnce(JSON.stringify({ threadId: 'mcp:created' }))
+      .mockResolvedValue(JSON.stringify([{ threadId: 'mcp:created', title: request.title }]))
+    const launcher = cliLauncher({ executable, baseDir, supportsRuntimeMode }, run)
 
-  await expect(launcher.projects()).resolves.toEqual([{ id: 'active', title: 'Scratch' }])
-  const launched = { threadId: 'mcp:created', link: 't3code://threads/local-env/mcp%3Acreated' }
-  await expect(launcher.launch(request)).rejects.toThrow('T3 could not confirm the launch.')
-  await expect(launcher.launch(request)).resolves.toEqual(launched)
+    await expect(launcher.projects()).resolves.toEqual([
+      {
+        id: 'active',
+        title: 'Scratch',
+        ...(supportsRuntimeMode ? {} : { localDefaultMode: 'full-access' }),
+      },
+    ])
+    const launched = { threadId: 'mcp:created', link: 't3code://threads/local-env/mcp%3Acreated' }
+    await expect(launcher.launch(request)).resolves.toEqual(launched)
+    await expect(launcher.find('active', request.clientRequestId)).resolves.toEqual(launched)
+    await expect(launcher.find('active', 'another-id')).resolves.toBeNull()
 
-  const flags = ['--base-dir', baseDir, '--json']
-  const list = ['thread', 'list', ...flags, '--project', 'active']
-  expect(run.mock.calls).toEqual([
-    [executable, list],
-    [
-      executable,
-      ['thread', 'start', ...flags, '--title', title, '--', 'active', '-'],
-      request.message,
-    ],
-    [executable, list],
-  ])
-})
+    const runtime = supportsRuntimeMode ? ['--runtime-mode', 'approval-required'] : []
+    expect(run.mock.calls).toEqual([
+      [
+        executable,
+        [
+          'thread',
+          'start',
+          '--base-dir',
+          baseDir,
+          '--json',
+          ...runtime,
+          '--title',
+          request.title,
+          '--',
+          'active',
+          '-',
+        ],
+        request.message,
+      ],
+      [executable, ['thread', 'list', '--base-dir', baseDir, '--json', '--project', 'active']],
+      [executable, ['thread', 'list', '--base-dir', baseDir, '--json', '--project', 'active']],
+    ])
+  },
+)

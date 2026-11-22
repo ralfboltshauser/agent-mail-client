@@ -3,12 +3,13 @@ import { accessSync, constants, readdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { T3Project } from '../shared/api'
-import type { T3Launcher, T3Thread } from './handoff'
+import type { T3Project, T3RuntimeMode } from '../shared/api'
+import { handoffTitle, type T3Launcher, type T3Thread } from './handoff'
 
 export interface T3Cli {
   executable: string
   baseDir: string
+  supportsRuntimeMode?: boolean
 }
 
 type RunCli = (executable: string, args: string[], input?: string) => Promise<string>
@@ -44,7 +45,11 @@ export async function detectT3Cli(
       accessSync(join(baseDir, 'userdata', 'statev2.sqlite'), constants.R_OK)
       const help = await run(executable, ['thread', 'start', '--help'])
       if (help.includes('t3 thread start') && help.includes('--json'))
-        return { executable, baseDir }
+        return {
+          executable,
+          baseDir,
+          supportsRuntimeMode: /^\s*--runtime-mode(?:[\s,=]|$)/m.test(help),
+        }
     } catch {
       // Older or moved desktop installs can leave a shim behind.
     }
@@ -63,16 +68,56 @@ function readdirProfiles(share: string): string[] {
   }
 }
 
-export function cliLauncher({ executable, baseDir }: T3Cli, run: RunCli = runCli): T3Launcher {
+function projectRuntimeModes(state: string): (id: string) => T3RuntimeMode | 'unknown' {
+  const mode = (value: unknown): T3RuntimeMode | 'unknown' => {
+    switch (value) {
+      case 'approval-required':
+      case 'auto-accept-edits':
+      case 'auto':
+      case 'full-access':
+        return value
+      default:
+        return 'unknown'
+    }
+  }
+  try {
+    const settings = JSON.parse(readFileSync(join(state, 'settings.json'), 'utf8')) as {
+      defaultRuntimeMode?: unknown
+      projectSettingsOverrides?: Record<string, { defaultRuntimeMode?: unknown }>
+    }
+    return (id) =>
+      mode(
+        settings.projectSettingsOverrides?.[id]?.defaultRuntimeMode ??
+          settings.defaultRuntimeMode ??
+          'full-access',
+      )
+  } catch (error) {
+    return () => ((error as NodeJS.ErrnoException).code === 'ENOENT' ? 'full-access' : 'unknown')
+  }
+}
+
+export function cliLauncher(
+  { executable, baseDir, supportsRuntimeMode }: T3Cli,
+  run: RunCli = runCli,
+): T3Launcher {
   const state = join(baseDir, 'userdata')
   const flags = ['--base-dir', baseDir, '--json']
 
+  const environmentId = () => {
+    const environment = readFileSync(join(state, 'environment-id'), 'utf8').trim()
+    if (!environment) throw new Error('Missing T3 environment ID.')
+    return environment
+  }
+  const threadLink = (environment: string, threadId: string) =>
+    `t3code://threads/${encodeURIComponent(environment)}/${encodeURIComponent(threadId)}`
+
   return {
+    key: `cli:${baseDir}`,
     async projects() {
       try {
         // The installed CLI resolves projects internally but has no project list command.
         using db = new DatabaseSync(join(state, 'statev2.sqlite'), { readOnly: true })
-        return db
+        const projects = db
           .prepare(`
           SELECT project_id AS id, title
           FROM projection_projects
@@ -80,35 +125,55 @@ export function cliLauncher({ executable, baseDir }: T3Cli, run: RunCli = runCli
           ORDER BY title COLLATE NOCASE, project_id
         `)
           .all() as unknown as T3Project[]
+        if (supportsRuntimeMode) return projects
+        const runtimeMode = projectRuntimeModes(state)
+        return projects.map((project) => ({
+          ...project,
+          localDefaultMode: runtimeMode(project.id),
+        }))
       } catch {
         throw new Error('AMC could not read local T3 projects. Open T3 Code and try again.')
       }
     },
-    async launch(request) {
-      // This CLI has no clientRequestId flag. The title lets a retry recover an accepted
-      // launch after a timeout or lost response without sending the prompt a second time.
-      const title = `${request.title} · ${request.clientRequestId}`
+    async find(projectId, launchId) {
       try {
-        const environment = readFileSync(join(state, 'environment-id'), 'utf8').trim()
         const threads = JSON.parse(
-          await run(executable, ['thread', 'list', ...flags, '--project', request.projectId]),
+          await run(executable, ['thread', 'list', ...flags, '--project', projectId]),
         ) as Array<T3Thread & { title: string }>
-        const existing = threads.find((thread) => thread.title === title)
-        const thread =
-          existing ??
-          (JSON.parse(
-            await run(
-              executable,
-              ['thread', 'start', ...flags, '--title', title, '--', request.projectId, '-'],
-              request.message,
-            ),
-          ) as T3Thread)
+        const title = handoffTitle(launchId)
+        const thread = threads.find((item) => item.title === title)
+        return thread
+          ? { threadId: thread.threadId, link: threadLink(environmentId(), thread.threadId) }
+          : null
+      } catch {
+        throw new Error('T3 could not check the earlier hand-off. Open T3 Code and retry.')
+      }
+    },
+    async launch(request) {
+      try {
+        // Check we can construct a navigation link before handing off the prompt.
+        const environment = environmentId()
+        const runtime = supportsRuntimeMode ? ['--runtime-mode', request.runtimeMode] : []
+        const thread = JSON.parse(
+          await run(
+            executable,
+            [
+              'thread',
+              'start',
+              ...flags,
+              ...runtime,
+              '--title',
+              request.title,
+              '--',
+              request.projectId,
+              '-',
+            ],
+            request.message,
+          ),
+        ) as T3Thread
         if (typeof thread?.threadId !== 'string' || !thread.threadId)
           throw new Error('Missing thread ID.')
-        return {
-          threadId: thread.threadId,
-          link: `t3code://threads/${encodeURIComponent(environment)}/${encodeURIComponent(thread.threadId)}`,
-        }
+        return { threadId: thread.threadId, link: threadLink(environment, thread.threadId) }
       } catch {
         throw new Error(
           'T3 could not confirm the launch. Check that T3 Code is running, then retry.',

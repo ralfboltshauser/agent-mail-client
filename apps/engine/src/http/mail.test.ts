@@ -935,7 +935,7 @@ it('keeps confirmed handoffs across recovery and revokes both grants when the ow
 })
 
 it('rotates both grants after a lost Engine reply and revokes the replacements on pending recovery', async () => {
-  const { db, app, call, owner, threadId, start } = await setupHandoff()
+  const { db, app, call, owner, threadId, otherThread, start } = await setupHandoff()
   const id = randomUUID()
   const remove = (requestId: string) =>
     app.request(`/v1/compose/handoff/${requestId}?pending=1`, {
@@ -961,8 +961,14 @@ it('rotates both grants after a lost Engine reply and revokes the replacements o
     expect((await post(id)).status).toBe(409)
 
     const delayed = randomUUID()
+    const drafts = () => db.prepare('SELECT id FROM draft WHERE thread_id = ?').all(otherThread)
+    expect(drafts()).toEqual([])
     expect((await remove(delayed)).status).toBe(200)
-    expect((await post(delayed)).status).toBe(409)
+    expect(
+      (await call('/v1/compose/handoff', owner, { threadId: otherThread, requestId: delayed }))
+        .status,
+    ).toBe(409)
+    expect(drafts()).toEqual([])
     expect(
       db
         .prepare(

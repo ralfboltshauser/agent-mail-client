@@ -1,7 +1,7 @@
 import type { ComposeDraft } from '@amc/protocol'
 import { useCallback, useEffect, useId, useState } from 'react'
 import { getAmc } from '@/lib/amc'
-import type { T3Project } from '../../../shared/api'
+import type { T3Project, T3RuntimeMode } from '../../../shared/api'
 import { Button } from './ui/button'
 import {
   Dialog,
@@ -12,6 +12,13 @@ import {
   DialogTitle,
 } from './ui/dialog'
 import { Input } from './ui/input'
+
+const runtimeModeLabel: Record<T3RuntimeMode, string> = {
+  'approval-required': 'Approval Required',
+  'auto-accept-edits': 'Auto-Accept Edits',
+  auto: 'Auto',
+  'full-access': 'Full Access',
+}
 
 export function HandoffDialog({
   threadId,
@@ -31,6 +38,8 @@ export function HandoffDialog({
   const [busy, setBusy] = useState(false)
   const [attempted, setAttempted] = useState(false)
   const [error, setError] = useState('')
+  const mode = projects?.find((project) => project.id === projectId)?.localDefaultMode
+  const launchAddress = kind === 'cli' ? null : address.trim()
 
   const load = useCallback(async (url: string | null) => {
     setBusy(true)
@@ -65,11 +74,7 @@ export function HandoffDialog({
     setError('')
     setAttempted(true)
     try {
-      const draft = await getAmc().handoff(
-        kind === 'cli' ? null : address.trim(),
-        projectId,
-        threadId,
-      )
+      const draft = await getAmc().handoff(launchAddress, projectId, threadId)
       localStorage.setItem('amc-handoff-project', projectId)
       onDraft(draft)
     } catch (cause) {
@@ -84,7 +89,7 @@ export function HandoffDialog({
     if (attempted) {
       setBusy(true)
       try {
-        await getAmc().cancelHandoff(projectId, threadId)
+        await getAmc().cancelHandoff(launchAddress, projectId, threadId)
       } catch (cause) {
         setError((cause as Error).message)
         setBusy(false)
@@ -153,6 +158,14 @@ export function HandoffDialog({
                   </option>
                 ))}
               </select>
+              {mode && (
+                <output htmlFor={projectSelectId} className="text-sm">
+                  {mode === 'unknown'
+                    ? 'This T3 CLI uses the project’s approval default. AMC could not read that default.'
+                    : `This T3 CLI uses the project’s approval default (${runtimeModeLabel[mode]}).`}
+                  {' Use T3 Connect to request Approval Required.'}
+                </output>
+              )}
             </div>
           )}
           {error && (

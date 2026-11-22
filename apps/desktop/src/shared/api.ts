@@ -90,9 +90,12 @@ export interface ActiveHandoff {
   expiresAt: number
 }
 
+export type T3RuntimeMode = 'approval-required' | 'auto-accept-edits' | 'auto' | 'full-access'
+
 export interface T3Project {
   id: string
   title: string
+  localDefaultMode?: T3RuntimeMode | 'unknown'
   archivedAt?: string | null
   deletedAt?: string | null
 }
@@ -137,7 +140,7 @@ export interface AmcApi {
   t3Setup(): Promise<{ kind: 'cli' | 'mcp'; address: string }>
   t3Projects(address: string | null): Promise<T3Project[]>
   handoff(address: string | null, projectId: string, threadId: string): Promise<ComposeDraft>
-  cancelHandoff(projectId: string, threadId: string): Promise<void>
+  cancelHandoff(address: string | null, projectId: string, threadId: string): Promise<void>
   activeHandoff(threadId: string): Promise<ActiveHandoff | null>
   endHandoff(id: string): Promise<void>
   pair(engineUrl: string, code: string): Promise<void>

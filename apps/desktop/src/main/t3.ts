@@ -15,7 +15,7 @@ import type {
 } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { app, safeStorage, shell } from 'electron'
 import type { T3Project } from '../shared/api'
-import type { T3Launch, T3Launcher, T3Thread } from './handoff'
+import { handoffTitle, type T3Launch, type T3Launcher, type T3Thread } from './handoff'
 
 interface Credentials {
   url: string
@@ -39,7 +39,7 @@ export function savedT3Url() {
 
 let connection: { url: string; client: Promise<Client> } | undefined
 
-export function t3Client(address: string): Promise<Client> {
+function t3Url(address: string): URL {
   const url = new URL(address)
   const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
   if (
@@ -52,6 +52,11 @@ export function t3Client(address: string): Promise<Client> {
   ) {
     throw new Error('Enter the MCP URL copied from T3 Code.')
   }
+  return url
+}
+
+export function t3Client(address: string): Promise<Client> {
+  const url = t3Url(address)
   if (connection?.url === url.href) return connection.client
   const previous = connection
   const client = connectT3(url).catch((error: unknown) => {
@@ -212,8 +217,33 @@ async function launchInT3(address: string, request: T3Launch): Promise<T3Thread>
 }
 
 export function mcpLauncher(address: string): T3Launcher {
+  const url = t3Url(address).href
   return {
+    key: `mcp:${url}`,
     projects: () => t3Projects(address),
+    async find(projectId, launchId) {
+      const title = handoffTitle(launchId)
+      try {
+        const client = await t3Client(address)
+        let cursor: number | null = 0
+        while (cursor !== null) {
+          const response = await client.callTool({
+            name: 't3_thread_list',
+            arguments: { projectId, titleContains: title, cursor },
+          })
+          const page = response.structuredContent as
+            | { threads: (T3Thread & { title: string })[]; nextCursor: number | null }
+            | undefined
+          if (response.isError || !Array.isArray(page?.threads)) throw new Error('Invalid list')
+          const thread = page.threads.find((thread) => thread.title === title)
+          if (thread) return { threadId: thread.threadId, link: thread.link }
+          cursor = page.nextCursor ?? null
+        }
+        return null
+      } catch {
+        throw new Error('T3 could not check the earlier hand-off. Reconnect T3 and retry.')
+      }
+    },
     launch: (request) => launchInT3(address, request),
   }
 }

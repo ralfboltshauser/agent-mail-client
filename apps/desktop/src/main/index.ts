@@ -412,7 +412,7 @@ function registerComposeIpc() {
         requireEngine(),
         projectId,
         threadId,
-        launcher(address).launch,
+        launcher(address),
       )
       const link = thread.link && t3NavigationLink(thread.link)
       if (link) void shell.openExternal(link).catch(() => {})
@@ -421,8 +421,10 @@ function registerComposeIpc() {
       return draft
     },
   )
-  ipcMain.handle('amc:cancelHandoff', (_e, projectId: string, threadId: string) =>
-    handoff.cancel(requireEngine(), projectId, threadId),
+  ipcMain.handle(
+    'amc:cancelHandoff',
+    (_e, address: string | null, projectId: string, threadId: string) =>
+      handoff.cancel(requireEngine(), projectId, threadId, launcher(address)),
   )
   ipcMain.handle('amc:activeHandoff', (_e, threadId: string) =>
     handoff.active(requireEngine(), threadId),
