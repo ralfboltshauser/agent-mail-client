@@ -40,7 +40,7 @@ function useBodyRequest(
         if (active) setResult({ key, value })
       },
       () => {
-        if (active) setResult((current) => ({ key, value: current.value }))
+        if (active) setResult({ key, value: null })
       },
     )
     return () => {

@@ -160,6 +160,17 @@ it('loads and refreshes a complete deferred body while its message stays expande
     expect(messageText).toHaveBeenCalledTimes(3)
     expect(scrollRef.current).toBe(scroll)
     expect(scroll.scrollTop).toBe(300)
+
+    messageText.mockRejectedValueOnce(new Error('Body read failed'))
+    replica.put('message', MessageDetail.parse({ ...original, bodyText: 'Recovered body' }))
+    await render()
+    expect(document.body.textContent?.includes('Updated 1')).toBe(false)
+    const retry = [...document.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Could not load message. Retry',
+    )
+    expect(retry).toBeDefined()
+    await act(async () => retry?.click())
+    expect(document.body.textContent).toContain('Recovered body')
   } finally {
     await act(async () => root.unmount())
     vi.unstubAllGlobals()
@@ -246,8 +257,12 @@ it('deduplicates slow inline bodies and retains iframe height and consent across
     }),
     bodyRevision: '1',
   }
-  const render = (next: ReplicaThreadMessage) => {
-    const data: ThreadWithMessages = { thread, messages: [structuredClone(next)], drafts: [] }
+  const render = (next: ReplicaThreadMessage, nextThread = thread) => {
+    const data: ThreadWithMessages = {
+      thread: nextThread,
+      messages: [structuredClone(next)],
+      drafts: [],
+    }
     return act(async () =>
       root.render(
         createElement(
@@ -276,6 +291,7 @@ it('deduplicates slow inline bodies and retains iframe height and consent across
     await act(async () => firstInline.resolve('first-image-data'))
     const frame = document.querySelector('iframe')
     if (!frame?.contentDocument) throw new Error('Expected message iframe')
+    expect(frame.getAttribute('sandbox')).toBe('allow-same-origin')
     expect(frame.srcdoc).toContain('data:image/png;base64,first-image-data')
     expect(frame.srcdoc).toContain('img-src data: cid:;')
     expect(frame.style.height).toBe('120px')
@@ -340,6 +356,21 @@ it('deduplicates slow inline bodies and retains iframe height and consent across
     expect(frame.style.height).toBe('242px')
     await load(80)
     expect(frame.style.height).toBe('120px')
+
+    const lateHtml = deferred<string>()
+    const otherHtml = deferred<string>()
+    messageHtml.mockReturnValueOnce(lateHtml.promise).mockReturnValueOnce(otherHtml.promise)
+    await render({ ...message, bodyRevision: '3' })
+    const nextThread = { ...thread, id: 'another-thread', subject: 'Another thread' }
+    await render({ ...message, id: 'another-message', threadId: nextThread.id }, nextThread)
+    expect(document.body.textContent).toContain(nextThread.subject)
+    expect(document.querySelector('iframe')).toBeNull()
+    await act(async () => otherHtml.resolve('<p>Another thread body</p>'))
+    await act(async () => lateHtml.resolve('<p>Late previous thread body</p>'))
+    const nextFrame = document.querySelector('iframe')
+    expect(nextFrame).not.toBe(frame)
+    expect(nextFrame?.srcdoc).toContain('Another thread body')
+    expect(nextFrame?.srcdoc).not.toContain('Late previous thread body')
   } finally {
     await act(async () => root.unmount())
     vi.unstubAllGlobals()
