@@ -1,88 +1,105 @@
-import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { rendererAdapter } from './adapter'
 import { expectBudget } from './profile'
 import { listbox, mount, reader } from './workspace'
 
+const panel = () => screen.queryByRole('region', { name: 'Send Feedback' })
+const toolbar = () => document.querySelector('agentation-toolbar')?.shadowRoot
+const button = (label: string) =>
+  toolbar()?.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)
+
+function clickToolbar(label: string) {
+  const control = button(label)
+  if (!control) throw new Error(`Missing Agentation button: ${label}`)
+  fireEvent.click(control)
+}
+
 async function openFeedback(adapter: ReturnType<typeof rendererAdapter>) {
-  // The real lazy chunk resolves on the module loader's clock.
   vi.useRealTimers()
   await act(async () => adapter.emitFeedback())
-  return screen.findByRole('dialog', { name: 'Send Feedback' })
+  await waitFor(() => expect(button('Exit')?.getAttribute('aria-expanded')).toBe('true'))
+}
+
+async function pickElement(target: HTMLElement) {
+  const original = document.elementFromPoint
+  document.elementFromPoint = () => target
+  try {
+    fireEvent.click(target, { clientX: 100, clientY: 150 })
+    await waitFor(() => expect(toolbar()?.querySelector('textarea')).toBeTruthy())
+  } finally {
+    document.elementFromPoint = original
+  }
 }
 
 describe('desktop feedback', () => {
-  it('captures once, opens with no mailbox commits, and closes with Escape', async () => {
+  it('opens Agentation immediately and exits without taking a screenshot or changing mailbox commits', async () => {
     const adapter = await mount()
     const originalList = listbox()
     const originalReader = reader()
-    const dialog = await openFeedback(adapter)
-    expect(adapter.api.feedback.capture).toHaveBeenCalledExactlyOnceWith('inbox', {
-      width: innerWidth,
-      height: innerHeight,
-    })
-    const text = within(dialog).getByRole('textbox', { name: 'What’s wrong / what do you want?' })
-    expect(document.activeElement).toBe(text)
-    fireEvent.change(text, { target: { value: 'More room here' } })
-    // Chromium fires the native cancel event on Escape. JSDOM does not drive native dialogs.
-    fireEvent(dialog, new Event('cancel', { cancelable: true, bubbles: false }))
-    expect(screen.queryByRole('dialog', { name: 'Send Feedback' })).toBeNull()
-    expect(adapter.api.feedback.send).not.toHaveBeenCalled()
+    originalList.focus()
+
+    const store = vi.spyOn(localStorage, 'setItem')
+    await openFeedback(adapter)
+    expect(panel()).toBeNull()
+    await pickElement(originalReader)
+    expect(store.mock.calls.filter(([key]) => key.startsWith('feedback-annotations-'))).toEqual([])
+    fireEvent.keyDown(window, { key: 'Escape' })
+
+    expect(panel()).toBeNull()
+    expect(toolbar()).toBeUndefined()
+    expect(store.mock.calls.filter(([key]) => key.startsWith('feedback-annotations-'))).toEqual([])
+    expect(adapter.api.feedback.capture).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(originalList)
     expect(listbox()).toBe(originalList)
     expect(reader()).toBe(originalReader)
     expectBudget({ app: 0, workspace: 0, list: 0, reader: 0, rows: 0 })
+
+    await openFeedback(adapter)
+    expect(toolbar()?.querySelector('[data-annotation-marker]')).toBeNull()
+    clickToolbar('Exit')
+    expect(panel()).toBeNull()
   })
 
-  it('accepts Cmd+Enter with empty feedback', async () => {
+  it('accepts Cmd+Enter with only a general note', async () => {
     const adapter = await mount()
-    const dialog = await openFeedback(adapter)
-    fireEvent.keyDown(within(dialog).getByRole('textbox'), { key: 'Enter', metaKey: true })
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Send Feedback' })).toBeNull())
+    await openFeedback(adapter)
+    expect(panel()).toBeNull()
+    fireEvent.keyDown(window, { key: 'Enter', metaKey: true })
+    const note = screen.getByRole('textbox', { name: 'General feedback note' })
+    fireEvent.change(note, { target: { value: 'More room here' } })
+    fireEvent.keyDown(note, { key: 'Enter', metaKey: true })
+
+    await waitFor(() => expect(adapter.api.feedback.send).toHaveBeenCalledTimes(1))
+    expect(panel()).toBeNull()
+    expect(adapter.api.feedback.capture).toHaveBeenCalledExactlyOnceWith('inbox')
     expect(adapter.api.feedback.send).toHaveBeenCalledExactlyOnceWith('renderer-fixture', {
-      text: '',
-      annotations: [],
+      text: 'More room here',
+      markdown: '',
     })
     expectBudget({ workspace: 0, list: 0, reader: 0, rows: 0 })
   })
 
-  it('toggles the picker, captures a structural annotation, and copies feedback on launch failure', async () => {
+  it('keeps the finished prompt in memory for offline Copy feedback', async () => {
     const adapter = rendererAdapter()
     adapter.api.feedback.send.mockRejectedValueOnce(new Error('offline'))
     await mount(adapter)
-    const dialog = await openFeedback(adapter)
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Annotate' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Annotate' }))
-    const picker = screen.getByRole('button', { name: 'Pick an element to annotate' })
-    vi.stubGlobal('CSS', { escape: (tag: string) => tag })
-    Object.defineProperty(document, 'elementsFromPoint', {
-      configurable: true,
-      value: () => [picker, reader()],
+    const store = vi.spyOn(localStorage, 'setItem')
+    await openFeedback(adapter)
+    fireEvent.keyDown(window, { key: 'Enter', metaKey: true })
+    fireEvent.change(screen.getByRole('textbox', { name: 'General feedback note' }), {
+      target: { value: 'Adjust spacing' },
     })
-    try {
-      fireEvent.click(picker)
-    } finally {
-      Reflect.deleteProperty(document, 'elementsFromPoint')
-    }
-    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Annotation 1' }), {
-      target: { value: 'Add spacing' },
-    })
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Add note' }))
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Skip text, open in T3' }))
-    const copy = await within(dialog).findByRole('button', { name: 'Copy feedback' })
-    fireEvent.click(copy)
-    const draft = {
-      text: '',
-      annotations: [
-        expect.objectContaining({
-          selector: expect.stringMatching(/ > h1$/),
-          component: expect.any(String),
-          note: 'Add spacing',
-        }),
-      ],
-    }
+    expect(adapter.api.feedback.capture).not.toHaveBeenCalled()
+    fireEvent.keyDown(window, { key: 'Enter', metaKey: true })
+    await waitFor(() => expect(adapter.api.feedback.send).toHaveBeenCalledTimes(1))
+    fireEvent.click(await screen.findByRole('button', { name: 'Copy feedback' }))
+
+    const draft = { text: 'Adjust spacing', markdown: '' }
     expect(adapter.api.feedback.send).toHaveBeenCalledExactlyOnceWith('renderer-fixture', draft)
     expect(adapter.api.feedback.copy).toHaveBeenCalledExactlyOnceWith('renderer-fixture', draft)
+    expect(toolbar()).toBeUndefined()
+    expect(store.mock.calls.filter(([key]) => key.startsWith('feedback-annotations-'))).toEqual([])
     expectBudget({ workspace: 0, list: 0, reader: 0, rows: 0 })
   })
 })

@@ -33,10 +33,7 @@ export function rendererAdapter() {
         feedbackListeners.add(listener)
         return () => feedbackListeners.delete(listener)
       },
-      capture: vi.fn(async (_view: string, viewport: { width: number; height: number }) => ({
-        id: 'renderer-fixture',
-        ...viewport,
-      })),
+      capture: vi.fn(async (_view: string) => ({ id: 'renderer-fixture' })),
       send: vi.fn(fixture.api.feedback.send),
       copy: vi.fn(fixture.api.feedback.copy),
     },

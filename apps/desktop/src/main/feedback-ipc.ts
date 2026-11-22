@@ -1,14 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { chmodSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import {
-  app,
-  type BrowserWindow,
-  clipboard,
-  type IpcMainEvent,
-  ipcMain,
-  type NativeImage,
-  shell,
-} from 'electron'
+import { app, type BrowserWindow, clipboard, type IpcMainEvent, ipcMain, shell } from 'electron'
 import { type FeedbackDraft, feedbackView } from '../shared/feedback'
 import {
   type FeedbackContext,
@@ -17,7 +8,6 @@ import {
   launchFeedback,
   saveFeedbackCapture,
 } from './feedback'
-import { markFeedbackImage } from './feedback-markers'
 import { t3NavigationLink } from './handoff'
 import { pairedFeedbackLauncher, savedT3Url } from './t3'
 import { cliLauncher, detectT3Cli } from './t3-cli'
@@ -28,8 +18,8 @@ export function registerFeedbackIpc(getWindow: () => BrowserWindow | null, openW
   let ready = false
   let pending = false
   let captureAllowed = false
-  let capture: { id: string; path: string; image: NativeImage; context: FeedbackContext } | null =
-    null
+  let capture: { id: string; path: string; context: FeedbackContext } | null = null
+  let rendererGeneration = 0
   let busy = false
 
   function trusted(event: Pick<IpcMainEvent, 'sender' | 'senderFrame'>) {
@@ -40,7 +30,7 @@ export function registerFeedbackIpc(getWindow: () => BrowserWindow | null, openW
     if (!ready || !pending) return
     pending = false
     const window = getWindow()
-    if (!window || capture) return
+    if (!window || capture || busy) return
     captureAllowed = true
     window.webContents.send('amc:feedbackOpen')
   }
@@ -62,53 +52,40 @@ export function registerFeedbackIpc(getWindow: () => BrowserWindow | null, openW
     ready = true
     flushOpen()
   })
-  ipcMain.handle('amc:feedbackCapture', async (event, view: unknown, viewport: unknown) => {
-    if (!trusted(event) || !captureAllowed || busy) throw new Error('AMC feedback is unavailable.')
+  ipcMain.handle('amc:feedbackCapture', async (event, view: unknown) => {
+    if (!trusted(event) || !captureAllowed || capture || busy)
+      throw new Error('AMC feedback is unavailable.')
     captureAllowed = false
+    const generation = rendererGeneration
     const at = new Date()
-    const image = await event.sender.capturePage().catch(() => null)
-    if (!image || image.isEmpty() || !trusted(event))
-      throw new Error('AMC could not capture its window.')
-    const { width, height } = image.getSize()
-    const context = {
-      at,
-      view: feedbackView(view),
-      width,
-      height,
-      version: [app.getVersion(), AMC_REVISION].filter(Boolean).join(' '),
-    }
-    // DOM bounds are in CSS pixels. The window capture can use a different pixel density.
-    const css = viewport as { width?: unknown; height?: unknown } | null
-    const validDimension = (value: unknown): value is number =>
-      typeof value === 'number' && Number.isInteger(value) && value > 0 && value < 100_000
-    const cssViewport =
-      css && validDimension(css.width) && validDimension(css.height)
-        ? { width: css.width, height: css.height }
-        : { width, height }
-    const id = randomUUID()
+    busy = true
     try {
+      const image = await event.sender.capturePage()
+      if (image.isEmpty() || generation !== rendererGeneration || !trusted(event))
+        throw new Error('Window capture is unavailable.')
+      const id = randomUUID()
       const path = saveFeedbackCapture(app.getPath('userData'), image.toPNG(), at)
-      capture = { id, path, image, context: { ...context, ...cssViewport } }
+      capture = {
+        id,
+        path,
+        context: {
+          at,
+          view: feedbackView(view),
+          ...image.getSize(),
+          version: [app.getVersion(), AMC_REVISION].filter(Boolean).join(' '),
+        },
+      }
+      return { id }
     } catch {
-      throw new Error('AMC could not save its window capture.')
+      throw new Error('AMC could not capture its window.')
+    } finally {
+      busy = false
     }
-    return { id, ...cssViewport }
   })
   ipcMain.handle('amc:feedbackSend', async (event, id: string, draft: FeedbackDraft) => {
     const current = active(event, id)
     busy = true
     try {
-      if (draft.annotations.length) {
-        const marked = markFeedbackImage(current.image, draft.annotations, current.context)
-        const temporary = `${current.path}.tmp`
-        try {
-          writeFileSync(temporary, marked, { mode: 0o600, flag: 'wx' })
-          chmodSync(temporary, 0o600)
-          renameSync(temporary, current.path)
-        } finally {
-          rmSync(temporary, { force: true })
-        }
-      }
       const address = savedT3Url()
       const localMcp =
         address && ['localhost', '127.0.0.1', '[::1]'].includes(new URL(address).hostname)
@@ -154,6 +131,7 @@ export function registerFeedbackIpc(getWindow: () => BrowserWindow | null, openW
   })
   return {
     reset() {
+      rendererGeneration += 1
       ready = false
       captureAllowed = false
       capture = null

@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { ReviewApi, SmartInboxApi } from '../../apps/desktop/src/shared/api'
 import { deferred, rendererAdapter } from './adapter'
@@ -175,11 +175,10 @@ it('keeps the same triage card and focus when Escape closes feedback', async () 
 
   vi.useRealTimers()
   await act(async () => adapter.emitFeedback())
-  const feedback = await screen.findByRole('dialog', { name: 'Send Feedback' })
-  expect(feedback.contains(document.activeElement)).toBe(true)
+  await waitFor(() => expect(review().querySelector('agentation-toolbar')).toBeTruthy())
   await press('Escape')
 
-  expect(screen.queryByRole('dialog', { name: 'Send Feedback' })).toBeNull()
+  expect(review().querySelector('agentation-toolbar')).toBeNull()
   expect(within(review()).getByRole('heading', { name: firstSubject })).toBe(heading)
   expect(document.activeElement).toBe(focus)
 })
