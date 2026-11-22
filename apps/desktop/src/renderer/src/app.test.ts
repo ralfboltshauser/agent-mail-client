@@ -360,7 +360,8 @@ it('clears cached rows and reader when the Engine identity changes', async () =>
     .fn<AmcApi['threads']>()
     .mockResolvedValueOnce([cached])
     .mockReturnValueOnce(oldRefresh.promise)
-    .mockReturnValueOnce(nextEngine.promise)
+    // Store invalidation and workspace remount can both read from the new Engine.
+    .mockReturnValue(nextEngine.promise)
   const mailbox = await openMailbox({ threads, thread: async () => detail(cached) })
   expect(reader()?.textContent).toBe(cached.subject)
   await mailbox.changed()
