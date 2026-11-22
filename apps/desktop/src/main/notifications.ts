@@ -55,6 +55,7 @@ function isInboxUnread(message: Message): boolean {
   const prefix = `${message.accountId}:`
   return (
     message.unread &&
+    message.screeningDisposition === undefined &&
     message.labelIds.includes(`${prefix}INBOX`) &&
     !message.labelIds.includes(`${prefix}TRASH`) &&
     !message.labelIds.includes(`${prefix}SPAM`) &&

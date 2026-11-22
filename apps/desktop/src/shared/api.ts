@@ -1,5 +1,6 @@
 import type {
   AccountSummary,
+  AdoptScreenedDestination,
   AgentAction,
   Bucket,
   BucketInput,
@@ -13,10 +14,18 @@ import type {
   Label,
   OrganiseAction,
   OutboxItem,
+  OwnerActionStatus,
   SearchHit,
+  SenderAvatarResolve,
+  SenderAvatarResults,
+  SenderDecision,
+  SenderList,
+  SenderListQuery,
   SendRequest,
   ThreadMessage,
   ThreadSummary,
+  TriageQueuePage,
+  TriageQueueQuery,
   VersionedDraft,
 } from '@amc/protocol'
 
@@ -131,7 +140,20 @@ export interface TriageStatus {
   notice: string | null
 }
 
+export interface SmartInboxApi {
+  listSenders(query: Partial<SenderListQuery>): Promise<SenderList>
+  decideSender(input: SenderDecision): Promise<OwnerActionStatus>
+  adoptScreenedDestination(
+    input: AdoptScreenedDestination,
+  ): Promise<{ accountId: string; providerId: string }>
+  ownerAction(id: string): Promise<OwnerActionStatus>
+  undoOwnerAction(id: string): Promise<OwnerActionStatus>
+  triageQueue(query: Partial<TriageQueueQuery>): Promise<TriageQueuePage>
+  resolveSenderAvatars(input: SenderAvatarResolve): Promise<SenderAvatarResults>
+}
+
 export interface AmcApi {
+  smartInbox?: SmartInboxApi
   notificationSettings(): Promise<NotificationSettings>
   saveNotificationSettings(settings: NotificationSettings): Promise<void>
   onOpenThread(listener: (thread: ThreadSummary) => void): () => void

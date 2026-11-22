@@ -1,11 +1,14 @@
 import { createHash } from 'node:crypto'
+import { open } from 'node:fs/promises'
 import type { LabelPatch } from '@amc/protocol'
 import { transaction } from '../../db/database.ts'
 import type { Logger } from '../../log.ts'
+import { senderMailbox } from '../../mail/senders/identity.ts'
+import { normalizeSender } from '../../mail/senders/index.ts'
 import { labelId } from '../../mail/store.ts'
 import { type ImapClient, imapMoveSupport } from './client.ts'
 import type { MessageLocation } from './locations.ts'
-import { type Folder, mapFolders, messageFlags } from './mapping.ts'
+import { type Folder, mapFolders, messageFlags, normalUserFolder } from './mapping.ts'
 import type { ImapAccountSync } from './sync.ts'
 
 export type ImapMutationRunner = (
@@ -175,6 +178,31 @@ async function findMovedUid(
   }
 }
 
+async function readSourceSender(sync: ImapAccountSync, source: MessageLocation) {
+  if (!source.source_blob) return null
+  try {
+    const file = await open(sync.store.blobs.path(source.source_blob), 'r')
+    try {
+      const bytes = Buffer.alloc(64 * 1024)
+      const { bytesRead } = await file.read(bytes)
+      const raw = bytes.subarray(0, bytesRead).toString('utf8')
+      const end = raw.search(/\r?\n\r?\n/)
+      if (end < 0) return null
+      const headers = raw
+        .slice(0, end)
+        .replace(/\r?\n[ \t]+/g, ' ')
+        .split(/\r?\n/)
+      const from = headers.filter((line) => /^from:/i.test(line))
+      const mailbox = from.length === 1 ? senderMailbox(from[0]?.slice(5).trim()) : null
+      return normalizeSender(mailbox?.address)
+    } finally {
+      await file.close()
+    }
+  } catch {
+    return null
+  }
+}
+
 export async function executeImap(
   sync: ImapAccountSync,
   changes: ImapChange[],
@@ -184,6 +212,7 @@ export async function executeImap(
   beforeWrite: () => void,
   log: Logger,
   requireDestinationUid = false,
+  screening?: { address?: string },
 ) {
   const { client, store, accountId, locations } = sync
   const unreadId = labelId(accountId, 'UNREAD')
@@ -195,6 +224,7 @@ export async function executeImap(
     ),
   )
   const folders = new Map<string, Folder>()
+  const normalFolders = new Set<string>()
 
   const finishMove = async (change: ImapChange, move: Move, uid?: number, validity?: string) => {
     const { source, destination, flags } = move
@@ -220,7 +250,9 @@ export async function executeImap(
         if (observed) log.warn('IMAP move destination UID is already assigned to another message')
         delete change.revisions
         if (requireDestinationUid)
-          entry.error ??= 'Snooze unavailable: the IMAP server did not verify the Archive UID'
+          entry.error ??= screening
+            ? 'The IMAP server did not verify the moved UID'
+            : 'Snooze unavailable: the IMAP server did not verify the Archive UID'
       }
       entry.applied.push(change)
       delete entry.pending
@@ -234,6 +266,54 @@ export async function executeImap(
   const removeCopiedSource = async (pending: Pending & { move: Move }, flags?: Set<string>) => {
     const { source, destination } = pending.move
     const { uid } = source
+    const stopCopyCleanup = () => {
+      entry.uncertain ??= []
+      entry.uncertain.push(pending.change)
+      done.add(pending.change.message_id)
+      entry.error = IMAP_COPY_INCOMPLETE
+      delete entry.pending
+      save()
+      return true
+    }
+    if (screening && (!pending.copied?.uid || !pending.copied.validity)) {
+      const recovered = await findMovedUid(client, pending.move, log, pending.copied?.validity)
+      if (!recovered) {
+        stopCopyCleanup()
+        await sync.refreshOrganiseFolder(destination)
+        return true
+      }
+      pending.copied = recovered
+      entry.pending = pending
+      save()
+      flags = undefined
+    }
+    if (screening) {
+      const managedPath = screening.address ? destination.path : decodeURIComponent(source.path_key)
+      if (!client.capabilities.has('UIDPLUS') || !normalFolders.has(managedPath))
+        return stopCopyCleanup()
+
+      const target = screening.address
+        ? store.db
+            .prepare(`
+              SELECT validity, mailbox_id FROM screened_destination
+              WHERE account_id = ? AND provider_id = ? AND state = 'ready'
+            `)
+            .get(accountId, destination.label.providerId)
+        : pending.change.moveFrom
+      const copied = pending.copied
+      if (!target || !copied?.uid || copied.validity !== target.validity) return stopCopyCleanup()
+
+      const box = await client.mailboxOpen(destination.path, { readOnly: true })
+      if (
+        String(box.uidValidity) !== target.validity ||
+        ('mailbox_id' in target && target.mailbox_id && target.mailbox_id !== box.mailboxId)
+      )
+        return stopCopyCleanup()
+
+      const targetFlags = await readFlags(client, copied.uid)
+      if (!targetFlags || targetFlags.has('\\Deleted')) return stopCopyCleanup()
+      flags = undefined
+    }
     const current =
       flags ?? ((await openSource(client, source, false)) && (await readFlags(client, uid)))
     if (current === false) {
@@ -301,8 +381,10 @@ export async function executeImap(
     entry.pending?.move ||
     changes.some(({ after }) => Object.keys(after).some((id) => !isFlag(id)))
   ) {
-    for (const folder of mapFolders(await client.list())) {
+    const list = await client.list()
+    for (const folder of mapFolders(list)) {
       folders.set(labelId(accountId, folder.label.providerId), folder)
+      if (screening && normalUserFolder(list, folder.path)) normalFolders.add(folder.path)
     }
   }
   const pending = entry.pending
@@ -366,6 +448,13 @@ export async function executeImap(
         )
         continue
       }
+      if (
+        screening &&
+        !normalFolders.has(screening.address ? destination.path : sourceFolder.path)
+      ) {
+        finish('failed', 'The Screened out folder is no longer a normal user folder')
+        continue
+      }
       if (!allowTrash && (sourceFolder.trash || destination.trash)) {
         finish('failed', 'Only the owner can move mail to or from Trash')
         continue
@@ -380,6 +469,32 @@ export async function executeImap(
       }
     }
 
+    if (screening?.address && (await readSourceSender(sync, source)) !== screening.address) {
+      finish('failed', 'The exact IMAP source Sender could not be verified')
+      continue
+    }
+    if (screening?.address && destination) {
+      const saved = store.db
+        .prepare(`
+        SELECT validity, mailbox_id FROM screened_destination
+        WHERE account_id = ? AND provider_id = ? AND state = 'ready'
+      `)
+        .get(accountId, destination.label.providerId)
+      const box = await client.mailboxOpen(destination.path, { readOnly: true })
+      if (
+        !saved ||
+        String(box.uidValidity) !== saved.validity ||
+        (saved.mailbox_id && saved.mailbox_id !== box.mailboxId)
+      ) {
+        store.db
+          .prepare(
+            "UPDATE screened_destination SET state = 'repair', error = ? WHERE account_id = ?",
+          )
+          .run('The managed Screened out folder changed', accountId)
+        finish('failed', 'The managed Screened out folder changed')
+        continue
+      }
+    }
     const lookup = destination && (await moveLookup(sync, source, destination, log))
     const uid = String(source.uid)
     const path = decodeURIComponent(source.path_key)

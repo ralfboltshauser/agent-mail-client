@@ -714,4 +714,63 @@ export const MIGRATIONS: readonly Migration[] = [
       DROP TABLE snoozed_label;
     `,
   },
+  {
+    version: 21,
+    name: 'Smart Inbox sender rules and owner actions',
+    sql: `
+      CREATE TABLE IF NOT EXISTS owner_action (
+        id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+        token_id TEXT NOT NULL, kind TEXT NOT NULL, request TEXT NOT NULL,
+        created_at INTEGER NOT NULL, undo_requested_at INTEGER, undo_token_id TEXT
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS sender_rule (
+        account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+        address TEXT NOT NULL, decision TEXT CHECK (decision IN ('accept', 'block')),
+        revision INTEGER NOT NULL, action_id TEXT NOT NULL REFERENCES owner_action(id),
+        decided_at INTEGER NOT NULL, PRIMARY KEY (account_id, address)
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS sender_evidence (
+        account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+        address TEXT NOT NULL, identity TEXT NOT NULL,
+        PRIMARY KEY (account_id, address, identity)
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS sender_index (
+        message_id TEXT PRIMARY KEY REFERENCES message(id) ON DELETE CASCADE,
+        account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+        address TEXT NOT NULL, in_inbox INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS sender_index_address ON sender_index(account_id, address, in_inbox);
+      CREATE TABLE IF NOT EXISTS sender_scan (
+        account_id TEXT PRIMARY KEY REFERENCES account(id) ON DELETE CASCADE,
+        cursor TEXT NOT NULL DEFAULT '', ready INTEGER NOT NULL DEFAULT 0
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS screened_destination (
+        account_id TEXT PRIMARY KEY REFERENCES account(id) ON DELETE CASCADE,
+        provider_id TEXT, validity TEXT, mailbox_id TEXT,
+        state TEXT NOT NULL CHECK (state IN ('creating', 'ready', 'repair')),
+        error TEXT
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS screening_work (
+        action_id TEXT NOT NULL REFERENCES owner_action(id) ON DELETE CASCADE,
+        identity TEXT NOT NULL, message_id TEXT NOT NULL,
+        mutation_id TEXT UNIQUE REFERENCES mutation(id) ON DELETE SET NULL,
+        undo_id TEXT UNIQUE REFERENCES mutation(id) ON DELETE SET NULL,
+        status TEXT NOT NULL DEFAULT 'pending', error TEXT, undo_error TEXT,
+        PRIMARY KEY (action_id, identity), UNIQUE (action_id, message_id)
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS screening_pending ON screening_work(status, action_id)
+        WHERE status = 'pending';
+      CREATE TABLE IF NOT EXISTS owner_handled (
+        thread_id TEXT PRIMARY KEY REFERENCES thread(id) ON DELETE CASCADE,
+        message_id TEXT NOT NULL,
+        action_id TEXT NOT NULL REFERENCES owner_action(id)
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS sender_suggestion (
+        action_id TEXT PRIMARY KEY REFERENCES agent_action(id) ON DELETE CASCADE,
+        token_id TEXT NOT NULL, account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+        address TEXT NOT NULL, message_id TEXT NOT NULL, decision TEXT NOT NULL, reason TEXT NOT NULL,
+        UNIQUE (token_id, account_id, address, decision)
+      ) STRICT;
+    `,
+  },
 ]

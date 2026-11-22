@@ -19,7 +19,14 @@ import type {
   SendRequest,
   VersionedDraft,
 } from '@amc/protocol'
-import { BucketInput } from '@amc/protocol'
+import {
+  AdoptScreenedDestination,
+  BucketInput,
+  SenderAvatarResolve,
+  SenderDecision,
+  SenderListQuery,
+  TriageQueueQuery,
+} from '@amc/protocol'
 import {
   app,
   BrowserWindow,
@@ -327,6 +334,43 @@ function registerIpc() {
     setStartupStatus(UNPAIRED)
     refreshTray()
   })
+  const queryString = (query: Record<string, string | number | undefined>) => {
+    const params = new URLSearchParams()
+    for (const [key, value] of Object.entries(query)) {
+      if (value !== undefined) params.set(key, String(value))
+    }
+    return params.toString()
+  }
+  ipcMain.handle('amc:listSenders', (_event, query: unknown) =>
+    requireEngine().get(`/v1/senders?${queryString(SenderListQuery.parse(query))}`),
+  )
+  ipcMain.handle('amc:decideSender', (_event, input: unknown) =>
+    requireEngine().request('/v1/senders/decisions', {
+      method: 'POST',
+      body: SenderDecision.parse(input),
+    }),
+  )
+  ipcMain.handle('amc:adoptScreenedDestination', (_event, input: unknown) =>
+    requireEngine().request('/v1/senders/destination/adopt', {
+      method: 'POST',
+      body: AdoptScreenedDestination.parse(input),
+    }),
+  )
+  ipcMain.handle('amc:ownerAction', (_event, id: string) =>
+    requireEngine().get(`/v1/owner-actions/${encodeURIComponent(id)}`),
+  )
+  ipcMain.handle('amc:undoOwnerAction', (_event, id: string) =>
+    requireEngine().request(`/v1/owner-actions/${encodeURIComponent(id)}/undo`, { method: 'POST' }),
+  )
+  ipcMain.handle('amc:triageQueue', (_event, query: unknown) =>
+    requireEngine().get(`/v1/triage/queue?${queryString(TriageQueueQuery.parse(query))}`),
+  )
+  ipcMain.handle('amc:resolveSenderAvatars', (_event, input: unknown) =>
+    requireEngine().request('/v1/sender-avatars/resolve', {
+      method: 'POST',
+      body: SenderAvatarResolve.parse(input),
+    }),
+  )
   ipcMain.handle('amc:setBucket', async (_event, input: unknown) => {
     const body = BucketInput.parse(input)
     const loop = sync

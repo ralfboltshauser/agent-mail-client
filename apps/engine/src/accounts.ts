@@ -75,6 +75,18 @@ function upsertAccount(
           for (const { provider_id } of messages) store.deleteMessage(existing.id, provider_id)
         }
         store.syncLabels(existing.id, [])
+        db.prepare(`
+          UPDATE screening_work SET
+            status = CASE WHEN mutation_id IS NULL AND status = 'pending' THEN 'superseded' ELSE status END,
+            undo_error = coalesce(undo_error, 'Undo unavailable: the IMAP Account endpoint changed')
+          WHERE action_id IN (SELECT id FROM owner_action WHERE account_id = ?)
+            AND (undo_id IS NULL OR undo_id IN (SELECT id FROM mutation WHERE status = 'pending'))
+        `).run(existing.id)
+        db.prepare('DELETE FROM sender_rule WHERE account_id = ?').run(existing.id)
+        db.prepare('DELETE FROM sender_evidence WHERE account_id = ?').run(existing.id)
+        db.prepare('DELETE FROM sender_scan WHERE account_id = ?').run(existing.id)
+        db.prepare('DELETE FROM sender_suggestion WHERE account_id = ?').run(existing.id)
+        db.prepare('DELETE FROM screened_destination WHERE account_id = ?').run(existing.id)
         db.prepare(
           "UPDATE account SET cursor = '{}', backfill = '{}', last_sync_at = NULL WHERE id = ?",
         ).run(existing.id)

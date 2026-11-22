@@ -12,6 +12,7 @@ import {
   type MessageText,
 } from 'mailparser'
 import type { BlobStore } from '../../blobs.ts'
+import { senderMailbox } from '../../mail/senders/identity.ts'
 import type { IncomingAttachment, IncomingLabel, IncomingMessage } from '../../mail/store.ts'
 import { BODY_SEARCH_LIMIT, ImapBodyParts } from './body-parts.ts'
 
@@ -59,6 +60,17 @@ export function mapFolders(list: ListResponse[]): Folder[] {
     folders.push({ path, label, trash })
   }
   return folders.sort((a, b) => Number(b.path === 'INBOX') - Number(a.path === 'INBOX'))
+}
+
+export function normalUserFolder(list: ListResponse[], path: string): boolean {
+  return list.some(
+    (folder) =>
+      folder.path === path &&
+      !folder.specialUse &&
+      ![...folder.flags].some((flag) =>
+        /^\\(?:inbox|junk|spam|trash|sent|drafts|archive|all)$/i.test(flag),
+      ),
+  )
 }
 
 export function messagePrefix(path: string): string {
@@ -163,6 +175,8 @@ export async function parseMessage(
   const reply = headers.get('in-reply-to')
   const references = headers.get('references')
   const subject = headers.get('subject')
+  const from = lines.filter(({ key }) => key === 'from')
+
   return {
     providerId: providerMessageId(folder.path, uidValidity, item.uid),
     providerThreadId: '',
@@ -173,7 +187,10 @@ export async function parseMessage(
       : typeof references === 'string'
         ? references
         : null,
-    from: addresses(headers.get('from') as AddressObject | undefined)[0] ?? null,
+    from:
+      from.length === 1
+        ? senderMailbox(from[0]?.line.replace(/^from:\s*/i, '').replace(/\r?\n[ \t]+/g, ' '))
+        : null,
     to: addresses(headers.get('to') as AddressObject | AddressObject[] | undefined),
     cc: addresses(headers.get('cc') as AddressObject | AddressObject[] | undefined),
     bcc: addresses(headers.get('bcc') as AddressObject | AddressObject[] | undefined),

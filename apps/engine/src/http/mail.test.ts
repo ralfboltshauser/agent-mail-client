@@ -19,8 +19,10 @@ import { Sealer } from '../crypto.ts'
 import { createLogger } from '../log.ts'
 import { gmailDelivery, publishSent } from '../mail/delivery.ts'
 import { Drafts } from '../mail/drafts.ts'
+import { Mutations } from '../mail/mutations.ts'
 import { Outbox } from '../mail/outbox.ts'
 import { MailQueries } from '../mail/queries.ts'
+import { decideSender, senderActionStatus, undoSender } from '../mail/senders/actions.ts'
 import { MailStore } from '../mail/store.ts'
 import { FakeGmail } from '../providers/gmail/fake.ts'
 import { fromGmail } from '../providers/gmail/mapping.ts'
@@ -373,6 +375,64 @@ it.each([
     await vi.waitFor(async () => expect(await subjects()).toEqual(['New endpoint']))
   } finally {
     await sync.stop()
+  }
+})
+
+it('does not carry IMAP screening authority or Undo across endpoints', async () => {
+  const first = new FakeImap()
+  const next = new FakeImap()
+  for (const imap of [first, next]) imap.capabilities.set('MOVE', true)
+  const oldUid = first.add('INBOX', 'Message-ID: <old-endpoint@example.com>')
+  const unrelatedUid = next.add('INBOX', 'Message-ID: <new-endpoint@example.com>')
+  const { call, admin, db, store, sync } = setup({
+    imapClient: ({ username }) => (username === 'replacement' ? next : first).client,
+  })
+  const queue = new Mutations(store, () => null, silentLog, {
+    imap: (account, work) => sync.organiseImap(account, work),
+  })
+  try {
+    const initial = (await (await call('/v1/accounts/imap', admin, login)).json()) as {
+      accountId: string
+    }
+    const principal = authenticate(db, admin)
+    if (!principal) throw new Error('Fixture owner missing')
+    const accountReady = async () => {
+      await vi.waitFor(() =>
+        expect(
+          db.prepare('SELECT status, last_error FROM account WHERE id = ?').get(initial.accountId),
+        ).toMatchObject({ status: 'ready', last_error: null }),
+      )
+    }
+    await accountReady()
+    const { actionId } = decideSender(store, principal, {
+      accountId: initial.accountId,
+      address: 'sender@example.com',
+      expectedRevision: 0,
+      clientActionId: randomUUID(),
+      decision: 'block',
+    })
+    await queue.tick()
+    await queue.tick()
+    expect(first.folder('INBOX').messages.has(oldUid)).toBe(false)
+
+    const changed = await call('/v1/accounts/imap', admin, {
+      ...login,
+      imap: { ...login.imap, username: 'replacement' },
+    })
+    expect(changed.status).toBe(200)
+    await accountReady()
+    undoSender(store, principal, actionId)
+    await queue.tick()
+    await queue.tick()
+    expect(next.folder('INBOX').messages.has(unrelatedUid)).toBe(true)
+    expect(next.writes).toEqual([])
+    expect(db.prepare('SELECT 1 FROM sender_rule').get()).toBeUndefined()
+    expect(senderActionStatus(db, actionId).undo).toMatchObject({
+      status: 'failed',
+      error: expect.stringMatching(/endpoint changed/),
+    })
+  } finally {
+    await Promise.all([sync.stop(), queue.stop()])
   }
 })
 

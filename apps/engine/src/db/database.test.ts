@@ -5,10 +5,11 @@ import { tempDir } from '../test-support.ts'
 import { migrate, openDatabase, schemaVersion, transaction } from './database.ts'
 import { MIGRATIONS } from './migrations.ts'
 
+const latest = Math.max(...MIGRATIONS.map(({ version }) => version))
+
 describe('migrate', () => {
   it('brings a new database to the latest version and is idempotent', () => {
     const db = openDatabase(':memory:')
-    const latest = Math.max(...MIGRATIONS.map((m) => m.version))
     expect(migrate(db)).toBe(latest)
     expect(migrate(db)).toBe(latest)
     expect(schemaVersion(db)).toBe(latest)
@@ -20,7 +21,7 @@ describe('migrate', () => {
     try {
       expect(migrate(db, { migrations: MIGRATIONS.filter(({ version }) => version <= 7) })).toBe(7)
       expect(MIGRATIONS.filter(({ version }) => version > 7).map(({ version }) => version)).toEqual(
-        [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+        [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21],
       )
       db.exec(`
         INSERT INTO account (id, kind, address, credentials, created_at)
@@ -40,7 +41,7 @@ describe('migrate', () => {
         VALUES ('i', 'INBOX', '1', 2, 'i:m', 'i:INBOX', 1, 1, 'fixture-source');
       `)
       const backupDir = join(dir, 'backups')
-      expect(migrate(db, { backupDir })).toBe(20)
+      expect(migrate(db, { backupDir })).toBe(latest)
       expect(db.prepare('SELECT bucket FROM thread WHERE id = ?').get('a:t')).toEqual({
         bucket: null,
       })
@@ -105,7 +106,7 @@ describe('migrate', () => {
     if (!compose) throw new Error('Compose migration missing')
     expect(migrate(db, { migrations: MIGRATIONS.filter(({ version }) => version <= 8) })).toBe(8)
     db.exec('DROP TABLE schema_migration')
-    expect(migrate(db)).toBe(20)
+    expect(migrate(db)).toBe(latest)
     expect(db.prepare('SELECT * FROM organise_intent').all()).toEqual([])
     expect(db.prepare('SELECT * FROM outbox').all()).toEqual([])
 
@@ -143,7 +144,7 @@ describe('migrate', () => {
         { account_id: 'g', mirror_hash: 'gmail-hash' },
         { account_id: 'i', mirror_hash: null },
       ])
-      expect(migrate(db)).toBe(20)
+      expect(migrate(db)).toBe(latest)
     } finally {
       db.close()
     }
@@ -169,7 +170,7 @@ describe('migrate', () => {
         INSERT INTO mutation_message (mutation_id, message_id, patch, before)
         VALUES ('old', 'a:m1', '{"a:INBOX":false,"a:AMC/Snoozed":true}', '{"a:INBOX":true}');
       `)
-      expect(migrate(db)).toBe(20)
+      expect(migrate(db)).toBe(latest)
       expect(db.prepare('SELECT label_ids FROM message ORDER BY id').all()).toEqual([
         { label_ids: '["a:INBOX"]' },
         { label_ids: '["a:AMC/Snoozed"]' },
@@ -206,7 +207,7 @@ describe('migrate', () => {
         VALUES ('a:m1', 'a', 'a:t', 'm1', 1, '["a:AMC/Snoozed","a:INBOX"]', '["a:AMC/Snoozed","a:INBOX"]'),
                ('a:m2', 'a', 'a:t', 'm2', 2, '[]', NULL);
       `)
-      expect(migrate(db)).toBe(20)
+      expect(migrate(db)).toBe(latest)
       expect(
         db.prepare('SELECT label_ids, provider_label_ids, modseq FROM message ORDER BY id').all(),
       ).toEqual([
