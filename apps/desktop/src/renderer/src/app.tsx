@@ -5,6 +5,7 @@ import { PairScreen } from './components/pair-screen'
 import { Button } from './components/ui/button'
 import { Toaster } from './components/ui/sonner'
 import { TooltipProvider } from './components/ui/tooltip'
+import { FeedbackEntry } from './features/feedback/feedback-entry'
 import { MailWorkspace } from './features/mailbox/mail-workspace'
 import { usePairingGate } from './hooks/use-amc'
 import { useTheme } from './hooks/use-theme'
@@ -28,6 +29,7 @@ export function App() {
           onToggleTheme={toggleTheme}
         />
       )}
+      <FeedbackEntry />
       <Toaster theme={dark ? 'dark' : 'light'} position="bottom-center" />
     </TooltipProvider>
   )
@@ -35,7 +37,7 @@ export function App() {
 
 function SavedPairingState({ retrying }: { retrying: boolean }) {
   return (
-    <main className="grid h-screen place-items-center">
+    <main data-feedback-view="setup" className="grid h-screen place-items-center">
       <div className="app-drag absolute inset-x-0 top-0 h-11" />
       {retrying ? (
         <output className="text-sm text-muted-foreground">Reconnecting…</output>

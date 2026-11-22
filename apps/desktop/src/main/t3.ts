@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import {
   type OAuthClientProvider,
   UnauthorizedError,
@@ -57,8 +57,9 @@ function t3Url(address: string): URL {
   return url
 }
 
-export function t3Client(address: string): Promise<Client> {
+export function t3Client(address: string, allowPairing = true): Promise<Client> {
   const url = t3Url(address)
+  if (!allowPairing) return connectT3(url, false)
   if (connection?.url === url.href) return connection.client
   const previous = connection
   const client = connectT3(url).catch((error: unknown) => {
@@ -70,7 +71,7 @@ export function t3Client(address: string): Promise<Client> {
   return client
 }
 
-async function connectT3(url: URL): Promise<Client> {
+async function connectT3(url: URL, allowPairing = true): Promise<Client> {
   const saved = loadPairing()
   const stored = saved?.url === url.href ? saved : null
   const client = new Client({ name: 'AMC Desktop', version: '1.0.0' })
@@ -85,6 +86,7 @@ async function connectT3(url: URL): Promise<Client> {
       if (!(error instanceof UnauthorizedError)) throw error
     }
   }
+  if (!allowPairing) throw new Error('Pair AMC with T3 Code before sending feedback.')
   return pairT3(url)
 }
 
@@ -221,4 +223,112 @@ export function mcpLauncher(address: string): T3Launcher {
     projects: () => t3Projects(address),
     launch: (request) => launchInT3(address, request),
   }
+}
+
+export function pairedFeedbackLauncher(address: string): T3Launcher {
+  const url = t3Url(address)
+  return {
+    key: `mcp:${url.href}`,
+    projects: () => t3Projects(address),
+    async launch(request, imagePath) {
+      const client = await t3Client(address, false)
+      try {
+        return await launchT3Feedback(client, url, request, imagePath)
+      } finally {
+        await client.close().catch(() => {})
+      }
+    },
+  }
+}
+
+export async function launchT3Feedback(
+  client: Pick<Client, 'listTools' | 'callTool'>,
+  endpoint: URL,
+  request: T3Launch,
+  imagePath?: string,
+  upload = fetch,
+): Promise<T3Thread> {
+  const options = { timeout: 20_000 }
+  let attachment:
+    | { id: string; type: 'image'; name: string; mimeType: string; sizeBytes: number }
+    | undefined
+  if (imagePath) {
+    const { tools } = await client.listTools(undefined, options)
+    const launch = tools.find((tool) => tool.name === 't3_thread_launch')
+    if (
+      launch?.inputSchema.properties?.attachments &&
+      tools.some((tool) => tool.name === 't3_attachment_prepare_upload')
+    ) {
+      const bytes = readFileSync(imagePath)
+      const metadata = {
+        type: 'image' as const,
+        name: basename(imagePath),
+        mimeType: 'image/png',
+        sizeBytes: bytes.length,
+      }
+      const prepared = await client.callTool(
+        {
+          name: 't3_attachment_prepare_upload',
+          arguments: { upload: metadata },
+        },
+        undefined,
+        options,
+      )
+      const result = prepared.structuredContent as
+        | { attachmentId?: string; relativeUrl?: string; uploadUrl?: string }
+        | undefined
+      if (prepared.isError || typeof result?.attachmentId !== 'string')
+        throw new Error('T3 could not prepare the screenshot attachment.')
+      try {
+        const target = new URL(result.uploadUrl ?? result.relativeUrl ?? '', endpoint)
+        if (
+          target.origin !== endpoint.origin ||
+          !target.pathname.startsWith('/api/attachments/upload/')
+        )
+          throw new Error('Invalid T3 attachment URL.')
+        const response = await upload(target, {
+          method: 'POST',
+          body: bytes,
+          headers: { 'Content-Type': metadata.mimeType },
+          redirect: 'error',
+          signal: AbortSignal.timeout(20_000),
+        })
+        if (!response.ok) throw new Error('T3 could not upload the screenshot.')
+        attachment = { id: result.attachmentId, ...metadata }
+      } catch (error) {
+        await client
+          .callTool(
+            {
+              name: 't3_attachment_discard',
+              arguments: { attachmentId: result.attachmentId },
+            },
+            undefined,
+            options,
+          )
+          .catch(() => {})
+        throw error
+      }
+    }
+  }
+  // Once dispatched, a lost launch response is ambiguous. Let T3 retain the upload
+  // for that attempt instead of deleting a screenshot it may already have claimed.
+  const response = await client.callTool(
+    {
+      name: 't3_thread_launch',
+      arguments: attachment
+        ? { ...request, attachments: [attachment] }
+        : {
+            ...request,
+            message: imagePath
+              ? `${request.message}
+Local screenshot: ${imagePath}`
+              : request.message,
+          },
+    },
+    undefined,
+    options,
+  )
+  const thread = response.structuredContent as T3Thread | undefined
+  if (!response.isError && thread?.threadId) return thread
+  throw new Error('T3 could not confirm the feedback thread.')
 }

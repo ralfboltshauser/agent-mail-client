@@ -219,8 +219,22 @@ export function MailWorkspace({
         ? view.bucket
         : (systemViews(snoozeEnabled).find((v) => v.view.kind === view.kind)?.title ?? 'Mail')
 
+  const feedbackView =
+    dialogs.sendSettings !== null
+      ? 'settings'
+      : compose.draft
+        ? 'composer'
+        : review.open
+          ? 'triage'
+          : search
+            ? 'search'
+            : filter
+              ? 'filter'
+              : view.kind
+
   return (
     <SidebarProvider
+      data-feedback-view={feedbackView}
       open={sidebarOpen}
       onOpenChange={setSidebarOpen}
       className="h-full"

@@ -38,3 +38,9 @@ install command after updating the checkout.
 For the Apple silicon desktop app, see the [Mac installation and update steps](docs/runbook.md#mac-desktop-app).
 
 Licensed under MIT.
+
+## Send AMC feedback
+
+Press **⌘⇧F**, or choose **Send Feedback…** from Help or the tray. AMC captures its window. Add a note, optionally click **Annotate** to mark an element, and press **⌘Enter** to open a new thread in the AMC project in T3 Code. You can leave the note blank and add details in T3.
+
+The screenshot may include visible mail. AMC retains the last 20 captures in its private `feedback/` folder. A paired local T3 connection can attach the PNG. Older T3 versions and the local CLI use the screenshot’s local path. If T3 is unavailable, **Copy feedback** copies the prompt and reveals the PNG in Finder.

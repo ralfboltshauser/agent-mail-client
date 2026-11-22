@@ -7,6 +7,14 @@ Object.defineProperties(Range.prototype, {
   getBoundingClientRect: { configurable: true, value: () => new DOMRect() },
 })
 
+// JSDOM exposes the element without the modal top-layer methods.
+HTMLDialogElement.prototype.showModal ??= function () {
+  this.open = true
+}
+HTMLDialogElement.prototype.close ??= function () {
+  this.open = false
+}
+
 // cmdk scrolls the selected command into view.
 Element.prototype.scrollIntoView = () => {}
 

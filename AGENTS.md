@@ -17,3 +17,7 @@ Review handwritten files around 300 lines and components around 150 lines. Split
 - [ ] Exercise slow, failed, and out-of-order responses when changing reads or writes. Show empty state after an accepted result.
 - [ ] Verify draft durability, reviewed revisions, and send/undo when changing composer or delivery.
 - [ ] Run `pnpm check` and `pnpm build`. Use synthetic mail for shared traces and screenshots.
+
+## Desktop feedback
+
+The owner can open a feedback thread from AMC with **⌘⇧F**. Use the [AMC feedback skill](.agents/skills/amc-feedback/SKILL.md) when a thread starts with “AMC feedback”.

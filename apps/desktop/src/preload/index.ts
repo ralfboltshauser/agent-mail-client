@@ -8,6 +8,18 @@ const invoke =
     ipcRenderer.invoke(`amc:${channel}`, ...args)
 
 const api: AmcApi = {
+  feedback: {
+    onOpen(listener) {
+      const handler = () => listener()
+      ipcRenderer.on('amc:feedbackOpen', handler)
+      ipcRenderer.send('amc:feedbackReady')
+      return () => ipcRenderer.off('amc:feedbackOpen', handler)
+    },
+    capture: invoke('feedbackCapture') as AmcApi['feedback']['capture'],
+    send: invoke('feedbackSend') as AmcApi['feedback']['send'],
+    release: invoke('feedbackRelease') as AmcApi['feedback']['release'],
+    copy: invoke('feedbackCopy') as AmcApi['feedback']['copy'],
+  },
   smartInbox: {
     review: {
       reviewPairing: invoke('reviewPairing') as ReviewApi['reviewPairing'],

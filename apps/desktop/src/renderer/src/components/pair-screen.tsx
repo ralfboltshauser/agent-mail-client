@@ -35,7 +35,7 @@ export function PairScreen({
   }
 
   return (
-    <div className="flex h-full flex-col">
+    <div data-feedback-view="setup" className="flex h-full flex-col">
       <div className="app-drag h-10 shrink-0" />
       <div className="flex flex-1 items-center justify-center p-8">
         <form
