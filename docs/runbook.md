@@ -195,10 +195,14 @@ already landed will come back through sync. To save preview-only draft text and
 envelopes, export them from the copy and recreate those drafts manually:
 
 ```sh
-umask 077
-sqlite3 -readonly -json /path/to/preview-copy.db \
-  'SELECT account_id, thread_id, to_json, cc_json, bcc_json, subject, body_text FROM draft' \
-  > preview-drafts.json
+(
+  umask 077
+  export_dir=$(mktemp -d "./amc-preview.XXXXXXXX") || exit 1
+  sqlite3 -readonly -json /path/to/preview-copy.db \
+    'SELECT account_id, thread_id, to_json, cc_json, bcc_json, subject, body_text FROM draft' \
+    > "$export_dir/preview-drafts.json" &&
+    printf '%s\n' "$export_dir/preview-drafts.json"
+)
 ```
 
 Keep the original and the export private. Pending mutations and Engine-only

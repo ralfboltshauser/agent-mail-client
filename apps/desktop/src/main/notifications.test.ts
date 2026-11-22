@@ -1,5 +1,6 @@
 import type { AccountSummary, MessageDetail, SyncChange, ThreadSummary } from '@amc/protocol'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { EngineClient } from './engine'
 import {
   DEFAULT_NOTIFICATION_SETTINGS,
   inQuietHours,
@@ -8,6 +9,7 @@ import {
   parseNotificationSettings,
 } from './notifications'
 import { Replica } from './replica'
+import { SyncLoop } from './sync'
 
 const now = new Date(2026, 10, 21, 12).getTime()
 const old = now - 11 * 60_000
@@ -56,6 +58,7 @@ function message(id: string, overrides: Partial<MessageDetail> = {}): MessageDet
     bodyText: '',
     hasHtml: false,
     sentAt: now,
+    deliveredAt: now,
     unread: true,
     starred: false,
     labelIds: ['a:INBOX'],
@@ -86,7 +89,7 @@ describe('new Inbox mail', () => {
     replica.put('message', message('existing', { unread: false }))
     const changes: SyncChange[] = [
       message('existing'),
-      message('old', { sentAt: old }),
+      message('missing-delivery', { deliveredAt: undefined }),
       message('old-delivery', { deliveredAt: old }),
       message('future', { deliveredAt: now + 1 }),
       message('read', { unread: false }),
@@ -105,6 +108,40 @@ describe('new Inbox mail', () => {
     replica.apply(changes)
     expect(newInboxMessages(replica, changes, now)).toEqual([])
   })
+})
+
+it('emits notification and triage arrivals for the same incremental sync page', async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(now)
+  replica.modseq = 1
+  const delivered = message('delivery', { threadId: 'new-thread', sentAt: old })
+  const engine = new EngineClient('https://engine.example', 'fixture')
+  vi.spyOn(engine, 'get').mockResolvedValue({
+    modseq: 3,
+    more: false,
+    changes: [
+      {
+        modseq: 2,
+        entity: 'thread',
+        op: 'upsert',
+        id: delivered.threadId,
+        data: { ...thread, id: delivered.threadId },
+      },
+      { ...change(delivered), modseq: 3 },
+    ],
+  })
+  const loop = new SyncLoop(engine, replica)
+  const newMail = vi.fn()
+  const arrivals = vi.fn()
+  loop.on('newMail', newMail)
+  loop.on('arrivals', arrivals)
+  await loop.pull()
+
+  expect(newMail).toHaveBeenCalledExactlyOnceWith([
+    { id: delivered.id, threadId: delivered.threadId, key: delivered.id },
+  ])
+  expect(arrivals).toHaveBeenCalledExactlyOnceWith(new Map([[delivered.threadId, account.id]]))
+  expect(replica.modseq).toBe(3)
 })
 
 describe('quiet hours', () => {

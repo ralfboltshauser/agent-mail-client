@@ -8,7 +8,8 @@ type Candidate = Pick<Message, 'id' | 'threadId'> & { key: string }
 const RECENT_ARRIVAL_MS = 10 * 60 * 1000
 
 function arrivalTime(message: Message): number {
-  return message.deliveredAt ?? message.sentAt
+  // Old replica rows can lack provider delivery time. Treat those as historical.
+  return message.deliveredAt ?? Number.NEGATIVE_INFINITY
 }
 
 function messageIdentity(message: Message): string | undefined {
