@@ -21,6 +21,9 @@ export const TRIAGE_RECENT_WINDOW_MS = 24 * 60 * 60_000
 
 export const UntriagedLimit = z.number().int().min(1).max(100).default(25)
 
+export const BucketConfidence = z.enum(['low', 'medium', 'high'])
+export type BucketConfidence = z.infer<typeof BucketConfidence>
+
 export const BucketInput = z.object({
   threadId: z.string().min(1),
   bucket: Bucket.nullable(),
@@ -28,9 +31,24 @@ export const BucketInput = z.object({
 })
 export type BucketInput = z.infer<typeof BucketInput>
 
+export const BucketReviewInput = BucketInput.extend({
+  intent: z.literal('review'),
+  bucket: Bucket,
+  expectedRevision: z.number().int().nonnegative(),
+  clientActionId: z.uuid(),
+})
+
+export const TriageBucketResult = z.object({
+  inputRevision: z.number().int().nonnegative(),
+  confidence: BucketConfidence.optional(),
+})
+
+export type TriageBucketResult = z.infer<typeof TriageBucketResult>
+
 export const BucketAssignment = z.object({
   bucket: Bucket,
   reason: BucketReason,
   setBy: z.string(),
   setAt: z.number(),
+  confidence: BucketConfidence.nullable().optional(),
 })

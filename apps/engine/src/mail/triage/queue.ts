@@ -1,0 +1,109 @@
+import type { TriageQueuePage, TriageQueueQuery } from '@amc/protocol'
+import { z } from 'zod'
+import { type Db, transaction } from '../../db/database.ts'
+import { SenderError } from '../senders/actions.ts'
+import { senderStatusSql } from '../senders/index.ts'
+import { latestInboxMessageSql } from './input.ts'
+
+const Cursor = z.tuple([
+  z.string().nullable(),
+  z.number().int(),
+  z.number().int().min(0).max(1),
+  z.number().int(),
+  z.string(),
+])
+
+interface QueueRow {
+  tier: number
+  threadId: string
+  threadRevision: number
+  accountId: string
+  messageId: string
+  address: string | null
+  ruleRevision: number
+  reason: string
+  at: number
+}
+
+export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
+  let boundary: z.infer<typeof Cursor> | undefined
+  const account = input.accountId ?? null
+  if (input.cursor) {
+    try {
+      boundary = Cursor.parse(JSON.parse(input.cursor))
+      if (boundary[0] !== account) throw new Error()
+    } catch {
+      throw new SenderError('Invalid triage queue cursor', 400)
+    }
+  }
+  return transaction(db, () => {
+    const revision = Number(
+      db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'change_log'").get()?.seq ?? 0,
+    )
+    if (boundary && revision !== boundary[1])
+      throw new SenderError('Triage queue changed. Start a fresh snapshot.', 409)
+
+    const rows = db
+      .prepare(`
+      WITH inbox AS MATERIALIZED (
+        SELECT t.id, t.account_id, t.modseq, t.last_message_at, t.bucket_confidence,
+          t.bucket_input_message_id, t.bucket_reason,
+          (SELECT json_object('id', m.id, 'address', i.address, 'revision', coalesce(r.revision, 0),
+             'status', ${senderStatusSql})
+           FROM message m JOIN sender_index i ON i.message_id = m.id
+           LEFT JOIN sender_rule r ON r.account_id = i.account_id AND r.address = i.address
+           WHERE m.thread_id = t.id AND i.in_inbox = 1
+             AND EXISTS (SELECT 1 FROM json_each(m.label_ids) WHERE value = m.account_id || ':INBOX')
+           ORDER BY m.sent_at DESC, m.id DESC LIMIT 1) AS sender
+        FROM thread t WHERE t.in_inbox = 1 AND (?1 IS NULL OR t.account_id = ?1)
+      ), new_senders AS (
+        SELECT t.*, row_number() OVER (
+          PARTITION BY account_id, sender ->> 'address' ORDER BY last_message_at DESC, id DESC
+        ) AS sender_rank
+        FROM inbox t WHERE sender ->> 'status' = 'new'
+      ), cards AS (
+        SELECT 0 AS tier, id AS threadId, modseq AS threadRevision, account_id AS accountId,
+          sender ->> 'id' AS messageId, sender ->> 'address' AS address,
+          sender ->> 'revision' AS ruleRevision, 'New sender' AS reason, last_message_at AS at
+        FROM new_senders WHERE sender_rank = 1
+        UNION ALL
+        SELECT 1, t.id, t.modseq, t.account_id, t.bucket_input_message_id, null, 0,
+          t.bucket_reason, t.last_message_at
+        FROM inbox t LEFT JOIN owner_handled h ON h.thread_id = t.id
+        WHERE t.bucket_confidence = 'low' AND t.sender ->> 'status' IS NOT 'new'
+          AND t.bucket_input_message_id = ${latestInboxMessageSql}
+          AND h.message_id IS NOT t.bucket_input_message_id
+      )
+      SELECT * FROM cards
+      WHERE ?2 IS NULL OR tier > ?2 OR (tier = ?2 AND (at, threadId) < (?3, ?4))
+      ORDER BY tier, at DESC, threadId DESC LIMIT ?5
+    `)
+      .all({
+        1: account,
+        2: boundary?.[2] ?? null,
+        3: boundary?.[3] ?? null,
+        4: boundary?.[4] ?? null,
+        5: input.limit + 1,
+      }) as unknown as QueueRow[]
+    const page = rows.slice(0, input.limit)
+    const last = page.at(-1)
+    return {
+      revision,
+      cards: page.map(
+        ({ address, accountId, threadId, threadRevision, messageId, ruleRevision, reason }) => ({
+          id: address ? { kind: 'sender', accountId, address } : { kind: 'thread', threadId },
+          accountId,
+          threadId,
+          threadRevision,
+          messageId,
+          revision: address ? ruleRevision : threadRevision,
+          reason,
+        }),
+      ),
+      cursor:
+        last && rows.length > input.limit
+          ? JSON.stringify([account, revision, last.tier, last.at, last.threadId])
+          : null,
+    }
+  })
+}
