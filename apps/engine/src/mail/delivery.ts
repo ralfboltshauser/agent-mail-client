@@ -99,7 +99,10 @@ export function imapDelivery(api: ImapProvider): Delivery {
         .join(' ')
       return {
         kind: 'accepted',
-        receipt: receipt(message, id, `amc-sent:${id}`, detail || undefined),
+        receipt: {
+          ...receipt(message, id, `amc-sent:${id}`, detail || undefined),
+          allRecipientsAccepted: sent.rejected.length === 0,
+        },
       }
     },
     async find(message, id) {
@@ -186,5 +189,5 @@ export function publishSent(
         messageId(message.accountId, sent.providerId),
       )
   }
-  drafts.finishSend(message)
+  drafts.finishSend(message, receipt.allRecipientsAccepted)
 }
