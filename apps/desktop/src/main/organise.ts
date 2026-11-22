@@ -166,6 +166,7 @@ export class LocalOrganise {
          WHERE q.status != 'failed' AND q.undo_of IS NULL
            AND json_extract(q.request, '$.action.kind') != 'undo'
            AND (?1 IS NULL OR q.thread_id = ?1)
+           AND (?1 IS NOT NULL OR ?2 IS NOT NULL OR t.id IS NOT NULL)
            AND NOT (
              COALESCE(json_extract(a.data, '$.kind') = 'imap', 0)
              AND q.status = 'applied' AND q.messages IS NOT NULL
@@ -178,7 +179,7 @@ export class LocalOrganise {
            AND NOT EXISTS (SELECT 1 FROM organise_queue u WHERE u.undo_of = q.id AND u.status != 'failed')
          ORDER BY q.seq DESC LIMIT 1`,
         )
-        .get(threadId ?? null) as unknown as QueueRow | undefined
+        .get(threadId ?? null, action.mutationId ?? null) as unknown as QueueRow | undefined
       if (action.mutationId && row?.id !== action.mutationId)
         throw new Error('Undo the newer action on this Thread first')
       if (row) {

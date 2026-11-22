@@ -654,4 +654,56 @@ export const MIGRATIONS: readonly Migration[] = [
     name: 'Track the provider revision written by AMC',
     sql: 'ALTER TABLE draft ADD COLUMN mirror_written_hash TEXT',
   },
+  {
+    version: 19,
+    name: 'Use Gmail provider IDs for existing AMC/Snoozed memberships',
+    sql: `
+      CREATE TEMP TABLE snoozed_label AS
+        SELECT l.account_id, l.id, l.account_id || ':AMC/Snoozed' AS legacy_id
+        FROM label l JOIN account a ON a.id = l.account_id
+        WHERE a.kind = 'gmail' AND l.kind = 'user' AND l.name = 'AMC/Snoozed'
+          AND l.id != l.account_id || ':AMC/Snoozed'
+        GROUP BY l.account_id HAVING count(*) = 1;
+
+      INSERT INTO change_log (entity, entity_id, op, at)
+        SELECT 'message', m.id, 'upsert', unixepoch() * 1000
+        FROM message m JOIN snoozed_label l ON l.account_id = m.account_id
+        WHERE instr(m.label_ids, json_quote(l.legacy_id)) > 0;
+
+      UPDATE message AS m
+        SET label_ids = (
+          SELECT json_group_array(DISTINCT CASE WHEN value = l.legacy_id THEN l.id ELSE value END)
+          FROM json_each(m.label_ids)
+        ), modseq = (
+          SELECT max(modseq) FROM change_log WHERE entity = 'message' AND entity_id = m.id
+        )
+        FROM snoozed_label l
+        WHERE m.account_id = l.account_id AND instr(m.label_ids, json_quote(l.legacy_id)) > 0;
+
+      UPDATE message AS m
+        SET provider_label_ids = (
+          SELECT json_group_array(DISTINCT CASE WHEN value = l.legacy_id THEN l.id ELSE value END)
+          FROM json_each(m.provider_label_ids)
+        )
+        FROM snoozed_label l
+        WHERE m.account_id = l.account_id AND instr(m.provider_label_ids, json_quote(l.legacy_id)) > 0;
+
+      INSERT INTO change_log (entity, entity_id, op, at)
+        SELECT 'thread', t.id, 'upsert', unixepoch() * 1000
+        FROM thread t JOIN snoozed_label l ON l.account_id = t.account_id
+        WHERE instr(t.label_ids, json_quote(l.legacy_id)) > 0;
+
+      UPDATE thread AS t
+        SET label_ids = (
+          SELECT json_group_array(DISTINCT CASE WHEN value = l.legacy_id THEN l.id ELSE value END)
+          FROM json_each(t.label_ids)
+        ), modseq = (
+          SELECT max(modseq) FROM change_log WHERE entity = 'thread' AND entity_id = t.id
+        )
+        FROM snoozed_label l
+        WHERE t.account_id = l.account_id AND instr(t.label_ids, json_quote(l.legacy_id)) > 0;
+
+      DROP TABLE snoozed_label;
+    `,
+  },
 ]
