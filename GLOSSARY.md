@@ -128,7 +128,6 @@ A triage assessment of how certain a prediction is for the current incoming mail
 
 An owner's explicit replacement or confirmation of a triage judgment.
 
-
 ### Owner preferences
 
 **Decision label**:
