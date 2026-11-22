@@ -188,6 +188,36 @@ it('moves only exact Inbox messages, saves one private reason and appends per-me
   }
 })
 
+it('keeps Gmail mail in Inbox when a later label edit supersedes the inverse destination', async () => {
+  const { db, queue, gmail, principal, put, review, handlers } = fixture()
+  try {
+    const threadId = put('target', { labels: ['INBOX'] })
+    const filtered = review(threadId)
+    await settle(queue)
+    const label = gmail.labelList.find(({ name }) => name === FILTERED_LABEL)?.id
+    if (!label) throw new Error('Missing Filtered label')
+    expect(await gmail.getMessageLabels('target')).toEqual([label])
+
+    const restored = review(threadId, 'filter.keep')
+    await settle(queue)
+    expect(await gmail.getMessageLabels('target')).toEqual(['INBOX'])
+
+    await gmail.modifyMessage('target', [label], [])
+    await gmail.modifyMessage('target', [], [label])
+    const handler = handlers[filtered.kind]
+    if (!handler) throw new Error('Missing filter action handler')
+    await handler.undo(principal, restored.actionId)
+    await settle(queue)
+    expect(await gmail.getMessageLabels('target')).toEqual(['INBOX'])
+    expect((await handler.get(restored.actionId)).undo).toMatchObject({
+      status: 'failed',
+      error: expect.stringContaining('destination'),
+    })
+  } finally {
+    db.close()
+  }
+})
+
 function prediction(context: ReturnType<typeof prepareContext>): SubmitTriagePrediction {
   const ref = context.refs[0]
   if (!ref) throw new Error('Missing prediction input')

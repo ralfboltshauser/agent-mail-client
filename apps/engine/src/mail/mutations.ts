@@ -1293,6 +1293,7 @@ export class Mutations {
               actionId: row.action_id,
               mid: row.message_id,
               filtered: row.kind.startsWith('filter:'),
+              destination: this.#screenRequest(original)?.destination,
               restore: JSON.parse(row.request).decision === 'filter.keep',
             }),
             thread,
@@ -1844,8 +1845,9 @@ export class Mutations {
     const trash = labelId(account, 'TRASH')
     const spam = labelId(account, 'SPAM')
     const screening = this.#screenRequest(row)
-    const sourceLabel = screening?.restore ? (screening.destination ?? inbox) : inbox
-    const targetLabel = screening?.restore ? inbox : screening?.destination
+    const intoInbox = screening?.work === 'screen-undo' ? !screening.restore : !!screening?.restore
+    const sourceLabel = intoInbox ? (screening?.destination ?? inbox) : inbox
+    const targetLabel = intoInbox ? inbox : screening?.destination
     const rawId = (id: string) => id.slice(account.length + 1)
     const intent = row.intent_id ? this.#intent(row.intent_id) : undefined
     const automatic = intent ? (JSON.parse(row.request) as AutomaticRequest) : undefined
@@ -2088,7 +2090,7 @@ export class Mutations {
         // A concurrent removal of the managed Label can supersede its addition.
         // Keep source membership unless the destination remains reachable.
         if (
-          screening?.work === 'screen' &&
+          (screening?.work === 'screen' || screening?.filtered) &&
           targetLabel &&
           after[sourceLabel] === false &&
           !labels?.includes(targetLabel) &&
@@ -2096,6 +2098,8 @@ export class Mutations {
         ) {
           delete after[sourceLabel]
           superseded[sourceLabel] = false
+          if (screening.work === 'screen-undo')
+            entry.error ??= 'Undo unavailable: the destination label changed'
         }
         if (Object.keys(superseded).length)
           entry.superseded = combine([...entry.superseded, { ...change, after: superseded }])
