@@ -208,6 +208,49 @@ it('clears cached data on unpair and discards old replies even when pairing to t
   stop()
 })
 
+it('does not reuse an in-flight read after a query loses its last subscriber', async () => {
+  const { store, changed } = fixture()
+  const stopStatus = store.subscribeStatus(ignore)
+  const old = deferred<string[]>()
+  const load = vi
+    .fn<() => Promise<string[]>>()
+    .mockReturnValueOnce(old.promise)
+    .mockResolvedValueOnce(['current'])
+  const query = { key: 'inbox', load }
+  const stop = store.subscribeQuery(query, ignore)
+  await settle()
+  expect(load).toHaveBeenCalledOnce()
+  stop()
+  changed()
+
+  const stopAgain = store.subscribeQuery(query, ignore)
+  await settle()
+  old.resolve(['stale'])
+  await settle()
+  expect(store.getQuery(query)).toEqual({ state: 'cached', data: ['current'] })
+  stopAgain()
+  stopStatus()
+})
+
+it('allows a manual legacy refresh to supersede a pending read', async () => {
+  const { store } = fixture()
+  const old = deferred<string[]>()
+  const load = vi
+    .fn<() => Promise<string[]>>()
+    .mockReturnValueOnce(old.promise)
+    .mockResolvedValueOnce(['current'])
+  const query = { key: {}, load, replacePending: true }
+  const stop = store.subscribeQuery(query, ignore)
+  await settle()
+
+  const refresh = store.refresh(query)
+  await settle()
+  old.resolve(['stale'])
+  await refresh
+  expect(store.getQuery(query)).toEqual({ state: 'cached', data: ['current'] })
+  stop()
+})
+
 it('detaches IPC listeners and ignores pending status and data from a stopped session', async () => {
   const initial = deferred<SyncStatus>()
   const oldLoad = deferred<number>()

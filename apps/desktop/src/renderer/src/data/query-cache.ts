@@ -7,7 +7,7 @@ export interface ReplicaQuery<T> {
   isEmpty?: (value: T) => boolean
   retainDuringBootstrap?: 'defer-reads' | 'keep-reading'
   versioned?: boolean
-  // Opaque legacy loaders retain their immediate replacement on change events.
+  // Opaque legacy loaders retain their immediate replacement on change events and retries.
   replacePending?: boolean
 }
 
@@ -71,7 +71,7 @@ export class QueryCache {
         retainDuringBootstrap: query.retainDuringBootstrap,
         replacePending: query.replacePending,
       }
-      if (!query.versioned || !reusableVersion(entry.snapshot)) entry.active.refresh()
+      if (!query.versioned || entry.snapshot.state !== 'cached') entry.active.refresh()
     }
     const notify = () => listener()
     entry.listeners.add(notify)
@@ -79,6 +79,9 @@ export class QueryCache {
       if (!entry.listeners.delete(notify)) return
       if (entry.listeners.size) return
       entry.active = undefined
+      // This key no longer observes invalidations. Do not reuse its pending read on remount.
+      entry.generation++
+      entry.pending = undefined
       // Inactive entries are ordered by when they were last used.
       this.#entries.delete(query.key)
       this.#entries.set(query.key, entry)
@@ -87,7 +90,13 @@ export class QueryCache {
   }
 
   refresh<T>(query: ReplicaQuery<T>): Promise<void> | undefined {
-    return this.#entry(query)?.active?.refresh()
+    const entry = this.#entry(query)
+    if (!entry?.active) return
+    if (entry.pending && entry.active.replacePending) {
+      entry.generation++
+      entry.pending = undefined
+    }
+    return entry.active.refresh()
   }
 
   invalidate(reason: 'changed' | 'pairing' | 'bootstrap'): void {
@@ -198,7 +207,6 @@ export class QueryCache {
     if (excess <= 0) return
     for (const [key, entry] of this.#entries) {
       if (entry.active) continue
-      entry.generation++
       this.#entries.delete(key)
       if (--excess === 0) break
     }
