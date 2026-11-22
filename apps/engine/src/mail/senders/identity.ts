@@ -9,6 +9,7 @@ export function senderMailbox(value: string | undefined): Address | null {
   let comment = 0
   let angle = false
   let hadAngle = false
+  let bareAddress = false
   for (let i = 0; i < value.length; i++) {
     const char = value[i]
     if (char === '\\' && (quoted || comment)) {
@@ -23,12 +24,15 @@ export function senderMailbox(value: string | undefined): Address | null {
       continue
     }
     if (char === '<') {
-      if (hadAngle) return null
+      if (hadAngle || bareAddress) return null
       hadAngle = true
       angle = true
     } else if (char === '>') {
       if (!angle) return null
       angle = false
+    } else if (char === '@' && !angle) {
+      if (hadAngle) return null
+      bareAddress = true
     } else if (char === ',' || char === ':' || char === ';' || char === ')') {
       return null
     }

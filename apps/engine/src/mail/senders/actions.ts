@@ -11,7 +11,13 @@ import {
 import type { Principal } from '../../auth/tokens.ts'
 import { type Db, transaction } from '../../db/database.ts'
 import type { MailStore } from '../store.ts'
-import { enqueueScreening, normalizeSender, notifySenderThreads, senderStatusSql } from './index.ts'
+import {
+  enqueueScreening,
+  isOwnerAddress,
+  normalizeSender,
+  notifySenderThreads,
+  senderStatusSql,
+} from './index.ts'
 
 export class SenderError extends Error {
   readonly status: 400 | 403 | 404 | 409 | 503
@@ -208,13 +214,7 @@ export function decideSender(store: MailStore, principal: Principal, input: Send
     }
     const account = db.prepare('SELECT kind, cursor FROM account WHERE id = ?').get(accountId)
     if (!account) throw new SenderError('Account unavailable', 404)
-    if (
-      decision !== 'clear' &&
-      db
-        .prepare('SELECT address FROM account')
-        .all()
-        .some((row) => normalizeSender(String(row.address)) === address)
-    )
+    if (decision !== 'clear' && isOwnerAddress(store, address))
       throw new SenderError('The owner’s addresses cannot be screened', 400)
     if (
       decision === 'block' &&

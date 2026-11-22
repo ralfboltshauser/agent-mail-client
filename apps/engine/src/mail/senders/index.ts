@@ -25,6 +25,13 @@ export function normalizeSender(input: string | null | undefined): string | null
   return `${local.toLowerCase()}@${domain.toLowerCase()}`
 }
 
+export function isOwnerAddress(store: MailStore, sender: string): boolean {
+  return store.db
+    .prepare('SELECT address FROM account')
+    .all()
+    .some(({ address }) => normalizeSender(String(address)) === sender)
+}
+
 export const senderStatusSql = `CASE
   WHEN r.decision = 'block' THEN 'blocked'
   WHEN r.decision = 'accept' THEN 'known'
@@ -103,10 +110,7 @@ export function observeSender(
     from &&
     ((m.address && normalizeSender(m.address) === from) ||
       ownAddresses.some((address) => normalizeSender(address) === from) ||
-      db
-        .prepare('SELECT address FROM account')
-        .all()
-        .some(({ address }) => normalizeSender(String(address)) === from))
+      isOwnerAddress(store, from))
   const is = (label: string) => labels.includes(`${account}:${label}`)
   const incoming = is('INBOX') && !['SPAM', 'TRASH', 'DRAFT', 'SENT'].some(is)
   if (from && !owner) {

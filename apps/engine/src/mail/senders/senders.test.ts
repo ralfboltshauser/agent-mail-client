@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto'
+import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { SCREENED_OUT_LABEL } from '@amc/protocol'
 import { expect, it, vi } from 'vitest'
@@ -6,7 +7,7 @@ import { DbAccountState } from '../../accounts.ts'
 import { authenticate, issueToken } from '../../auth/tokens.ts'
 import { BlobStore } from '../../blobs.ts'
 import { Sealer } from '../../crypto.ts'
-import { migrate, openDatabase } from '../../db/database.ts'
+import { migrate, openDatabase, schemaVersion } from '../../db/database.ts'
 import { MIGRATIONS } from '../../db/migrations.ts'
 import { FakeGmail } from '../../providers/gmail/fake.ts'
 import { GmailAccountSync } from '../../providers/gmail/sync.ts'
@@ -116,6 +117,70 @@ it('screens exact Gmail arrivals across queue restarts and honors an external re
   }
 })
 
+it.each([false, true])(
+  'keeps Gmail Inbox membership when the owner removes Screened out after preparation (initially labeled: %s)',
+  async (initiallyLabeled) => {
+    const { db, store, gmail, principal } = await gmailFixture()
+    try {
+      const base = ['INBOX', 'UNREAD', 'STARRED', 'Label_work']
+      const { actionId } = decideSender(store, principal, request())
+      const queue = new Mutations(store, () => gmail, silentLog)
+      await queue.tick()
+      const destination = gmail.labelList.find(({ name }) => name === SCREENED_OUT_LABEL)?.id
+      if (!destination) throw new Error('Screened out Label was not created')
+      if (initiallyLabeled) gmail.setLabels('first', [...base, destination])
+      const getMessage = gmail.getMessage.bind(gmail)
+      vi.spyOn(gmail, 'getMessage').mockImplementationOnce(async (id) => {
+        const prepared = await getMessage(id)
+        if (!initiallyLabeled) gmail.setLabels(id, [...base, destination])
+        gmail.setLabels(id, base)
+        return prepared
+      })
+      const writes = vi.spyOn(gmail, 'modifyMessage')
+      await queue.tick()
+      expect(writes).not.toHaveBeenCalled()
+      expect(await gmail.getMessageLabels('first')).toEqual(base)
+      expect(senderActionStatus(db, actionId).status).toBe('superseded')
+    } finally {
+      db.close()
+    }
+  },
+)
+
+it('does not dispatch screening for an address newly configured by the owner', async () => {
+  const { db, store, gmail, principal } = await gmailFixture()
+  try {
+    const { actionId } = decideSender(store, principal, request())
+    const queue = new Mutations(store, () => gmail, silentLog)
+    await queue.tick()
+    const modify = gmail.modifyMessage.bind(gmail)
+    vi.spyOn(gmail, 'modifyMessage').mockImplementationOnce((...args) => {
+      db.prepare(
+        "INSERT INTO account (id, kind, address, credentials, created_at) VALUES ('b', 'gmail', ?, X'00', 0)",
+      ).run(sender)
+      return modify(...args)
+    })
+    await queue.tick()
+    expect(await gmail.getMessageLabels('first')).toContain('INBOX')
+    expect(senderActionStatus(db, actionId).status).toBe('superseded')
+  } finally {
+    db.close()
+  }
+})
+
+it('ignores a malformed From with an unquoted mailbox outside the angle address', async () => {
+  const { db, store, gmail, sync, principal } = await gmailFixture()
+  try {
+    gmail.add('malformed', { from: `other@example.com <${sender}>` })
+    await sync.incremental()
+    decideSender(store, principal, request())
+    await ticks(new Mutations(store, () => gmail, silentLog))
+    expect(await gmail.getMessageLabels('malformed')).toEqual(['INBOX', 'UNREAD'])
+  } finally {
+    db.close()
+  }
+})
+
 it('inverts the acknowledged Gmail delta when Undo races a partial provider acknowledgement', async () => {
   const { db, store, gmail, principal } = await gmailFixture()
   try {
@@ -180,14 +245,15 @@ it('requires explicit adoption of a name collision and never opts into provider 
 })
 
 it.each([
-  { capability: 'MOVE', copyUid: true, missingIdentity: false },
-  { capability: 'UIDPLUS', copyUid: true, missingIdentity: false },
-  { capability: 'UIDPLUS', copyUid: false, missingIdentity: false },
-  { capability: 'UIDPLUS', copyUid: false, missingIdentity: true },
-  { capability: '', copyUid: false, missingIdentity: false },
+  { capability: 'MOVE', copyUid: true, missingIdentity: false, replaceFolder: false },
+  { capability: 'UIDPLUS', copyUid: true, missingIdentity: false, replaceFolder: false },
+  { capability: 'UIDPLUS', copyUid: true, missingIdentity: false, replaceFolder: true },
+  { capability: 'UIDPLUS', copyUid: false, missingIdentity: false, replaceFolder: false },
+  { capability: 'UIDPLUS', copyUid: false, missingIdentity: true, replaceFolder: false },
+  { capability: '', copyUid: false, missingIdentity: false, replaceFolder: false },
 ])(
-  'uses only verified UID operations for $capability (COPYUID=$copyUid, missing identity=$missingIdentity)',
-  async ({ capability, copyUid, missingIdentity }) => {
+  'uses verified UID operations for $capability (COPYUID=$copyUid, missing identity=$missingIdentity, replaced folder=$replaceFolder)',
+  async ({ capability, copyUid, missingIdentity, replaceFolder }) => {
     const db = testDb()
     const store = new MailStore(db, new BlobStore(tempDir()))
     const sealer = new Sealer(randomBytes(32))
@@ -234,10 +300,18 @@ it.each([
       }
       await queue.verifyScreeningCapability('a', input.clientActionId)
       const { actionId } = decideSender(store, principal, input)
+      if (replaceFolder) {
+        const copy = imap.messageCopy.bind(imap)
+        vi.spyOn(imap, 'messageCopy').mockImplementationOnce((range, destination, options) => {
+          imap.folder(destination).validity++
+          return copy(range, destination, options)
+        })
+      }
       await ticks(queue, 4)
-      if (missingIdentity) {
+      if (missingIdentity || replaceFolder) {
         expect(imap.folder('INBOX').messages.has(uid)).toBe(true)
         expect(imap.folder('INBOX').messages.get(uid)?.flags.has('\\Deleted')).toBe(false)
+        expect(imap.writes.some(({ command }) => command === 'UID EXPUNGE')).toBe(false)
         expect(imap.folder(SCREENED_OUT_LABEL).messages.size).toBe(1)
         expect(senderActionStatus(db, actionId)).toMatchObject({
           status: 'failed',
@@ -262,7 +336,8 @@ it.each([
 )
 
 it('upgrades a populated v20 fixture and rebuilds Account-scoped evidence without creating rules', async () => {
-  const db = openDatabase(join(tempDir(), 'migration.db'))
+  const dir = tempDir()
+  const db = openDatabase(join(dir, 'migration.db'))
   try {
     migrate(db, { migrations: MIGRATIONS.filter(({ version }) => version <= 20) })
     for (const account of ['a', 'b']) {
@@ -282,8 +357,24 @@ it('upgrades a populated v20 fixture and rebuilds Account-scoped evidence withou
     }
     db.exec(`INSERT INTO message (id, account_id, thread_id, provider_id, to_json, sent_at, label_ids)
       VALUES ('a:out', 'a', 'a:t', 'out', '[{"address":"alice@example.com","name":null}]', 2, '["a:SENT"]')`)
-    expect(migrate(db)).toBe(21)
-    expect(migrate(db)).toBe(21)
+    const original = db.prepare('SELECT * FROM message ORDER BY id').all()
+    const backupDir = join(dir, 'backups')
+    expect(migrate(db, { backupDir })).toBe(21)
+    expect(migrate(db, { backupDir })).toBe(21)
+    const backups = readdirSync(backupDir)
+    expect(backups).toHaveLength(1)
+    const [backupName] = backups
+    if (!backupName) throw new Error('Migration did not create a backup')
+    const backup = openDatabase(join(backupDir, backupName))
+    try {
+      expect(schemaVersion(backup)).toBe(20)
+      expect(backup.prepare('SELECT * FROM message ORDER BY id').all()).toEqual(original)
+    } finally {
+      backup.close()
+    }
+    expect(db.prepare('SELECT * FROM message ORDER BY id').all()).toEqual(original)
+    expect(db.prepare('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' })
+    expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([])
     const store = new MailStore(db, new BlobStore(tempDir()))
     await new Mutations(store, () => null, silentLog).tick()
     expect(

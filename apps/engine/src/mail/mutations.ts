@@ -38,7 +38,7 @@ import {
 import type { ImapAccountSync } from '../providers/imap/sync.ts'
 import { assertOwner, liveOwner, SenderError } from './senders/actions.ts'
 import { gmailDestination, imapDestination } from './senders/destination.ts'
-import { normalizeSender, scanSenderEnvelopes } from './senders/index.ts'
+import { isOwnerAddress, normalizeSender, scanSenderEnvelopes } from './senders/index.ts'
 import { labelId, type MailStore, messageId } from './store.ts'
 
 const INTERNAL = 'engine'
@@ -1213,11 +1213,17 @@ export class Mutations {
       if (
         destination?.provider_id &&
         labelId(row.account_id, String(destination.provider_id)) === request.destination &&
+        request.address &&
+        !isOwnerAddress(this.#store, request.address) &&
         this.#screeningAllowed(request.actionId, request.mid)
       )
         return
       throw new ScreeningCanceled('The Sender rule or original Inbox membership changed')
     }
+    const unavailable = this.#db
+      .prepare('SELECT undo_error FROM screening_work WHERE undo_id = ?')
+      .get(row.id)?.undo_error
+    if (unavailable) throw new ScreeningCanceled(String(unavailable))
     const owner = this.#db
       .prepare('SELECT undo_token_id FROM owner_action WHERE id = ?')
       .get(request.actionId)?.undo_token_id
@@ -1533,7 +1539,7 @@ export class Mutations {
         this.#finish(
           row,
           copied || this.#screenRequest(row)?.work === 'screen-undo' ? 'failed' : 'applied',
-          copied ? IMAP_COPY_INCOMPLETE : null,
+          copied ? IMAP_COPY_INCOMPLETE : screen?.work === 'screen-undo' ? error.message : null,
           journal,
         )
         return
@@ -1787,6 +1793,7 @@ export class Mutations {
     const inbox = labelId(account, 'INBOX')
     const trash = labelId(account, 'TRASH')
     const spam = labelId(account, 'SPAM')
+    const screening = this.#screenRequest(row)
     const rawId = (id: string) => id.slice(account.length + 1)
     const intent = row.intent_id ? this.#intent(row.intent_id) : undefined
     const automatic = intent ? (JSON.parse(row.request) as AutomaticRequest) : undefined
@@ -2000,7 +2007,7 @@ export class Mutations {
           }
         }
         if (
-          this.#screenRequest(row)?.work === 'screen' &&
+          screening?.work === 'screen' &&
           (!labels?.includes(inbox) ||
             ['SPAM', 'TRASH', 'SENT', 'DRAFT'].some((label) =>
               labels.includes(labelId(account, label)),
@@ -2025,6 +2032,18 @@ export class Mutations {
           } else if (value !== before[key]) {
             after[key] = value
           }
+        }
+        // A concurrent removal of the managed Label can supersede its addition.
+        // Keep Inbox membership unless this write will leave the message in Screened out.
+        if (
+          screening?.work === 'screen' &&
+          screening.destination &&
+          after[inbox] === false &&
+          !labels?.includes(screening.destination) &&
+          after[screening.destination] !== true
+        ) {
+          delete after[inbox]
+          superseded[inbox] = false
         }
         if (Object.keys(superseded).length)
           entry.superseded = combine([...entry.superseded, { ...change, after: superseded }])

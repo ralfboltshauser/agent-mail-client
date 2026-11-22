@@ -266,27 +266,7 @@ export async function executeImap(
   const removeCopiedSource = async (pending: Pending & { move: Move }, flags?: Set<string>) => {
     const { source, destination } = pending.move
     const { uid } = source
-    if (screening && (!pending.copied?.uid || !pending.copied.validity)) {
-      const recovered = await findMovedUid(client, pending.move, log, pending.copied?.validity)
-      if (!recovered) {
-        entry.uncertain ??= []
-        entry.uncertain.push(pending.change)
-        done.add(pending.change.message_id)
-        entry.error = IMAP_COPY_INCOMPLETE
-        delete entry.pending
-        save()
-        await sync.refreshOrganiseFolder(destination)
-        return true
-      }
-      pending.copied = recovered
-      entry.pending = pending
-      save()
-      flags = undefined
-    }
-    if (
-      screening &&
-      !normalFolders.has(screening.address ? destination.path : decodeURIComponent(source.path_key))
-    ) {
+    const stopCopyCleanup = () => {
       entry.uncertain ??= []
       entry.uncertain.push(pending.change)
       done.add(pending.change.message_id)
@@ -295,21 +275,43 @@ export async function executeImap(
       save()
       return true
     }
-    if (screening && pending.copied?.validity) {
-      const box = await client.mailboxOpen(destination.path, { readOnly: true })
-      if (
-        String(box.uidValidity) !== pending.copied.validity ||
-        !pending.copied.uid ||
-        !(await readFlags(client, pending.copied.uid))
-      ) {
-        entry.uncertain ??= []
-        entry.uncertain.push(pending.change)
-        done.add(pending.change.message_id)
-        entry.error = IMAP_COPY_INCOMPLETE
-        delete entry.pending
-        save()
+    if (screening && (!pending.copied?.uid || !pending.copied.validity)) {
+      const recovered = await findMovedUid(client, pending.move, log, pending.copied?.validity)
+      if (!recovered) {
+        stopCopyCleanup()
+        await sync.refreshOrganiseFolder(destination)
         return true
       }
+      pending.copied = recovered
+      entry.pending = pending
+      save()
+      flags = undefined
+    }
+    if (screening) {
+      const managedPath = screening.address ? destination.path : decodeURIComponent(source.path_key)
+      if (!client.capabilities.has('UIDPLUS') || !normalFolders.has(managedPath))
+        return stopCopyCleanup()
+
+      const target = screening.address
+        ? store.db
+            .prepare(`
+              SELECT validity, mailbox_id FROM screened_destination
+              WHERE account_id = ? AND provider_id = ? AND state = 'ready'
+            `)
+            .get(accountId, destination.label.providerId)
+        : pending.change.moveFrom
+      const copied = pending.copied
+      if (!target || !copied?.uid || copied.validity !== target.validity) return stopCopyCleanup()
+
+      const box = await client.mailboxOpen(destination.path, { readOnly: true })
+      if (
+        String(box.uidValidity) !== target.validity ||
+        ('mailbox_id' in target && target.mailbox_id && target.mailbox_id !== box.mailboxId)
+      )
+        return stopCopyCleanup()
+
+      const targetFlags = await readFlags(client, copied.uid)
+      if (!targetFlags || targetFlags.has('\\Deleted')) return stopCopyCleanup()
       flags = undefined
     }
     const current =
