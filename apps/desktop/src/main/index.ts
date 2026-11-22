@@ -35,6 +35,7 @@ import {
   dialog,
   ipcMain,
   Menu,
+  MenuItem,
   Notification,
   nativeTheme,
   session,
@@ -75,6 +76,7 @@ let notificationSettings = DEFAULT_NOTIFICATION_SETTINGS
 let notifications: NewMailNotifications | null = null
 let threadNavigationReady = false
 let pendingThreadId: string | null = null
+let pendingSettings = false
 const notificationSettingsFile = () => join(app.getPath('userData'), 'notifications.json')
 let handoff: Handoff
 let triage: AutoTriage
@@ -286,6 +288,7 @@ function registerIpc() {
     if (event.sender !== window?.webContents) return
     threadNavigationReady = true
     openPendingThread()
+    openPendingSettings()
   })
   ipcMain.handle('amc:triageStatus', () => triage.status)
   ipcMain.handle('amc:setAutoTriage', (_e, enabled: unknown) => {
@@ -797,23 +800,42 @@ function openWindow() {
   window.focus()
 }
 
+function openPendingSettings() {
+  // The workspace subscribes to Settings before it signals thread navigation readiness.
+  if (!threadNavigationReady || !pendingSettings) return
+  pendingSettings = false
+  window?.webContents.send('amc:openSettings')
+}
+
+function openSettings() {
+  pendingSettings = true
+  if (!window?.isFocused()) openWindow()
+  openPendingSettings()
+}
+
 function buildMenu() {
-  Menu.setApplicationMenu(
-    Menu.buildFromTemplate([
-      { role: 'appMenu' },
-      { role: 'editMenu' },
-      {
-        label: 'View',
-        submenu: [
-          { role: 'reload' },
-          ...(!app.isPackaged ? [{ role: 'toggleDevTools' as const }] : []),
-          { type: 'separator' },
-          { role: 'togglefullscreen' },
-        ],
-      },
-      { role: 'windowMenu' },
-    ]),
-  )
+  const menu = Menu.buildFromTemplate([
+    { role: 'appMenu', id: 'app-menu' },
+    { role: 'editMenu' },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'reload' },
+        ...(!app.isPackaged ? [{ role: 'toggleDevTools' as const }] : []),
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
+    { role: 'windowMenu' },
+  ])
+  if (process.platform === 'darwin') {
+    const appMenu = menu.getMenuItemById('app-menu')?.submenu
+    appMenu?.insert(
+      1,
+      new MenuItem({ label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: openSettings }),
+    )
+  }
+  Menu.setApplicationMenu(menu)
 }
 
 app.setName('AMC')
@@ -862,7 +884,7 @@ if (!app.requestSingleInstanceLock()) {
       }
     }
     if (process.platform === 'darwin') {
-      tray = createTray(openWindow, toggleSync, loginItem)
+      tray = createTray(openWindow, openSettings, toggleSync, loginItem)
       if (Notification.isSupported()) {
         // Keep Electron's JavaScript wrappers alive while their alerts can be clicked.
         const active = new Set<Notification>()

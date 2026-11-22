@@ -2,7 +2,12 @@ import { existsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { app, Menu, type MenuItemConstructorOptions, nativeImage, shell, Tray } from 'electron'
 
-export function createTray(openWindow: () => void, toggleSync: () => void, loginItem: boolean) {
+export function createTray(
+  openWindow: () => void,
+  openSettings: () => void,
+  toggleSync: () => void,
+  loginItem: boolean,
+) {
   const resources = app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'build')
   const image = nativeImage.createFromPath(join(resources, 'trayTemplate.png'))
   image.setTemplateImage(true)
@@ -70,6 +75,7 @@ export function createTray(openWindow: () => void, toggleSync: () => void, login
     tray.setContextMenu(
       Menu.buildFromTemplate([
         { label: 'Open AMC', click: openWindow },
+        { label: 'Settings…', click: openSettings },
         { type: 'separator' },
         ...(paused ? [{ label: 'Sync paused', enabled: false }] : []),
         { label: paused ? 'Resume Sync' : 'Pause Sync', enabled: paired, click: toggleSync },

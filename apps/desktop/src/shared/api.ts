@@ -182,6 +182,7 @@ export interface AmcApi {
   smartInbox?: SmartInboxApi
   notificationSettings(): Promise<NotificationSettings>
   saveNotificationSettings(settings: NotificationSettings): Promise<void>
+  onOpenSettings(listener: () => void): () => void
   onOpenThread(listener: (thread: ThreadSummary) => void): () => void
   triageStatus(): Promise<TriageStatus>
   setAutoTriage(enabled: boolean): Promise<void>

@@ -257,10 +257,7 @@ export function MailWorkspace({
           <OutboxView
             accountId={accountId}
             onRestore={(id) => void openDraft(id)}
-            onSettings={() => {
-              rememberFocus()
-              openSendSettings()
-            }}
+            onSettings={openSendSettings}
             onThread={(id) => {
               goTo({ kind: 'sent' }, id)
               void getAmc().syncNow()
@@ -321,13 +318,6 @@ export function MailWorkspace({
         onOpenChange={dialogs.setAgentOpen}
         onCloseAutoFocus={restoreDialogFocus}
       />
-      {dialogs.sendSettings !== null && (
-        <MailSettings
-          initial={dialogs.sendSettings}
-          onClose={() => dialogs.setSendSettings(null)}
-          onCloseAutoFocus={restoreDialogFocus}
-        />
-      )}
       <MailboxCommandPalette
         open={dialogs.paletteOpen}
         onOpenChange={dialogs.setPaletteOpen}
@@ -365,6 +355,13 @@ export function MailWorkspace({
             const draft = await compose.startCompose('reply', card.detail.thread)
             if (draft) review.rememberReply(record, draft.id)
           }}
+        />
+      )}
+      {dialogs.sendSettings !== null && (
+        <MailSettings
+          initial={dialogs.sendSettings}
+          onClose={() => dialogs.setSendSettings(null)}
+          onCloseAutoFocus={dialogs.restoreSettingsFocus}
         />
       )}
     </SidebarProvider>
