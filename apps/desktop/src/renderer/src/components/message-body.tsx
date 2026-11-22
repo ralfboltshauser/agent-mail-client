@@ -1,59 +1,33 @@
-import DOMPurify from 'dompurify'
 import { ImageOff } from 'lucide-react'
 import { memo, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import {
+  allowRemoteImagesFromSender,
+  setLoadRemoteImagesAutomatically,
+  useRemoteImages,
+} from '@/data/remote-image-preferences'
 import { getAmc } from '@/lib/amc'
+import { messageDocument, sanitizeMessageHtml } from './html-message-document'
 
 export const MIN_HTML_BODY_HEIGHT = 120
 
-const BASE_CSS = `
-  :root { color-scheme: light; }
-  html, body { margin: 0; padding: 0; background: #fff; color: #1f1f23;
-    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-    overflow-wrap: anywhere; }
-  body { padding: 16px 20px; }
-  img, video { max-width: 100%; height: auto; }
-  table { max-width: 100%; }
-  pre { white-space: pre-wrap; }
-  a { color: #3b5bdb; }
-  blockquote { margin: 0 0 0 .6em; padding-left: .8em; border-left: 2px solid #d4d4d8; color: #52525b; }
-`
-
 /**
- * Renders an HTML mail body safely: sanitized, in a sandboxed iframe without scripts, with a
- * Content-Security-Policy that blocks remote images (tracking pixels) until the owner allows
- * them. Links open in the default browser, never inside AMC.
+ * Renders sanitized HTML in a sandboxed iframe. Links open in the default browser.
  */
-export const HtmlBody = memo(function HtmlBody({ html }: { html: string }) {
-  const [remote, setRemote] = useState(false)
+export const HtmlBody = memo(function HtmlBody({
+  html,
+  senderKey,
+}: {
+  html: string
+  senderKey: string | null
+}) {
+  const [loadOnce, setLoadOnce] = useState(false)
+  const permitted = useRemoteImages(senderKey)
+  const remote = loadOnce || permitted
   const frame = useRef<HTMLIFrameElement>(null)
   const [height, setHeight] = useState(MIN_HTML_BODY_HEIGHT)
-
-  const { doc, hasRemote } = useMemo(() => {
-    const clean = DOMPurify.sanitize(html, {
-      WHOLE_DOCUMENT: true,
-      FORBID_TAGS: [
-        'form',
-        'input',
-        'button',
-        'textarea',
-        'select',
-        'script',
-        'iframe',
-        'object',
-        'embed',
-        'base',
-        'meta',
-        'link',
-      ],
-      FORBID_ATTR: ['onerror', 'onload', 'onclick'],
-    })
-    const hasRemote = /<img[^>]+src=["']?https?:|url\(\s*["']?https?:/i.test(clean)
-    const imgSrc = remote ? 'data: cid: https: http:' : 'data: cid:'
-    const csp = `default-src 'none'; img-src ${imgSrc}; style-src 'unsafe-inline'; font-src data:; media-src 'none'`
-    const doc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>${BASE_CSS}</style></head><body>${clean}</body></html>`
-    return { doc, hasRemote }
-  }, [html, remote])
+  const { clean, hasRemote } = useMemo(() => sanitizeMessageHtml(html), [html])
+  const doc = useMemo(() => messageDocument(clean, remote), [clean, remote])
 
   useLayoutEffect(() => {
     const el = frame.current
@@ -77,22 +51,23 @@ export const HtmlBody = memo(function HtmlBody({ html }: { html: string }) {
         setHeight(Math.max(MIN_HTML_BODY_HEIGHT, contentHeight + 2))
       }
       const onClick = (event: MouseEvent) => {
-        const link = (event.target as Element | null)?.closest?.(
-          'a[href]',
-        ) as HTMLAnchorElement | null
+        if (event.type === 'auxclick' && event.button !== 1) return
+        const link = (event.target as Element | null)?.closest?.('a, area')
         if (!link) return
         event.preventDefault()
-        const href = link.getAttribute('href') ?? ''
+        const href = link.getAttribute('href') ?? link.getAttribute('xlink:href') ?? ''
         if (/^(https?|mailto):/i.test(href)) void getAmc().openExternal(href)
       }
       measure()
       const observer = new ResizeObserver(measure)
       observer.observe(body, { box: 'border-box' })
       document.addEventListener('click', onClick)
+      document.addEventListener('auxclick', onClick)
       disconnect = () => {
         observing = false
         observer.disconnect()
         document.removeEventListener('click', onClick)
+        document.removeEventListener('auxclick', onClick)
       }
     }
     el.addEventListener('load', onLoad)
@@ -106,17 +81,37 @@ export const HtmlBody = memo(function HtmlBody({ html }: { html: string }) {
   return (
     <div className="space-y-2">
       {hasRemote && !remote && (
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <ImageOff className="size-3.5" />
-          Remote images are blocked so the sender can't see you opened this.
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+          <span className="inline-flex items-center gap-2">
+            <ImageOff aria-hidden="true" className="size-3.5 shrink-0" />
+            Remote images are blocked.
+          </span>
           <Button
             variant="link"
             size="sm"
             className="h-auto p-0 text-xs"
-            onClick={() => setRemote(true)}
+            onClick={() => setLoadOnce(true)}
           >
             Load images
           </Button>
+          <Button
+            variant="link"
+            size="sm"
+            className="h-auto p-0 text-xs"
+            onClick={() => setLoadRemoteImagesAutomatically(true)}
+          >
+            Always load
+          </Button>
+          {senderKey && (
+            <Button
+              variant="link"
+              size="sm"
+              className="h-auto p-0 text-xs"
+              onClick={() => allowRemoteImagesFromSender(senderKey)}
+            >
+              Always from this sender
+            </Button>
+          )}
         </div>
       )}
       <iframe

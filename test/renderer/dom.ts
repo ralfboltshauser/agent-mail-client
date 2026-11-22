@@ -7,6 +7,9 @@ Object.defineProperties(Range.prototype, {
   getBoundingClientRect: { configurable: true, value: () => new DOMRect() },
 })
 
+// cmdk scrolls the selected command into view.
+Element.prototype.scrollIntoView = () => {}
+
 beforeEach(() => {
   vi.useFakeTimers()
   const storage = new Map<string, string>()
