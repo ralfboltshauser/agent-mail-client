@@ -101,6 +101,44 @@ type SearchState = {
   failed?: boolean
 } | null
 
+export function showQueuedSend(item: OutboxItem, requestedAt: number, onCancelled: () => void) {
+  if (item.originalDraftLeft) toast.warning(ORIGINAL_DRAFT_LEFT)
+  if (item.status !== 'queued') {
+    toast.info(item.status === 'sent' ? 'Message sent' : 'Check the Outbox for delivery status')
+    return
+  }
+  const message = item.sendAt > item.undoUntil ? 'Send scheduled' : 'Message queued'
+  // Bound response transit by the full round trip using the local clock.
+  const deadline = requestedAt + (item.undoRemainingMs ?? 0)
+  const remaining = deadline - Date.now()
+  if (remaining <= 0) {
+    toast(message, { duration: 3000 })
+    return
+  }
+
+  // Sonner pauses its own timer while the toast is hovered or the window is hidden.
+  const stop = () => clearTimeout(expiry)
+  const id = toast(message, {
+    duration: Infinity,
+    onDismiss: stop,
+    action: {
+      label: 'Undo',
+      onClick: () => {
+        stop()
+        if (Date.now() >= deadline) return
+        void getAmc()
+          .cancelSend(item.id)
+          .then(() => {
+            onCancelled()
+            toast.success('Send cancelled. Draft saved.')
+          })
+          .catch((cause: Error) => toast.error(cause.message))
+      },
+    },
+  })
+  const expiry = setTimeout(() => toast.dismiss(id), remaining)
+}
+
 function MailApp({
   status,
   dark,
@@ -110,6 +148,7 @@ function MailApp({
   dark: boolean
   onToggleTheme: () => void
 }) {
+  const [sidebarOpen, setSidebarOpen] = useState(true)
   const [accountId, setAccountId] = useState<string | null>(null)
   const snoozeEnabled = status?.snoozeEnabled === true
   const [selectedView, setView] = useState<View>(INBOX)
@@ -379,31 +418,10 @@ function MailApp({
     }
   }
 
-  const queued = (item: OutboxItem) => {
-    if (item.originalDraftLeft) toast.warning(ORIGINAL_DRAFT_LEFT)
+  const queued = (item: OutboxItem, requestedAt: number) => {
     setDraft(null)
-    const remaining = item.undoRemainingMs ?? 0
-    const scheduled = item.sendAt > item.undoUntil
-    if (item.status !== 'queued') {
-      toast.info(item.status === 'sent' ? 'Message sent' : 'Check the Outbox for delivery status')
-      return
-    }
-    toast(scheduled ? 'Send scheduled' : 'Message queued', {
-      duration: remaining || 3000,
-      action: remaining
-        ? {
-            label: 'Undo',
-            onClick: () => {
-              void getAmc()
-                .cancelSend(item.id)
-                .then(async () => {
-                  setMinimised({ id: item.draftId, subject: item.subject })
-                  toast.success('Send cancelled. Draft saved.')
-                })
-                .catch((cause: Error) => toast.error(cause.message))
-            },
-          }
-        : undefined,
+    showQueuedSend(item, requestedAt, () => {
+      setMinimised({ id: item.draftId, subject: item.subject })
     })
   }
 
@@ -566,6 +584,8 @@ function MailApp({
 
   return (
     <SidebarProvider
+      open={sidebarOpen}
+      onOpenChange={setSidebarOpen}
       className="h-full"
       style={{ '--sidebar-width': '13.5rem' } as React.CSSProperties}
     >
@@ -590,7 +610,8 @@ function MailApp({
         labels={labels}
         status={status}
       />
-      <SidebarInset className="overflow-hidden">
+      <SidebarInset className="min-w-0 overflow-hidden">
+        {!sidebarOpen && <div className="app-drag h-11 shrink-0" />}
         {view.kind === 'drafts' && !search ? (
           <DraftsView
             accountId={accountId}

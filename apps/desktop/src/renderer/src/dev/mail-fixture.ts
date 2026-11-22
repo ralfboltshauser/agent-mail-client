@@ -352,9 +352,10 @@ export function createFixture(scenario: string): AmcApi {
     },
     composeDrafts: async () => (discarded ? [] : [draft]),
     composeDraft: async () => draft,
-    discardDraft: async () => {
+    discardDraft: async (id) => {
+      if (discarded) return { absent: id }
       discarded = true
-      return {}
+      return { deleted: id }
     },
     stageComposeBody: () => {},
     saveCompose: async (_id, patch) => {

@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 
-import { type SearchHit, ThreadSummary } from '@amc/protocol'
+import { type OutboxItem, type SearchHit, ThreadSummary } from '@amc/protocol'
 import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
+import { toast } from 'sonner'
 import { expect, it, vi } from 'vitest'
-import { App } from './app'
+import { App, showQueuedSend } from './app'
 
 it.each(['resolves', 'rejects'] as const)(
   'keeps the notification thread selected when an earlier search %s',
@@ -102,3 +103,53 @@ it.each(['resolves', 'rejects'] as const)(
     }
   },
 )
+
+it('expires send Undo independently of Sonner and accounts for a delayed response', () => {
+  vi.useFakeTimers()
+  toast.dismiss()
+  const cancelSend = vi.fn()
+  vi.stubGlobal('amc', { cancelSend })
+  const onCancelled = vi.fn()
+  const item: OutboxItem = {
+    id: 'send',
+    draftId: 'draft',
+    accountId: 'account',
+    messageId: 'message',
+    subject: 'Test fixture',
+    to: [],
+    status: 'queued',
+    sendAt: 10_000,
+    undoUntil: 10_000,
+    undoRemainingMs: 1000,
+    detail: null,
+    canResolve: false,
+    threadId: null,
+  }
+
+  try {
+    // With no Toaster mounted, Sonner's own dismissal timer never starts.
+    const requestedAt = Date.now()
+    vi.advanceTimersByTime(300)
+    showQueuedSend(item, requestedAt, onCancelled)
+    const [notice] = toast.getToasts()
+    const action = notice && 'action' in notice ? notice.action : undefined
+    if (!action || typeof action !== 'object' || !('onClick' in action)) {
+      throw new Error('Missing Undo action')
+    }
+    expect(action.label).toBe('Undo')
+    vi.advanceTimersByTime(699)
+    expect(toast.getToasts()).toEqual([notice])
+    vi.advanceTimersByTime(1)
+    expect(toast.getToasts()).toEqual([])
+    action.onClick({} as Parameters<typeof action.onClick>[0])
+    expect(cancelSend).not.toHaveBeenCalled()
+    expect(onCancelled).not.toHaveBeenCalled()
+
+    showQueuedSend(item, requestedAt, onCancelled)
+    expect(toast.getToasts()[0]).not.toHaveProperty('action')
+  } finally {
+    toast.dismiss()
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  }
+})

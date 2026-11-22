@@ -19,6 +19,10 @@ export interface ComposeDraft extends Draft {
   originalDraftLeft?: boolean
 }
 
+export type DiscardDraftResult =
+  | { absent: string }
+  | { deleted: string; providerRemoved?: 'Gmail' | 'IMAP'; warning?: string }
+
 export interface ComposeStart {
   accountId?: string
   threadId?: string

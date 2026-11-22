@@ -26,7 +26,6 @@ import {
 } from '@tiptap/react'
 import { Bold, Italic, List, Minus, Paperclip, Trash2, X } from 'lucide-react'
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
-import { toast } from 'sonner'
 import * as Y from 'yjs'
 import { getAmc } from '@/lib/amc'
 import { DiscardDraftDialog } from './discard-draft-dialog'
@@ -103,7 +102,7 @@ export function Composer({
   draft: ComposeDraft
   accounts: AccountSummary[]
   onMinimise: (subject: string) => void
-  onQueued: (item: OutboxItem) => void
+  onQueued: (item: OutboxItem, requestedAt: number) => void
   onDiscarded: () => void
 }) {
   const [doc] = useState(() => {
@@ -350,9 +349,9 @@ export function Composer({
     setBusy(true)
     try {
       await saveChain.current.catch(() => {})
-      const { warning } = await getAmc().discardDraft(draft.id)
-      if (warning) toast.warning(warning)
+      const result = await getAmc().discardDraft(draft.id)
       onDiscarded()
+      return result
     } finally {
       submitting.current = false
       setBusy(false)
@@ -393,8 +392,9 @@ export function Composer({
           ...(schedule ? { sendAt: new Date(sendAt).getTime() } : {}),
         }
       }
+      const requestedAt = Date.now()
       const item = await getAmc().sendDraft(request.current)
-      onQueued(item)
+      onQueued(item, requestedAt)
     } catch (cause) {
       const message = (cause as Error).message
       if (message.includes(DRAFT_CHANGED)) {
@@ -781,7 +781,11 @@ export function Composer({
         </footer>
       </DialogContent>
       {confirmDiscard && (
-        <DiscardDraftDialog onConfirm={discard} onClose={() => setConfirmDiscard(false)} />
+        <DiscardDraftDialog
+          subject={fields.subject}
+          onConfirm={discard}
+          onClose={() => setConfirmDiscard(false)}
+        />
       )}
     </Dialog>
   )

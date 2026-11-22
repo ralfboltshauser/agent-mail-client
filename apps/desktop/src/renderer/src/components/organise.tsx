@@ -83,6 +83,8 @@ export function useOrganise(
         .organiseErrors()
         .then((errors) => {
           for (const notice of errors) {
+            if (notice.updateOnly && !toast.getToasts().some((active) => active.id === notice.id))
+              continue
             if (notice.quiet) toast(notice.message, { id: notice.id, action: undefined })
             else if (notice.undo) {
               const undo = notice.undo

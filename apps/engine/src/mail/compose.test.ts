@@ -341,7 +341,9 @@ it.each(['unchanged', 'edited remotely', 'edited and synced'])(
         : undefined
       expect(JSON.parse(text ?? 'null')).toEqual({
         deleted: draft.id,
-        ...(edited && { warning: 'The copy in Gmail was changed elsewhere and was kept' }),
+        ...(edited
+          ? { warning: 'A copy in Gmail was left untouched.' }
+          : { providerRemoved: 'Gmail' }),
       })
       expect(await call(`/drafts/${draft.id}`)).toMatchObject({ status: 404 })
       expect(gmail.drafts.has(mirror)).toBe(edited)
@@ -371,10 +373,71 @@ it('discards an imported Gmail draft in Desktop without deleting the provider co
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({
       deleted: draft.id,
-      warning: 'The copy in Gmail was changed elsewhere and was kept',
+      warning: 'A copy in Gmail was left untouched.',
     })
     expect(await call(`/drafts/${draft.id}`)).toMatchObject({ status: 404 })
     expect(gmail.drafts.has(remote.id)).toBe(true)
+  } finally {
+    db.close()
+  }
+})
+
+it.each(['unchanged', 'changed'] as const)(
+  'retries a failed Gmail discard and checks whether the copy is %s',
+  async (state) => {
+    const { account, call, db, drafts, gmail } = setup()
+    try {
+      const draft = await drafts.create({ accountId: account, body: 'Test draft' }, 'owner')
+      const [mirror] = gmail.drafts.keys()
+      if (!mirror) throw new Error('Missing draft mirror')
+      const remove = vi.spyOn(gmail, 'deleteDraft').mockRejectedValueOnce(new Error('Offline'))
+      const path = `/drafts/${draft.id}`
+      expect(await (await call(path, 'DELETE')).json()).toEqual({
+        deleted: draft.id,
+        warning: 'AMC will retry removing the copy in Gmail.',
+      })
+      await drafts.pullGmail(account, gmail)
+      expect(drafts.list()).toEqual([])
+      expect(await (await call(path, 'DELETE')).json()).toEqual({ absent: draft.id })
+
+      if (state === 'changed') {
+        await gmail.saveDraft({
+          draftId: mirror,
+          raw: await buildMessage({
+            from: { address: gmail.address, name: null },
+            to: reader,
+            cc: [],
+            bcc: [],
+            subject: 'Changed in Gmail',
+            text: 'Keep this version',
+          }),
+        })
+      }
+      await drafts.mirrorPending()
+      expect(remove).toHaveBeenCalledTimes(state === 'changed' ? 1 : 2)
+      expect(gmail.drafts.has(mirror)).toBe(state === 'changed')
+      await drafts.pullGmail(account, gmail)
+      expect(drafts.list()).toHaveLength(state === 'changed' ? 1 : 0)
+    } finally {
+      db.close()
+    }
+  },
+)
+
+it('reports a draft that disappeared after delivery', async () => {
+  const { account, call, db, drafts, outbox, advance } = setup()
+  try {
+    const draft = await drafts.create({ accountId: account, to: reader, body: 'Body' }, 'owner')
+    const response = await call('/outbox', 'POST', {
+      id: 'sent-discard',
+      draftId: draft.id,
+      revision: draft.revision,
+    })
+    expect(response.status).toBe(202)
+    advance(60_000)
+    await outbox.runDue()
+    expect(outbox.get('sent-discard')?.status).toBe('sent')
+    expect(await (await call(`/drafts/${draft.id}`, 'DELETE')).json()).toEqual({ absent: draft.id })
   } finally {
     db.close()
   }
@@ -583,13 +646,13 @@ it.each(['before discard', 'after STORE', 'still a draft'])(
       const result = await drafts.delete(draft.id)
       expect(drafts.get(draft.id)).toBeNull()
       if (state === 'still a draft') {
-        expect(result).toEqual({ deleted: draft.id })
+        expect(result).toEqual({ deleted: draft.id, providerRemoved: 'IMAP' })
         expect(expunge).toHaveBeenCalledExactlyOnceWith(uid)
         expect(folder.messages.has(uid)).toBe(false)
       } else {
         expect(result).toEqual({
           deleted: draft.id,
-          warning: 'The copy in IMAP was changed elsewhere and was kept',
+          warning: 'A copy in IMAP was left untouched.',
         })
         expect(expunge).not.toHaveBeenCalled()
         expect(folder.messages.get(uid)?.flags).toEqual(new Set(['\\Seen']))

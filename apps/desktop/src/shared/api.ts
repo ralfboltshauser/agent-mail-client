@@ -8,6 +8,7 @@ import type {
   ComposePatch,
   ComposeStart,
   Contact,
+  DiscardDraftResult,
   Draft,
   Label,
   OrganiseAction,
@@ -82,6 +83,7 @@ export interface OrganiseNotice {
   id: string
   message: string
   quiet?: boolean
+  updateOnly?: boolean
   undo?: Extract<OrganiseAction, { kind: 'undo' }>
 }
 
@@ -165,7 +167,7 @@ export interface AmcApi {
   startCompose(input: ComposeStart): Promise<ComposeDraft>
   composeDrafts(): Promise<Draft[]>
   composeDraft(id: string): Promise<ComposeDraft>
-  discardDraft(id: string): Promise<{ warning?: string }>
+  discardDraft(id: string): Promise<DiscardDraftResult>
   stageComposeBody(id: string, patch: ComposePatch): void
   saveCompose(id: string, patch: ComposePatch): Promise<ComposeDraft>
   addComposeAttachment(

@@ -6,9 +6,6 @@
   "exports": {
     "./triage": "./src/triage.ts"
   },
-  "bin": {
-    "amc": "dist/amc.mjs"
-  },
   "scripts": {
     "build": "node build.mjs"
   },

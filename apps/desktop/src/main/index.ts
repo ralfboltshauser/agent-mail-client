@@ -13,6 +13,7 @@ import type {
   ComposeDraft,
   ComposePatch,
   ComposeStart,
+  DiscardDraftResult,
   Draft,
   OutboxItem,
   PairResponse,
@@ -448,7 +449,7 @@ function registerComposeIpc() {
   ipcMain.handle('amc:discardDraft', async (_e, id: string) => {
     const client = requireEngine()
     // Use the guarded delete endpoint, which older Engines do not expose.
-    const result = await client.request<{ warning?: string }>(draftPath(id), { method: 'DELETE' })
+    const result = await client.request<DiscardDraftResult>(draftPath(id), { method: 'DELETE' })
     if (engine === client) {
       openReplica().draftUpdates.discard(id)
       void sync?.pull().catch(() => {}) // Normal sync retries if this pull fails.

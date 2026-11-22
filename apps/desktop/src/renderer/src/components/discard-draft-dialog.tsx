@@ -1,13 +1,16 @@
+import type { DiscardDraftResult } from '@amc/protocol'
 import { useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { Button } from './ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from './ui/dialog'
 
 export function DiscardDraftDialog({
+  subject,
   onConfirm,
   onClose,
 }: {
-  onConfirm: () => Promise<void>
+  subject: string
+  onConfirm: () => Promise<DiscardDraftResult>
   onClose: () => void
 }) {
   const [pending, setPending] = useState(false)
@@ -17,7 +20,16 @@ export function DiscardDraftDialog({
     submitting.current = true
     setPending(true)
     try {
-      await onConfirm()
+      const result = await onConfirm()
+      if ('absent' in result) {
+        toast.info('This draft is already gone. It may have been sent or discarded elsewhere.')
+      } else {
+        const message = result.providerRemoved
+          ? `Draft discarded. The matching copy is gone from ${result.providerRemoved}.`
+          : 'Draft discarded'
+        if (result.warning) toast.warning(message, { description: result.warning })
+        else toast.success(message)
+      }
       onClose()
     } catch (cause) {
       toast.error((cause as Error).message)
@@ -35,7 +47,10 @@ export function DiscardDraftDialog({
     >
       <DialogContent showCloseButton={false}>
         <DialogTitle>Discard draft?</DialogTitle>
-        <DialogDescription>The draft will be deleted from AMC.</DialogDescription>
+        <DialogDescription className="wrap-anywhere">
+          “{subject || '(No subject)'}” will be deleted from AMC. A matching copy that AMC wrote in
+          Gmail or IMAP will also be permanently deleted.
+        </DialogDescription>
         <DialogFooter>
           <Button variant="outline" disabled={pending} onClick={onClose}>
             Cancel

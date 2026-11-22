@@ -75,7 +75,7 @@ export function DraftsView({
   onDiscarded: (id: string) => void
 }) {
   const { data, error } = usePolling<Draft[]>(loadDrafts, 1500)
-  const [discardId, setDiscardId] = useState<string | null>(null)
+  const [discard, setDiscard] = useState<Pick<Draft, 'id' | 'subject'> | null>(null)
   const [discarded, setDiscarded] = useState<string[]>([])
   const drafts = data?.filter(
     (draft) => (!accountId || draft.accountId === accountId) && !discarded.includes(draft.id),
@@ -119,21 +119,22 @@ export function DraftsView({
               variant="ghost"
               aria-label={`Discard draft: ${draft.subject || '(No subject)'}`}
               title="Discard draft"
-              onClick={() => setDiscardId(draft.id)}
+              onClick={() => setDiscard({ id: draft.id, subject: draft.subject })}
             >
               <Trash2 />
             </Button>
           </div>
         ))}
       </div>
-      {discardId && (
+      {discard && (
         <DiscardDraftDialog
-          onClose={() => setDiscardId(null)}
+          subject={discard.subject}
+          onClose={() => setDiscard(null)}
           onConfirm={async () => {
-            const { warning } = await getAmc().discardDraft(discardId)
-            setDiscarded((ids) => [...ids, discardId])
-            onDiscarded(discardId)
-            if (warning) toast.warning(warning)
+            const result = await getAmc().discardDraft(discard.id)
+            setDiscarded((ids) => [...ids, discard.id])
+            onDiscarded(discard.id)
+            return result
           }}
         />
       )}
