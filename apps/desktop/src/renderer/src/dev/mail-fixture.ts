@@ -11,6 +11,10 @@ import type { AmcApi, ReplicaThreadMessage, SyncStatus, TriageStatus } from '../
 
 /** Synthetic data only. The fixture never calls the preload bridge. */
 export function createFixture(scenario: string): AmcApi {
+  return createMailFixture(scenario).api
+}
+
+export function createMailFixture(scenario: string) {
   const now = Date.now()
   const account: AccountSummary = {
     id: 'studio',
@@ -72,7 +76,7 @@ export function createFixture(scenario: string): AmcApi {
         : scenario === 'loading'
           ? 'bootstrapping'
           : 'live'
-  const status: SyncStatus = {
+  let status: SyncStatus = {
     phase,
     engineUrl: 'https://engine.example.test',
     progress: scenario === 'loading' ? 0.38 : null,
@@ -82,6 +86,7 @@ export function createFixture(scenario: string): AmcApi {
     healthRefreshFailed: scenario === 'health-error',
   }
   const changed = new Set<() => void>()
+  const statusListeners = new Set<(status: SyncStatus) => void>()
   const mutations = new Map<string, ThreadSummary>()
   const notify = () =>
     changed.forEach((listener) => {
@@ -174,7 +179,7 @@ export function createFixture(scenario: string): AmcApi {
     )
   let triage: TriageStatus = { enabled: true, running: false, lastRun: null, notice: null }
   const triageListeners = new Set<(status: TriageStatus) => void>()
-  return {
+  const api: AmcApi = {
     triageStatus: async () => triage,
     setAutoTriage: async (enabled) => {
       triage = { ...triage, enabled }
@@ -189,7 +194,12 @@ export function createFixture(scenario: string): AmcApi {
       }
     },
     status: async () => status,
-    onStatus: () => () => {},
+    onStatus: (listener) => {
+      statusListeners.add(listener)
+      return () => {
+        statusListeners.delete(listener)
+      }
+    },
     onOpenThread: () => () => {},
     onChanged: (listener) => {
       changed.add(listener)
@@ -419,5 +429,13 @@ export function createFixture(scenario: string): AmcApi {
     cancelHandoff: async () => {},
     activeHandoff: async () => null,
     endHandoff: async () => {},
+  }
+  return {
+    api,
+    emitChanged: notify,
+    emitStatus(patch: Partial<SyncStatus>) {
+      status = { ...status, ...patch }
+      for (const listener of statusListeners) listener(status)
+    },
   }
 }
