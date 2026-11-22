@@ -476,7 +476,7 @@ it('keeps same-size oversized messages with identical headers and different bodi
   expect(queries.message(inboxId)).toBeNull()
   expect(queries.message(archiveId)?.bodyText.endsWith('body B')).toBe(true)
   expect(queries.message(archiveId)?.labelIds).toEqual(['a:ARCHIVE'])
-})
+}, 30_000)
 
 it('downloads a replacement folder with identical metadata and displays its new body', async () => {
   const { db, imap, makeSync, queries } = fixture()

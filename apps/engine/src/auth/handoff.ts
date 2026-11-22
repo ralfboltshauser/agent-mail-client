@@ -30,6 +30,11 @@ export function handoffGrant(db: Db, principal: Principal) {
 }
 
 export async function startHandoff(db: Db, drafts: Drafts, threadId: string, id: string) {
+  const requireOpen = () => {
+    if (db.prepare('SELECT 1 FROM closed_handoff WHERE id = ?').get(id))
+      throw new DraftError('Handoff is closed', 409)
+  }
+  requireOpen()
   const getRecorded = () =>
     db
       .prepare('SELECT thread_id, draft_id, agent_id, t3_thread_id FROM handoff WHERE id = ?')
@@ -51,8 +56,7 @@ export async function startHandoff(db: Db, drafts: Drafts, threadId: string, id:
   if (!draft || draft.accountId !== accountId) throw new DraftError('Draft unavailable', 409)
 
   return transaction(db, () => {
-    if (db.prepare('SELECT 1 FROM closed_handoff WHERE id = ?').get(id))
-      throw new DraftError('Handoff is closed', 409)
+    requireOpen()
     // Reply creation can yield. Refuse a stale request if another request got here first.
     if (getRecorded()?.agent_id !== recorded?.agent_id)
       throw new DraftError('Handoff changed. Retry the request.', 409)

@@ -39,7 +39,7 @@ export function savedT3Url() {
 
 let connection: { url: string; client: Promise<Client> } | undefined
 
-export function t3Client(address: string): Promise<Client> {
+function t3Url(address: string): URL {
   const url = new URL(address)
   const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
   if (
@@ -52,6 +52,11 @@ export function t3Client(address: string): Promise<Client> {
   ) {
     throw new Error('Enter the MCP URL copied from T3 Code.')
   }
+  return url
+}
+
+export function t3Client(address: string): Promise<Client> {
+  const url = t3Url(address)
   if (connection?.url === url.href) return connection.client
   const previous = connection
   const client = connectT3(url).catch((error: unknown) => {
@@ -212,7 +217,9 @@ async function launchInT3(address: string, request: T3Launch): Promise<T3Thread>
 }
 
 export function mcpLauncher(address: string): T3Launcher {
+  const url = t3Url(address).href
   return {
+    key: `mcp:${url}`,
     projects: () => t3Projects(address),
     launch: (request) => launchInT3(address, request),
   }

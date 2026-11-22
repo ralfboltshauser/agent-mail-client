@@ -3,7 +3,7 @@ import type { DatabaseSync } from 'node:sqlite'
 import type { ComposeDraft } from '@amc/protocol'
 import type { ActiveHandoff, T3Project } from '../shared/api'
 import { composeDraftPath } from './draft-updates'
-import type { EngineClient } from './engine'
+import { type EngineClient, EngineError } from './engine'
 
 export interface T3Launch {
   projectId: string
@@ -35,11 +35,10 @@ export function t3NavigationLink(value: string): string | null {
   }
 }
 
-export type LaunchThread = (request: T3Launch) => Promise<T3Thread>
-
 export interface T3Launcher {
+  key: string
   projects(): Promise<T3Project[]>
-  launch: LaunchThread
+  launch(request: T3Launch): Promise<T3Thread>
 }
 
 export function handoffRequest(
@@ -68,11 +67,10 @@ export function handoffRequest(
   }
 }
 
+type LaunchResult = { draft: ComposeDraft; thread: T3Thread }
+
 export class Handoff {
-  readonly #pending = new Map<
-    string,
-    { id: string; request?: T3Launch; draftId?: string; launching?: Promise<T3Thread> }
-  >()
+  readonly #pending = new Map<string, Promise<LaunchResult>>()
   readonly #recovering = new Map<string, Promise<void>>()
   readonly #db: DatabaseSync
 
@@ -82,6 +80,11 @@ export class Handoff {
       id TEXT PRIMARY KEY,
       engine_url TEXT NOT NULL
     )`)
+    const columns = db.prepare('PRAGMA table_info(pending_handoff)').all()
+    if (!columns.some(({ name }) => name === 'target'))
+      db.exec('ALTER TABLE pending_handoff ADD COLUMN target TEXT')
+    if (!columns.some(({ name }) => name === 'launch'))
+      db.exec('ALTER TABLE pending_handoff ADD COLUMN launch TEXT')
   }
 
   recover(engine: EngineClient): Promise<void> {
@@ -93,12 +96,13 @@ export class Handoff {
   }
 
   async #recover(engine: EngineClient): Promise<void> {
-    const live = new Set(Array.from(this.#pending.values(), (attempt) => attempt.id))
+    // Before T3 is contacted it is safe to close the Engine request, including legacy rows.
+    // Leave dispatched handoffs available for the owner to end.
     const rows = this.#db
-      .prepare('SELECT id FROM pending_handoff WHERE engine_url = ?')
-      .all(engine.baseUrl) as { id: string }[]
-    for (const { id } of rows) {
-      if (live.has(id)) continue
+      .prepare('SELECT id, target FROM pending_handoff WHERE engine_url = ? AND launch IS NULL')
+      .all(engine.baseUrl) as { id: string; target: string | null }[]
+    for (const { id, target } of rows) {
+      if (target && this.#pending.has(target)) continue
       await this.#revokePending(engine, id)
     }
   }
@@ -131,60 +135,73 @@ export class Handoff {
     engine: EngineClient,
     projectId: string,
     threadId: string,
-    launchThread: LaunchThread,
-  ): Promise<{ draft: ComposeDraft; thread: T3Thread }> {
+    launcher: T3Launcher,
+  ): Promise<LaunchResult> {
     await this.recover(engine)
-    const key = JSON.stringify([engine.baseUrl, projectId, threadId])
-    let attempt = this.#pending.get(key)
-    if (!attempt) {
-      attempt = { id: randomUUID() }
-      this.#db
-        .prepare('INSERT INTO pending_handoff (id, engine_url) VALUES (?, ?)')
-        .run(attempt.id, engine.baseUrl)
-      this.#pending.set(key, attempt)
-    }
-    if (!attempt.request || !attempt.draftId) {
-      const { draftId, composerUrl, agentToken } = await engine.request<{
-        draftId: string
-        composerUrl: string
-        agentToken: string
-      }>('/v1/compose/handoff', { method: 'POST', body: { requestId: attempt.id, threadId } })
-      attempt.draftId = draftId
-      attempt.request = handoffRequest(
-        projectId,
-        attempt.id,
-        threadId,
-        draftId,
-        composerUrl,
-        new URL('/mcp', engine.baseUrl).href,
-        agentToken,
-      )
-    }
-    const { id, request, draftId } = attempt
-    attempt.launching ??= Promise.resolve()
-      .then(() => launchThread(request))
-      .catch(async (error) => {
-        // If the Engine is unreachable, keep the SQLite row for recovery.
-        await this.#revokePending(engine, id).catch(() => {})
-        if (this.#pending.get(key)?.id === id) this.#pending.delete(key)
-        throw error
+    const target = JSON.stringify([engine.baseUrl, launcher.key, projectId, threadId])
+    const pending = this.#pending.get(target)
+    if (pending) return pending
+    const task = this.#launch(engine, projectId, threadId, launcher, target).finally(() =>
+      this.#pending.delete(target),
+    )
+    this.#pending.set(target, task)
+    return task
+  }
+
+  async #launch(
+    engine: EngineClient,
+    projectId: string,
+    threadId: string,
+    launcher: T3Launcher,
+    target: string,
+  ): Promise<LaunchResult> {
+    const id = randomUUID()
+    this.#db
+      .prepare('INSERT INTO pending_handoff (id, engine_url, target) VALUES (?, ?, ?)')
+      .run(id, engine.baseUrl, target)
+    const { draftId, composerUrl, agentToken } = await engine.request<{
+      draftId: string
+      composerUrl: string
+      agentToken: string
+    }>('/v1/compose/handoff', { method: 'POST', body: { requestId: id, threadId } })
+    // The Engine has replaced the previous handoff and revoked both of its credentials.
+    this.#db.prepare('DELETE FROM pending_handoff WHERE target = ? AND id != ?').run(target, id)
+    const request = handoffRequest(
+      projectId,
+      randomUUID(),
+      threadId,
+      draftId,
+      composerUrl,
+      new URL('/mcp', engine.baseUrl).href,
+      agentToken,
+    )
+    // A launch can succeed even if its reply is lost. Keep the journal entry on failure.
+    this.#db.prepare("UPDATE pending_handoff SET launch = 'dispatched' WHERE id = ?").run(id)
+    const thread = await launcher.launch(request)
+    try {
+      await engine.request(`/v1/compose/handoff/${id}`, {
+        method: 'PUT',
+        body: { t3ThreadId: thread.threadId },
       })
-    const thread = await attempt.launching
-    await engine.request(`/v1/compose/handoff/${id}`, {
-      method: 'PUT',
-      body: { t3ThreadId: thread.threadId },
-    })
+    } catch (error) {
+      if (error instanceof EngineError && error.status === 404) this.#forget(id)
+      throw error
+    }
     this.#forget(id)
     const draft = await engine.get<ComposeDraft>(composeDraftPath(draftId))
-    if (this.#pending.get(key)?.id === id) this.#pending.delete(key)
     return { draft, thread }
   }
 
-  async cancel(engine: EngineClient, projectId: string, threadId: string): Promise<void> {
-    const key = JSON.stringify([engine.baseUrl, projectId, threadId])
-    const attempt = this.#pending.get(key)
-    if (!attempt) return
-    await this.end(engine, attempt.id)
-    this.#pending.delete(key)
+  async cancel(
+    engine: EngineClient,
+    projectId: string,
+    threadId: string,
+    launcher: T3Launcher,
+  ): Promise<void> {
+    const target = JSON.stringify([engine.baseUrl, launcher.key, projectId, threadId])
+    const attempt = this.#db
+      .prepare('SELECT id FROM pending_handoff WHERE target = ?')
+      .get(target) as { id: string } | undefined
+    if (attempt) await this.end(engine, attempt.id)
   }
 }
