@@ -12,6 +12,7 @@ export function deferred<T>() {
 
 export function rendererAdapter() {
   const fixture = createMailFixture('inbox')
+  const settingsListeners = new Set<() => void>()
   let pause: (() => Promise<void>) | undefined
 
   function read<Args extends unknown[], Reply>(method: (...args: Args) => Promise<Reply>) {
@@ -41,11 +42,18 @@ export function rendererAdapter() {
     startCompose: read(fixture.api.startCompose),
     status: read(fixture.api.status),
     stageComposeBody: vi.fn(fixture.api.stageComposeBody),
+    onOpenSettings: (listener) => {
+      settingsListeners.add(listener)
+      return () => settingsListeners.delete(listener)
+    },
     onStatus: (listener) => fixture.api.onStatus((status) => listener(structuredClone(status))),
   } satisfies AmcApi
 
   return {
     api,
+    emitOpenSettings() {
+      for (const listener of settingsListeners) listener()
+    },
     emitChanged: fixture.emitChanged,
     emitStatus: fixture.emitStatus,
     staggerReads() {

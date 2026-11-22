@@ -29,6 +29,11 @@ const api: AmcApi = {
   saveNotificationSettings: invoke(
     'saveNotificationSettings',
   ) as AmcApi['saveNotificationSettings'],
+  onOpenSettings(listener) {
+    const handler = () => listener()
+    ipcRenderer.on('amc:openSettings', handler)
+    return () => ipcRenderer.off('amc:openSettings', handler)
+  },
   onOpenThread(listener) {
     const handler = (_e: unknown, thread: ThreadSummary) => listener(thread)
     ipcRenderer.on('amc:openThread', handler)

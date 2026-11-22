@@ -127,6 +127,24 @@ async function click(element: Element) {
   })
 }
 
+it('opens Settings from the native menu and returns to the same triage card', async () => {
+  const { adapter } = await fixture()
+  await mount(adapter)
+  await open()
+  const heading = within(review()).getByRole('heading', { name: firstSubject })
+  const focus = document.activeElement
+
+  await act(async () => adapter.emitOpenSettings())
+  const settings = screen.getByRole('dialog', { name: 'Settings' })
+  expect(settings.contains(document.activeElement)).toBe(true)
+  await press('Escape')
+  await tick()
+
+  expect(screen.queryByRole('dialog', { name: 'Settings' })).toBeNull()
+  expect(within(review()).getByRole('heading', { name: firstSubject })).toBe(heading)
+  expect(document.activeElement).toBe(focus)
+})
+
 it('keeps one card, isolates cursor commits, and resumes through exit and restart', async () => {
   const { adapter } = await fixture()
   await mount(adapter)

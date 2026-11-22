@@ -45,6 +45,32 @@ it('applies one subject character without replacing the composer fields', async 
   expectBudget(keystrokeBudget)
 })
 
+it('opens Settings from the native menu and returns to the same edited composer', async () => {
+  const { adapter, subject } = await openComposer()
+  await act(async () => {
+    subject.focus()
+    fireEvent.change(subject, { target: { value: 'Unsent edit' } })
+  })
+  expect(adapter.api.stageComposeBody).toHaveBeenCalledExactlyOnceWith(
+    'draft-1',
+    expect.objectContaining({ fields: expect.objectContaining({ subject: 'Unsent edit' }) }),
+  )
+
+  await act(async () => adapter.emitOpenSettings())
+  const settings = screen.getByRole('dialog', { name: 'Settings' })
+  expect(settings.contains(document.activeElement)).toBe(true)
+  await act(async () => {
+    fireEvent.keyDown(document.activeElement ?? settings, { key: 'Escape' })
+    await vi.advanceTimersByTimeAsync(0)
+  })
+
+  expect(screen.queryByRole('dialog', { name: 'Settings' })).toBeNull()
+  const composer = screen.getByRole('dialog', { name: 'Compose' })
+  expect(within(composer).getByRole('textbox', { name: 'Subject' })).toBe(subject)
+  expect(subject.value).toBe('Unsent edit')
+  expect(document.activeElement).toBe(subject)
+})
+
 it('stages one body character without replacing the editor', async () => {
   const { adapter, dialog, editor, recipient } = await openComposer()
   const paragraph = editor.querySelector('p')

@@ -19,6 +19,7 @@ export function ShortcutsDialog({
       title: 'Navigate',
       keys: [
         ['Command palette', '⌘K'],
+        ['Settings', '⌘,'],
         ['Toggle sidebar', '⌘B'],
         ['Filter mail', '/'],
         ['Next / previous thread', 'J / K'],

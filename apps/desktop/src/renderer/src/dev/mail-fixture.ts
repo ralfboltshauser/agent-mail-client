@@ -202,6 +202,7 @@ export function createMailFixture(scenario: string) {
         statusListeners.delete(listener)
       }
     },
+    onOpenSettings: () => () => {},
     onOpenThread: () => () => {},
     onChanged: (listener) => {
       changed.add(listener)
