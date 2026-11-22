@@ -156,10 +156,29 @@ it('paginates grouped new Senders before explicit current low confidence with ex
     expect(next.cursor).toBeNull()
     const account = await (await http('/v1/triage/queue?accountId=b')).json()
     expect(account.cards.map((card: { threadId: string }) => card.threadId)).toEqual([otherAccount])
+    const lookup =
+      '/v1/triage/queue?' +
+      new URLSearchParams({
+        accountId: 'a',
+        senderAddress: alice,
+        limit: '1',
+        omitThreads: JSON.stringify([representative]),
+      })
+    expect(await (await http(lookup)).json()).toMatchObject({
+      reviewLookup: true,
+      cards: [{ id: { kind: 'sender', accountId: 'a', address: alice }, threadId: first }],
+    })
+    expect(
+      await (await http(`/v1/triage/queue?${new URLSearchParams({ threadId: low })}`)).json(),
+    ).toMatchObject({
+      cards: [{ id: { kind: 'thread', threadId: low } }],
+    })
+    expect((await http(lookup, 'GET', undefined, agent.secret)).status).toBe(403)
     expect((await http('/v1/triage/queue?limit=101')).status).toBe(400)
     expect((await http('/v1/triage/queue', 'GET', undefined, agent.secret)).status).toBe(403)
     put('a', 'new-low', known, 16, 'low')
     expect((await http(nextUrl)).status).toBe(409)
+    expect((await http(`${nextUrl}&nextBatch=1`)).status).toBe(200)
     expect(queries.threadSummary(low)?.bucket).not.toHaveProperty('confidence')
   } finally {
     await agent.close()

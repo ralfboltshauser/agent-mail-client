@@ -111,6 +111,7 @@ export interface TriageQueuePage {
     revision: number
     threadRevision: number
     reason: string
+    suggestions?: SenderSuggestion[]
   }[]
   cursor: string | null
 }

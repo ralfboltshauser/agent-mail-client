@@ -1,7 +1,7 @@
 import type { TriageQueuePage, TriageQueueQuery } from '@amc/protocol'
 import { z } from 'zod'
 import { type Db, transaction } from '../../db/database.ts'
-import { SenderError } from '../senders/actions.ts'
+import { SenderError, senderSuggestions } from '../senders/actions.ts'
 import { senderStatusSql } from '../senders/index.ts'
 import { latestInboxMessageSql } from './input.ts'
 
@@ -114,6 +114,9 @@ export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
           messageId,
           revision: address ? ruleRevision : threadRevision,
           reason,
+          ...(input.senderAddress && address
+            ? { suggestions: senderSuggestions(db, accountId, address) }
+            : {}),
         }),
       ),
       cursor:

@@ -32,6 +32,7 @@ export function statusLabel(status: ActionStatus) {
     case 'applied':
       return 'Applied'
     case 'failed':
+    case 'rejected':
       return 'Failed'
     case 'partial':
       return 'Partially applied'
@@ -49,7 +50,7 @@ export function canUndo(action: ReviewAction) {
   if (action.decision.kind === 'reply') return action.status === 'pending'
   if (action.decision.kind === 'organise')
     return ['pending', 'applied', 'partial'].includes(action.status)
-  return !['undone', 'superseded'].includes(action.status)
+  return !['undone', 'superseded', 'rejected'].includes(action.status)
 }
 
 export async function submit(api: SmartInboxApi & ReviewApi, action: ReviewAction) {
@@ -109,7 +110,10 @@ export async function poll(
     }
   }
   if (action.decision.kind === 'organise') {
-    const id = action.undo?.status === 'pending' ? action.undo.id : action.id
+    const id =
+      action.undo && ['pending', 'unconfirmed'].includes(action.undo.status)
+        ? action.undo.id
+        : action.id
     const status = await smart.reviewOrganiseStatus(id)
     return status && id !== action.id ? { undo: { id, ...status } } : status
   }

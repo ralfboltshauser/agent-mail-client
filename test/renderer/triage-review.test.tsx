@@ -258,7 +258,7 @@ it('retries a dropped decision acknowledgment with the same id and surfaces part
   await open()
   await click(within(review()).getByText('Action history (1)'))
   expect(within(review()).getByText('One message remained in Inbox')).toBeTruthy()
-  await click(within(review()).getByRole('button', { name: 'Undo', exact: true }))
+  await click(within(review()).getByRole('button', { name: /^Undo$/ }))
   expect(smart.undoOwnerAction).toHaveBeenCalledWith(id)
 })
 
@@ -281,13 +281,133 @@ it('opens the real reply composer, leaves a draft, and returns to the same card'
   expect(within(review()).getByRole('heading', { name: firstSubject })).toBeTruthy()
 })
 
-it('uses the Inbox heading when a review invoker is no longer mounted', async () => {
+it('uses the Inbox heading when review starts without a focused control', async () => {
   const { adapter } = await fixture()
   await mount(adapter)
-  const invoker = row(firstSubject)
-  await press('t', invoker)
+  await press('t', document.body)
   await tick()
   await press('Escape')
   await tick()
-  expect(screen.getByRole('heading', { name: 'Inbox', level: 2 }).isConnected).toBe(true)
+  expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Inbox', level: 2 }))
+})
+
+it('uses the Snooze picker and exact Organise Undo for the representative Thread', async () => {
+  const { adapter, smart, first } = await fixture()
+  await mount(adapter)
+  await open()
+  await press('s')
+  const picker = screen.getByRole('dialog', { name: 'Snooze Thread' })
+  await press('e', within(picker).getByLabelText('Return to Inbox'))
+  expect(smart.reviewOrganise).not.toHaveBeenCalled()
+  await click(within(picker).getByRole('button', { name: 'Snooze' }))
+  await tick()
+  const [input, id, messageId] = smart.reviewOrganise.mock.calls[0]
+  expect(input).toMatchObject({ kind: 'snooze', threadId: first.threadId })
+  expect(messageId).toBe(first.messageId)
+  expect(progress()).toBe('1/2')
+  await press('u')
+  expect(smart.reviewOrganise.mock.calls[1][0]).toEqual({
+    kind: 'undo',
+    threadId: first.threadId,
+    mutationId: id,
+  })
+  await tick(2000)
+  expect(within(review()).getByRole('heading', { name: firstSubject })).toBeTruthy()
+})
+
+it('preserves scope and notification navigation when an older queue load finishes late', async () => {
+  const { adapter, smart } = await fixture()
+  const target = (await adapter.api.thread('thread-3'))?.thread
+  if (!target) throw new Error('Expected notification Thread')
+  let notify: ((thread: NonNullable<typeof target>) => void) | undefined
+  adapter.api.onOpenThread = (callback) => {
+    notify = callback
+    return () => {
+      notify = undefined
+    }
+  }
+  const previous = deferred<TriageQueuePage>()
+  smart.triageQueue.mockImplementationOnce(() => previous.promise)
+  await mount(adapter)
+  await open()
+  expect(within(review()).getByText('Loading triage queue…')).toBeTruthy()
+  await act(async () => {
+    notify?.(target)
+  })
+  expect(screen.queryByRole('dialog', { name: 'Triage Inbox' })).toBeNull()
+  expect(row(target.subject).getAttribute('aria-selected')).toBe('true')
+  await press('1', listbox(), { metaKey: true })
+  await open()
+  expect(smart.triageQueue).toHaveBeenCalledWith({ accountId: 'studio', limit: 100 })
+  expect(progress()).toBe('1/2')
+  await act(async () =>
+    previous.resolve({ reviewLookup: true, cards: [], cursor: null, revision: 8 }),
+  )
+  expect(progress()).toBe('1/2')
+  await press('Escape')
+  await tick()
+  await press('0', listbox(), { metaKey: true })
+  await open()
+  expect(smart.triageQueue.mock.calls.filter(([query]) => query.limit === 100)).toHaveLength(3)
+})
+
+it('keeps ordinary Shift+T, Inbox T, and sequence G then T distinct', async () => {
+  const { adapter, smart } = await fixture()
+  await mount(adapter)
+  await press('T', listbox(), { shiftKey: true })
+  await tick()
+  const handoff = screen.getByRole('dialog', { name: /Hand off/i })
+  expect(smart.triageQueue).not.toHaveBeenCalled()
+  await press('Escape', handoff)
+  await tick()
+  await press('g', listbox())
+  await press('t', listbox())
+  expect(screen.queryByRole('dialog', { name: 'Triage Inbox' })).toBeNull()
+  expect(screen.getByRole('heading', { name: 'Sent', level: 2 })).toBeTruthy()
+  await press('g', document.body)
+  await press('i', document.body)
+  await open()
+  expect(progress()).toBe('1/2')
+})
+
+it('accepts the shown Account-scoped Sender and skips its whole group', async () => {
+  const { adapter, smart } = await fixture()
+  await mount(adapter)
+  await open()
+  await press('a')
+  expect(smart.decideSender).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({
+      accountId: 'studio',
+      address: 'mina.park@example.test',
+      expectedRevision: 1,
+      decision: 'accept',
+    }),
+  )
+  expect(progress()).toBe('2/2')
+})
+
+it('advances a queued Reply and uses its exact Outbox ID for keyboard Undo', async () => {
+  const { adapter } = await fixture()
+  const submit = adapter.api.sendDraft
+  const send = vi.spyOn(adapter.api, 'sendDraft').mockImplementation(async (request) => ({
+    ...(await submit(request)),
+    undoRemainingMs: 5000,
+  }))
+  const cancel = vi.spyOn(adapter.api, 'cancelSend')
+  await mount(adapter)
+  await open()
+  await press(' ')
+  await press('r')
+  const composer = screen.getByRole('dialog', { name: 'Compose' })
+  expect(send).not.toHaveBeenCalled()
+  await click(within(composer).getByRole('button', { name: /^Send ⌘/ }))
+  await tick()
+  expect(within(review()).getByText('All clear')).toBeTruthy()
+  expect(send).toHaveBeenCalledOnce()
+  await press('u')
+  expect(cancel).toHaveBeenCalledExactlyOnceWith(send.mock.calls[0][0].id)
+  expect(progress()).toBe('2/2')
+  expect(
+    within(review()).getByRole('heading', { name: 'Invoice for the spring issue' }),
+  ).toBeTruthy()
 })

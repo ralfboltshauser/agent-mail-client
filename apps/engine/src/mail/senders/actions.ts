@@ -345,15 +345,19 @@ export function listSenders(db: Db, input: SenderListQuery): SenderList {
   return {
     rows: page.map((row) => ({
       ...row,
-      suggestions: db
-        .prepare(`
-        SELECT s.action_id AS actionId, a.token_name AS author, s.message_id AS messageId, s.decision, s.reason
-        FROM sender_suggestion s JOIN agent_action a ON a.id = s.action_id
-        WHERE s.account_id = ? AND s.address = ? ORDER BY a.seq DESC LIMIT 20
-      `)
-        .all(row.accountId, row.address) as unknown as SenderList['rows'][number]['suggestions'],
+      suggestions: senderSuggestions(db, row.accountId, row.address),
     })),
     cursor:
       last && rows.length > input.limit ? JSON.stringify([last.accountId, last.address]) : null,
   }
+}
+
+export function senderSuggestions(db: Db, accountId: string, address: string) {
+  return db
+    .prepare(`
+    SELECT s.action_id AS actionId, a.token_name AS author, s.message_id AS messageId, s.decision, s.reason
+    FROM sender_suggestion s JOIN agent_action a ON a.id = s.action_id
+    WHERE s.account_id = ? AND s.address = ? ORDER BY a.seq DESC LIMIT 20
+  `)
+    .all(accountId, address) as unknown as SenderList['rows'][number]['suggestions']
 }

@@ -344,15 +344,22 @@ function registerIpc() {
     }
     return params.toString()
   }
+  const reportReviewRejection = (error: unknown): never => {
+    if (error instanceof EngineError && [400, 403, 404, 409, 422].includes(error.status))
+      throw new Error(`Review rejected: ${error.message}`)
+    throw error
+  }
   ipcMain.handle('amc:listSenders', (_event, query: unknown) =>
     requireEngine().get(`/v1/senders?${queryString(SenderListQuery.parse(query))}`),
   )
   ipcMain.handle('amc:decideSender', (_event, input: unknown) =>
-    requireEngine().request('/v1/senders/decisions', {
-      method: 'POST',
-      body: SenderDecision.parse(input),
-      signal: AbortSignal.timeout(10_000),
-    }),
+    requireEngine()
+      .request('/v1/senders/decisions', {
+        method: 'POST',
+        body: SenderDecision.parse(input),
+        signal: AbortSignal.timeout(10_000),
+      })
+      .catch(reportReviewRejection),
   )
   ipcMain.handle('amc:adoptScreenedDestination', (_event, input: unknown) =>
     requireEngine().request('/v1/senders/destination/adopt', {
@@ -379,11 +386,13 @@ function registerIpc() {
   ipcMain.handle('amc:reviewPairing', () => requireEngine().pairingScope)
   ipcMain.handle('amc:reviewBucket', async (_event, input: unknown) => {
     const loop = sync
-    const result = await requireEngine().request('/v1/bucket', {
-      method: 'PUT',
-      body: BucketReviewInput.parse(input),
-      signal: AbortSignal.timeout(10_000),
-    })
+    const result = await requireEngine()
+      .request('/v1/bucket', {
+        method: 'PUT',
+        body: BucketReviewInput.parse(input),
+        signal: AbortSignal.timeout(10_000),
+      })
+      .catch(reportReviewRejection)
     void loop?.pull().catch(() => {})
     return result
   })

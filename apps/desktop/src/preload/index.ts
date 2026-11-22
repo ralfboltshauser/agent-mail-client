@@ -10,10 +10,10 @@ const invoke =
 const api: AmcApi = {
   smartInbox: {
     review: {
-    reviewPairing: invoke('reviewPairing') as ReviewApi['reviewPairing'],
-    reviewBucket: invoke('reviewBucket') as ReviewApi['reviewBucket'],
-    reviewOrganise: invoke('reviewOrganise') as ReviewApi['reviewOrganise'],
-    reviewOrganiseStatus: invoke('reviewOrganiseStatus') as ReviewApi['reviewOrganiseStatus'],
+      reviewPairing: invoke('reviewPairing') as ReviewApi['reviewPairing'],
+      reviewBucket: invoke('reviewBucket') as ReviewApi['reviewBucket'],
+      reviewOrganise: invoke('reviewOrganise') as ReviewApi['reviewOrganise'],
+      reviewOrganiseStatus: invoke('reviewOrganiseStatus') as ReviewApi['reviewOrganiseStatus'],
     },
     listSenders: invoke('listSenders') as SmartInboxApi['listSenders'],
     decideSender: invoke('decideSender') as SmartInboxApi['decideSender'],

@@ -21,6 +21,7 @@ export type Decision =
 
 export type ActionStatus =
   | 'unconfirmed'
+  | 'rejected'
   | 'pending'
   | 'applied'
   | 'failed'

@@ -64,11 +64,14 @@ export class ReviewStore {
   }
 
   #save() {
-    if (!this.#saved) return
+    if (!this.#saved) return false
     try {
       saveReview(this.#saved)
+      if (this.#view.storageError) this.#publish({ storageError: false })
+      return true
     } catch {
       this.#publish({ storageError: true })
+      return false
     }
   }
 
@@ -95,22 +98,12 @@ export class ReviewStore {
       card: null,
       error: null,
       progress: '',
+      busy: true,
       finished: false,
       more: false,
       notice: '',
     })
-    void this.restore()
-      .then(() => {
-        if (this.#active && this.#account === JSON.stringify(accountId)) {
-          const session = this.#session
-          void this.refresh(!!session && session.index >= session.ids.length && !session.cursor)
-        }
-      })
-      .catch((error) => {
-        if (this.#active && this.#account === JSON.stringify(accountId)) {
-          this.#publish({ busy: false, error: reviewError(error) })
-        }
-      })
+    void this.refresh(false)
   }
 
   close() {
@@ -122,7 +115,7 @@ export class ReviewStore {
   replicaChanged() {
     this.#replicaVersion++
     this.#next = null
-    void this.poll()
+    void this.poll(true)
   }
 
   async refresh(newBatch = this.#retryBatch) {
@@ -164,6 +157,18 @@ export class ReviewStore {
     if (!session || !this.#smart || !this.#active) return
     let notice = this.#view.notice
     for (let index = session.index; index < session.ids.length; index++) {
+      if (
+        this.#history.some(
+          (entry) =>
+            entry.batch === session.batch &&
+            entry.index === index &&
+            (entry.status === 'pending' || entry.status === 'applied') &&
+            (entry.decision.kind === 'skip' ||
+              entry.card.kind === 'thread' ||
+              entry.decision.kind === 'sender'),
+        )
+      )
+        continue
       const preview =
         cached ??
         (await loadPreview(
@@ -217,15 +222,17 @@ export class ReviewStore {
       .catch(() => {})
   }
 
-  #update(action: ReviewAction, patch: Partial<ReviewAction>) {
+  #update(action: ReviewAction, patch: Partial<ReviewAction>, requireStorage = false) {
     const updated = { ...action, ...patch }
     const saved = this.#saved
     if (!saved) return updated
     saved.history = saved.history.some(({ id }) => id === action.id)
       ? saved.history.map((entry) => (entry.id === action.id ? updated : entry))
       : [...saved.history, updated]
-    this.#save()
+    const savedLocally = this.#save()
     this.#publish({ history: saved.history })
+    if (requireStorage && !savedLocally)
+      throw new Error('Could not save this decision locally. Retry from action history.')
     return updated
   }
 
@@ -290,6 +297,20 @@ export class ReviewStore {
       void this.#advance(action, false)
       return
     }
+    if (
+      this.#history.some(
+        (entry) =>
+          entry.batch === action.batch &&
+          entry.index === action.index &&
+          entry.threadId === action.threadId &&
+          entry.status === 'unconfirmed',
+      )
+    ) {
+      this.#publish({
+        notice: 'Retry the unconfirmed decision from action history before making another.',
+      })
+      return
+    }
     const generation = this.#read
     this.#working = true
     this.#publish({ busy: true })
@@ -307,8 +328,8 @@ export class ReviewStore {
 
   async #submit(action: ReviewAction) {
     const smart = await this.#ownerApi()
-    this.#update(action, { status: 'unconfirmed', error: null })
     try {
+      this.#update(action, { status: 'unconfirmed', error: null }, true)
       const result = await submit(smart, action)
       const updated = this.#update(action, { status: result.status, error: result.error })
       this.#announce(updated, true)
@@ -319,13 +340,22 @@ export class ReviewStore {
         )
       }
     } catch (error) {
-      this.#announce(this.#update(action, { status: 'unconfirmed', error: reviewError(error) }))
+      const message = reviewError(error)
+      const rejected = message.startsWith('Review rejected: ')
+      this.#announce(
+        this.#update(action, {
+          status: rejected ? 'rejected' : 'unconfirmed',
+          error: message.replace(/^Review rejected: /, ''),
+        }),
+      )
     }
   }
 
   async retryAction(action: ReviewAction) {
-    if (this.#working) return
-    if (action.status !== 'unconfirmed' || !action.error) {
+    const latest = this.#history.find(({ id }) => id === action.id)
+    if (this.#working || !latest) return
+    action = latest
+    if (action.status !== 'unconfirmed') {
       this.#returnTo(action)
       return
     }
@@ -339,9 +369,30 @@ export class ReviewStore {
     }
   }
 
+  async adoptDestination(action: ReviewAction, providerId: string) {
+    if (this.#working) return
+    this.#working = true
+    try {
+      const smart = await this.#ownerApi()
+      await smart.adoptScreenedDestination({ accountId: action.accountId, providerId })
+      this.#announce(this.#update(action, { status: 'pending', error: null }))
+    } catch (error) {
+      this.#publish({ notice: reviewError(error) })
+    } finally {
+      this.#working = false
+    }
+  }
+
   #returnTo(action: ReviewAction) {
     const session = this.#sessionFor(action)
-    if (!session) return
+    if (!session) {
+      if (this.#active)
+        this.#publish({
+          notice:
+            'This card belongs to an earlier batch. Check for new cards to review its current state.',
+        })
+      return
+    }
     session.index = action.index
     this.#save()
     if (this.#active && session === this.#session) void this.refresh(false)
@@ -388,7 +439,7 @@ export class ReviewStore {
     const id = action.undo?.status === 'unconfirmed' ? action.undo.id : crypto.randomUUID()
     try {
       const smart = await this.#ownerApi()
-      this.#update(action, { undo: { id, status: 'unconfirmed', error: null } })
+      this.#update(action, { undo: { id, status: 'unconfirmed', error: null } }, true)
       const result = await undo(this.#api, smart, action, id)
       this.#acceptStatus(action, { undo: { id, ...result } })
     } catch (error) {
@@ -426,26 +477,45 @@ export class ReviewStore {
     }
   }
 
-  async poll() {
-    if (
-      this.#polling ||
-      this.#working ||
-      !this.#history.some((entry) => entry.status === 'pending' || entry.undo?.status === 'pending')
-    )
-      return
+  async poll(recheckBlocks = false) {
+    if (this.#polling || this.#working) return
+    const pending = this.#history.filter(watchAction)
+    const activeBlocks = recheckBlocks
+      ? this.#history
+          .filter(
+            (entry) =>
+              entry.status === 'applied' &&
+              !entry.undo &&
+              entry.decision.kind === 'sender' &&
+              entry.decision.input.decision === 'block',
+          )
+          .slice(-8)
+      : []
+    if (!pending.length && !activeBlocks.length) return
     this.#polling = true
     try {
       const smart = await this.#ownerApi()
-      const pending = this.#history.filter(
-        (entry) => entry.status === 'pending' || entry.undo?.status === 'pending',
-      )
       await Promise.allSettled(
-        pending.map(async (action) => {
+        [...pending, ...activeBlocks].map(async (action) => {
           const next = await poll(this.#api, smart, action)
           if (!next || !this.#history.includes(action)) return
-          if (next.undo ? next.undo.status === action.undo?.status : next.status === action.status)
+          if (
+            next.undo
+              ? next.undo.status === action.undo?.status && next.undo.error === action.undo.error
+              : next.status === action.status && next.error === action.error
+          )
             return
           this.#acceptStatus(action, next)
+          if (
+            action.status === 'unconfirmed' &&
+            !next.undo &&
+            (next.status === 'applied' || next.status === 'pending')
+          ) {
+            await this.#advance(
+              { ...action, ...next },
+              action.card.kind === 'sender' && action.decision.kind !== 'sender',
+            )
+          }
         }),
       )
     } catch {
@@ -454,4 +524,13 @@ export class ReviewStore {
       this.#polling = false
     }
   }
+}
+
+function watchAction(action: ReviewAction) {
+  return (
+    action.status === 'pending' ||
+    action.status === 'unconfirmed' ||
+    action.undo?.status === 'pending' ||
+    action.undo?.status === 'unconfirmed'
+  )
 }

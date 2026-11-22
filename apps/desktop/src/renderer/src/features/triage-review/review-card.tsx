@@ -70,6 +70,19 @@ function CardPreview({ card, controls }: { card: Preview; controls: ReviewContro
             {thread.bucket?.bucket} · {card.reason}
           </p>
         )}
+        {!!card.suggestions?.length && (
+          <details className="text-sm">
+            <summary>Agent suggestions ({card.suggestions.length})</summary>
+            <ul className="mt-2 space-y-2 text-muted-foreground">
+              {card.suggestions.map(({ actionId, author, decision, reason }) => (
+                <li key={actionId}>
+                  <strong>{author}</strong> suggests{' '}
+                  {decision === 'accept' ? 'accepting' : 'blocking'} this Sender. {reason}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
       </section>
       <fieldset className="grid gap-2">
         <legend className="mb-2 text-sm font-medium">Sender</legend>

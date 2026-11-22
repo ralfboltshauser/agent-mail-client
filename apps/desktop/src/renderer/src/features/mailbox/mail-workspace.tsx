@@ -355,6 +355,10 @@ export function MailWorkspace({
           suspended={!!compose.draft || openingComposer}
           snoozeEnabled={snoozeEnabled}
           onClose={() => closeReview()}
+          onOutbox={() => {
+            closeReview(false)
+            goTo({ kind: 'outbox' })
+          }}
           onReply={async (card) => {
             await review.store.validate(card)
             const draft = await compose.startCompose('reply', card.detail.thread)
