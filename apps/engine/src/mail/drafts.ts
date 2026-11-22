@@ -604,8 +604,10 @@ export class Drafts {
     }
     return outbox.enqueue(principal, input, () => ({
       ...this.freeze(id, message.revision),
-      // Only the paired desktop send path records authority to remove an imported UID.
-      ...(importedImapDraft && row.mirror_hash && { importedImapDraftHash: row.mirror_hash }),
+      // Keep the source when the composer cannot faithfully reproduce it.
+      ...(importedImapDraft &&
+        row.mirror_hash &&
+        this.#canReplaceContent(row) && { importedImapDraftHash: row.mirror_hash }),
     }))
   }
 
@@ -675,10 +677,11 @@ export class Drafts {
     return message
   }
 
-  finishSend(message: FrozenMessage): void {
+  finishSend(message: FrozenMessage, allRecipientsAccepted = false): void {
     const row = this.#row(message.draftId)
     if (row?.modseq !== message.revision) return
     if (
+      allRecipientsAccepted &&
       message.importedImapDraftHash &&
       row.account_id === message.accountId &&
       row.provider_draft_id &&

@@ -806,23 +806,41 @@ it.each([
   }
 })
 
-it.each(['accepted', 'cancelled', 'rejected', 'changed on server'])(
+it.each([
+  'accepted',
+  'cancelled',
+  'rejected',
+  'partially accepted',
+  'reconciled',
+  'changed on server',
+])(
   'only removes an unchanged imported IMAP draft after confirmed owner send (%s)',
   async (scenario) => {
     const { account, addPlainDraft, advance, call, db, drafts, fake, folder, provider, outbox } =
       imapDraftSetup()
     try {
       const uid = addPlainDraft('Imported content')
+      if (scenario === 'partially accepted') {
+        const source = fixture(folder.messages.get(uid))
+        source.source = Buffer.concat([Buffer.from('Cc: rejected@example.test\r\n'), source.source])
+      }
       await drafts.pullImap(account, provider)
       const draft = fixture(drafts.compose(fixture(drafts.list()[0]).id))
       const expunge = vi.spyOn(fake, 'uidExpunge')
       const send = vi.spyOn(provider, 'send')
       if (scenario === 'rejected') send.mockRejectedValue(new SmtpRejection('Fixture rejection'))
-      else {
+      else if (scenario === 'reconciled') {
+        send.mockRejectedValue(new Error('Lost SMTP response'))
+        vi.spyOn(provider, 'findSent').mockResolvedValue({
+          folder: 'Sent',
+          uidValidity: '1',
+          uid: 1,
+        })
+      } else {
         send.mockResolvedValue({
           messageId: 'sent@example.test',
           accepted: ['reviewed@example.test'],
-          rejected: [],
+          rejected: scenario === 'partially accepted' ? ['rejected@example.test'] : [],
           sentCopy: 'server-managed',
         })
       }
@@ -836,8 +854,6 @@ it.each(['accepted', 'cancelled', 'rejected', 'changed on server'])(
           })
         ).status,
       ).toBe(202)
-      if (scenario === 'cancelled')
-        expect((await call('/outbox/imap-send/cancel', 'POST')).ok).toBe(true)
       if (scenario === 'changed on server') {
         const source = fixture(folder.messages.get(uid))
         source.source = Buffer.concat([
@@ -845,19 +861,33 @@ it.each(['accepted', 'cancelled', 'rejected', 'changed on server'])(
           source.source,
         ])
       }
+      advance(9_999)
+      await outbox.runDue()
       await drafts.mirrorPending()
+      expect(send).not.toHaveBeenCalled()
       expect(expunge).not.toHaveBeenCalled()
       expect(folder.messages.has(uid)).toBe(true)
+      if (scenario === 'cancelled')
+        expect((await call('/outbox/imap-send/cancel', 'POST')).ok).toBe(true)
 
-      advance(10_000)
+      advance(1)
       await outbox.runDue()
+      if (scenario === 'reconciled') {
+        expect(outbox.get('imap-send')?.status).toBe('dispatching')
+        await drafts.mirrorPending()
+        expect(folder.messages.has(uid)).toBe(true)
+        advance(15_000)
+        await outbox.runDue()
+      }
       expect(send).toHaveBeenCalledTimes(scenario === 'cancelled' ? 0 : 1)
       const status =
         scenario === 'cancelled' ? 'cancelled' : scenario === 'rejected' ? 'failed' : 'sent'
       expect(outbox.get('imap-send')?.status).toBe(status)
       expect(folder.messages.has(uid)).toBe(true)
       await drafts.pullImap(account, provider)
-      expect(drafts.list()).toHaveLength(status === 'sent' ? 0 : 1)
+      expect(drafts.list()).toHaveLength(
+        status === 'sent' && scenario !== 'partially accepted' && scenario !== 'reconciled' ? 0 : 1,
+      )
 
       await drafts.mirrorPending()
       if (scenario === 'accepted') {
@@ -1136,7 +1166,8 @@ it('keeps distinct IMAP draft UIDs when multiple new copies match the missing so
 })
 
 it('leaves unsupported MIME on IMAP and flags it on edit and send', async () => {
-  const { account, addPlainDraft, db, drafts, fake, folder, outbox, provider } = imapDraftSetup()
+  const { account, addPlainDraft, advance, db, drafts, fake, folder, outbox, provider } =
+    imapDraftSetup()
   const uid = addPlainDraft('Some content')
   fixture(folder.messages.get(uid)).structure = {
     type: 'multipart/signed',
@@ -1156,6 +1187,16 @@ it('leaves unsupported MIME on IMAP and flags it on edit and send', async () => 
     outbox,
   )
   expect(outbox.get(item.id)).toMatchObject({ originalDraftLeft: true })
+  vi.spyOn(provider, 'send').mockResolvedValue({
+    messageId: 'sent@example.test',
+    accepted: ['reviewed@example.test'],
+    rejected: [],
+    sentCopy: 'server-managed',
+  })
+  advance(10_000)
+  await outbox.runDue()
+  expect(outbox.get(item.id)?.status).toBe('sent')
+  await drafts.mirrorPending()
   expect(folder.messages.has(uid)).toBe(true)
   db.close()
 })

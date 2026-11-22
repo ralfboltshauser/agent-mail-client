@@ -140,11 +140,13 @@ after a UIDVALIDITY reset. When the bytes differ or several copies match,
 AMC imports the new copies separately and flags the previous draft so you
 can compare them.
 
-AMC keeps edits to imported IMAP drafts on the Host. When the owner discards
-one from the desktop or its send is confirmed, AMC attempts to remove the
-original server copy. Removal requires a matching UIDVALIDITY, UID, Draft flag,
-and full message hash, plus server support for UID EXPUNGE. A copy that fails
-verification stays on the server.
+AMC keeps edits to imported IMAP drafts on the Host. AMC attempts to remove
+the original server copy when the owner discards it from the desktop, or
+when the composer can faithfully represent the draft and SMTP confirms
+acceptance for every recipient. A Sent-folder lookup can confirm that a
+message was sent, but provides no per-recipient acceptance evidence.
+Removal requires a matching UIDVALIDITY, UID, Draft flag, and full message
+hash, plus server support for UID EXPUNGE.
 
 ## Rolling back
 

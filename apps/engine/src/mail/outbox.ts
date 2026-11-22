@@ -25,6 +25,7 @@ export interface Receipt {
   providerId: string
   providerThreadId: string
   detail?: string
+  allRecipientsAccepted?: boolean
 }
 
 type SubmitResult =
