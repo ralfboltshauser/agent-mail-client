@@ -3,6 +3,8 @@ import { agentGrantActive, type Principal, withinAccount } from '../../auth/toke
 import { type Db, transaction } from '../../db/database.ts'
 import { setBucketAsAgent } from '../agent-actions.ts'
 import type { MailStore } from '../store.ts'
+import { recordPrediction } from './annotations.ts'
+import { suggestFilter } from './filtering.ts'
 import { threadInput } from './input.ts'
 
 export function hasTriageLease(db: Db, agent: Principal, scope: 'read' | 'organize') {
@@ -33,7 +35,7 @@ export function setModelBucket(
     if (!thread || !withinAccount(agent, thread.account_id))
       return { updated: false, error: 'Thread is no longer available' }
     if (
-      !input.bucket ||
+      (!input.bucket && metadata.outcome !== 'filtered') ||
       !thread.in_inbox ||
       !thread.input_id ||
       thread.handled_id === thread.input_id ||
@@ -42,8 +44,23 @@ export function setModelBucket(
     )
       return { updated: false, reason: 'The Inbox input or Bucket changed. Refresh triage.' }
 
+    if (metadata.outcome === 'filtered') {
+      if (input.bucket) return { updated: false, error: 'Choose one triage outcome' }
+      return suggestFilter(store, thread.account_id, input.threadId, thread.input_id, metadata)
+    }
+    db.prepare('UPDATE thread SET filter_suggestion_message_id = NULL WHERE id = ?').run(
+      input.threadId,
+    )
     const result = setBucketAsAgent(store, agent, input, true)
-    if (result.updated)
+    if (result.updated && input.bucket) {
+      recordPrediction(
+        db,
+        thread.account_id,
+        input.threadId,
+        thread.input_id,
+        input.bucket,
+        metadata,
+      )
       db.prepare(`
         UPDATE thread SET bucket_confidence = ?, bucket_input_revision = ?,
           bucket_input_message_id = ?, bucket_producer = ? WHERE id = ?
@@ -54,6 +71,7 @@ export function setModelBucket(
         agent.name,
         input.threadId,
       )
+    }
     return result
   })
 }

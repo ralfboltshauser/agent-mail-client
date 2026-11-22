@@ -118,6 +118,7 @@ export function fromGmail(message: GmailMessage): IncomingMessage {
     size: message.sizeEstimate ?? 0,
     labels: message.labelIds ?? [],
     listUnsubscribe: header(headers, 'List-Unsubscribe'),
+    listId: header(headers, 'List-Id'),
     attachments: collected.attachments,
   }
 }

@@ -1,9 +1,15 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { setTimeout as delay } from 'node:timers/promises'
-import { Bucket, BucketConfidence, BucketInput } from '@amc/protocol'
+import {
+  Bucket,
+  BucketConfidence,
+  BucketInput,
+  TriageAttention,
+  TriageOutcome,
+} from '@amc/protocol'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -20,7 +26,13 @@ declare const AMC_TRIAGE_PROMPT: string | undefined
 const BATCH_SIZE = 20
 const Decisions = z.object({
   decisions: z
-    .array(BucketInput.extend({ bucket: Bucket, confidence: BucketConfidence.optional() }))
+    .array(
+      BucketInput.extend({
+        bucket: TriageOutcome,
+        confidence: BucketConfidence.optional(),
+        attention: TriageAttention.optional(),
+      }),
+    )
     .max(BATCH_SIZE),
 })
 // Claude's structured output supports the shape and enum. AMC validates lengths locally.
@@ -28,9 +40,10 @@ export const ModelDecisions = z.object({
   decisions: z.array(
     z.object({
       threadId: z.string(),
-      bucket: Bucket,
+      bucket: TriageOutcome,
       reason: z.string(),
       confidence: BucketConfidence,
+      attention: TriageAttention.optional(),
     }),
   ),
 })
@@ -44,11 +57,12 @@ const ReviewBatch = z.object({
     .array(
       z.object({
         previous: Bucket.nullable(),
-        chosen: Bucket,
+        chosen: z.union([TriageOutcome, z.enum(['not filtered', 'block sender'])]),
+        ownerReason: z.string().max(500).optional(),
         context: z.object({ subject: z.string().max(480), snippet: z.string().max(960) }),
       }),
     )
-    .max(12),
+    .max(30),
 })
 const TriageBatch = z.union([ReviewBatch, ListedThreads])
 const TOOL_NAMES = ['list_untriaged', 'get_thread'] as const
@@ -61,6 +75,7 @@ export type TriageHarness = (request: {
   tools: readonly string[]
   signal: AbortSignal
   allowReads: () => void
+  onModel?: (model: string) => void
 }) => Promise<unknown>
 
 function toolJson(result: CallToolResult): unknown {
@@ -203,16 +218,21 @@ export async function triageWithGrant(
       signal,
     )
     try {
+      const promptVersion = createHash('sha256').update(prompt).digest('hex').slice(0, 16)
+      let model = 'unspecified'
       const proposal = await harness({
         url: forwarder.url,
         bearer: forwarder.bearer,
         tools: TOOL_NAMES.map((name) => `mcp__amc__${name}`),
         prompt: examples.length
-          ? `${prompt}\n\nOwner Bucket choices (JSON data)\n${JSON.stringify(examples)}`
+          ? `${prompt}\n\nOwner decisions (JSON data)\n${JSON.stringify(examples)}`
           : prompt,
         schema: triageJsonSchema,
         signal,
         allowReads: forwarder.allowReads,
+        onModel: (name) => {
+          if (/^[a-zA-Z0-9:._/-]{1,96}$/.test(name)) model = name
+        },
       })
       signal.throwIfAborted()
       const { decisions } = Decisions.parse(proposal)
@@ -227,14 +247,32 @@ export async function triageWithGrant(
 
       const results = []
       for (const decision of decisions) {
-        const { confidence, ...assignment } = decision
+        const { confidence, attention, bucket, ...assignment } = decision
         const inputRevision = revisions.get(decision.threadId)
+        if (bucket === 'filtered' && inputRevision === undefined) {
+          results.push({
+            ...decision,
+            updated: false,
+            skipped: 'Update the Engine to suggest filtering',
+          })
+          continue
+        }
         const result = z.object({ updated: z.boolean(), reason: z.string().optional() }).parse(
           toolJson(
             await call('set_bucket', {
               ...assignment,
+              bucket: bucket === 'filtered' ? null : bucket,
               onlyUntriaged: true,
-              ...(inputRevision === undefined ? {} : { triage: { inputRevision, confidence } }),
+              ...(inputRevision === undefined
+                ? {}
+                : {
+                    triage: {
+                      inputRevision,
+                      confidence,
+                      version: `${promptVersion}/${model}`,
+                      ...(bucket === 'filtered' ? { outcome: bucket, attention } : {}),
+                    },
+                  }),
             }),
           ),
         )

@@ -1,6 +1,9 @@
-import { type Label, SCREENED_OUT_LABEL } from '@amc/protocol'
+import { FILTERED_LABEL, type Label, SCREENED_OUT_LABEL } from '@amc/protocol'
+import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { canUndo, statusLabel } from './journal'
+import type { ReviewAction } from './model'
+import { ReasonInput } from './reason-input'
 import type { ReviewStore } from './store'
 import { useReviewValue } from './use-review-value'
 
@@ -43,8 +46,9 @@ export function ReviewHistory({
                   Open Outbox
                 </Button>
               )}
-              {action.decision.kind === 'sender' &&
-                action.decision.input.decision === 'block' &&
+              {(action.decision.kind === 'filter' ||
+                (action.decision.kind === 'sender' &&
+                  action.decision.input.decision === 'block')) &&
                 action.undo === undefined &&
                 action.error &&
                 /adopt|already in use/.test(action.error) &&
@@ -53,7 +57,11 @@ export function ReviewHistory({
                     (label) =>
                       label.accountId === action.accountId &&
                       label.kind === 'user' &&
-                      label.name.toLowerCase() === SCREENED_OUT_LABEL.toLowerCase(),
+                      label.name.toLowerCase() ===
+                        (action.decision.kind === 'filter'
+                          ? FILTERED_LABEL
+                          : SCREENED_OUT_LABEL
+                        ).toLowerCase(),
                   )
                   .map((label) => (
                     <Button
@@ -73,6 +81,12 @@ export function ReviewHistory({
                   {action.status === 'unconfirmed' ? 'Retry decision' : 'Review card'}
                 </Button>
               )}
+              {(action.decision.kind === 'filter' ||
+                (action.decision.kind === 'sender' &&
+                  action.decision.input.decision === 'block')) &&
+                !['unconfirmed', 'rejected'].includes(action.status) && (
+                  <HistoryReason action={action} store={store} />
+                )}
               {canUndo(action) && (
                 <Button size="sm" variant="outline" onClick={() => void store.undoAction(action)}>
                   {action.undo ? 'Retry Undo' : 'Undo'}
@@ -83,5 +97,37 @@ export function ReviewHistory({
         ))}
       </ol>
     </details>
+  )
+}
+
+function HistoryReason({ action, store }: { action: ReviewAction; store: ReviewStore }) {
+  const [editing, setEditing] = useState(false)
+  const original =
+    action.decision.kind === 'filter' || action.decision.kind === 'sender'
+      ? action.decision.input.reason
+      : undefined
+  const reason = action.ownerReason === undefined ? original : action.ownerReason
+  if (editing)
+    return (
+      <ReasonInput
+        label="Action reason"
+        initial={reason ?? ''}
+        onCancel={() => setEditing(false)}
+        onSave={async (value) => {
+          await store.editReason(action, value)
+          setEditing(false)
+        }}
+      />
+    )
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      aria-label={reason ? 'Edit reason' : 'Add reason'}
+      title={reason ?? undefined}
+      onClick={() => setEditing(true)}
+    >
+      {reason ? 'Edit reason' : 'Add reason'}
+    </Button>
   )
 }

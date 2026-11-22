@@ -8,6 +8,7 @@ import { ReviewAvatar } from './review-avatar'
 export interface ReviewControls {
   accountAddress: string
   run: (key: string) => void
+  reasonInput?: React.ReactNode
   unavailable: (key: string) => string | undefined
 }
 
@@ -62,7 +63,8 @@ function CardPreview({ card, controls }: { card: Preview; controls: ReviewContro
           {message?.subject || thread.subject || '(no subject)'}
         </h2>
         <p className="line-clamp-4 text-sm leading-relaxed">{message?.snippet || thread.snippet}</p>
-        {card.id.kind === 'thread' && (
+        {card.suggestFilter && <p className="text-sm font-medium">Suggested: Filter out</p>}
+        {card.id.kind === 'thread' && !card.suggestFilter && (
           <p className="text-sm text-muted-foreground">
             {thread.bucket?.bucket} · {card.reason}
           </p>
@@ -92,6 +94,7 @@ function CardPreview({ card, controls }: { card: Preview; controls: ReviewContro
         <legend className="mb-2 text-sm font-medium">This Thread</legend>
         <div className="flex flex-wrap gap-2">
           {choice('e', 'Archive')}
+          {choice('f', 'Filter out')}
           {choice('s', 'Snooze')}
           {choice('r', 'Reply')}
         </div>
@@ -100,6 +103,7 @@ function CardPreview({ card, controls }: { card: Preview; controls: ReviewContro
           {BUCKETS.map((bucket, i) => choice(String(i + 1), bucket))}
         </fieldset>
       </fieldset>
+      {controls.reasonInput}
     </article>
   )
 }

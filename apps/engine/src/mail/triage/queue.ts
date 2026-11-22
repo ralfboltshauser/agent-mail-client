@@ -23,6 +23,7 @@ interface QueueRow {
   ruleRevision: number
   reason: string
   at: number
+  suggestFilter: number
 }
 
 export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
@@ -57,6 +58,7 @@ export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
       WITH inbox AS MATERIALIZED (
         SELECT t.id, t.account_id, t.modseq, t.last_message_at, t.bucket_confidence,
           t.bucket_input_message_id, t.bucket_reason,
+          t.filter_suggestion_message_id, t.bucket, ${latestInboxMessageSql} AS latest,
           (SELECT json_object('id', m.id, 'address', i.address, 'revision', coalesce(r.revision, 0),
              'status', ${senderStatusSql})
            FROM message m JOIN sender_index i ON i.message_id = m.id
@@ -76,15 +78,19 @@ export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
       ), cards AS (
         SELECT 0 AS tier, id AS threadId, modseq AS threadRevision, account_id AS accountId,
           sender ->> 'id' AS messageId, sender ->> 'address' AS address,
-          sender ->> 'revision' AS ruleRevision, 'New sender' AS reason, last_message_at AS at
+          sender ->> 'revision' AS ruleRevision, 'New sender' AS reason, last_message_at AS at,
+          (bucket IS NULL AND filter_suggestion_message_id IS latest AND latest IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM owner_handled h WHERE h.thread_id = id AND h.message_id = latest)) AS suggestFilter
         FROM new_senders WHERE sender_rank = 1
         UNION ALL
-        SELECT 1, t.id, t.modseq, t.account_id, t.bucket_input_message_id, null, 0,
-          t.bucket_reason, t.last_message_at
+        SELECT 1, t.id, t.modseq, t.account_id, t.latest, null, 0,
+          coalesce(t.bucket_reason, ''), t.last_message_at,
+          (t.bucket IS NULL AND t.filter_suggestion_message_id IS t.latest)
         FROM inbox t LEFT JOIN owner_handled h ON h.thread_id = t.id
-        WHERE ?7 IS NULL AND t.bucket_confidence = 'low' AND t.sender ->> 'status' IS NOT 'new'
-          AND t.bucket_input_message_id = ${latestInboxMessageSql}
-          AND h.message_id IS NOT t.bucket_input_message_id
+        WHERE ?7 IS NULL AND t.sender ->> 'status' IS NOT 'new'
+          AND t.latest IS NOT NULL AND h.message_id IS NOT t.latest
+          AND ((t.bucket_confidence = 'low' AND t.bucket_input_message_id = t.latest)
+            OR (t.bucket IS NULL AND t.filter_suggestion_message_id = t.latest))
       )
       SELECT * FROM cards
       WHERE ?2 IS NULL OR tier > ?2 OR (tier = ?2 AND (at, threadId) < (?3, ?4))
@@ -106,7 +112,16 @@ export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
       reviewLookup: true,
       revision,
       cards: page.map(
-        ({ address, accountId, threadId, threadRevision, messageId, ruleRevision, reason }) => ({
+        ({
+          address,
+          accountId,
+          threadId,
+          threadRevision,
+          messageId,
+          ruleRevision,
+          reason,
+          suggestFilter,
+        }) => ({
           id: address ? { kind: 'sender', accountId, address } : { kind: 'thread', threadId },
           accountId,
           threadId,
@@ -114,6 +129,7 @@ export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
           messageId,
           revision: address ? ruleRevision : threadRevision,
           reason,
+          ...(suggestFilter ? { suggestFilter: true as const } : {}),
           ...(input.senderAddress && address
             ? { suggestions: senderSuggestions(db, accountId, address) }
             : {}),

@@ -49,6 +49,8 @@ export function ShortcutsDialog({
         ['Block sender', 'X'],
         ['Choose a Bucket', '1–6'],
         ['Archive this Thread', 'E'],
+        ['Filter out this Thread', 'F'],
+        ['Add a reason to Filter out or Block sender', 'Shift+F / Shift+X'],
         ...(snoozeEnabled ? [['Snooze this Thread', 'S']] : []),
         ['Reply', 'R'],
         ['Skip card', 'Space'],

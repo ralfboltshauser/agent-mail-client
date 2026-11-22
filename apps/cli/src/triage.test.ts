@@ -102,6 +102,7 @@ function fixture({
               {
                 previous: 'Action',
                 chosen: 'Later',
+                ownerReason: 'Synthetic owner preference',
                 context: { subject: 'Synthetic example', snippet: '' },
               },
             ],
@@ -196,6 +197,7 @@ describe('amc triage', () => {
     fixture({ modern: true })
     const results = await runTriage(config, 'a', false, signal(), async ({ prompt }) => {
       expect(prompt).toContain('Synthetic example')
+      expect(prompt).toContain('Synthetic owner preference')
       expect(prompt).toContain('"chosen":"Later"')
       return { decisions: [{ ...decision, confidence: 'low', inputRevision: 99 }] }
     })

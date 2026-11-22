@@ -402,12 +402,24 @@ export class ReviewStore {
     }
   }
 
+  async editReason(action: ReviewAction, reason: string) {
+    const smart = await this.#ownerApi()
+    if (!smart.editOwnerReason) throw new Error('Reason editing is unavailable')
+    const result = await smart.editOwnerReason(action.id, reason)
+    const updated = this.#history.find(({ id }) => id === action.id)
+    if (updated) this.#update(updated, { ownerReason: result.reason })
+  }
+
   async adoptDestination(action: ReviewAction, providerId: string) {
     if (this.#working) return
     this.#working = true
     try {
       const smart = await this.#ownerApi()
-      await smart.adoptScreenedDestination({ accountId: action.accountId, providerId })
+      await smart.adoptScreenedDestination({
+        accountId: action.accountId,
+        providerId,
+        ...(action.decision.kind === 'filter' ? { destination: 'filtered' } : {}),
+      })
       this.#announce(this.#update(action, { status: 'pending', error: null }))
     } catch (error) {
       this.#publish({ notice: reviewError(error) })

@@ -12,6 +12,7 @@ import type {
   Contact,
   DiscardDraftResult,
   Draft,
+  FilterReviewInput,
   Label,
   OrganiseAction,
   OutboxItem,
@@ -70,6 +71,7 @@ export interface Counts {
   starred: number
   drafts: number
   buckets: Partial<Record<Bucket, number>>
+  filteredByLabel?: Record<string, number>
 }
 
 export type SyncPhase =
@@ -168,6 +170,9 @@ export interface SmartInboxApi {
   review?: ReviewApi
   listSenders(query: Partial<SenderListQuery>): Promise<SenderList>
   decideSender(input: SenderDecision): Promise<OwnerActionStatus>
+  reviewFilter?(input: FilterReviewInput): Promise<OwnerActionStatus>
+  restoreFiltered?(threadId: string, actionId: string): Promise<OwnerActionStatus>
+  editOwnerReason?(actionId: string, reason: string): Promise<{ reason: string | null }>
   adoptScreenedDestination(
     input: AdoptScreenedDestination,
   ): Promise<{ accountId: string; providerId: string }>

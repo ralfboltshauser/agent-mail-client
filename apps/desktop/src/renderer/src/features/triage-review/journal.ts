@@ -59,6 +59,9 @@ export async function submit(api: SmartInboxApi & ReviewApi, action: ReviewActio
   switch (decision.kind) {
     case 'sender':
       return api.decideSender(decision.input)
+    case 'filter':
+      if (!api.reviewFilter) throw new Error('Filter out is unavailable')
+      return api.reviewFilter(decision.input)
     case 'bucket':
       return api.reviewBucket(decision.input)
     case 'organise':

@@ -35,6 +35,7 @@ export interface IncomingMessage {
   unread?: boolean
   starred?: boolean
   listUnsubscribe: string | null
+  listId?: string | null
   attachments: IncomingAttachment[]
 }
 
@@ -217,8 +218,8 @@ export class MailStore extends EventEmitter<{ change: [] }> {
            id, account_id, thread_id, provider_id, rfc_message_id, in_reply_to, refs,
            from_json, to_json, cc_json, bcc_json, reply_to_json, subject, snippet, body_text, body_search_limit,
            body_parts, html_blob, sent_at, size, label_ids, unread, starred, list_unsubscribe, provider_label_ids,
-           first_seen_at, provider_history_id, provider_delivery_history_id, delivered_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           first_seen_at, provider_history_id, provider_delivery_history_id, delivered_at, list_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            thread_id = excluded.thread_id, rfc_message_id = excluded.rfc_message_id,
            in_reply_to = excluded.in_reply_to, refs = excluded.refs, from_json = excluded.from_json,
@@ -231,7 +232,7 @@ export class MailStore extends EventEmitter<{ change: [] }> {
            list_unsubscribe = excluded.list_unsubscribe, provider_label_ids = excluded.provider_label_ids,
            provider_history_id = excluded.provider_history_id,
            provider_delivery_history_id = COALESCE(message.provider_delivery_history_id, excluded.provider_delivery_history_id),
-           delivered_at = COALESCE(excluded.delivered_at, message.delivered_at)`,
+           delivered_at = COALESCE(excluded.delivered_at, message.delivered_at), list_id = excluded.list_id`,
       )
       .run(
         mid,
@@ -263,6 +264,7 @@ export class MailStore extends EventEmitter<{ change: [] }> {
         stale ? previous.provider_history_id : (msg.providerHistoryId ?? null),
         msg.providerDeliveryHistoryId ?? null,
         msg.deliveredAt ?? null,
+        msg.listId ?? null,
       )
 
     observeSender(this, mid, providerLabels, ownAddresses)

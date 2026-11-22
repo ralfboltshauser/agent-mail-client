@@ -37,9 +37,10 @@ import {
 } from '../providers/imap/organise.ts'
 import type { ImapAccountSync } from '../providers/imap/sync.ts'
 import { assertOwner, liveOwner, SenderError } from './senders/actions.ts'
-import { gmailDestination, imapDestination } from './senders/destination.ts'
+import { gmailDestination, imapDestination, managedDestination } from './senders/destination.ts'
 import { isOwnerAddress, normalizeSender, scanSenderEnvelopes } from './senders/index.ts'
 import { labelId, type MailStore, messageId } from './store.ts'
+import { filterWorkAllowed, markRestored } from './triage/filtering.ts'
 
 const INTERNAL = 'engine'
 const IMAP_SNOOZE_INBOX = 'Snooze is only available for IMAP threads in the Inbox'
@@ -558,7 +559,9 @@ export class Mutations {
 
     const thread = this.#thread(action.threadId)
     if (!allowTrash && this.#managedAgentAction(thread, action))
-      throw new MutationPermissionError('Only the owner can organise mail involving Screened out')
+      throw new MutationPermissionError(
+        'Only the owner can organise mail involving AMC-managed destinations',
+      )
     if (thread.kind === 'imap') {
       const labels = this.#db
         .prepare('SELECT id FROM label WHERE account_id = ?')
@@ -746,11 +749,16 @@ export class Mutations {
     action: OrganiseAction,
   ): boolean {
     const managed = this.#db
-      .prepare('SELECT provider_id FROM screened_destination WHERE account_id = ?')
-      .get(thread.account_id)
-    if (!managed?.provider_id) return false
-    const destination = labelId(thread.account_id, String(managed.provider_id))
-    if (action.kind === 'label' && action.labelId === destination) return true
+      .prepare(`
+      SELECT provider_id FROM screened_destination WHERE account_id = ?1 AND provider_id IS NOT NULL
+      UNION ALL SELECT provider_id FROM filtered_destination WHERE account_id = ?1 AND provider_id IS NOT NULL
+    `)
+      .all(thread.account_id)
+    if (!managed.length) return false
+    const destinations = managed.map(({ provider_id }) =>
+      labelId(thread.account_id, String(provider_id)),
+    )
+    if (action.kind === 'label' && destinations.includes(action.labelId)) return true
     if (
       !this.#db
         .prepare("SELECT 1 FROM account WHERE id = ? AND kind = 'imap'")
@@ -760,9 +768,9 @@ export class Mutations {
     return !!this.#db
       .prepare(`
       SELECT 1 FROM imap_location l JOIN message m ON m.id = l.message_id
-      WHERE m.thread_id = ? AND l.label_id = ? LIMIT 1
+      WHERE m.thread_id = ? AND l.label_id IN (SELECT value FROM json_each(?)) LIMIT 1
     `)
-      .get(thread.id, destination)
+      .get(thread.id, JSON.stringify(destinations))
   }
 
   #imapTrashLabels(accountId: string): Set<string> {
@@ -843,7 +851,7 @@ export class Mutations {
       throw new Error('Gmail did not provide a history checkpoint')
     const screen = this.#screenRequest(row)
     const messages =
-      screen?.work === 'screen'
+      screen?.work === 'screen' && !screen.filtered
         ? await api
             .getMessage(screen.mid.slice(account.length + 1), true)
             .then((message) => (message ? [message] : []))
@@ -868,13 +876,12 @@ export class Mutations {
         patchFor = (id, labels) =>
           id === screen.mid &&
           screen.destination &&
-          from &&
-          normalizeSender(from.address) === screen.address &&
-          labels.includes(inbox) &&
+          (screen.filtered || (from && normalizeSender(from.address) === screen.address)) &&
+          labels.includes(screen.restore ? screen.destination : inbox) &&
           !['SPAM', 'TRASH', 'SENT', 'DRAFT'].some((label) =>
             labels.includes(labelId(account, label)),
           )
-            ? { [screen.destination]: true, [inbox]: false }
+            ? { [screen.destination]: !screen.restore, [inbox]: !!screen.restore }
             : {}
       } else if (row.intent_id) {
         statePatch = {}
@@ -1143,7 +1150,12 @@ export class Mutations {
       )
   }
 
-  async adoptScreenedDestination(principal: Principal, accountId: string, providerId: string) {
+  async adoptScreenedDestination(
+    principal: Principal,
+    accountId: string,
+    providerId: string,
+    filtered = false,
+  ) {
     assertOwner(this.#db, principal)
     const account = this.#db.prepare('SELECT kind FROM account WHERE id = ?').get(accountId)
     if (!account) throw new SenderError('Account unavailable', 404)
@@ -1154,12 +1166,19 @@ export class Mutations {
       let adopted = false
       if (account.kind === 'imap') {
         await this.#imap?.(accountId, async (sync) => {
-          adopted = !!(await imapDestination(sync, allow, providerId))
+          adopted = !!(await imapDestination(sync, allow, providerId, filtered))
         })
       } else {
         const api = this.#api(accountId)
         if (api)
-          adopted = !!(await gmailDestination(this.#store, accountId, api, allow, providerId))
+          adopted = !!(await gmailDestination(
+            this.#store,
+            accountId,
+            api,
+            allow,
+            providerId,
+            filtered,
+          ))
       }
       assertOwner(this.#db, principal)
       if (!adopted) throw new SenderError('The Account is offline. Retry when connected.', 503)
@@ -1181,7 +1200,8 @@ export class Mutations {
       this.#store.recordChange('message', mid, 'upsert')
   }
 
-  #screeningAllowed(actionId: string, mid: string): boolean {
+  #screeningAllowed(actionId: string, mid: string, filtered = false): boolean {
+    if (filtered) return filterWorkAllowed(this.#store, actionId, mid)
     return !!this.#db
       .prepare(`
       SELECT 1 FROM sender_rule r JOIN sender_index i USING (account_id, address)
@@ -1196,6 +1216,9 @@ export class Mutations {
     mid: string
     destination?: string
     address?: string
+    filtered?: boolean
+    restore?: boolean
+    automatic?: boolean
   } | null {
     const request = JSON.parse(row.request)
     return request.work === 'screen' || request.work === 'screen-undo' ? request : null
@@ -1205,20 +1228,20 @@ export class Mutations {
     const request = this.#screenRequest(row)
     if (!request) return
     if (request.work === 'screen') {
+      const { table } = managedDestination(!!request.filtered)
       const destination = this.#db
         .prepare(`
-        SELECT provider_id FROM screened_destination WHERE account_id = ? AND state = 'ready'
+        SELECT provider_id FROM ${table} WHERE account_id = ? AND state = 'ready'
       `)
         .get(row.account_id)
       if (
         destination?.provider_id &&
         labelId(row.account_id, String(destination.provider_id)) === request.destination &&
-        request.address &&
-        !isOwnerAddress(this.#store, request.address) &&
-        this.#screeningAllowed(request.actionId, request.mid)
+        (request.filtered || (request.address && !isOwnerAddress(this.#store, request.address))) &&
+        this.#screeningAllowed(request.actionId, request.mid, request.filtered)
       )
         return
-      throw new ScreeningCanceled('The Sender rule or original Inbox membership changed')
+      throw new ScreeningCanceled('The decision or source mailbox membership changed')
     }
     const unavailable = this.#db
       .prepare('SELECT undo_error FROM screening_work WHERE undo_id = ?')
@@ -1234,7 +1257,7 @@ export class Mutations {
   #stageScreeningUndo(accountId: string) {
     const rows = this.#db
       .prepare(`
-      SELECT w.action_id, w.message_id, w.mutation_id, a.undo_token_id
+      SELECT w.action_id, w.message_id, w.mutation_id, a.undo_token_id, a.kind, a.request
       FROM screening_work w JOIN owner_action a ON a.id = w.action_id JOIN mutation m ON m.id = w.mutation_id
       WHERE a.account_id = ? AND a.undo_requested_at IS NOT NULL AND w.undo_id IS NULL AND w.undo_error IS NULL
         AND m.status IN ('applied', 'partial')
@@ -1246,6 +1269,8 @@ export class Mutations {
       message_id: string
       mutation_id: string
       undo_token_id: string
+      kind: string
+      request: string
     }[]
     for (const row of rows) {
       const original = this.#row(row.mutation_id)
@@ -1268,6 +1293,8 @@ export class Mutations {
               work: 'screen-undo',
               actionId: row.action_id,
               mid: row.message_id,
+              filtered: row.kind.startsWith('filter:'),
+              restore: JSON.parse(row.request).decision === 'not filtered',
             }),
             thread,
             {},
@@ -1291,28 +1318,35 @@ export class Mutations {
   async #stageScreening(accountId: string, kind: string, status: string) {
     const rows = this.#db
       .prepare(`
-      SELECT w.action_id, w.message_id FROM screening_work w JOIN owner_action a ON a.id = w.action_id
+      SELECT w.action_id, w.message_id, a.kind, a.request FROM screening_work w JOIN owner_action a ON a.id = w.action_id
       WHERE a.account_id = ? AND w.mutation_id IS NULL AND w.status = 'pending'
       ORDER BY w.rowid LIMIT 50
     `)
-      .all(accountId) as { action_id: string; message_id: string }[]
-    const eligible = rows.filter(({ action_id, message_id }) => {
-      if (this.#screeningAllowed(action_id, message_id)) return true
+      .all(accountId) as { action_id: string; message_id: string; kind: string; request: string }[]
+    const first = rows[0]
+    if (!first) return
+    const filtered = first.kind.startsWith('filter:')
+    const eligible = rows.filter(({ action_id, message_id, kind }) => {
+      if (kind.startsWith('filter:') !== filtered) return false
+      if (this.#screeningAllowed(action_id, message_id, filtered)) return true
       this.#screeningStatus(action_id, message_id, 'superseded')
       return false
     })
     if (!eligible.length) return
     const allow = () =>
-      eligible.some(({ action_id, message_id }) => this.#screeningAllowed(action_id, message_id))
+      eligible.some(({ action_id, message_id }) =>
+        this.#screeningAllowed(action_id, message_id, filtered),
+      )
     const stage = (providerId: string) =>
       transaction(this.#db, () => {
         const destination = labelId(accountId, providerId)
         const inbox = labelId(accountId, 'INBOX')
-        for (const { action_id, message_id } of eligible) {
-          if (!this.#screeningAllowed(action_id, message_id)) continue
+        for (const { action_id, message_id, request, kind } of eligible) {
+          if (!this.#screeningAllowed(action_id, message_id, filtered)) continue
+          const restore = filtered && JSON.parse(request).decision === 'not filtered'
           const source = this.#db
             .prepare(`
-          SELECT m.thread_id, i.address FROM message m JOIN sender_index i ON i.message_id = m.id WHERE m.id = ?
+          SELECT m.thread_id, i.address FROM message m LEFT JOIN sender_index i ON i.message_id = m.id WHERE m.id = ?
         `)
             .get(message_id)
           if (!source) continue
@@ -1325,11 +1359,13 @@ export class Mutations {
               actionId: action_id,
               mid: message_id,
               destination,
-              address: source.address,
+              ...(filtered
+                ? { filtered, restore, automatic: kind === 'filter:automatic' }
+                : { address: source.address }),
             }),
             this.#thread(String(source.thread_id)),
             {},
-            (mid) => (mid === message_id ? { [destination]: true, [inbox]: false } : {}),
+            (mid) => (mid === message_id ? { [destination]: !restore, [inbox]: restore } : {}),
           )
           this.#db
             .prepare(
@@ -1343,19 +1379,26 @@ export class Mutations {
         throw new SenderError('Sign in again to screen mail on this Account')
       if (kind === 'imap') {
         await this.#imap?.(accountId, async (sync) => {
-          const found = await imapDestination(sync, allow)
+          const found = await imapDestination(sync, allow, undefined, filtered)
           if (found) stage(found.label.providerId)
         })
       } else {
         const api = this.#api(accountId)
         if (!api) return
-        const found = await gmailDestination(this.#store, accountId, api, allow)
+        const found = await gmailDestination(
+          this.#store,
+          accountId,
+          api,
+          allow,
+          undefined,
+          filtered,
+        )
         if (found) stage(found.label.providerId)
       }
     } catch (error) {
       if (!(error instanceof SenderError)) throw error
       for (const { action_id, message_id } of eligible) {
-        if (this.#screeningAllowed(action_id, message_id))
+        if (this.#screeningAllowed(action_id, message_id, filtered) || filtered)
           this.#screeningStatus(action_id, message_id, 'failed', error.message)
       }
     }
@@ -1427,7 +1470,11 @@ export class Mutations {
           JSON.parse(row.request),
         )
       ) {
-        this.#finish(row, 'failed', 'Only the owner can organise mail involving Screened out')
+        this.#finish(
+          row,
+          'failed',
+          'Only the owner can organise mail involving AMC-managed destinations',
+        )
         continue
       }
       if (row.agent_action_id && !this.#agentGrantActive(row)) {
@@ -1526,7 +1573,13 @@ export class Mutations {
             beforeWrite,
             this.#log.child({ mutation: row.id }),
             snoozing || !!this.#screenRequest(row),
-            screen ? { ...(screen.address ? { address: screen.address } : {}) } : undefined,
+            screen
+              ? {
+                  address: screen.address,
+                  filtered: screen.filtered,
+                  intoManaged: screen.work === 'screen' ? !screen.restore : !!screen.restore,
+                }
+              : undefined,
           ),
         )
         if (!ran) return
@@ -1794,6 +1847,8 @@ export class Mutations {
     const trash = labelId(account, 'TRASH')
     const spam = labelId(account, 'SPAM')
     const screening = this.#screenRequest(row)
+    const sourceLabel = screening?.restore ? (screening.destination ?? inbox) : inbox
+    const targetLabel = screening?.restore ? inbox : screening?.destination
     const rawId = (id: string) => id.slice(account.length + 1)
     const intent = row.intent_id ? this.#intent(row.intent_id) : undefined
     const automatic = intent ? (JSON.parse(row.request) as AutomaticRequest) : undefined
@@ -2008,11 +2063,12 @@ export class Mutations {
         }
         if (
           screening?.work === 'screen' &&
-          (!labels?.includes(inbox) ||
+          (!labels?.includes(sourceLabel) ||
+            (screening.automatic && labels.includes(labelId(account, 'IMPORTANT'))) ||
             ['SPAM', 'TRASH', 'SENT', 'DRAFT'].some((label) =>
               labels.includes(labelId(account, label)),
             ) ||
-            (await touched(change, inbox)))
+            (await touched(change, sourceLabel)))
         ) {
           entry.superseded = combine([...entry.superseded, change])
           continue
@@ -2034,16 +2090,16 @@ export class Mutations {
           }
         }
         // A concurrent removal of the managed Label can supersede its addition.
-        // Keep Inbox membership unless this write will leave the message in Screened out.
+        // Keep source membership unless the destination remains reachable.
         if (
           screening?.work === 'screen' &&
-          screening.destination &&
-          after[inbox] === false &&
-          !labels?.includes(screening.destination) &&
-          after[screening.destination] !== true
+          targetLabel &&
+          after[sourceLabel] === false &&
+          !labels?.includes(targetLabel) &&
+          after[targetLabel] !== true
         ) {
-          delete after[inbox]
-          superseded[inbox] = false
+          delete after[sourceLabel]
+          superseded[sourceLabel] = false
         }
         if (Object.keys(superseded).length)
           entry.superseded = combine([...entry.superseded, { ...change, after: superseded }])
@@ -2519,8 +2575,16 @@ export class Mutations {
       }
       for (const patch of this.#patches(row.id)) this.#store.refreshMessageLabels(patch.message_id)
       const screen = this.#screenRequest(row)
-      if (screen?.work === 'screen')
+      if (screen?.work === 'screen') {
         this.#screeningStatus(screen.actionId, screen.mid, status, error)
+        if (
+          screen.restore &&
+          journal?.some(({ applied }) =>
+            applied.some(({ after }) => after[labelId(row.account_id, 'INBOX')] === true),
+          )
+        )
+          markRestored(this.#store, screen.actionId, row.thread_id, screen.mid)
+      }
       this.#refreshThread(row.thread_id, row.id)
     })
   }

@@ -1,5 +1,6 @@
 import type {
   BucketReviewInput,
+  FilterReviewInput,
   SenderDecision,
   TriageCardId,
   TriageQueuePage,
@@ -14,6 +15,7 @@ export type Preview = Candidate & {
 }
 export type Decision =
   | { kind: 'sender'; input: SenderDecision }
+  | { kind: 'filter'; input: FilterReviewInput }
   | { kind: 'bucket'; input: BucketReviewInput }
   | { kind: 'organise'; input: Exclude<ReviewOrganiseAction, { kind: 'undo' }> }
   | { kind: 'skip' }
@@ -38,6 +40,7 @@ export interface ReviewAction {
   index: number
   batch: string
   label: string
+  ownerReason?: string | null
   decision: Decision
   status: ActionStatus
   error: string | null

@@ -10,6 +10,8 @@ export const BUCKETS = [
 ] as const
 export const Bucket = z.enum(BUCKETS)
 export type Bucket = z.infer<typeof Bucket>
+export const TriageOutcome = z.enum([...BUCKETS, 'filtered'])
+export const TriageAttention = z.enum(['routine', 'interrupt', 'security', 'uncertain'])
 
 export const BucketReason = z
   .string()
@@ -42,6 +44,12 @@ export type BucketReviewInput = z.infer<typeof BucketReviewInput>
 export const TriageBucketResult = z.object({
   inputRevision: z.number().int().nonnegative(),
   confidence: BucketConfidence.optional(),
+  outcome: z.literal('filtered').optional(),
+  attention: TriageAttention.optional(),
+  version: z
+    .string()
+    .regex(/^[a-zA-Z0-9:._/-]{1,120}$/)
+    .optional(),
 })
 
 export type TriageBucketResult = z.infer<typeof TriageBucketResult>

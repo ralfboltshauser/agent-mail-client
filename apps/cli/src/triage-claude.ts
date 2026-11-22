@@ -18,6 +18,7 @@ type ClaudeEvent = {
   type?: string
   subtype?: string
   tools?: unknown
+  model?: unknown
   is_error?: boolean
   structured_output?: unknown
   error?: { message?: unknown } | string
@@ -38,6 +39,7 @@ export const runClaude: TriageHarness = async ({
   schema,
   signal,
   allowReads,
+  onModel,
 }) => {
   const home = homedir()
   const { username } = userInfo()
@@ -173,6 +175,7 @@ export const runClaude: TriageHarness = async ({
             names.some((name) => !allowed.has(name))
           )
             throw new Error('Claude Code exposed an unexpected tool inventory')
+          if (typeof event.model === 'string') onModel?.(event.model)
           inventoryAccepted = true
           allowReads()
         }

@@ -206,6 +206,7 @@ export async function parseMessage(
     labels: [folder.label.providerId],
     ...messageFlags(item.flags),
     listUnsubscribe: unsubscribe?.line.replace(/^list-unsubscribe:\s*/i, '') ?? null,
+    listId: lines.find(({ key }) => key === 'list-id')?.line.replace(/^list-id:\s*/i, '') ?? null,
     attachments,
   }
 }

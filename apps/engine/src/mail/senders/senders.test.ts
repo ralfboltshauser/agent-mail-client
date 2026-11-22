@@ -373,7 +373,9 @@ it('upgrades a populated v20 fixture and rebuilds Account-scoped evidence withou
     } finally {
       backup.close()
     }
-    expect(db.prepare('SELECT * FROM message ORDER BY id').all()).toEqual(original)
+    expect(db.prepare('SELECT * FROM message ORDER BY id').all()).toEqual(
+      original.map((row) => ({ ...row, list_id: null })),
+    )
     expect(db.prepare('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' })
     expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([])
     const store = new MailStore(db, new BlobStore(tempDir()))

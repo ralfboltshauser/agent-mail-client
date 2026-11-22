@@ -1,5 +1,6 @@
 import {
   AdoptScreenedDestination,
+  OwnerActionReasonInput,
   type OwnerActionStatus,
   SenderDecision,
   SenderListQuery,
@@ -15,6 +16,7 @@ import {
   undoSender,
 } from '../mail/senders/actions.ts'
 import type { MailStore } from '../mail/store.ts'
+import { editOwnerReason } from '../mail/triage/annotations.ts'
 import type { AppEnv } from './app.ts'
 
 export interface OwnerActionHandler {
@@ -53,6 +55,7 @@ export function senderRoutes(store: MailStore, queue: Mutations) {
         c.get('principal'),
         parsed.data.accountId,
         parsed.data.providerId,
+        parsed.data.destination === 'filtered',
       ),
     )
   })
@@ -86,6 +89,20 @@ export function ownerActionRoutes(
     const owner = handler(id)
     if (!owner) return c.json({ error: 'not_found', message: 'Owner action unavailable' }, 404)
     return c.json(await owner.get(id))
+  })
+  routes.put('/:id/reason', async (c) => {
+    const id = c.req.param('id')
+    const input = OwnerActionReasonInput.safeParse(await c.req.json().catch(() => null))
+    if (!input.success)
+      return c.json(
+        { error: 'bad_request', message: 'Use a single-line reason of at most 500 characters' },
+        400,
+      )
+    const principal = c.get('principal')
+    assertOwner(store.db, principal)
+    if (!editOwnerReason(store.db, id, input.data.reason))
+      return c.json({ error: 'not_found', message: 'Owner action unavailable' }, 404)
+    return c.json({ reason: input.data.reason || null })
   })
   routes.post('/:id/undo', async (c) => {
     const id = c.req.param('id')

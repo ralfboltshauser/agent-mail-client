@@ -3,6 +3,7 @@ import { open } from 'node:fs/promises'
 import type { LabelPatch } from '@amc/protocol'
 import { transaction } from '../../db/database.ts'
 import type { Logger } from '../../log.ts'
+import { managedDestination } from '../../mail/senders/destination.ts'
 import { senderMailbox } from '../../mail/senders/identity.ts'
 import { normalizeSender } from '../../mail/senders/index.ts'
 import { labelId } from '../../mail/store.ts'
@@ -212,9 +213,10 @@ export async function executeImap(
   beforeWrite: () => void,
   log: Logger,
   requireDestinationUid = false,
-  screening?: { address?: string },
+  screening?: { address?: string; filtered?: boolean; intoManaged: boolean },
 ) {
   const { client, store, accountId, locations } = sync
+  const { table, name } = managedDestination(!!screening?.filtered)
   const unreadId = labelId(accountId, 'UNREAD')
   const starredId = labelId(accountId, 'STARRED')
   const isFlag = (id: string) => id === unreadId || id === starredId
@@ -288,18 +290,20 @@ export async function executeImap(
       flags = undefined
     }
     if (screening) {
-      const managedPath = screening.address ? destination.path : decodeURIComponent(source.path_key)
+      const managedPath = screening.intoManaged
+        ? destination.path
+        : decodeURIComponent(source.path_key)
       if (!client.capabilities.has('UIDPLUS') || !normalFolders.has(managedPath))
         return stopCopyCleanup()
 
-      const target = screening.address
+      const target = screening.intoManaged
         ? store.db
             .prepare(`
-              SELECT validity, mailbox_id FROM screened_destination
+              SELECT validity, mailbox_id FROM ${table}
               WHERE account_id = ? AND provider_id = ? AND state = 'ready'
             `)
             .get(accountId, destination.label.providerId)
-        : pending.change.moveFrom
+        : (pending.change.moveFrom ?? (screening.filtered ? pending.copied : undefined))
       const copied = pending.copied
       if (!target || !copied?.uid || copied.validity !== target.validity) return stopCopyCleanup()
 
@@ -450,9 +454,9 @@ export async function executeImap(
       }
       if (
         screening &&
-        !normalFolders.has(screening.address ? destination.path : sourceFolder.path)
+        !normalFolders.has(screening.intoManaged ? destination.path : sourceFolder.path)
       ) {
-        finish('failed', 'The Screened out folder is no longer a normal user folder')
+        finish('failed', `The ${name} folder is no longer a normal user folder`)
         continue
       }
       if (!allowTrash && (sourceFolder.trash || destination.trash)) {
@@ -473,25 +477,25 @@ export async function executeImap(
       finish('failed', 'The exact IMAP source Sender could not be verified')
       continue
     }
-    if (screening?.address && destination) {
+    if (screening && destination && (screening.intoManaged || screening.filtered)) {
+      const managed = screening.intoManaged ? destination : folders.get(source.label_id)
+      if (!managed) continue
       const saved = store.db
         .prepare(`
-        SELECT validity, mailbox_id FROM screened_destination
+        SELECT validity, mailbox_id FROM ${table}
         WHERE account_id = ? AND provider_id = ? AND state = 'ready'
       `)
-        .get(accountId, destination.label.providerId)
-      const box = await client.mailboxOpen(destination.path, { readOnly: true })
+        .get(accountId, managed.label.providerId)
+      const box = await client.mailboxOpen(managed.path, { readOnly: true })
       if (
         !saved ||
         String(box.uidValidity) !== saved.validity ||
         (saved.mailbox_id && saved.mailbox_id !== box.mailboxId)
       ) {
         store.db
-          .prepare(
-            "UPDATE screened_destination SET state = 'repair', error = ? WHERE account_id = ?",
-          )
-          .run('The managed Screened out folder changed', accountId)
-        finish('failed', 'The managed Screened out folder changed')
+          .prepare(`UPDATE ${table} SET state = 'repair', error = ? WHERE account_id = ?`)
+          .run(`The managed ${name} folder changed`, accountId)
+        finish('failed', `The managed ${name} folder changed`)
         continue
       }
     }

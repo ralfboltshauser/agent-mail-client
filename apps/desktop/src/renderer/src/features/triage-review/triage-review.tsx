@@ -7,9 +7,10 @@ import { Kbd } from '@/components/ui/kbd'
 import { useReplicaSelector } from '@/hooks/use-amc'
 import { accountsQuery, queryFailed } from '../mailbox/mailbox-queries'
 import { type Preview, reviewError } from './model'
+import { ReasonInput } from './reason-input'
 import { ReviewCard } from './review-card'
 import { ReviewHistory } from './review-history'
-import { BlockSender, ReviewState } from './review-status'
+import { ReviewState } from './review-status'
 import type { ReviewStore } from './store'
 import { useReviewValue } from './use-review-value'
 
@@ -35,7 +36,7 @@ export function TriageReview({
   onReply,
 }: Props) {
   const [picker, setPicker] = useState<Preview | null>(null)
-  const [block, setBlock] = useState<Preview | null>(null)
+  const [reasonTarget, setReasonTarget] = useState<{ card: Preview; key: 'f' | 'x' } | null>(null)
   const [message, setMessage] = useState('')
   const openingReply = useRef(false)
   const heading = useRef<HTMLHeadingElement>(null)
@@ -51,22 +52,23 @@ export function TriageReview({
   )
   const errors = useReviewValue(store, (view) => view.error)
   const busy = useReviewValue(store, (view) => view.busy)
+  const activeReason = reasonTarget?.card === card ? reasonTarget : null
   const focus = () => heading.current?.focus()
   const unavailable = (key: string) => {
     if (!card) return 'No card is selected.'
     if (busy) return 'Wait for the current review operation.'
     if (errors) return 'Refresh the card before making a decision.'
     if ((key === 'a' || key === 'x') && !card.sender) return 'This message has no eligible Sender.'
-    if (key === 'x' && account.account?.imapMoves === false)
+    if ((key === 'x' || key === 'f') && account.account?.imapMoves === false)
       return 'This IMAP server does not support safe moves.'
     if (key === 'r' && !card.canReply) return 'This Thread has no reply target.'
     if (key === 's' && !snoozeEnabled) return 'Snooze is disabled on this Engine.'
-    if (key === 'e' || key === 's' || key === 'x') {
+    if (key === 'e' || key === 's' || key === 'x' || key === 'f') {
       if (!account.account)
         return account.failed
           ? 'Account details could not be loaded.'
           : 'Account details are loading.'
-      if (key !== 'x' && account.account.kind === 'imap') {
+      if ((key === 'e' || key === 's') && account.account.kind === 'imap') {
         return imapActionError(
           { kind: 'archive', threadId: card.threadId },
           card.accountId,
@@ -76,7 +78,7 @@ export function TriageReview({
       }
     }
   }
-  const senderDecision = (card: Preview, decision: 'accept' | 'block') => {
+  const senderDecision = (card: Preview, decision: 'accept' | 'block', reason?: string) => {
     if (!card.sender) return
     const id = crypto.randomUUID()
     void store.decide(
@@ -90,6 +92,8 @@ export function TriageReview({
           decision,
           expectedRevision: card.sender.revision,
           clientActionId: id,
+          source: 'triage-key',
+          ...(reason ? { reason } : {}),
         },
       },
       (decision === 'accept' ? 'Accept ' : 'Block ') + card.sender.address,
@@ -110,7 +114,11 @@ export function TriageReview({
     }
     return true
   }
-  const run = (key: string) => {
+  const closeReason = () => {
+    setReasonTarget(null)
+    focus()
+  }
+  const run = (key: string, ownerReason?: string) => {
     setMessage('')
     if (store.view.card !== card || openingReply.current) return
     if (key === 'u') {
@@ -127,7 +135,7 @@ export function TriageReview({
     }
     if (!card) return
     if (key === 'a') senderDecision(card, 'accept')
-    else if (key === 'x') setBlock(card)
+    else if (key === 'x') senderDecision(card, 'block', ownerReason)
     else if (key === 's') setPicker(card)
     else if (key === 'r') {
       openingReply.current = true
@@ -140,6 +148,23 @@ export function TriageReview({
       const id = crypto.randomUUID()
       const bucket = BUCKETS[Number(key) - 1]
       if (key === ' ') void store.decide(card, id, { kind: 'skip' }, 'Skip')
+      else if (key === 'f')
+        void store.decide(
+          card,
+          id,
+          {
+            kind: 'filter',
+            input: {
+              threadId: card.threadId,
+              decision: 'filtered',
+              expectedRevision: card.threadRevision,
+              clientActionId: id,
+              source: 'triage-key',
+              ...(ownerReason ? { reason: ownerReason } : {}),
+            },
+          },
+          'Filter out',
+        )
       else if (key === 'e')
         void store.decide(
           card,
@@ -169,7 +194,7 @@ export function TriageReview({
   const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (
       picker ||
-      block ||
+      activeReason ||
       suspended ||
       event.defaultPrevented ||
       event.nativeEvent.isComposing ||
@@ -177,14 +202,24 @@ export function TriageReview({
       event.metaKey ||
       event.ctrlKey ||
       event.altKey ||
-      event.shiftKey ||
       !(event.target instanceof HTMLElement) ||
       !event.currentTarget.contains(event.target) ||
       event.target.closest('input, textarea, select, [contenteditable="true"], [role="menu"]')
     )
       return
+    if (event.shiftKey) {
+      const key = event.key.toLowerCase()
+      if ((key === 'f' || key === 'x') && card) {
+        event.preventDefault()
+        if (event.repeat || !canActOn(card)) return
+        const reason = unavailable(key)
+        if (reason) setMessage(reason)
+        else setReasonTarget({ card, key })
+      }
+      return
+    }
     if (event.key === ' ' && event.target.closest('button, a, summary, [role="button"]')) return
-    if (!['a', 'x', '1', '2', '3', '4', '5', '6', 'e', 's', 'r', ' ', 'u'].includes(event.key))
+    if (!['a', 'x', '1', '2', '3', '4', '5', '6', 'e', 'f', 's', 'r', ' ', 'u'].includes(event.key))
       return
     event.preventDefault()
     if (!event.repeat) run(event.key)
@@ -209,7 +244,14 @@ export function TriageReview({
             }}
             onCloseAutoFocus={(event) => event.preventDefault()}
             onEscapeKeyDown={(event) => {
-              if (picker || block || event.isComposing || event.keyCode === 229)
+              if (
+                picker ||
+                activeReason ||
+                event.isComposing ||
+                event.keyCode === 229 ||
+                (event.target instanceof HTMLElement &&
+                  event.target.closest('[data-review-reason]'))
+              )
                 event.preventDefault()
             }}
           >
@@ -234,6 +276,16 @@ export function TriageReview({
                   accountAddress: account.account?.address ?? cardAccount ?? '',
                   run,
                   unavailable,
+                  reasonInput: activeReason && (
+                    <ReasonInput
+                      label={activeReason.key === 'f' ? 'Filter out reason' : 'Block sender reason'}
+                      onCancel={closeReason}
+                      onSave={(reason) => {
+                        closeReason()
+                        run(activeReason.key, reason)
+                      }}
+                    />
+                  ),
                 }}
               />
               <ReviewState store={store} message={message} busy={busy} error={errors} />
@@ -264,17 +316,6 @@ export function TriageReview({
           run={async (input) => {
             if (input.kind === 'snooze' && canActOn(picker))
               await store.decide(picker, crypto.randomUUID(), { kind: 'organise', input }, 'Snooze')
-          }}
-        />
-      )}
-      {block && (
-        <BlockSender
-          card={block}
-          onClose={() => setBlock(null)}
-          onFocus={focus}
-          onConfirm={() => {
-            setBlock(null)
-            if (canActOn(block)) senderDecision(block, 'block')
           }}
         />
       )}

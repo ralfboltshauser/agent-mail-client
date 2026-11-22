@@ -17,7 +17,8 @@ import { Drafts } from '../drafts.ts'
 import { Mutations } from '../mutations.ts'
 import { MailQueries } from '../queries.ts'
 import { MailStore } from '../store.ts'
-import { correctionActions, correctionExamples, markConfirmedReply } from './corrections.ts'
+import { correctionExamples } from './annotations.ts'
+import { correctionActions, markConfirmedReply } from './corrections.ts'
 import { threadInput } from './input.ts'
 
 function setup(legacy = false) {
@@ -253,9 +254,16 @@ it('rejects raced model writes and restores an assignment and prompt eligibility
 })
 
 it('upgrades populated pre-confidence databases and keeps existing Buckets outside the low-confidence tier', async () => {
-  const { db, put, http, store, queries } = setup(true)
+  const { db, http, store, queries } = setup(true)
   try {
-    const tid = put('a', 'legacy', 'person@example.test', 10)
+    const tid = 'a:legacy'
+    db.prepare(
+      "INSERT INTO thread (id, account_id, provider_thread_id, in_inbox) VALUES (?, 'a', 'legacy', 1)",
+    ).run(tid)
+    db.prepare(`
+      INSERT INTO message (id, thread_id, account_id, provider_id, sent_at, label_ids)
+      VALUES ('a:legacy', ?, 'a', 'legacy', 10, '["a:INBOX"]')
+    `).run(tid)
     store.setBucket({ threadId: tid, bucket: 'Later', reason: 'Legacy reason' }, 'owner')
     db.prepare("INSERT INTO sender_evidence VALUES ('a', 'person@example.test', 'fixture')").run()
     expect(migrate(db)).toBe(MIGRATIONS.at(-1)?.version)

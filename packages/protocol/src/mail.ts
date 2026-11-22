@@ -34,6 +34,7 @@ export const Label = z.object({
   name: z.string(),
   kind: z.enum(['system', 'user']),
   color: z.string().nullable(),
+  managed: z.literal('filtered').optional(),
 })
 export type Label = z.infer<typeof Label>
 

@@ -28,6 +28,7 @@ async function fixture({ empty = false } = {}) {
       revision: 1,
       threadRevision: 42,
       reason: index < 2 ? 'New sender' : 'Could be Action or Update',
+      ...(index === 2 ? { suggestFilter: true } : {}),
     }
   })
   const [first, representative, low] = cards
@@ -70,6 +71,15 @@ async function fixture({ empty = false } = {}) {
       available = available.filter((card) => card.id.kind !== 'sender')
       return status
     }),
+    reviewFilter: vi.fn<NonNullable<SmartInboxApi['reviewFilter']>>(async (input) => {
+      const status = result(input.clientActionId)
+      ledger.set(input.clientActionId, status)
+      available = available.filter((card) => card.threadId !== input.threadId)
+      return status
+    }),
+    editOwnerReason: vi.fn<NonNullable<SmartInboxApi['editOwnerReason']>>(async (_id, reason) => ({
+      reason,
+    })),
     reviewBucket: vi.fn<ReviewApi['reviewBucket']>(async (input) => {
       const status = result(input.clientActionId)
       ledger.set(input.clientActionId, status)
@@ -277,10 +287,6 @@ it('retries a dropped decision acknowledgment with the same id and surfaces part
   await mount(adapter)
   await open()
   await press('x')
-  const block = screen.getByRole('dialog', { name: 'Block mina.park@example.test?' })
-  await press('a', within(block).getByRole('button', { name: 'Cancel' }))
-  expect(smart.decideSender).not.toHaveBeenCalled()
-  await click(within(block).getByRole('button', { name: 'Block sender' }))
   expect(smart.decideSender).toHaveBeenCalledTimes(1)
   expect(progress()).toBe('1/2')
   const id = smart.decideSender.mock.calls[0][0].clientActionId
@@ -543,4 +549,125 @@ it('restores a skipped card from the previous batch and preserves the next batch
     within(review()).getByRole('heading', { name: 'Invoice for the spring issue' }),
   ).toBeTruthy()
   expect(smart.triageQueue.mock.calls.filter(([input]) => input.limit === 100)).toHaveLength(2)
+})
+
+it('filters with F, records it in action history, and restores its position with U', async () => {
+  const { adapter, smart, first } = await fixture()
+  await mount(adapter)
+  await open()
+  expect(within(review()).getByRole('button', { name: 'Filter out F' })).toBeTruthy()
+  await press('f')
+  expect(smart.reviewFilter).toHaveBeenCalledExactlyOnceWith({
+    threadId: first.threadId,
+    expectedRevision: first.threadRevision,
+    decision: 'filtered',
+    clientActionId: expect.any(String),
+    source: 'triage-key',
+  })
+  await click(within(review()).getByText('Action history (1)'))
+  expect(within(within(review()).getByRole('list')).getByText('Filter out · Applied')).toBeTruthy()
+  await press('u')
+  expect(smart.undoOwnerAction).toHaveBeenCalledWith(
+    smart.reviewFilter.mock.calls[0][0].clientActionId,
+  )
+  expect(within(review()).getByRole('heading', { name: firstSubject })).toBeTruthy()
+})
+
+it.each([
+  { key: 'F', label: 'Filter out reason' },
+  { key: 'X', label: 'Block sender reason' },
+])(
+  'opens the inline $label with Shift, cancels with Esc, submits on Enter, and edits from history',
+  async ({ key, label }) => {
+    const { adapter, smart } = await fixture()
+    await mount(adapter)
+    await open()
+    const heading = within(review()).getByRole('heading', { name: firstSubject })
+    const action = key === 'F' ? smart.reviewFilter : smart.decideSender
+    await press(key, undefined, { shiftKey: true })
+    const input = within(review()).getByRole('textbox', { name: label })
+    expect(document.activeElement).toBe(input)
+    await press('Escape', input)
+    expect(within(review()).queryByRole('textbox', { name: label })).toBeNull()
+    expect(within(review()).getByRole('heading', { name: firstSubject })).toBe(heading)
+    expect(action).not.toHaveBeenCalled()
+
+    await press(key, undefined, { shiftKey: true })
+    const reopened = within(review()).getByRole('textbox', { name: label })
+    commits.clear()
+    fireEvent.change(reopened, { target: { value: 'Synthetic note' } })
+    expectBudget({ workspace: 0, list: 0, reader: 0, reviewCard: 0 })
+    const form = reopened.closest('form')
+    if (!form) throw new Error('Expected the inline reason form')
+    // jsdom does not perform the browser's implicit form submission on Enter.
+    await press('Enter', reopened)
+    await act(async () => {
+      fireEvent.submit(form)
+    })
+    expect(action).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ reason: 'Synthetic note' }),
+    )
+
+    await click(within(review()).getByText('Action history (1)'))
+    await click(within(review()).getByRole('button', { name: 'Edit reason' }))
+    const edit = within(review()).getByRole('textbox', { name: 'Action reason' })
+    expect((edit as HTMLInputElement).value).toBe('Synthetic note')
+    fireEvent.change(edit, { target: { value: 'Updated synthetic note' } })
+    await click(within(review()).getByRole('button', { name: 'Apply' }))
+    expect(smart.editOwnerReason).toHaveBeenCalledExactlyOnceWith(
+      action.mock.calls[0][0].clientActionId,
+      'Updated synthetic note',
+    )
+  },
+)
+
+it('shows a count for the managed Filtered Label and restores the selected Thread', async () => {
+  const { adapter, smart, result } = await fixture()
+  const detail = await adapter.api.thread('thread-1')
+  if (!detail) throw new Error('Expected synthetic Thread')
+  const labelId = 'studio:filtered'
+  let restored = false
+  const visible = { ...detail.thread, labelIds: [labelId] }
+  const labels = await adapter.api.labels(null)
+  adapter.api.labels.mockResolvedValue([
+    ...labels,
+    {
+      id: labelId,
+      name: 'Filtered',
+      accountId: 'studio',
+      providerId: 'filtered',
+      kind: 'user',
+      color: null,
+      managed: 'filtered',
+    },
+  ])
+  const counts = await adapter.api.counts(null)
+  adapter.api.counts.mockImplementation(async () => ({
+    ...counts,
+    filteredByLabel: { [labelId]: restored ? 0 : 1 },
+  }))
+  const inbox = await adapter.api.threads({ view: { kind: 'inbox' }, accountId: null })
+  adapter.api.threads.mockImplementation(async ({ view }) =>
+    view.kind === 'label' ? (restored ? [] : [visible]) : inbox,
+  )
+  adapter.api.thread.mockImplementation(async (id) =>
+    id === visible.id
+      ? {
+          ...detail,
+          thread: restored ? detail.thread : visible,
+        }
+      : null,
+  )
+  const restoreFiltered = vi.fn(async (_id: string, actionId: string) => {
+    restored = true
+    adapter.emitChanged()
+    return result(actionId)
+  })
+  Object.assign(adapter.api, { smartInbox: { ...smart, review: smart, restoreFiltered } })
+  await mount(adapter)
+  await click(screen.getByRole('button', { name: 'Filtered 1' }))
+  await click(screen.getByRole('button', { name: 'Not filtered — move to Inbox' }))
+  expect(restoreFiltered).toHaveBeenCalledExactlyOnceWith(visible.id, expect.any(String))
+  expect(screen.getByRole('button', { name: 'Filtered 0' })).toBeTruthy()
+  expect(screen.queryByRole('button', { name: 'Not filtered — move to Inbox' })).toBeNull()
 })

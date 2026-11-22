@@ -7,6 +7,7 @@ import type { OwnerActionHandler } from '../../http/senders.ts'
 import type { FrozenMessage, Receipt } from '../outbox.ts'
 import { assertOwner, SenderError } from '../senders/actions.ts'
 import type { MailStore } from '../store.ts'
+import { annotate, annotateUndo } from './annotations.ts'
 import { type Assignment, markHandled, threadInput, type Watermark } from './input.ts'
 
 const KIND = 'bucket:review'
@@ -98,11 +99,6 @@ export function correctBucket(store: MailStore, principal: Principal, input: Rev
       revision: bucket_revision,
       ...(watermark ? { watermark } : {}),
     }
-    const source = db
-      .prepare(
-        'SELECT substr(subject, 1, 240) AS subject, substr(snippet, 1, 480) AS snippet FROM message WHERE id = ?',
-      )
-      .get(input_id)
     const now = Date.now()
     db.prepare(
       'INSERT INTO owner_action (id, account_id, token_id, kind, request, created_at) VALUES (?, ?, ?, ?, ?, ?)',
@@ -122,9 +118,17 @@ export function correctBucket(store: MailStore, principal: Principal, input: Rev
       input.threadId,
       JSON.stringify(previous),
       input.bucket,
-      JSON.stringify(source),
+      '{}',
       now,
     )
+    annotate(db, {
+      actionId: input.clientActionId,
+      accountId: account_id,
+      threadId: input.threadId,
+      mid: input_id,
+      label: input.bucket,
+      source: 'triage-key',
+    })
     return status(db, input.clientActionId)
   })
 }
@@ -172,6 +176,7 @@ export function correctionActions(store: MailStore): Record<string, OwnerActionH
             current ? 'applied' : 'superseded',
             id,
           )
+          annotateUndo(db, id)
           if (current) {
             const { assignment, watermark, revision } = JSON.parse(row.previous) as Previous
             db.prepare(
@@ -210,21 +215,6 @@ export function correctionActions(store: MailStore): Record<string, OwnerActionH
       },
     },
   }
-}
-
-export function correctionExamples(db: Db, accountId: string) {
-  const rows = db
-    .prepare(`
-    SELECT previous -> 'assignment' ->> 'bucket' AS previous, chosen, summary
-    FROM triage_correction WHERE account_id = ? AND undo_status IS NULL
-    ORDER BY created_at DESC, action_id DESC LIMIT 12
-  `)
-    .all(accountId)
-  return rows.map(({ previous, chosen, summary }) => ({
-    previous,
-    chosen,
-    context: JSON.parse(String(summary)) as { subject: string; snippet: string },
-  }))
 }
 
 export function markConfirmedReply(
