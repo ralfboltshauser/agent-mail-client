@@ -120,6 +120,8 @@ async function dns<T>(signal: AbortSignal, query: (resolver: Resolver) => Promis
     return await bounded(query(resolver), signal)
   } finally {
     signal.removeEventListener('abort', cancel)
+    // A failed A or AAAA query can settle Promise.all while its sibling is still pending.
+    cancel()
   }
 }
 
