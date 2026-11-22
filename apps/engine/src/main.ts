@@ -11,6 +11,7 @@ import { backupDatabase, lockDatabaseFiles, restoreDatabase } from './db/backups
 import { migrate, openDatabase } from './db/database.ts'
 import { createApp } from './http/app.ts'
 import { serveComposerSocket } from './http/composer-socket.ts'
+import { triageRoutes } from './http/triage.ts'
 import { createLogger } from './log.ts'
 import { gmailDelivery, imapDelivery, imapDraftMirror, publishSent } from './mail/delivery.ts'
 import { Drafts } from './mail/drafts.ts'
@@ -18,6 +19,7 @@ import { Mutations } from './mail/mutations.ts'
 import { Outbox } from './mail/outbox.ts'
 import { MailQueries } from './mail/queries.ts'
 import { MailStore } from './mail/store.ts'
+import { correctionActions, markConfirmedReply } from './mail/triage/corrections.ts'
 import { loadOAuthClient, type OAuthClient } from './providers/gmail/oauth.ts'
 import { gmailPubSub } from './providers/gmail/pubsub.ts'
 import { SyncManager } from './sync/manager.ts'
@@ -145,7 +147,10 @@ async function main(argv: string[]) {
           const imap = sync.imapProvider(accountId)
           return imap ? imapDelivery(imap) : null
         },
-        (message, id, receipt) => publishSent(store, drafts, message, id, receipt),
+        (message, id, receipt) => {
+          publishSent(store, drafts, message, id, receipt)
+          markConfirmedReply(store, message, id, receipt)
+        },
       )
       const mutations = new Mutations(store, (accountId) => sync.gmailApi(accountId), log, {
         snoozeEnabled,
@@ -161,6 +166,7 @@ async function main(argv: string[]) {
         mutations,
         outbox,
         shutdownSignal: stopping.signal,
+        smartInbox: { triage: triageRoutes(db), ownerActions: correctionActions(store) },
         composerScript: () => {
           editorScript ??= composerScript()
           return editorScript

@@ -87,6 +87,14 @@ export type TriageCardId =
   | { kind: 'thread'; threadId: string }
 export interface TriageQueuePage {
   revision: number
-  cards: { id: TriageCardId; threadId: string; revision: number; reason: string }[]
+  cards: {
+    id: TriageCardId
+    accountId: string
+    messageId: string
+    threadId: string
+    revision: number
+    threadRevision: number
+    reason: string
+  }[]
   cursor: string | null
 }

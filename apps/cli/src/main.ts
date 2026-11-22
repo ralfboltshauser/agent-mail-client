@@ -6,6 +6,7 @@ import {
   type AgentAction,
   Bucket,
   BucketInput,
+  BucketReviewInput,
   type Contact,
   doctorWarnings,
   type GmailAuthStartResponse,
@@ -14,6 +15,7 @@ import {
   type MessageDetail,
   type MutationResponse,
   type OrganiseAction,
+  type OwnerActionStatus,
   type PairResponse,
   type SearchHit,
   type ThreadDetail,
@@ -25,6 +27,7 @@ import { authed, request } from './client.ts'
 import { readConfig, writeConfig } from './config.ts'
 import { addImapAccount } from './imap-signin.ts'
 import { loopbackSignIn } from './signin.ts'
+import { printOwnerAction, registerSmartInboxCommands } from './smart-inbox.ts'
 import { runTriage } from './triage.ts'
 
 declare const AMC_VERSION: string | undefined
@@ -320,16 +323,42 @@ program
   .argument('<thread>', 'Thread id')
   .argument('<bucket>', 'Reply, Action, Follow-up, Update, Later, "When I have time", or clear')
   .option('--reason <text>', 'one-line reason', 'Set manually')
-  .action(async (threadId: string, value: string, opts: { reason: string }) => {
-    const bucket = Bucket.options.find((name) => name.toLowerCase() === value.toLowerCase())
-    if (!bucket && value.toLowerCase() !== 'clear')
-      throw new Error(`Choose ${Bucket.options.join(', ')}, or clear`)
-    const body = BucketInput.parse({ threadId, bucket: bucket ?? null, reason: opts.reason })
-    await authed(requireConfig())('/v1/bucket', { method: 'PUT', body })
-    console.log(bucket ? `Moved to ${bucket}` : 'Bucket cleared')
-  })
+  .option('--review <revision>', 'record an owner correction at this Thread revision')
+  .option('--action-id <id>', 'reuse this review action UUID on retry')
+  .action(
+    async (
+      threadId: string,
+      value: string,
+      opts: { reason: string; review?: string; actionId?: string },
+    ) => {
+      const bucket = Bucket.options.find((name) => name.toLowerCase() === value.toLowerCase())
+      if (!bucket && value.toLowerCase() !== 'clear')
+        throw new Error(`Choose ${Bucket.options.join(', ')}, or clear`)
+      const input = { threadId, bucket: bucket ?? null, reason: opts.reason }
+      if (opts.review !== undefined) {
+        if (!/^\d+$/.test(opts.review))
+          throw new Error('Expected a Thread revision from amc triage queue')
+        const body = BucketReviewInput.parse({
+          ...input,
+          intent: 'review',
+          expectedRevision: Number(opts.review),
+          clientActionId: opts.actionId ?? randomUUID(),
+        })
+        const result = await authed(requireConfig())<OwnerActionStatus>('/v1/bucket', {
+          method: 'PUT',
+          body,
+        })
+        printOwnerAction(result)
+        return
+      }
+      if (opts.actionId) throw new Error('--action-id requires --review')
+      const body = BucketInput.parse(input)
+      await authed(requireConfig())('/v1/bucket', { method: 'PUT', body })
+      console.log(bucket ? `Moved to ${bucket}` : 'Bucket cleared')
+    },
+  )
 
-program
+const triage = program
   .command('triage')
   .description('Triage the newest untriaged Inbox Threads with Claude Code')
   .option('--account <id>', 'Account to triage (required if there are multiple)')
@@ -368,6 +397,8 @@ program
       process.off('SIGTERM', interrupt)
     }
   })
+
+registerSmartInboxCommands(program, triage, requireConfig)
 
 program
   .command('mutation-status')

@@ -4,13 +4,14 @@ import {
   type OrganiseAction,
   type Scope,
   TRIAGE_RECENT_WINDOW_MS,
+  TriageBucketResult,
   UntriagedLimit,
 } from '@amc/protocol'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { handoffGrant } from '../auth/handoff.ts'
 import { type Principal, withinAccount } from '../auth/tokens.ts'
-import type { Db } from '../db/database.ts'
+import { type Db, transaction } from '../db/database.ts'
 import {
   agentAction,
   agentCreatedDraft,
@@ -24,6 +25,9 @@ import type { Mutations } from '../mail/mutations.ts'
 import type { MailQueries } from '../mail/queries.ts'
 import { suggestSenderRule } from '../mail/senders/suggestions.ts'
 import type { MailStore } from '../mail/store.ts'
+import { correctionExamples } from '../mail/triage/corrections.ts'
+import { threadInput } from '../mail/triage/input.ts'
+import { hasTriageLease, setLegacyUntriagedBucket, setModelBucket } from '../mail/triage/model.ts'
 import { VERSION } from '../version.ts'
 
 export interface McpDeps {
@@ -135,6 +139,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
       {
         description: 'Set an AMC Bucket and one-line reason. Set bucket to null to clear.',
         inputSchema: BucketInput.extend({
+          triage: TriageBucketResult.optional(),
           onlyUntriaged: z
             .boolean()
             .optional()
@@ -142,9 +147,22 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
         }),
         annotations: { destructiveHint: false },
       },
-      async ({ onlyUntriaged, ...input }) => {
-        const result = setBucketAsAgent(deps.store, agent, input, onlyUntriaged)
-        return result.error ? failure(result.error) : json({ updated: result.updated })
+      async ({ onlyUntriaged, triage, ...input }) => {
+        if (!triage) {
+          const result = onlyUntriaged
+            ? setLegacyUntriagedBucket(deps.store, agent, input)
+            : setBucketAsAgent(deps.store, agent, input)
+          return 'error' in result && result.error
+            ? failure(result.error)
+            : json({ updated: result.updated })
+        }
+        const result = setModelBucket(deps.store, agent, input, triage)
+        return result.error
+          ? failure(result.error)
+          : json({
+              updated: result.updated,
+              ...('reason' in result && result.reason ? { reason: result.reason } : {}),
+            })
       },
     )
   }
@@ -156,6 +174,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
         description: 'List Inbox Threads without a Bucket, newest first.',
         inputSchema: {
           limit: UntriagedLimit,
+          reviewContext: z.boolean().optional(),
           account_id: z.string().optional(),
           recent: z
             .boolean()
@@ -164,17 +183,29 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
         },
         annotations: { readOnlyHint: true },
       },
-      async ({ limit, account_id, recent }) => {
+      async ({ limit, account_id, recent, reviewContext }) => {
         const target = account_id ?? accountId
         if (!withinAccount(principal, target)) return failure('Account unavailable to this Agent')
-        return json(
+        const list = () =>
           queries.threads({
             inbox: true,
             untriaged: true,
             accountId: target,
             limit,
+            ...(reviewContext ? { triageInput: true } : {}),
             ...(recent ? { deliveredSince: Date.now() - TRIAGE_RECENT_WINDOW_MS } : {}),
-          }).threads,
+          }).threads
+        if (!reviewContext) return json(list())
+        if (!target || !agent || !hasTriageLease(db, agent, 'read'))
+          return failure('A live Account-scoped triage lease is required')
+        return json(
+          transaction(db, () => ({
+            threads: list().map((thread) => ({
+              ...thread,
+              inputRevision: threadInput(db, thread.id)?.modseq,
+            })),
+            examples: correctionExamples(db, target),
+          })),
         )
       },
     )
