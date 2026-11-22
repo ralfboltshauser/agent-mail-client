@@ -470,7 +470,7 @@ function registerComposeIpc() {
       body,
       signal: AbortSignal.timeout(15_000),
     })
-    openReplica().draftUpdates.acknowledge(id, body.update)
+    openReplica().draftUpdates.acknowledge(id, body)
     return saved
   })
   ipcMain.handle(
@@ -489,7 +489,12 @@ function registerComposeIpc() {
       method: 'POST',
       body,
     })
-    if (body.edits) openReplica().draftUpdates.acknowledge(body.draftId, body.edits.update)
+    if (body.edits) {
+      openReplica().draftUpdates.acknowledge(body.draftId, {
+        ...body.edits,
+        baseRevision: body.revision,
+      })
+    }
     return item
   })
   ipcMain.handle(

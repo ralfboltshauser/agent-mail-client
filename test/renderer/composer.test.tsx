@@ -1,6 +1,12 @@
-import { act, fireEvent, screen, within } from '@testing-library/react'
+import { DatabaseSync } from 'node:sqlite'
+import { act, cleanup, fireEvent, screen, within } from '@testing-library/react'
 import { expect, it, vi } from 'vitest'
-import { DRAFT_CHANGED, type SendRequest } from '../../packages/protocol/src/index'
+import { LocalDraftUpdates } from '../../apps/desktop/src/main/draft-updates'
+import {
+  type ComposePatch,
+  DRAFT_CHANGED,
+  type SendRequest,
+} from '../../packages/protocol/src/index'
 
 import { deferred } from './adapter'
 import { commits, expectBudget } from './profile'
@@ -31,7 +37,10 @@ it('applies one subject character without replacing the composer fields', async 
   expect(dialog.getByRole('textbox', { name: 'Message body' })).toBe(editor)
   expect(dialog.getByRole('combobox', { name: 'To' })).toBe(recipient)
   expect(adapter.api.saveCompose).not.toHaveBeenCalled()
-  expect(adapter.api.stageComposeBody).not.toHaveBeenCalled()
+  expect(adapter.api.stageComposeBody).toHaveBeenCalledExactlyOnceWith(
+    'draft-1',
+    expect.objectContaining({ fields: expect.objectContaining({ subject: 'x' }) }),
+  )
   expect(commits.get('SubjectField')).toBe(1)
   expectBudget(keystrokeBudget)
 })
@@ -104,6 +113,40 @@ it('saves one local burst and adopts a newer remote subject without replacing th
   expect(subject.value).toBe('Remote revision')
   expect(dialog.getByRole('textbox', { name: 'Message body' })).toBe(editor)
   expect(adapter.api.saveCompose).toHaveBeenCalledTimes(1)
+})
+
+it('flushes the edited subject and committed recipient after immediate renderer teardown', async () => {
+  const { adapter, subject, recipient, dialog } = await openComposer()
+  const db = new DatabaseSync(':memory:')
+  try {
+    const drafts = new LocalDraftUpdates(db)
+    adapter.api.stageComposeBody.mockImplementation((id, patch) => drafts.stage(id, patch))
+    await act(async () => {
+      fireEvent.change(subject, { target: { value: 'Closing subject' } })
+      fireEvent.change(recipient, { target: { value: 'closing@example.test' } })
+      fireEvent.keyDown(recipient, { key: 'Enter' })
+    })
+    expect(dialog.getByRole('button', { name: 'Remove closing@example.test' })).toBeTruthy()
+    cleanup()
+    expect(adapter.api.saveCompose).not.toHaveBeenCalled()
+
+    const request = vi
+      .fn()
+      .mockImplementation(async (_path, { body }: { body: ComposePatch }) =>
+        adapter.api.saveCompose('draft-1', body),
+      )
+    await drafts.flush({ request })
+    expect(request).toHaveBeenCalledExactlyOnceWith(
+      '/v1/compose/drafts/draft-1',
+      expect.objectContaining({ method: 'PUT' }),
+    )
+    expect(await adapter.api.composeDraft('draft-1')).toMatchObject({
+      subject: 'Closing subject',
+      to: [{ address: 'closing@example.test', name: null }],
+    })
+  } finally {
+    db.close()
+  }
 })
 
 const keystrokeBudget = {

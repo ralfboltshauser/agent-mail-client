@@ -62,6 +62,10 @@ function sameHeaders(
   )
 }
 
+function sameFields(left: ComposeFields, right: ComposeFields) {
+  return sameHeaders(left, right) && sameList(left.attachmentIds, right.attachmentIds, Object.is)
+}
+
 function sameMirror(left: ComposeDraft, right: ComposeDraft) {
   return (
     left.mirrorError === right.mirrorError &&
@@ -118,6 +122,7 @@ export class DraftSession {
   #listeners = new Set<() => void>()
   #version = 0
   #saved = 0
+  #savingFields: ComposeFields | undefined
   #saveChain: Promise<unknown> = Promise.resolve()
   #timer: ReturnType<typeof setTimeout> | undefined
   #active = false
@@ -169,14 +174,14 @@ export class DraftSession {
   ) => {
     if (Object.is(this.#fields[key], value)) return
     this.#fields = { ...this.#fields, [key]: value }
+    this.#localEdit()
     this.#publish()
-    this.changed()
   }
 
   updateAttachments(attachments: ComposeAttachment[]) {
     this.#attachments = attachments
+    this.#localEdit()
     this.#publish()
-    this.changed()
   }
 
   apply(update: string) {
@@ -203,6 +208,7 @@ export class DraftSession {
       ),
     ]
     if (!sameAttachments(this.#attachments, attachments)) this.#attachments = attachments
+    if (this.dirty) this.#stage()
     this.#publish()
   }
 
@@ -213,8 +219,8 @@ export class DraftSession {
       baseRevision: revision,
       update: base64(Y.encodeStateAsUpdate(this.doc)),
       fields:
-        sameHeaders(fields, baseline) &&
-        sameList(fields.attachmentIds, baseline.attachmentIds, Object.is)
+        sameFields(fields, baseline) &&
+        (!this.#savingFields || sameFields(fields, this.#savingFields))
           ? undefined
           : fields,
     }
@@ -236,7 +242,12 @@ export class DraftSession {
       const started = this.#version
       const patch = this.patch(this.#baseline.revision)
       const submitted = patch.fields ?? headerFields(this.#baseline)
-      const updated = await this.#getApi().saveCompose(this.id, patch)
+      this.#savingFields = patch.fields
+      const updated = await this.#getApi()
+        .saveCompose(this.id, patch)
+        .finally(() => {
+          this.#savingFields = undefined
+        })
       this.#saved = started
       this.rebase(updated, submitted)
       return updated
@@ -260,6 +271,22 @@ export class DraftSession {
     this.#queueAutosave()
   }
 
+  #localEdit() {
+    this.#stage()
+    this.changed()
+  }
+
+  #stage() {
+    if (!this.#active) return
+    try {
+      // Stage each local edit synchronously for native close and crash recovery.
+      this.#getApi().stageComposeBody(this.id, this.patch(this.#baseline.revision))
+    } catch (cause) {
+      this.#onStageError(cause)
+    }
+  }
+
+  #onStageError: (cause: unknown) => void = () => {}
   #onSaveError: (cause: unknown) => void = () => {}
 
   #clearTimer() {
@@ -289,20 +316,11 @@ export class DraftSession {
     uploadInFlight: () => boolean
   }) {
     this.#active = true
+    this.#onStageError = onStageError
     this.#onSaveError = onSaveError
     this.#queueAutosave()
     const onUpdate = (_bytes: Uint8Array, origin: unknown) => {
-      if (origin === remote) return
-      try {
-        // Stage every local transaction synchronously for crash recovery.
-        this.#getApi().stageComposeBody(this.id, {
-          baseRevision: this.#baseline.revision,
-          update: base64(Y.encodeStateAsUpdate(this.doc)),
-        })
-      } catch (cause) {
-        onStageError(cause)
-      }
-      this.changed()
+      if (origin !== remote) this.#localEdit()
     }
     this.doc.on('update', onUpdate)
     let running = false

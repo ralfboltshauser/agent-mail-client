@@ -77,14 +77,17 @@ describe('draft session', () => {
     await vi.advanceTimersByTimeAsync(400)
     session.updateField('subject', 'New subject')
     body.insert(1, 'b')
-    expect(decodeBody(api.stageComposeBody.mock.calls[1][1].update)).toBe('ab')
+    expect(api.stageComposeBody).toHaveBeenCalledTimes(3)
+    const staged = api.stageComposeBody.mock.calls[2][1]
+    expect(decodeBody(staged.update)).toBe('ab')
+    expect(staged.fields.subject).toBe('New subject')
     await vi.advanceTimersByTimeAsync(549)
     expect(api.saveCompose).toHaveBeenCalledTimes(0)
     await vi.advanceTimersByTimeAsync(1)
     expect(api.saveCompose).toHaveBeenCalledTimes(1)
     expect(api.saveCompose).toHaveBeenCalledWith('draft', {
       baseRevision: 1,
-      update: api.stageComposeBody.mock.calls[1][1].update,
+      update: staged.update,
       fields: {
         accountId: 'account',
         subject: 'New subject',
@@ -195,6 +198,33 @@ describe('draft session', () => {
     )
     expect(session.reviewed.revision).toBe(3)
     expect(session.dirty).toBe(false)
+    disconnect()
+  })
+
+  it('stages a subject reverted while an older autosave is in flight', async () => {
+    const { session, api, disconnect } = setup()
+    const first = deferred<ComposeDraft>()
+    api.saveCompose.mockReturnValueOnce(first.promise)
+    session.updateField('subject', 'Changed subject')
+    await vi.advanceTimersByTimeAsync(550)
+    session.updateField('subject', draft.subject)
+    expect(api.stageComposeBody).toHaveBeenLastCalledWith(
+      draft.id,
+      expect.objectContaining({
+        baseRevision: 1,
+        fields: expect.objectContaining({ subject: draft.subject }),
+      }),
+    )
+
+    first.resolve({ ...draft, revision: 2, subject: 'Changed subject' })
+    await session.whenSaved()
+    expect(api.stageComposeBody).toHaveBeenLastCalledWith(
+      draft.id,
+      expect.objectContaining({
+        baseRevision: 2,
+        fields: expect.objectContaining({ subject: draft.subject }),
+      }),
+    )
     disconnect()
   })
 

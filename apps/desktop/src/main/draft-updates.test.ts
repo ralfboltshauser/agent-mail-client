@@ -1,9 +1,11 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import type { ComposePatch } from '@amc/protocol'
 import { expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
+import { LocalDraftUpdates } from './draft-updates'
 import { Replica } from './replica'
 
 it('persists a pending body change through an offline flush and replays it on restart', async () => {
@@ -49,6 +51,55 @@ it('clears staged updates for a discarded draft while keeping other drafts', asy
     expect(request).toHaveBeenCalledExactlyOnceWith(
       '/v1/compose/drafts/kept',
       expect.objectContaining({ method: 'PUT', body: patch }),
+    )
+  } finally {
+    replica.db.close()
+  }
+})
+
+it('replays a body update staged by an older desktop version', async () => {
+  const db = new DatabaseSync(':memory:')
+  try {
+    db.exec(`CREATE TABLE draft_update (
+      id TEXT PRIMARY KEY, revision INTEGER NOT NULL, body TEXT NOT NULL
+    ) STRICT;
+    INSERT INTO draft_update VALUES ('draft', 3, 'AAA=')`)
+    const updates = new LocalDraftUpdates(db)
+    const request = vi.fn().mockResolvedValue(undefined)
+    await updates.flush({ request })
+    expect(request).toHaveBeenCalledExactlyOnceWith(
+      '/v1/compose/drafts/draft',
+      expect.objectContaining({ body: { baseRevision: 3, update: 'AAA=' } }),
+    )
+  } finally {
+    db.close()
+  }
+})
+
+it('keeps a newer header edit with the same body when an older save completes', async () => {
+  const replica = new Replica(':memory:')
+  try {
+    const first = {
+      baseRevision: 3,
+      update: 'AAA=',
+      fields: {
+        accountId: 'account',
+        to: [],
+        cc: [],
+        bcc: [],
+        subject: 'First',
+        attachmentIds: [],
+      },
+    }
+    const latest = { ...first, fields: { ...first.fields, subject: 'Latest' } }
+    replica.draftUpdates.stage('draft', first)
+    replica.draftUpdates.stage('draft', latest)
+    replica.draftUpdates.acknowledge('draft', first)
+    const request = vi.fn().mockResolvedValue(undefined)
+    await replica.draftUpdates.flush({ request })
+    expect(request).toHaveBeenCalledExactlyOnceWith(
+      '/v1/compose/drafts/draft',
+      expect.objectContaining({ body: latest }),
     )
   } finally {
     replica.db.close()
