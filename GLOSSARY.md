@@ -85,3 +85,37 @@ _Avoid_: delegate, forward to AI
 **Composer Link**:
 A link that opens one draft for live editing by the owner and an Agent together, and can do nothing else (it can never send).
 _Avoid_: share link, draft URL
+
+### Smart Inbox
+
+**Sender**
+
+The parsed From mailbox of an incoming message. Screening uses its full address within an Account.
+
+**Sender rule**
+
+An owner's explicit decision to accept or block a Sender for one Account.
+
+**Known sender**
+
+A Sender the owner has accepted, sent mail to, or replied to on that Account. A block takes precedence over prior outbound mail.
+
+**Screened out**
+
+The recoverable AMC Label where blocked Senders' incoming messages go. Gmail uses a user Label. IMAP uses a folder.
+
+**Section**
+
+A named group of Threads or Sender cards within the Inbox.
+
+**Triage queue**
+
+The ordered set of New sender cards and low-confidence Threads waiting for review in a triage session.
+
+**Confidence**
+
+A triage assessment of how certain a Bucket assignment is for the current incoming mail.
+
+**Triage correction**
+
+An owner's Bucket choice recorded as an example for future triage.
