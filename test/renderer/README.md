@@ -23,11 +23,12 @@ editing, IPC latency, and frame timing require a separate Electron run.
    `expectContinuity` at each checkpoint when retention lands.
 
 `profile-plugin.ts` inserts test-only React Profiler boundaries around the
-tracked components' return values. Each boundary counts its new render output
-once, even if a descendant later commits on its own. Row counts use thread IDs.
-When the inline row body or footer is extracted, move its probe inside the
-extracted component so it measures content rather than the position or parent
-wrapper. The mount checks detect missing probes.
+return values of tracked components found by name in renderer exports. Each
+boundary counts its new render output once, even if a descendant later commits
+on its own. The list option supplies its thread ID to the probe inside the
+memoized `ThreadRow` body. The inline composer footer has its own probe. The
+mount checks detect missing probes and verify that row counts use the mounted
+thread IDs.
 
 ## Baseline
 
