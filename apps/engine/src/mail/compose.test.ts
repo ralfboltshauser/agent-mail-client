@@ -344,9 +344,7 @@ it.each(['unchanged', 'edited remotely', 'edited and synced'])(
         : undefined
       expect(JSON.parse(text ?? 'null')).toEqual({
         deleted: draft.id,
-        ...(edited
-          ? { warning: 'A copy in Gmail was left untouched.' }
-          : { providerRemoved: 'Gmail' }),
+        ...(edited ? { warning: 'Draft left in Gmail' } : { providerRemoved: 'Gmail' }),
       })
       expect(await call(`/drafts/${draft.id}`)).toMatchObject({ status: 404 })
       expect(gmail.drafts.has(mirror)).toBe(edited)
@@ -376,7 +374,7 @@ it('discards an imported Gmail draft in Desktop without deleting the provider co
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({
       deleted: draft.id,
-      warning: 'A copy in Gmail was left untouched.',
+      warning: 'Draft left in Gmail',
     })
     expect(await call(`/drafts/${draft.id}`)).toMatchObject({ status: 404 })
     expect(gmail.drafts.has(remote.id)).toBe(true)
@@ -385,47 +383,58 @@ it('discards an imported Gmail draft in Desktop without deleting the provider co
   }
 })
 
-it.each(['unchanged', 'changed'] as const)(
-  'retries a failed Gmail discard and checks whether the copy is %s',
-  async (state) => {
+it.each(['getDraft', 'deleteDraft'] as const)(
+  'leaves the Gmail copy in place when %s fails during discard',
+  async (method) => {
     const { account, call, db, drafts, gmail } = setup()
     try {
       const draft = await drafts.create({ accountId: account, body: 'Test draft' }, 'owner')
       const [mirror] = gmail.drafts.keys()
       if (!mirror) throw new Error('Missing draft mirror')
-      const remove = vi.spyOn(gmail, 'deleteDraft').mockRejectedValueOnce(new Error('Offline'))
+      const read = vi.spyOn(gmail, 'getDraft')
+      const remove = vi.spyOn(gmail, 'deleteDraft')
+      const failingCall = method === 'getDraft' ? read : remove
+      failingCall.mockRejectedValueOnce(new Error('Offline'))
       const path = `/drafts/${draft.id}`
       expect(await (await call(path, 'DELETE')).json()).toEqual({
         deleted: draft.id,
-        warning: 'AMC will retry removing the copy in Gmail.',
+        warning: 'Draft left in Gmail',
       })
-      await drafts.pullGmail(account, gmail)
-      expect(drafts.list()).toEqual([])
       expect(await (await call(path, 'DELETE')).json()).toEqual({ absent: draft.id })
 
-      if (state === 'changed') {
-        await gmail.saveDraft({
-          draftId: mirror,
-          raw: await buildMessage({
-            from: { address: gmail.address, name: null },
-            to: reader,
-            cc: [],
-            bcc: [],
-            subject: 'Changed in Gmail',
-            text: 'Keep this version',
-          }),
-        })
-      }
       await drafts.mirrorPending()
-      expect(remove).toHaveBeenCalledTimes(state === 'changed' ? 1 : 2)
-      expect(gmail.drafts.has(mirror)).toBe(state === 'changed')
+      expect(read).toHaveBeenCalledOnce()
+      expect(remove).toHaveBeenCalledTimes(method === 'getDraft' ? 0 : 1)
+      expect(gmail.drafts.has(mirror)).toBe(true)
       await drafts.pullGmail(account, gmail)
-      expect(drafts.list()).toHaveLength(state === 'changed' ? 1 : 0)
+      expect(drafts.list()).toHaveLength(1)
     } finally {
       db.close()
     }
   },
 )
+
+it('clears a legacy Gmail discard retry without touching the provider copy', async () => {
+  const { account, db, drafts, gmail } = setup()
+  try {
+    const draft = await drafts.create({ accountId: account, body: 'Test draft' }, 'owner')
+    db.prepare(`INSERT INTO draft_mirror_removal (account_id, provider_draft_id, mirror_hash, draft_id)
+      SELECT account_id, provider_draft_id, mirror_written_hash, id FROM draft WHERE id = ?`).run(
+      draft.id,
+    )
+    db.prepare('DELETE FROM draft WHERE id = ?').run(draft.id)
+    const read = vi.spyOn(gmail, 'getDraft')
+    const remove = vi.spyOn(gmail, 'deleteDraft')
+
+    await drafts.mirrorPending()
+    expect(read).not.toHaveBeenCalled()
+    expect(remove).not.toHaveBeenCalled()
+    expect(db.prepare('SELECT * FROM draft_mirror_removal').all()).toEqual([])
+    expect(gmail.drafts.size).toBe(1)
+  } finally {
+    db.close()
+  }
+})
 
 it('keeps a newer draft revision when the owner confirms discard of a stale selection', async () => {
   const { account, call, drafts, db, gmail } = setup()

@@ -633,6 +633,11 @@ export class Drafts {
       if (!removed) this.#markMirrorLeft(row.draft_id)
       return removed ? 'removed' : 'left'
     }
+    // Older builds queued Gmail discard retries after deleting the local draft.
+    if (!this.#row(row.draft_id)) {
+      this.#clearRemoval(row)
+      return 'left'
+    }
     if (!api?.getDraft)
       throw new DraftError('Could not remove the provider draft. Sign in again before sending.')
     const remote = await api.getDraft(row.provider_draft_id)
@@ -1307,8 +1312,14 @@ export class Drafts {
         .prepare('SELECT DISTINCT account_id FROM draft_mirror_removal WHERE draft_id = ?')
         .all(id) as { account_id: string }[]
       const provider = this.#isImap(row.account_id) ? 'IMAP' : 'Gmail'
+      const gmailDraftId =
+        provider === 'Gmail' &&
+        row.provider_draft_id &&
+        !this.#awaitingRemoval(row.account_id, row.provider_draft_id)
+          ? row.provider_draft_id
+          : null
       const removal: MirrorRemoval | null =
-        row.provider_draft_id && row.mirror_written_hash
+        provider === 'IMAP' && row.provider_draft_id && row.mirror_written_hash
           ? {
               account_id: row.account_id,
               provider_draft_id: row.provider_draft_id,
@@ -1331,10 +1342,17 @@ export class Drafts {
         pending.map(({ account_id }) => (this.#isImap(account_id) ? 'IMAP' : 'Gmail')),
       )
       if (row.mirror_left) kept.add('IMAP')
-      if (row.provider_draft_id && !removal) kept.add(provider)
       let providerRemoved: 'Gmail' | 'IMAP' | undefined
       let retry = false
-      if (removal) {
+      if (gmailDraftId && row.mirror_written_hash) {
+        const removed = await this.#discardGmailMirror(
+          row.account_id,
+          gmailDraftId,
+          row.mirror_written_hash,
+        ).catch(() => false)
+        if (removed) providerRemoved = 'Gmail'
+        else kept.add('Gmail')
+      } else if (removal) {
         try {
           const outcome = await this.#removeOldMirror(removal)
           if (outcome === 'removed' || outcome === 'absent') providerRemoved = provider
@@ -1342,9 +1360,13 @@ export class Drafts {
         } catch {
           retry = true
         }
+      } else if (row.provider_draft_id) {
+        kept.add(provider)
       }
 
-      const warnings = [...kept].map((name) => `A copy in ${name} was left untouched.`)
+      const warnings = [...kept].map((name) =>
+        name === 'Gmail' ? 'Draft left in Gmail' : `A copy in ${name} was left untouched.`,
+      )
       if (retry) warnings.push(`AMC will retry removing the copy in ${provider}.`)
       return {
         deleted: id,
@@ -1352,6 +1374,17 @@ export class Drafts {
         ...(warnings.length > 0 && { warning: warnings.join(' ') }),
       }
     })
+  }
+
+  async #discardGmailMirror(accountId: string, id: string, writtenHash: string): Promise<boolean> {
+    const api = this.#api(accountId)
+    if (!api?.getDraft) return false
+    const remote = await api.getDraft(id)
+    if (!remote) return true
+    if (mirrorHash(remote.message.id) !== writtenHash) return false
+    // Gmail deletes by stable draft ID. Make one attempt after the fresh read.
+    await api.deleteDraft(id)
+    return true
   }
 
   #push(id: string): Promise<void> {
