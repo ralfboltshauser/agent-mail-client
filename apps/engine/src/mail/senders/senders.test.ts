@@ -97,6 +97,7 @@ it('screens exact Gmail arrivals across queue restarts and honors an external re
     expect(queries.threadSummary('a:mixed')).toMatchObject({
       inInbox: true,
       inboxSender: { address: 'else@example.com' },
+      ownerHandledMessageId: null,
     })
     gmail.setLabels('first', ['INBOX', 'UNREAD', 'STARRED', 'Label_work'])
     gmail.add('late', { threadId: 'mixed', from: sender })

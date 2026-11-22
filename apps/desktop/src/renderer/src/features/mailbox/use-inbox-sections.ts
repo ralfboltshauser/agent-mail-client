@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { shareReply } from '@/data/share-reply'
 import { INBOX_SECTIONS, type InboxSection, type ThreadIndex } from '@/data/thread-queries'
 
-const UPDATES_PREVIEW = 3
+export const UPDATES_PREVIEW = 3
 const NO_IDS: readonly string[] = []
 type CollapsePreferences = Partial<Record<InboxSection, boolean>>
 

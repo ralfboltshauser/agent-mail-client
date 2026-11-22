@@ -1,23 +1,32 @@
 import type { VirtualItem } from '@tanstack/react-virtual'
 import { ChevronDown, ChevronRight } from 'lucide-react'
-import { memo } from 'react'
+import { memo, useRef } from 'react'
+import { runOrganise } from '@/components/organise'
 import { Button } from '@/components/ui/button'
+import { replicaStoreFor } from '@/data/replica-store'
 import type { InboxSection } from '@/data/thread-queries'
 import { accountsQuery, type MailboxThreadQuery } from '@/features/mailbox/mailbox-queries'
-import type { InboxItem, InboxNavigation } from '@/features/mailbox/use-inbox-sections'
+import {
+  type InboxItem,
+  type InboxNavigation,
+  UPDATES_PREVIEW,
+} from '@/features/mailbox/use-inbox-sections'
 import { useReplicaSelector } from '@/hooks/use-amc'
+import { getAmc } from '@/lib/amc'
 import { cn } from '@/lib/utils'
 
 export const InboxSectionHeader = memo(function InboxSectionHeader({
   section,
   query,
   collapsed,
+  preview,
   onToggle,
   controls,
 }: {
   section: InboxSection
   query: MailboxThreadQuery | null
   collapsed: boolean
+  preview: boolean
   onToggle: (section: InboxSection) => void
   controls: string
 }) {
@@ -26,6 +35,37 @@ export const InboxSectionHeader = memo(function InboxSectionHeader({
     query,
     ({ data }) => (data?.inbox?.sections[section].unread ?? 0) > 0,
   )
+  const marking = useRef(false)
+  const canMark = !collapsed && hasUnread
+  const markSeen = async () => {
+    if (!query || !canMark || marking.current) return
+    const data = replicaStoreFor(getAmc()).getQuery(query).data
+    const inbox = data?.inbox
+    if (!inbox) return
+    const { ids } = inbox.sections[section]
+    const visibleIds = preview ? ids.slice(0, UPDATES_PREVIEW) : ids
+    const threadIds =
+      section === 'New senders'
+        ? visibleIds.flatMap((id) => inbox.cards.get(id)?.threadIds ?? [])
+        : visibleIds
+    const unread = threadIds.flatMap((id) => {
+      const thread = data.summaries.get(id)
+      return thread && thread.unreadCount > 0 ? [thread] : []
+    })
+    marking.current = true
+    try {
+      await Promise.all(
+        unread.map((thread) =>
+          runOrganise(
+            { kind: 'read', threadId: thread.id, value: true },
+            `Marked as read · ${thread.subject || '(no subject)'}`,
+          ),
+        ),
+      )
+    } finally {
+      marking.current = false
+    }
+  }
   const Chevron = collapsed ? ChevronRight : ChevronDown
   return (
     <div className="flex min-h-10 items-center justify-between gap-1 border-b px-2">
@@ -47,10 +87,10 @@ export const InboxSectionHeader = memo(function InboxSectionHeader({
       <Button
         variant="ghost"
         size="sm"
-        aria-label={`Mark ${section} seen (unavailable)`}
-        title={hasUnread ? 'Exact-message Mark seen is unavailable' : 'No unread Threads'}
-        aria-disabled="true"
-        className="opacity-50"
+        aria-label={`Mark ${section} seen`}
+        aria-disabled={!canMark}
+        className="aria-disabled:opacity-50"
+        onClick={() => void markSeen()}
       >
         Mark seen
       </Button>
@@ -142,6 +182,7 @@ export function VirtualInboxChrome({
           section={entry.section}
           query={query}
           collapsed={!!inbox.collapsed[entry.section]}
+          preview={entry.section === 'Updates' && !inbox.showAll}
           onToggle={inbox.toggle}
           controls={listId}
         />

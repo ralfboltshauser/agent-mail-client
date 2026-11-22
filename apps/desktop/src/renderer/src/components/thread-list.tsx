@@ -119,6 +119,8 @@ export function ThreadList({
           const index = positions.get(inboxHeaderId(section))
           if (index !== undefined) indexes.add(index)
         }
+        const updatesFooter = positions.get('footer:Updates')
+        if (updatesFooter !== undefined) indexes.add(updatesFooter)
       }
       return [...indexes].sort((a, b) => a - b)
     },

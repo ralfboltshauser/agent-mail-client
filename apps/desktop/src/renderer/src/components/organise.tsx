@@ -61,6 +61,8 @@ const run = async (action: OrganiseAction, description: string) => {
     toast.error(message)
   }
 }
+export { run as runOrganise }
+
 export function OrganiseNotices() {
   // Reading acknowledges notices in SQLite. Handle each reply directly as an event.
   useEffect(() => {

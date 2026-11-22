@@ -97,6 +97,14 @@ it('groups new Senders by Account and opens all represented Threads', async () =
   )
   expect(header('New senders').textContent).toBe('New senders1')
   expect(header('Seen').textContent).toBe('Seen1')
+  await act(async () => api.organise({ kind: 'read', threadId: 'thread-4', value: false }))
+  const organise = vi.spyOn(api, 'organise')
+  await act(async () =>
+    fireEvent.click(screen.getByRole('button', { name: 'Mark New senders seen' })),
+  )
+  expect(organise.mock.calls).toEqual(
+    ['thread-1', 'thread-4'].map((threadId) => [{ kind: 'read', threadId, value: true }]),
+  )
   const card = byId('thread-1')
   expect(card).toBeTruthy()
   if (!card) throw new Error('Expected the representative Thread')
@@ -121,6 +129,10 @@ it('navigates across section boundaries and activates disclosure with native key
   expect(selected().dataset.threadId).toBe('thread-1')
   await act(async () => fireEvent.keyDown(active, { key: 'J', shiftKey: true }))
   expect(document.activeElement).toBe(header('Follow-up'))
+  await act(async () => fireEvent.keyDown(header('Follow-up'), { key: 'K', shiftKey: true }))
+  expect(document.activeElement).toBe(header('Action/Reply'))
+  await act(async () => fireEvent.keyDown(header('Action/Reply'), { key: 'J', shiftKey: true }))
+  expect(document.activeElement).toBe(header('Follow-up'))
   expect(fireEvent.keyDown(header('Follow-up'), { key: ' ' })).toBe(true)
   await act(async () => fireEvent.click(header('Follow-up')))
   expect(header('Follow-up').getAttribute('aria-expanded')).toBe('false')
@@ -132,6 +144,25 @@ it('navigates across section boundaries and activates disclosure with native key
   await act(async () => fireEvent.keyDown(active, { key: 'j' }))
   expect(selected().dataset.threadId).toBe('thread-4')
   expect(headers.map(header)).toHaveLength(5)
+  await act(async () => fireEvent.keyDown(active, { key: 't' }))
+  expect(screen.queryByRole('dialog')).toBeNull()
+  await act(async () => fireEvent.keyDown(active, { key: 'T', shiftKey: true }))
+  expect(screen.getByRole('dialog', { name: 'Hand off to T3' })).toBeTruthy()
+})
+
+it('archives the selected Inbox Thread and restores its row via Organise Undo', async () => {
+  const { api } = await mountSections()
+  const organise = vi.spyOn(api, 'organise')
+  const active = listbox()
+  act(() => active.focus())
+  await act(async () => fireEvent.keyDown(active, { key: 'e' }))
+  expect(organise).toHaveBeenLastCalledWith({ kind: 'archive', threadId: 'thread-1' })
+  expect(byId('thread-1')).toBeUndefined()
+  expect(selected().dataset.threadId).toBe('thread-2')
+  await act(async () => fireEvent.keyDown(active, { key: 'z' }))
+  expect(organise).toHaveBeenLastCalledWith({ kind: 'undo' })
+  expect(byId('thread-1')).toBeTruthy()
+  expect(selected().dataset.threadId).toBe('thread-2')
 })
 
 it('keeps row DOM identity and commits only the moved row and affected section headings', async () => {
@@ -214,4 +245,49 @@ it('indexes Threads beyond the legacy replica cap while mounting a bounded windo
   await act(async () => fireEvent.click(header('Action/Reply')))
   expect(selected().dataset.threadId).toBe('synthetic-5104')
   expect(listbox()).toBe(list)
+})
+
+it('marks only exposed unread Updates and undoes a specific Thread action', async () => {
+  const { api } = await mountSections()
+  await act(async () => {
+    for (const threadId of ['thread-4', 'thread-5', 'thread-6', 'thread-8']) {
+      await api.organise({ kind: 'read', threadId, value: false })
+    }
+    await api.setBucket({ threadId: 'thread-8', bucket: 'Later', reason: 'Update' })
+  })
+  const organise = vi.spyOn(api, 'organise')
+  const markSeen = () => screen.getByRole('button', { name: 'Mark Updates seen' })
+
+  await act(async () => fireEvent.click(header('Updates')))
+  expect(markSeen().getAttribute('aria-disabled')).toBe('true')
+  await act(async () => fireEvent.click(markSeen()))
+  expect(organise).not.toHaveBeenCalled()
+
+  await act(async () => fireEvent.click(header('Updates')))
+  await act(async () => fireEvent.click(markSeen()))
+  expect(organise.mock.calls).toEqual(
+    ['thread-4', 'thread-5', 'thread-6'].map((threadId) => [
+      { kind: 'read', threadId, value: true },
+    ]),
+  )
+  expect(byId('thread-8')).toBeTruthy()
+  const mutationId = await organise.mock.results[1].value
+  await act(async () => vi.advanceTimersByTimeAsync(1))
+  const notice = screen.getByText('Marked as read · April launch checklist').closest('li')
+  if (!notice) throw new Error('Expected a per-Thread Undo notice')
+  await act(async () => fireEvent.click(within(notice).getByRole('button', { name: 'Undo' })))
+  expect(organise).toHaveBeenLastCalledWith({ kind: 'undo', threadId: 'thread-5', mutationId })
+  const updates = await api.threads(inbox)
+  expect(
+    updates.filter(
+      ({ id, unreadCount }) => ['thread-5', 'thread-8'].includes(id) && unreadCount > 0,
+    ),
+  ).toHaveLength(2)
+
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Show all' })))
+  await act(async () => fireEvent.click(markSeen()))
+  expect(organise.mock.calls.slice(-2)).toEqual(
+    ['thread-5', 'thread-8'].map((threadId) => [{ kind: 'read', threadId, value: true }]),
+  )
+  expect(markSeen().getAttribute('aria-disabled')).toBe('true')
 })

@@ -121,7 +121,7 @@ export function useMailCommands({
             : []),
         ]
       : []),
-    ...(canHandOff ? [{ name: 'Hand off', icon: Forward, shortcut: 'T', run: handOff }] : []),
+    ...(canHandOff ? [{ name: 'Hand off', icon: Forward, shortcut: '⇧T', run: handOff }] : []),
     ...(activeHandoff && endingHandoff !== activeHandoff.id
       ? [{ name: 'End hand-off', icon: X, run: () => void endHandoff(activeHandoff.id) }]
       : []),
@@ -156,7 +156,7 @@ export function useMailCommands({
       f: () => {
         if (!ownView) void startCompose('forward')
       },
-      t: (event) => {
+      'shift+t': (event) => {
         if (!event.repeat) handOff()
       },
       '?': () => {
