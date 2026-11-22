@@ -24,12 +24,11 @@ export function sign({ app }) {
   if (hashes.size > 1)
     throw new Error('Multiple AMC Local Code Signing identities in the login keychain.')
 
-  // Seal Electron's nested bundles before signing AMC itself. Only AMC's main
-  // executable accesses Safe Storage and needs the persistent identity.
+  // Seal Electron's nested bundles before signing AMC itself.
   execFileSync(codesign, ['--force', '--deep', '--sign', '-', app], { stdio: 'inherit' })
   if (hashes.size === 0) {
     console.warn(
-      'Warning: signing AMC ad hoc. Run scripts/create-signing-identity.sh to keep Keychain access across updates.',
+      'Warning: signing AMC ad hoc. Run scripts/create-signing-identity.sh to set up local signing.',
     )
     return
   }

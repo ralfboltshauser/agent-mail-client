@@ -1,51 +1,45 @@
-import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { app, safeStorage } from 'electron'
+import { app } from 'electron'
+import { archiveLegacyCredentials, credentialPath, writeCredentials } from './credential-files'
 
-interface Stored {
-  engineUrl: string
-  /** The owner-device token, encrypted with the macOS Keychain via safeStorage. */
-  token: string
-}
-
-const file = () => join(app.getPath('userData'), 'pairing.json')
+const file = () => credentialPath(app.getPath('userData'), 'pairing.json')
 
 type LoadedPairing =
-  | { engineUrl: string; token: string }
-  | { engineUrl: string | null; token: null }
+  | { state: 'paired'; engineUrl: string; token: string }
+  | { state: 'unpaired' | 'read-error'; engineUrl: string | null }
 
-export async function loadPairing(): Promise<LoadedPairing | null> {
+function readPairing(path: string): { engineUrl: string; token?: unknown } | null {
   let data: string
   try {
-    data = readFileSync(file(), 'utf8')
+    data = readFileSync(path, 'utf8')
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ENOENT'
-      ? null
-      : { engineUrl: null, token: null }
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
   }
-  let engineUrl: string | null = null
+  const { engineUrl, token } = JSON.parse(data)
+  return { engineUrl: new URL(engineUrl).origin, token }
+}
+
+export function loadPairing(): LoadedPairing {
   try {
-    const stored = JSON.parse(data) as Stored
-    engineUrl = new URL(stored.engineUrl).origin
-    // The Keychain may wait on a macOS prompt. Keep the main process responsive.
-    const { result: token } = await safeStorage.decryptStringAsync(
-      Buffer.from(stored.token, 'base64'),
-    )
-    if (token) return { engineUrl, token }
-    return { engineUrl, token: null }
+    const stored = readPairing(file())
+    if (stored) {
+      if (typeof stored.token === 'string' && stored.token)
+        return { state: 'paired', engineUrl: stored.engineUrl, token: stored.token }
+      return { state: 'read-error', engineUrl: stored.engineUrl }
+    }
+    const archive = archiveLegacyCredentials(join(app.getPath('userData'), 'pairing.json'))
+    // Reuse the replica when pairing again with the same Engine, even after a restart.
+    const engineUrl = readPairing(archive)?.engineUrl ?? null
+    return { state: 'unpaired', engineUrl }
   } catch {
-    // The URL is plaintext so a Keychain failure needn't lose the replica identity.
-    return { engineUrl, token: null }
+    return { state: 'read-error', engineUrl: null }
   }
 }
 
 export function savePairing(engineUrl: string, token: string): void {
-  if (!safeStorage.isEncryptionAvailable())
-    throw new Error('macOS Keychain encryption is not available')
-  const stored: Stored = { engineUrl, token: safeStorage.encryptString(token).toString('base64') }
-  const path = file()
-  writeFileSync(`${path}.tmp`, JSON.stringify(stored), { mode: 0o600 })
-  renameSync(`${path}.tmp`, path)
+  writeCredentials(file(), { engineUrl, token })
 }
 
 export function clearPairing(): void {

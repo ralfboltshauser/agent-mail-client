@@ -109,27 +109,17 @@ function setStartupStatus(status: SyncStatus) {
   broadcast('amc:status', status)
 }
 
-async function restoreSavedPairing() {
-  setStartupStatus({ ...startupStatus, phase: 'restoring-pairing', error: null })
+function restoreSavedPairing() {
   startupLog('reading saved pairing')
-  let pairing = await loadPairing()
-  if (quittingTriage.signal.aborted) return
-  if (pairing && !pairing.token) {
-    startupLog('saved pairing unreadable; retrying')
-    await new Promise((resolve) => setTimeout(resolve, 500))
-    if (quittingTriage.signal.aborted) return
-    pairing = await loadPairing()
-    if (quittingTriage.signal.aborted) return
-  }
-  if (pairing?.token) {
-    startupLog('saved pairing decrypted')
+  const pairing = loadPairing()
+  if (pairing.state === 'paired') {
+    startupLog('saved pairing loaded')
     connect(pairing.engineUrl, pairing.token)
-  } else if (pairing) {
-    startupLog('saved pairing unreadable after retry')
+  } else if (pairing.state === 'read-error') {
+    startupLog('saved pairing unreadable')
     setStartupStatus({ ...UNPAIRED, phase: 'pairing-read-error', engineUrl: pairing.engineUrl })
   } else {
-    startupLog('no saved pairing file')
-    setStartupStatus(UNPAIRED)
+    setStartupStatus({ ...UNPAIRED, engineUrl: pairing.engineUrl })
   }
 }
 
@@ -720,7 +710,6 @@ function buildMenu() {
   )
 }
 
-// Chromium chooses the Safe Storage service name during Electron startup.
 app.setName('AMC')
 // Both the packaged app and electron-vite use the original dev profile by default.
 const customProfile = app.commandLine.getSwitchValue('user-data-dir')
@@ -796,8 +785,8 @@ if (!app.requestSingleInstanceLock()) {
       }
     }
     refreshTray()
-    void restoreSavedPairing().then(() => {
-      if (startupStatus.phase !== 'unpaired' || quittingTriage.signal.aborted) return
+    restoreSavedPairing()
+    if (startupStatus.phase === 'unpaired') {
       // Scriptable first run: --engine-url=… --pairing-code=…
       const arg = (name: string) =>
         process.argv.find((a) => a.startsWith(`--${name}=`))?.split('=')[1]
@@ -807,7 +796,7 @@ if (!app.requestSingleInstanceLock()) {
         void pair(url, code).catch((error: Error) =>
           console.error(`Pairing failed: ${error.message}`),
         )
-    })
+    }
     if (!loginItem || !app.getLoginItemSettings().wasOpenedAtLogin) createWindow()
     app.on('activate', openWindow)
     app.on('browser-window-focus', refreshTray)
