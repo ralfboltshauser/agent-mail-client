@@ -5,6 +5,41 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { expect, it } from 'vitest'
 
+it.each(['0', '1'])('reports a missing triage account with AMC_DEBUG=%s', async (debug) => {
+  const server = createServer((req, res) => {
+    if (req.url !== '/v1/accounts') {
+      res.writeHead(404).end('{}')
+      return
+    }
+    res.setHeader('Content-Type', 'application/json')
+    res.end(JSON.stringify({ accounts: [{ id: 'first' }, { id: 'second' }] }))
+  })
+  server.listen(0, '127.0.0.1')
+  try {
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('Expected a TCP address')
+    const result = promisify(execFile)(
+      process.execPath,
+      [fileURLToPath(new URL('./main.ts', import.meta.url)), 'triage', '--dry-run'],
+      {
+        env: {
+          ...process.env,
+          AMC_ENGINE_URL: `http://127.0.0.1:${address.port}`,
+          AMC_TOKEN: 'test',
+          AMC_DEBUG: debug,
+        },
+      },
+    )
+    const message = 'Error: Choose an Account with --account <id> (see amc accounts --json)'
+    const stderr = debug === '1' ? expect.stringMatching(/\n\s+at /) : `${message}\n`
+    await expect(result).rejects.toMatchObject({ code: 1, stdout: '', stderr })
+    await expect(result).rejects.toHaveProperty('stderr', expect.stringContaining(message))
+  } finally {
+    server.close()
+  }
+})
+
 it('reports unavailable backup health from an older Engine in doctor', async () => {
   const server = createServer((_req, res) => {
     res.setHeader('Content-Type', 'application/json')

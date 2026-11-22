@@ -21,12 +21,11 @@ import {
   type ThreadSummary,
 } from '@amc/protocol'
 import { Command } from 'commander'
-import { authed, EngineError, request } from './client.ts'
+import { authed, request } from './client.ts'
 import { readConfig, writeConfig } from './config.ts'
 import { addImapAccount } from './imap-signin.ts'
 import { loopbackSignIn } from './signin.ts'
 import { runTriage } from './triage.ts'
-import { ClaudeAuthError } from './triage-claude.ts'
 
 declare const AMC_VERSION: string | undefined
 const VERSION = typeof AMC_VERSION === 'string' ? AMC_VERSION : 'dev'
@@ -611,8 +610,7 @@ async function main() {
 }
 
 main().catch((error: unknown) => {
-  if (error instanceof EngineError || error instanceof ClaudeAuthError)
-    console.error(`Error: ${error.message}`)
-  else console.error(error)
+  if (process.env.AMC_DEBUG === '1') console.error(error)
+  else console.error(`Error: ${error instanceof Error ? error.message : String(error)}`)
   process.exit(1)
 })
