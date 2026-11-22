@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 
 export type HotkeyMap = Record<string, (event: KeyboardEvent) => void>
 
@@ -13,7 +13,9 @@ function isTyping(target: EventTarget | null): boolean {
  */
 export function useHotkeys(map: HotkeyMap, enabled = true): void {
   const mapRef = useRef(map)
-  mapRef.current = map
+  useLayoutEffect(() => {
+    mapRef.current = map
+  }, [map])
   useEffect(() => {
     if (!enabled) return
     let pending: string | null = null

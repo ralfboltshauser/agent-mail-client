@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import babel from '@rolldown/plugin-babel'
 import tailwindcss from '@tailwindcss/vite'
-import react from '@vitejs/plugin-react'
+import react, { reactCompilerPreset } from '@vitejs/plugin-react'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 
 export default defineConfig({
@@ -31,6 +32,10 @@ export default defineConfig({
   },
   renderer: {
     resolve: { alias: { '@': resolve('src/renderer/src') } },
-    plugins: [react(), tailwindcss()],
+    plugins: [
+      react(),
+      babel({ presets: [reactCompilerPreset({ compilationMode: 'annotation' })] }),
+      tailwindcss(),
+    ],
   },
 })

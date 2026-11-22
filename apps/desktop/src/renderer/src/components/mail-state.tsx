@@ -12,6 +12,8 @@ export function MailState({
   children?: React.ReactNode
   error?: boolean
 }) {
+  'use memo'
+
   return (
     <div
       className="grid h-full min-h-32 place-items-center px-6 py-8 text-center"
@@ -31,6 +33,8 @@ export function MailState({
 }
 
 export function MailLoading({ label }: { label: string }) {
+  'use memo'
+
   return (
     <div className="divide-y px-4">
       <output className="sr-only">{label}</output>
