@@ -1,12 +1,13 @@
-import type { ThreadSummary } from '@amc/protocol'
 import { Paperclip, Star } from 'lucide-react'
 import { memo } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { MailboxThreadQuery } from '@/features/mailbox/mailbox-queries'
+import { SenderAvatar } from '@/features/sender-avatar/sender-avatar'
 import { useReplicaSelector } from '@/hooks/use-amc'
 import { listDate, participantsLine } from '@/lib/format'
 import { cn } from '@/lib/utils'
+import type { DesktopThreadSummary } from '../../../../shared/api'
 
 export const SubscribedThreadRow = memo(function SubscribedThreadRow({
   id,
@@ -14,18 +15,38 @@ export const SubscribedThreadRow = memo(function SubscribedThreadRow({
   fallback,
   self,
   match,
+  avatarVisible,
 }: {
   id: string
   query: MailboxThreadQuery | null
-  fallback?: ThreadSummary
+  fallback?: DesktopThreadSummary
   self: Set<string>
   match?: string
+  avatarVisible: boolean
 }) {
   const thread = useReplicaSelector(query, ({ data }) => data?.summaries.get(id) ?? fallback)
   if (!thread) return null
+  const inboxSender =
+    thread.inboxSender?.accountId === thread.accountId ? thread.inboxSender : undefined
+  const messageId = thread.latestSender?.messageId ?? inboxSender?.messageId
+  const from = thread.latestSender
+    ? thread.latestSender.from
+    : inboxSender
+      ? {
+          address: inboxSender.address,
+          name: thread.participants.find(
+            ({ address }) => address.toLowerCase() === inboxSender.address,
+          )?.name,
+        }
+      : (thread.participants.find(({ address }) => !self.has(address.toLowerCase())) ??
+        thread.participants[0])
   return (
     <ThreadRow
       unread={thread.unreadCount > 0}
+      avatarAccountId={thread.accountId}
+      avatarMessageId={avatarVisible && from?.address ? messageId : undefined}
+      avatarAddress={from?.address}
+      avatarName={from?.name ?? undefined}
       participants={participantsLine(thread.participants, self)}
       messageCount={thread.messageCount}
       hasAttachments={thread.hasAttachments}
@@ -43,6 +64,10 @@ export const SubscribedThreadRow = memo(function SubscribedThreadRow({
 
 interface RowProps {
   unread: boolean
+  avatarAccountId: string
+  avatarMessageId?: string
+  avatarAddress?: string
+  avatarName?: string
   participants: string
   messageCount: number
   hasAttachments: boolean
@@ -58,6 +83,10 @@ interface RowProps {
 
 export const ThreadRow = memo(function ThreadRow({
   unread,
+  avatarAccountId,
+  avatarMessageId,
+  avatarAddress,
+  avatarName,
   participants,
   messageCount,
   hasAttachments,
@@ -79,6 +108,13 @@ export const ThreadRow = memo(function ThreadRow({
           </span>
         )}
       </div>
+      <SenderAvatar
+        accountId={avatarAccountId}
+        messageId={avatarMessageId}
+        address={avatarAddress}
+        name={avatarName}
+        className="self-center"
+      />
       <div className="min-w-0 flex-1">
         <div className="flex h-[19px] items-center gap-1.5">
           <span

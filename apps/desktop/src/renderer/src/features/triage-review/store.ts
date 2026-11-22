@@ -1,5 +1,6 @@
 import { toast } from 'sonner'
 import { getAmc } from '@/lib/amc'
+import type { ReviewApi, SmartInboxApi } from '../../../../shared/api'
 import {
   canUndo,
   loadReview,
@@ -25,7 +26,9 @@ export class ReviewStore {
   #listeners = new Set<() => void>()
   #next: { batch: string; index: number; preview: Preview } | null = null
   #api = getAmc()
-  #smart = this.#api.smartInbox
+  #smart: (SmartInboxApi & ReviewApi) | undefined = this.#api.smartInbox?.review
+    ? { ...this.#api.smartInbox, ...this.#api.smartInbox.review }
+    : undefined
   #view = {
     card: null as Preview | null,
     progress: '',

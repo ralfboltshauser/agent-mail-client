@@ -50,6 +50,10 @@ export interface ThreadQuery {
   limit?: number
 }
 
+export type DesktopThreadSummary = ThreadSummary & {
+  latestSender?: { messageId: string; from: ThreadMessage['from'] }
+}
+
 export type ReplicaThreadMessage = ThreadMessage & { bodyRevision: string }
 
 export interface ThreadWithMessages {
@@ -147,11 +151,19 @@ export interface ReviewOrganiseStatus {
   error: string | null
 }
 
-export interface SmartInboxApi {
+export interface DesktopSenderAvatarResults {
+  rows: (SenderAvatarResults['rows'][number] & { image?: string | null })[]
+}
+
+export interface ReviewApi {
   reviewPairing(): Promise<string>
   reviewBucket(input: BucketReviewInput): Promise<OwnerActionStatus>
   reviewOrganise(input: ReviewOrganiseAction, id: string, messageId?: string): Promise<string>
   reviewOrganiseStatus(id: string): Promise<ReviewOrganiseStatus | null>
+}
+
+export interface SmartInboxApi {
+  review?: ReviewApi
   listSenders(query: Partial<SenderListQuery>): Promise<SenderList>
   decideSender(input: SenderDecision): Promise<OwnerActionStatus>
   adoptScreenedDestination(
@@ -160,7 +172,10 @@ export interface SmartInboxApi {
   ownerAction(id: string): Promise<OwnerActionStatus>
   undoOwnerAction(id: string): Promise<OwnerActionStatus>
   triageQueue(query: TriageQueueRequest): Promise<TriageQueuePage>
-  resolveSenderAvatars(input: SenderAvatarResolve): Promise<SenderAvatarResults>
+  resolveSenderAvatars(
+    input: SenderAvatarResolve,
+    knownDigests?: readonly string[],
+  ): Promise<DesktopSenderAvatarResults>
 }
 
 export interface AmcApi {
@@ -193,11 +208,11 @@ export interface AmcApi {
   accounts(): Promise<AccountSummary[]>
   labels(accountId: string | null): Promise<Label[]>
   counts(accountId: string | null): Promise<Counts>
-  threads(query: ThreadQuery): Promise<ThreadSummary[]>
+  threads(query: ThreadQuery): Promise<DesktopThreadSummary[]>
   thread(id: string): Promise<ThreadWithMessages | null>
-  summaries(ids: string[]): Promise<ThreadSummary[]>
+  summaries(ids: string[]): Promise<DesktopThreadSummary[]>
   /** Instant local filter over subject, people and snippet. */
-  filter(text: string, accountId: string | null): Promise<ThreadSummary[]>
+  filter(text: string, accountId: string | null): Promise<DesktopThreadSummary[]>
   /** Full-text search over the entire history, on the Engine. */
   search(text: string, accountId: string | null): Promise<SearchHit[]>
   contacts(text: string): Promise<Contact[]>

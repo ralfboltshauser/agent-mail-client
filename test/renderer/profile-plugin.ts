@@ -14,6 +14,7 @@ const components: Record<string, string> = {
   'features/composer/footer.tsx': 'ComposerFooter',
   'features/composer/header-fields.tsx': 'SubjectField',
   'features/mailbox/mail-workspace.tsx': 'MailWorkspace',
+  'features/sender-avatar/sender-avatar.tsx': 'SenderAvatar',
   'features/thread-list/inbox-chrome.tsx': 'InboxSectionHeader',
   'features/thread-list/thread-row.tsx': 'ThreadRow',
   'features/triage-review/review-card.tsx': 'ReviewCard',
@@ -53,6 +54,7 @@ export function profileRenderer() {
         if (!component.body) throw new Error(`Update the renderer Profiler probe for ${name}`)
         let profileId = JSON.stringify(name === 'ComposerFooter' ? 'footer' : name)
         if (name === 'InboxSectionHeader') profileId = "'section:' + section"
+        if (name === 'SenderAvatar') profileId = "'avatar:' + messageId"
         if (name === 'ThreadRow') {
           const props = component.parameters[0]?.name
           if (!props || !ts.isObjectBindingPattern(props)) {
@@ -98,6 +100,9 @@ export function profileRenderer() {
             const render = getMemoRender(declaration)
             if (!render) continue
             if (declaration.name.text === name) instrument(render, name)
+            if (name === 'InboxSectionHeader' && declaration.name.text === 'InboxSenderCard') {
+              instrument(render, 'InboxSenderCard')
+            }
             if (name === 'ThreadRow' && declaration.name.text === 'SubscribedThreadRow') {
               visitRowBody(render.body)
             }

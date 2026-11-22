@@ -1,4 +1,4 @@
-import type { AmcApi, SmartInboxApi } from '../../../../shared/api'
+import type { AmcApi, ReviewApi, SmartInboxApi } from '../../../../shared/api'
 import type { ActionStatus, ReviewAction, Session } from './model'
 
 const storageKey = 'amc-triage-review-v1'
@@ -52,7 +52,7 @@ export function canUndo(action: ReviewAction) {
   return !['undone', 'superseded'].includes(action.status)
 }
 
-export async function submit(api: SmartInboxApi, action: ReviewAction) {
+export async function submit(api: SmartInboxApi & ReviewApi, action: ReviewAction) {
   const { decision } = action
   switch (decision.kind) {
     case 'sender':
@@ -69,7 +69,7 @@ export async function submit(api: SmartInboxApi, action: ReviewAction) {
 
 export async function undo(
   api: AmcApi,
-  smart: SmartInboxApi,
+  smart: SmartInboxApi & ReviewApi,
   action: ReviewAction,
   undoId: string,
 ) {
@@ -96,7 +96,7 @@ export async function undo(
 
 export async function poll(
   api: AmcApi,
-  smart: SmartInboxApi,
+  smart: SmartInboxApi & ReviewApi,
   action: ReviewAction,
 ): Promise<Partial<ReviewAction> | null> {
   if (action.decision.kind === 'reply') {

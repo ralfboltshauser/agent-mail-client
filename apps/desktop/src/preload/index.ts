@@ -1,6 +1,6 @@
 import type { ComposePatch, ThreadSummary } from '@amc/protocol'
 import { contextBridge, ipcRenderer } from 'electron'
-import type { AmcApi, SmartInboxApi, SyncStatus } from '../shared/api'
+import type { AmcApi, ReviewApi, SmartInboxApi, SyncStatus } from '../shared/api'
 
 const invoke =
   (channel: string) =>
@@ -9,10 +9,12 @@ const invoke =
 
 const api: AmcApi = {
   smartInbox: {
-    reviewPairing: invoke('reviewPairing') as SmartInboxApi['reviewPairing'],
-    reviewBucket: invoke('reviewBucket') as SmartInboxApi['reviewBucket'],
-    reviewOrganise: invoke('reviewOrganise') as SmartInboxApi['reviewOrganise'],
-    reviewOrganiseStatus: invoke('reviewOrganiseStatus') as SmartInboxApi['reviewOrganiseStatus'],
+    review: {
+    reviewPairing: invoke('reviewPairing') as ReviewApi['reviewPairing'],
+    reviewBucket: invoke('reviewBucket') as ReviewApi['reviewBucket'],
+    reviewOrganise: invoke('reviewOrganise') as ReviewApi['reviewOrganise'],
+    reviewOrganiseStatus: invoke('reviewOrganiseStatus') as ReviewApi['reviewOrganiseStatus'],
+    },
     listSenders: invoke('listSenders') as SmartInboxApi['listSenders'],
     decideSender: invoke('decideSender') as SmartInboxApi['decideSender'],
     adoptScreenedDestination: invoke(

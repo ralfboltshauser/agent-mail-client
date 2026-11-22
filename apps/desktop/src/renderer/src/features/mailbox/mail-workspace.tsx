@@ -196,7 +196,7 @@ export function MailWorkspace({
     reviewOpen: review.open,
     openReview:
       sectioned &&
-      getAmc().smartInbox &&
+      getAmc().smartInbox?.review &&
       !compose.draft &&
       !compose.handoffThread &&
       !openingComposer &&

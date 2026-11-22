@@ -96,3 +96,18 @@ Section membership comes from the query-local index. The list owns changes to
 row geometry and headers subscribe to their counts. The cross-section test
 checks the actual row, listbox, selection, reader and focus nodes in addition
 to the commit budget.
+
+## Sender avatars
+
+The production Inbox fixture renders 48 Threads with a New senders card.
+Its delayed avatar batch contains the card's representative incoming message
+and the thread rows in the visible range. Scrolling requests the newly visible
+range and excludes overscan and the off-screen selected row that stays mounted.
+Opening an already visible Thread adds zero avatar requests.
+
+| Settled action | Workspace | List | Card and row bodies | Reader | Composer | Changed avatar | Other avatars |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| New senders logo resolves | 0 | 0 | 0 | 0 | 0 | 1 | 0 |
+
+The scenario checks the same 32×32 slot before and after the logo arrives,
+plus DOM identity for the rows, selection, and reader.

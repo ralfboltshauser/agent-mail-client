@@ -53,6 +53,7 @@ import {
 import { OrganiseSync } from './organise'
 import { loadRenderer } from './renderer-load'
 import { Replica } from './replica'
+import { resolveSenderAvatars } from './sender-avatars'
 import { SyncLoop } from './sync'
 import { mcpLauncher, savedT3Url } from './t3'
 import { cliLauncher, detectT3Cli } from './t3-cli'
@@ -407,12 +408,11 @@ function registerIpc() {
       return queued
     },
   )
-  ipcMain.handle('amc:resolveSenderAvatars', (_event, input: unknown) =>
-    requireEngine().request('/v1/sender-avatars/resolve', {
-      method: 'POST',
-      body: SenderAvatarResolve.parse(input),
-    }),
-  )
+  ipcMain.handle('amc:resolveSenderAvatars', async (_event, input: unknown, known: unknown) => {
+    const connection = requireEngine()
+    const result = await resolveSenderAvatars(connection, SenderAvatarResolve.parse(input), known)
+    return connection === engine ? result : { rows: [] }
+  })
   ipcMain.handle('amc:setBucket', async (_event, input: unknown) => {
     const body = BucketInput.parse(input)
     const loop = sync

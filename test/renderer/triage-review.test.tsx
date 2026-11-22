@@ -1,11 +1,12 @@
-import type { OwnerActionStatus, TriageQueuePage } from '@amc/protocol'
 import { act, cleanup, fireEvent, screen, within } from '@testing-library/react'
 import { expect, it, vi } from 'vitest'
-import type { SmartInboxApi } from '../../apps/desktop/src/shared/api'
+import type { ReviewApi, SmartInboxApi } from '../../apps/desktop/src/shared/api'
 import { deferred, rendererAdapter } from './adapter'
 import { commits, expectBudget } from './profile'
 import { firstSubject, listbox, mount, row } from './workspace'
 
+type TriageQueuePage = Awaited<ReturnType<SmartInboxApi['triageQueue']>>
+type OwnerActionStatus = Awaited<ReturnType<SmartInboxApi['ownerAction']>>
 type Card = TriageQueuePage['cards'][number]
 
 async function fixture({ empty = false } = {}) {
@@ -39,6 +40,7 @@ async function fixture({ empty = false } = {}) {
     status,
     error: null,
     mutationIds: [],
+    undo: null,
   })
   const sameId = (left: Card, right: Card) => JSON.stringify(left.id) === JSON.stringify(right.id)
   const smart = {
@@ -68,14 +70,14 @@ async function fixture({ empty = false } = {}) {
       available = available.filter((card) => card.id.kind !== 'sender')
       return status
     }),
-    reviewBucket: vi.fn<SmartInboxApi['reviewBucket']>(async (input) => {
+    reviewBucket: vi.fn<ReviewApi['reviewBucket']>(async (input) => {
       const status = result(input.clientActionId)
       ledger.set(input.clientActionId, status)
       if (input.threadId === low.threadId) available = available.filter((card) => card !== low)
       return status
     }),
-    reviewOrganise: vi.fn<SmartInboxApi['reviewOrganise']>(async (_input, id) => id),
-    reviewOrganiseStatus: vi.fn<SmartInboxApi['reviewOrganiseStatus']>(async () => ({
+    reviewOrganise: vi.fn<ReviewApi['reviewOrganise']>(async (_input, id) => id),
+    reviewOrganiseStatus: vi.fn<ReviewApi['reviewOrganiseStatus']>(async () => ({
       status: 'applied',
       error: null,
     })),
@@ -88,8 +90,8 @@ async function fixture({ empty = false } = {}) {
     listSenders: vi.fn(async () => ({ rows: [], cursor: null })),
     adoptScreenedDestination: vi.fn(async () => ({ accountId: 'studio', providerId: 'screened' })),
     resolveSenderAvatars: vi.fn(async () => ({ rows: [] })),
-  } satisfies SmartInboxApi
-  Object.assign(adapter.api, { smartInbox: smart })
+  } satisfies SmartInboxApi & ReviewApi
+  Object.assign(adapter.api, { smartInbox: { ...smart, review: smart } })
   return {
     adapter,
     smart,
@@ -256,7 +258,7 @@ it('retries a dropped decision acknowledgment with the same id and surfaces part
   await open()
   await click(within(review()).getByText('Action history (1)'))
   expect(within(review()).getByText('One message remained in Inbox')).toBeTruthy()
-  await click(within(review()).getAllByRole('button', { name: /^Undo/ }).at(-1)!)
+  await click(within(review()).getByRole('button', { name: 'Undo', exact: true }))
   expect(smart.undoOwnerAction).toHaveBeenCalledWith(id)
 })
 

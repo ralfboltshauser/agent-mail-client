@@ -11,7 +11,7 @@ export function useTriageReview(accountId: string | null) {
   const reply = useRef<{ card: Preview; draftId: string } | null>(null)
 
   useEffect(() => {
-    if (!getAmc().smartInbox) return
+    if (!getAmc().smartInbox?.review) return
     void store.restore().catch(() => {})
     const timer = setInterval(() => void store.poll(), 2000)
     const unsubscribe = getAmc().onChanged(() => store.replicaChanged())

@@ -1,19 +1,15 @@
+import { SenderAvatar } from '../sender-avatar/sender-avatar'
 import type { Preview } from './model'
 
 export function ReviewAvatar({ card }: { card: Preview }) {
-  const name = card.sender?.name || card.sender?.address || ''
-  const initials = (name.includes('@') ? name.split('@')[0] : name)
-    .split(/[\s._-]+/)
-    .slice(0, 2)
-    .map((word) => Array.from(word)[0])
-    .join('')
-    .toUpperCase()
+  const from = card.detail.messages.find(({ id }) => id === card.messageId)?.from
   return (
-    <span
-      aria-hidden="true"
-      className="grid size-10 shrink-0 place-items-center rounded-full bg-accent font-semibold text-accent-foreground"
-    >
-      {initials || '?'}
-    </span>
+    <SenderAvatar
+      accountId={card.accountId}
+      messageId={card.messageId}
+      address={card.sender?.address ?? from?.address}
+      name={card.sender?.name ?? from?.name}
+      size={40}
+    />
   )
 }

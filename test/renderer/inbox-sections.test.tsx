@@ -2,8 +2,12 @@ import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { StrictMode } from 'react'
 import { expect, it, vi } from 'vitest'
 import { App } from '@/app'
-import type { AmcApi } from '../../apps/desktop/src/shared/api'
-import { rendererAdapter } from './adapter'
+import type {
+  AmcApi,
+  DesktopSenderAvatarResults,
+  SmartInboxApi,
+} from '../../apps/desktop/src/shared/api'
+import { deferred, rendererAdapter } from './adapter'
 import { commitCounts, commits, expectBudget } from './profile'
 import { listbox, options, reader, selected } from './workspace'
 
@@ -17,7 +21,10 @@ const sectionCommits = () =>
 const rowIds = () => options().map((node) => node.dataset.threadId)
 const byId = (id: string) => options().find((node) => node.dataset.threadId === id)
 
-async function mountSections(project?: (rows: ThreadSummary[]) => ThreadSummary[]) {
+async function mountSections(
+  project?: (rows: ThreadSummary[]) => ThreadSummary[],
+  smartInbox?: SmartInboxApi,
+) {
   const adapter = rendererAdapter()
   const read = adapter.api.threads.getMockImplementation()
   if (!read) throw new Error('Expected synthetic thread reads')
@@ -32,6 +39,7 @@ async function mountSections(project?: (rows: ThreadSummary[]) => ThreadSummary[
     notify = callback
     return () => {}
   }
+  Object.assign(adapter.api, { smartInbox })
   vi.stubGlobal('amc', adapter.api)
   const app = (
     <StrictMode>
@@ -290,4 +298,120 @@ it('marks only exposed unread Updates and undoes a specific Thread action', asyn
     ['thread-5', 'thread-8'].map((threadId) => [{ kind: 'read', threadId, value: true }]),
   )
   expect(markSeen().getAttribute('aria-disabled')).toBe('true')
+})
+
+it('resolves avatars only in the visible virtual range and commits only the changed avatar', async () => {
+  const pending = deferred<DesktopSenderAvatarResults>()
+  const resolveSenderAvatars = vi
+    .fn<SmartInboxApi['resolveSenderAvatars']>()
+    .mockReturnValueOnce(pending.promise)
+    .mockResolvedValue({ rows: [] })
+  const { api } = await mountSections(
+    ([first, second]) =>
+      Array.from({ length: 48 }, (_, index) => {
+        const thread = index === 1 ? second : first
+        return {
+          ...thread,
+          id: index < 2 ? thread.id : `avatar-thread-${index}`,
+          lastMessageAt: first.lastMessageAt - index,
+          latestSender: { messageId: `latest-${index}`, from: thread.participants[0] },
+          inboxSender:
+            index === 0
+              ? {
+                  accountId: thread.accountId,
+                  address: 'new-sender@example.test',
+                  status: 'new' as const,
+                  messageId: 'incoming-card',
+                  revision: 0,
+                }
+              : undefined,
+        }
+      }),
+    {
+      listSenders: vi.fn(),
+      decideSender: vi.fn(),
+      adoptScreenedDestination: vi.fn(),
+      ownerAction: vi.fn(),
+      undoOwnerAction: vi.fn(),
+      triageQueue: vi.fn(),
+      resolveSenderAvatars,
+    },
+  )
+  const list = listbox()
+  const viewport = list.closest<HTMLElement>('[data-thread-viewport]')
+  const card = byId('thread-1')
+  const thread = byId('thread-2')
+  const avatar = card?.querySelector<HTMLElement>('span[aria-hidden="true"]')
+  if (!viewport || !card || !thread || !avatar) throw new Error('Expected mounted avatars')
+  expect(avatar.textContent).toBe('NS')
+  expect(avatar.style.width).toBe('32px')
+  expect(avatar.style.height).toBe('32px')
+  const messages = () =>
+    resolveSenderAvatars.mock.lastCall?.[0].messages.map(({ messageId }) => messageId)
+  const visibleMessages = () =>
+    options()
+      .filter((row) => {
+        const start = Number(row.style.transform.match(/translateY\(([-.\d]+)px\)/)?.[1])
+        return (
+          start < viewport.scrollTop + viewport.clientHeight &&
+          start + Number.parseInt(row.style.height || '88', 10) > viewport.scrollTop
+        )
+      })
+      .map(({ dataset }) => {
+        if (dataset.threadId === 'thread-1') return 'incoming-card'
+        return dataset.threadId === 'thread-2'
+          ? 'latest-1'
+          : dataset.threadId?.replace('avatar-thread-', 'latest-')
+      })
+
+  await act(async () => vi.advanceTimersByTimeAsync(16))
+  expect(resolveSenderAvatars).toHaveBeenCalledTimes(1)
+  expect(messages()).toEqual(visibleMessages())
+  expect(messages()).toContain('latest-1')
+  expect(options().length).toBeGreaterThan(messages()?.length ?? 0)
+  const siblings = options()
+  const active = selected()
+  const heading = reader()
+  commits.clear()
+
+  const image = 'data:image/png;base64,c3ludGhldGlj'
+  const [{ accountId }] = await api.threads(inbox)
+  await act(async () =>
+    pending.resolve({
+      rows: [
+        {
+          accountId,
+          messageId: 'incoming-card',
+          initials: 'NS',
+          color: '#304879',
+          source: 'favicon',
+          digest: 'fixture-digest',
+          image,
+        },
+      ],
+    }),
+  )
+  expect(avatar.querySelector('img')?.getAttribute('src')).toBe(image)
+  expect(card.querySelector('span[aria-hidden="true"]')).toBe(avatar)
+  expect(avatar.style.width).toBe('32px')
+  expect(avatar.style.height).toBe('32px')
+  expect(options()).toEqual(siblings)
+  expect(selected()).toBe(active)
+  expect(reader()).toBe(heading)
+  expectBudget({ app: 0, workspace: 0, list: 0, rows: 0, reader: 0, composer: 0 })
+  expect(Object.fromEntries(commits)).toEqual({ 'avatar:incoming-card': 1 })
+
+  await act(async () => fireEvent.click(thread))
+  await act(async () => vi.advanceTimersByTimeAsync(16))
+  expect(reader('Sunday at the studio')).toBeTruthy()
+  expect(resolveSenderAvatars).toHaveBeenCalledTimes(1)
+
+  await act(async () => {
+    viewport.scrollTop = 1800
+    fireEvent.scroll(viewport)
+  })
+  await act(async () => vi.advanceTimersByTimeAsync(16))
+  expect(byId('thread-2')).toBe(thread) // Selection is pinned outside the virtual viewport.
+  expect(resolveSenderAvatars).toHaveBeenCalledTimes(2)
+  expect(messages()).toEqual(visibleMessages())
 })
