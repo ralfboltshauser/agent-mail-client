@@ -104,6 +104,14 @@ A Sender the owner has accepted, sent mail to, or replied to on that Account. A 
 
 The recoverable AMC Label where blocked Senders' incoming messages go. Gmail uses a user Label. IMAP uses a folder.
 
+**Filtered**:
+
+The recoverable AMC Label for incoming mail omitted from Inbox by an owner choice or an approved Preference rule.
+
+**Filter out**:
+
+The choice to place incoming mail in Filtered.
+
 **Section**
 
 A named group of Threads or Sender cards within the Inbox.
@@ -114,8 +122,42 @@ The ordered set of New sender cards and low-confidence Threads waiting for revie
 
 **Confidence**
 
-A triage assessment of how certain a Bucket assignment is for the current incoming mail.
+A triage assessment of how certain a prediction is for the current incoming mail.
 
 **Triage correction**
 
-An owner's Bucket choice recorded as an example for future triage.
+An owner's explicit replacement or confirmation of a triage judgment.
+
+
+### Owner preferences
+
+**Decision label**:
+
+A stable judgment value within one triage dimension, such as Keep in Inbox within filtering.
+_Avoid_: provider Label
+
+**Triage decision**:
+
+An explicit owner judgment about an arrival, Thread or Sender, optionally with a reason.
+_Avoid_: prediction, move result
+
+**Triage prediction**:
+
+AMC's assessment of an arrival against a triage dimension.
+_Avoid_: owner decision
+
+**Decision log**:
+
+The ordered history of Triage decisions, Triage predictions and their amendments.
+
+**Preference rule**:
+
+An owner-editable plain-language instruction for how AMC should assess a kind of mail.
+
+**Preference policy**:
+
+A versioned set of Preference rules for an Account. The active version is the version the owner approved for use.
+
+**Shadow policy**:
+
+A Preference policy evaluated on arrivals to preview its judgments before activation.
