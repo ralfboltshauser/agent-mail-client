@@ -654,4 +654,12 @@ export const MIGRATIONS: readonly Migration[] = [
     name: 'Track the provider revision written by AMC',
     sql: 'ALTER TABLE draft ADD COLUMN mirror_written_hash TEXT',
   },
+  {
+    version: 19,
+    name: 'Retire IMAP draft removals with unknown provenance',
+    sql: `
+      UPDATE draft_mirror_removal SET mirror_hash = NULL
+      WHERE account_id IN (SELECT id FROM account WHERE kind = 'imap');
+    `,
+  },
 ]

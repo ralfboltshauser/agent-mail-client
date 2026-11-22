@@ -19,7 +19,7 @@ import { type Db, transaction } from '../db/database.ts'
 import { fromGmail } from '../providers/gmail/mapping.ts'
 import type { GmailApi, GmailDraft } from '../providers/gmail/types.ts'
 import { parseMessage } from '../providers/imap/mapping.ts'
-import { draftSourceHash, type ImapProvider } from '../providers/imap/provider.ts'
+import type { ImapProvider } from '../providers/imap/provider.ts'
 import {
   applyDraftUpdate,
   draftDocument,
@@ -82,6 +82,15 @@ export interface DraftMirror {
   ): Promise<GmailDraft & { sourceHash?: string }>
   deleteDraft(id: string, sourceHash?: string | null): Promise<boolean>
   getDraft?: GmailApi['getDraft']
+}
+
+type ImapDraftLocation = Awaited<ReturnType<ImapProvider['listDrafts']>>[number]
+
+interface ImapDraftSource {
+  location: ImapDraftLocation
+  hash: string
+  size: number
+  structure?: MessageStructureObject
 }
 
 interface ImapContent {
@@ -567,7 +576,11 @@ export class Drafts {
     }
     const row = this.#row(id)
     if (!row || row.modseq !== message.revision) throw new DraftError(DRAFT_CHANGED, 409)
-    if (row.provider_draft_id) {
+    if (row.provider_draft_id && this.#isImap(row.account_id) && !row.mirror_written_hash) {
+      // Keep the imported copy linked until send completes so a pull cannot reimport it
+      // while the message is in the Outbox.
+      this.#markMirrorLeft(id)
+    } else if (row.provider_draft_id) {
       const api = this.#api(row.account_id)
       if (this.#isImap(row.account_id)) {
         if (!(await this.#removeImapMirror(api, row.provider_draft_id, this.#removalHash(row))))
@@ -720,6 +733,21 @@ export class Drafts {
     const knownIds = new Set(known.map((row) => row.provider_draft_id))
     const remote = await api.listDrafts()
     const seen = new Set(remote.map((location) => location.id))
+    const matches = new Map<string, DraftRow[]>()
+    for (const row of known) {
+      if (!row.mirror_hash || !row.provider_draft_id) continue
+      const { endpoint, folder } = JSON.parse(row.provider_draft_id) as {
+        endpoint?: string
+        folder: string
+      }
+      if (endpoint !== api.draftEndpoint) continue
+      const key = JSON.stringify([folder, row.mirror_hash])
+      const rows = matches.get(key) ?? []
+      rows.push(row)
+      matches.set(key, rows)
+    }
+
+    const replacements = new Map<string, ImapDraftSource[]>()
     for (const location of remote) {
       if (
         knownIds.has(location.id) ||
@@ -731,30 +759,37 @@ export class Drafts {
         continue
       const source = await api.readDraft(location)
       if (!source || source.raw.byteLength > MAX_ATTACHMENT_BYTES * 2) continue
-      const { raw, structure } = source
-      const body: { text?: string; html?: string } = {}
-      const incoming = await parseMessage(
-        location.folder,
-        location.uidValidity,
-        { uid: location.uid, seq: 0, size: raw.byteLength },
-        this.#store.blobs,
-        this.#store.blobs.put(raw),
-        body,
-      )
-      const parts = incoming.attachments.flatMap((part) =>
-        part.blob ? [{ ...part, blob: part.blob }] : [],
-      )
-      this.#importDraft(accountId, location.id, location.id, incoming, parts, undefined, {
-        ...body,
-        hash: draftSourceHash(raw),
-        complete:
-          canRepresentMime(structure, parts) &&
-          !body.text?.includes('\uFFFD') &&
-          !body.html?.includes('\uFFFD'),
-      })
+      const incoming = {
+        location,
+        hash: this.#store.blobs.put(source.raw),
+        size: source.raw.byteLength,
+        structure: source.structure,
+      }
+      const key = JSON.stringify([location.folder.path, incoming.hash])
+      const candidates = matches.get(key)
+      const previous = candidates?.[0]
+      if (
+        candidates?.length === 1 &&
+        previous?.provider_draft_id &&
+        !seen.has(previous.provider_draft_id)
+      ) {
+        const copies = replacements.get(key) ?? []
+        copies.push(incoming)
+        replacements.set(key, copies)
+      } else {
+        await this.#importImapDraft(accountId, incoming)
+      }
     }
-    // A new UID can be a replacement or a separate draft. Keep the original local
-    // copy bound to its old UID so it cannot be sent as if its mirror still existed.
+
+    for (const [key, copies] of replacements) {
+      const previous = matches.get(key)?.[0]
+      for (const copy of copies) {
+        if (copies.length === 1 && previous && this.#rebindImapDraft(previous, copy.location.id))
+          continue
+        await this.#importImapDraft(accountId, copy)
+      }
+    }
+    // Keep local copies whose old locations have no unambiguous byte-identical replacement.
     for (const local of known) {
       if (!local.provider_draft_id || seen.has(local.provider_draft_id) || local.mirror_conflict)
         continue
@@ -773,6 +808,56 @@ export class Drafts {
       )
         this.#markMirrorLeft(local.id)
     }
+  }
+
+  #rebindImapDraft(previous: DraftRow, providerId: string): boolean {
+    return transaction(this.#db, () => {
+      const current = this.#row(previous.id)
+      if (
+        !current ||
+        current.modseq !== previous.modseq ||
+        current.provider_draft_id !== previous.provider_draft_id ||
+        current.mirror_hash !== previous.mirror_hash ||
+        !this.#canImport(current) ||
+        this.#mirror.size > 0 ||
+        this.#providerDraft(current.account_id, providerId) ||
+        this.#awaitingRemoval(current.account_id, providerId)
+      )
+        return false
+      // Identical bytes establish continuity, but only AMC's own APPEND establishes
+      // ownership of a particular UID for automatic removal.
+      this.#db
+        .prepare(
+          `UPDATE draft SET provider_draft_id = ?, provider_message_id = ?, mirror_written_hash = NULL,
+          mirror_conflict = 0, mirror_error = 0 WHERE id = ?`,
+        )
+        .run(providerId, providerId, current.id)
+      this.#store.recordChange('draft', current.id, 'upsert')
+      return true
+    })
+  }
+
+  async #importImapDraft(accountId: string, { location, hash, size, structure }: ImapDraftSource) {
+    const body: { text?: string; html?: string } = {}
+    const incoming = await parseMessage(
+      location.folder,
+      location.uidValidity,
+      { uid: location.uid, seq: 0, size },
+      this.#store.blobs,
+      hash,
+      body,
+    )
+    const parts = incoming.attachments.flatMap((part) =>
+      part.blob ? [{ ...part, blob: part.blob }] : [],
+    )
+    this.#importDraft(accountId, location.id, location.id, incoming, parts, undefined, {
+      ...body,
+      hash,
+      complete:
+        canRepresentMime(structure, parts) &&
+        !body.text?.includes('\uFFFD') &&
+        !body.html?.includes('\uFFFD'),
+    })
   }
 
   #providerDraft(accountId: string, providerId: string): DraftRow | undefined {
@@ -949,7 +1034,7 @@ export class Drafts {
   #removalHash(row: DraftRow): string | null {
     if (!this.#isImap(row.account_id))
       return row.mirror_hash ?? (row.provider_message_id && mirrorHash(row.provider_message_id))
-    return this.#canReplaceContent(row) ? row.mirror_hash : null
+    return this.#canReplaceContent(row) ? row.mirror_written_hash : null
   }
 
   #canReplaceContent(row: DraftRow): boolean {
@@ -1219,7 +1304,7 @@ export class Drafts {
         .prepare('SELECT account_id FROM draft_mirror_removal WHERE draft_id = ? LIMIT 1')
         .get(id) as { account_id: string } | undefined
       transaction(this.#db, () => {
-        // The queued cleanup may refer to an imported revision. Cancel it on discard.
+        // Cancel pending cleanup when discarding the current version.
         this.#db.prepare('DELETE FROM draft_mirror_removal WHERE draft_id = ?').run(id)
         this.#db.prepare('DELETE FROM draft WHERE id = ?').run(id)
         this.#store.recordChange('draft', id, 'delete')
@@ -1269,8 +1354,16 @@ export class Drafts {
     try {
       const api = this.#api(row.account_id)
       if (!api) throw new Error('Account is unavailable')
-      if (api.imap && row.provider_draft_id && !this.#canReplaceContent(row)) {
-        this.#db.prepare('UPDATE draft SET mirror_left = 1, mirror_dirty = 0 WHERE id = ?').run(id)
+      if (
+        api.imap &&
+        row.provider_draft_id &&
+        (!row.mirror_written_hash || !this.#canReplaceContent(row))
+      ) {
+        this.#db
+          .prepare(
+            'UPDATE draft SET mirror_left = 1, mirror_dirty = 0, mirror_error = 0 WHERE id = ?',
+          )
+          .run(id)
         return
       }
       const message = this.#message(row)
@@ -1309,6 +1402,7 @@ export class Drafts {
             ...row,
             provider_draft_id: saved.id,
             mirror_hash: savedHash,
+            mirror_written_hash: savedHash,
             imap_content: null,
           })
         } else if (previous && previous !== saved.id && remote === undefined) {
