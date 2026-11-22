@@ -105,9 +105,7 @@ function toThread(row: ThreadRow): ThreadSummary {
     snoozedUntil: row.snoozed_until,
     muted: row.muted === 1,
     ...(row.inbox_sender ? { inboxSender: JSON.parse(row.inbox_sender) as InboxSender } : {}),
-    ...(row.owner_handled_message_id
-      ? { ownerHandledMessageId: row.owner_handled_message_id }
-      : {}),
+    ownerHandledMessageId: row.owner_handled_message_id,
     bucket: row.bucket
       ? {
           bucket: row.bucket,

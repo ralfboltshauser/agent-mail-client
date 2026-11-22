@@ -90,9 +90,9 @@ it('applies one off-reader bucket change to the existing row', async () => {
   const changed = options()[1]
   expect(within(changed).queryByText('Later')).toBeNull()
   await act(async () => {
-    await adapter.api.setBucket({ threadId: 'thread-2', bucket: 'Later', reason: 'Synthetic edit' })
+    await adapter.api.setBucket({ threadId: 'thread-2', bucket: 'Reply', reason: 'Synthetic edit' })
   })
-  expect(within(changed).getByText('Later')).toBeTruthy()
+  expect(within(changed).getByText('Reply')).toBeTruthy()
   expect(options()).toEqual(before.rows)
   expectContinuity(before)
   expectBudget({ ...idleMailbox, rows: 1 })

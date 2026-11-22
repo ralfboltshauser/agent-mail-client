@@ -71,7 +71,7 @@ export function ReaderToolbar({
           <Button
             size="sm"
             variant="ghost"
-            title="Hand off (T)"
+            title="Hand off (⇧T)"
             disabled={Boolean(draft) || openingComposer}
             onClick={() => setHandoffThread(activeThread.id)}
           >

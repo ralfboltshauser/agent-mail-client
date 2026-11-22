@@ -35,12 +35,12 @@ beforeEach(() => {
   vi.spyOn(Element.prototype, 'clientHeight', 'get').mockImplementation(function (
     this: HTMLElement,
   ) {
-    return this.getAttribute('aria-label') === 'Threads' ? 720 : (height?.call(this) ?? 0)
+    return this.hasAttribute('data-thread-viewport') ? 720 : (height?.call(this) ?? 0)
   })
   vi.spyOn(Element.prototype, 'clientWidth', 'get').mockImplementation(function (
     this: HTMLElement,
   ) {
-    return this.getAttribute('aria-label') === 'Threads' ? 380 : (width?.call(this) ?? 0)
+    return this.hasAttribute('data-thread-viewport') ? 380 : (width?.call(this) ?? 0)
   })
 })
 

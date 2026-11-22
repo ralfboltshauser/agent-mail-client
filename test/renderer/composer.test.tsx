@@ -93,7 +93,7 @@ it.each(['timestamp', 'immediate', 'staggered', 'off-reader'] as const)(
     expect(commits.get('SubjectField') ?? 0).toBe(0)
     expectBudget({
       workspace: 0,
-      list: 0,
+      list: event === 'off-reader' ? 1 : 0,
       reader: 0,
       rows: event === 'off-reader' ? 1 : 0,
       composer: 0,

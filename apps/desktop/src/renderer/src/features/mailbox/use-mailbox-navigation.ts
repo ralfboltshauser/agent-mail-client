@@ -1,6 +1,10 @@
 import type { ThreadSummary } from '@amc/protocol'
 import { useCallback, useMemo, useState } from 'react'
+import { inboxSelectionFallback } from '@/data/selection'
+import { useReplicaSelector } from '@/hooks/use-amc'
 import type { View } from '../../../../shared/api'
+import type { MailboxThreadQuery } from './mailbox-queries'
+import type { InboxNavigation } from './use-inbox-sections'
 
 export const INBOX: View = { kind: 'inbox' }
 
@@ -25,6 +29,8 @@ export function useThreadSelection(
   key: string,
   ids: readonly string[] | undefined,
   notificationId: string | undefined,
+  inboxQuery: MailboxThreadQuery | null,
+  inbox: InboxNavigation,
 ) {
   const [selection, setSelection] = useState<{ key: string; id: string | null }>({ key, id: null })
   const requestedId = selection.key === key ? selection.id : null
@@ -34,8 +40,19 @@ export function useThreadSelection(
     () => (includeNotification ? [notificationId, ...(ids ?? [])] : ids),
     [includeNotification, notificationId, ids],
   )
-  const selectedId =
-    orderedIds === undefined || (requestedId !== null && orderedIds.includes(requestedId))
+  const inboxSelected = useReplicaSelector(inboxQuery, ({ data }) => {
+    const visible = inbox.readIds(data)
+    if (
+      !visible ||
+      (requestedId !== null && (requestedId === notificationId || visible.includes(requestedId)))
+    ) {
+      return requestedId
+    }
+    return inboxSelectionFallback(inbox.getPreviousOrder(), visible, requestedId)
+  })
+  const selectedId = inboxQuery
+    ? inboxSelected
+    : orderedIds === undefined || (requestedId !== null && orderedIds.includes(requestedId))
       ? requestedId
       : (orderedIds[0] ?? null)
   if (selection.key !== key || selection.id !== selectedId) setSelection({ key, id: selectedId })
