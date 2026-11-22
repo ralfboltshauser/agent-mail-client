@@ -1,6 +1,7 @@
 import type { FetchMessageObject, MailboxObject, SearchObject } from 'imapflow'
 import { transaction } from '../../db/database.ts'
 import type { MailStore } from '../../mail/store.ts'
+import { advanceMailboxGeneration } from '../../mail/triage/annotations.ts'
 import { type ImapClient, imapMoveSupport } from './client.ts'
 import { ImapLocations, PAGE } from './locations.ts'
 import { type Folder, mapFolders, messageFlags, parseMessage } from './mapping.ts'
@@ -371,6 +372,7 @@ export class ImapAccountSync {
       cursor.validity !== validity ||
       (cursor.mailboxId && box.mailboxId && cursor.mailboxId !== box.mailboxId)
     ) {
+      const identityChanged = !!cursor
       cursor = {
         path,
         validity,
@@ -381,6 +383,7 @@ export class ImapAccountSync {
       }
       const reset = cursor
       transaction(this.store.db, () => {
+        if (identityChanged) advanceMailboxGeneration(this.store.db, this.accountId)
         this.locations.clear(path, true)
         this.#saveCursor(reset)
       })

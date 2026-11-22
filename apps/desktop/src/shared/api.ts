@@ -172,11 +172,14 @@ export interface SmartInboxApi {
   decideSender(input: SenderDecision): Promise<OwnerActionStatus>
   reviewFilter?(input: FilterReviewInput): Promise<OwnerActionStatus>
   restoreFiltered?(threadId: string, actionId: string): Promise<OwnerActionStatus>
-  editOwnerReason?(actionId: string, reason: string): Promise<{ reason: string | null }>
+  editOwnerReason?(
+    actionId: string,
+    input: import('@amc/protocol').OwnerActionReasonInput,
+  ): Promise<{ reason: string | null; reasonRevision: string }>
   adoptScreenedDestination(
     input: AdoptScreenedDestination,
   ): Promise<{ accountId: string; providerId: string }>
-  ownerAction(id: string): Promise<OwnerActionStatus>
+  ownerAction(id: string, includeReason?: boolean): Promise<OwnerActionStatus>
   undoOwnerAction(id: string): Promise<OwnerActionStatus>
   triageQueue(query: TriageQueueRequest): Promise<TriageQueuePage>
   resolveSenderAvatars(

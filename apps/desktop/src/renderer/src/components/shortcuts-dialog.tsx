@@ -50,7 +50,14 @@ export function ShortcutsDialog({
         ['Choose a Bucket', '1–6'],
         ['Archive this Thread', 'E'],
         ['Filter out this Thread', 'F'],
-        ['Add a reason to Filter out or Block sender', 'Shift+F / Shift+X'],
+        ...(import.meta.env.VITE_AMC_PRIVATE_TRIAGE_REASONS === '1'
+          ? [
+              ['Add a reason to Filter out or Block sender', 'Shift+F / Shift+X'] as [
+                string,
+                string,
+              ],
+            ]
+          : []),
         ...(snoozeEnabled ? [['Snooze this Thread', 'S']] : []),
         ['Reply', 'R'],
         ['Skip card', 'Space'],

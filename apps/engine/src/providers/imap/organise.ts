@@ -260,8 +260,13 @@ export async function executeImap(
       delete entry.pending
       done.add(change.message_id)
       save()
-      if (uid && validity && !observed) locations.moved(source, destination, validity, uid, flags)
-      else locations.remove(path, source.validity, source.uid)
+      if (uid && validity && !observed) {
+        locations.moved(source, destination, validity, uid, flags)
+      } else {
+        if (uid && validity && observed?.message_id === source.message_id)
+          locations.inheritArrival(source, destination, validity, uid)
+        locations.remove(path, source.validity, source.uid)
+      }
     })
   }
 

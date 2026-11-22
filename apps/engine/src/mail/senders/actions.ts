@@ -11,7 +11,7 @@ import {
 import type { Principal } from '../../auth/tokens.ts'
 import { type Db, transaction } from '../../db/database.ts'
 import type { MailStore } from '../store.ts'
-import { annotate, annotateUndo, readOwnerReason, setOwnerReason } from '../triage/annotations.ts'
+import { annotate, annotateUndo, ownerReasonRetry, readOwnerReason } from '../triage/annotations.ts'
 import {
   enqueueScreening,
   isOwnerAddress,
@@ -28,22 +28,22 @@ export class SenderError extends Error {
   }
 }
 
-export function liveOwner(db: Db, tokenId: string): boolean {
+export function liveOwner(db: Db, tokenId: string, scope: 'admin' | 'organize' = 'admin'): boolean {
   return !!db
     .prepare(`
     SELECT 1 FROM token WHERE id = ? AND kind IN ('desktop', 'cli')
     AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
     AND account_id IS NULL AND thread_id IS NULL
-    AND 'admin' IN (SELECT value FROM json_each(scopes))
+    AND (? IN (SELECT value FROM json_each(scopes)) OR 'admin' IN (SELECT value FROM json_each(scopes)))
   `)
-    .get(tokenId, Date.now())
+    .get(tokenId, Date.now(), scope)
 }
 
-export function assertOwner(db: Db, principal: Principal) {
+export function assertOwner(db: Db, principal: Principal, scope: 'admin' | 'organize' = 'admin') {
   if (
     !['desktop', 'cli'].includes(principal.kind) ||
-    !hasScope(principal.scopes, 'admin') ||
-    !liveOwner(db, principal.tokenId)
+    !hasScope(principal.scopes, scope) ||
+    !liveOwner(db, principal.tokenId, scope)
   )
     throw new SenderError('This action requires a paired owner Client', 403)
 }
@@ -148,7 +148,7 @@ export function workActionStatus(
   } = {},
 ): OwnerActionStatus {
   const { id } = row
-  const reason = readOwnerReason(db, id)
+  const { reason, reasonRevision } = readOwnerReason(db, id)
   const work = db
     .prepare(`
     SELECT w.mutation_id, coalesce(m.status, w.status) AS status,
@@ -202,6 +202,7 @@ export function workActionStatus(
     kind: row.kind,
     ...(revision === undefined ? {} : { revision }),
     ...(reason ? { ownerReason: reason } : {}),
+    reasonRevision,
     status: superseded && !work.length ? 'superseded' : status,
     error,
     mutationIds: work.flatMap(({ mutation_id }) => (mutation_id ? [mutation_id] : [])),
@@ -236,6 +237,7 @@ export function decideSender(store: MailStore, principal: Principal, input: Send
         request.source !== input.source
       )
         throw new SenderError('Client action ID is already in use')
+      ownerReasonRetry(db, clientActionId, input.reason, true)
       return senderActionStatus(db, clientActionId)
     }
     const account = db.prepare('SELECT kind, cursor FROM account WHERE id = ?').get(accountId)
@@ -275,14 +277,16 @@ export function decideSender(store: MailStore, principal: Principal, input: Send
       ORDER BY coalesce(m.delivered_at, m.sent_at) DESC, m.id DESC LIMIT 1
     `)
       .get(accountId, address)
+    ownerReasonRetry(db, clientActionId, input.reason)
     annotate(db, {
+      axis: 'sender',
       actionId: clientActionId,
       accountId,
       sender: address,
       mid: sample?.id ? String(sample.id) : undefined,
       threadId: sample?.thread_id ? String(sample.thread_id) : undefined,
-      label: `${decision} sender`,
-      source: input.source ?? 'thread-action',
+      label: `sender.${decision}`,
+      source: input.source?.replace('-', '_') ?? 'sender_review',
       reason: input.reason,
     })
     saveRule(
@@ -331,7 +335,6 @@ export function undoSender(store: MailStore, principal: Principal, id: string) {
         }),
         Date.now(),
       )
-      if (previous) setOwnerReason(db, restored, readOwnerReason(db, previous.action_id))
       saveRule(
         store,
         original.account_id,
@@ -401,10 +404,8 @@ export function listSenders(db: Db, input: SenderListQuery): SenderList {
   const last = page.at(-1)
   return {
     rows: page.map(({ action_id, ...row }) => {
-      const reason = readOwnerReason(db, action_id)
       return {
         ...row,
-        ...(reason ? { reason } : {}),
         suggestions: senderSuggestions(db, row.accountId, row.address),
       }
     }),

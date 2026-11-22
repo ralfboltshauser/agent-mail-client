@@ -1,9 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import { writeFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { domainToASCII } from 'node:url'
 import {
-  type FilterCorrectionPage,
-  type FilterCounts,
   type FilteredPage,
   FilterReviewInput,
   type OwnerActionStatus,
@@ -17,6 +15,14 @@ import {
 import type { Command } from 'commander'
 import { authed } from './client.ts'
 import type { CliConfig } from './config.ts'
+
+async function readPrivateReason(path: string) {
+  if (path !== '-') return (await readFile(path, 'utf8')).trim()
+  let value = ''
+  process.stdin.setEncoding('utf8')
+  for await (const chunk of process.stdin) value += chunk
+  return value.trim()
+}
 
 export function printOwnerAction(action: OwnerActionStatus, undo = false) {
   const { ownerReason: _ownerReason, ...status } = action
@@ -74,9 +80,9 @@ export function registerSmartInboxCommands(
       }
     })
 
-  const filtered = program.command('filtered').description('Manage learned content filtering')
-  filtered
-    .command('list')
+  triage
+    .command('filtered')
+    .description('List Filtered Threads')
     .option('--account <id>', 'filter by Account ID')
     .option('--cursor <cursor>', 'continue from this cursor')
     .option('--limit <n>', 'page size (1–100)')
@@ -86,36 +92,16 @@ export function registerSmartInboxCommands(
       )
       console.log(JSON.stringify(page, null, 2))
     })
-  filtered
-    .command('corrections')
-    .option('--account <id>', 'filter by Account ID')
-    .option('--cursor <cursor>', 'continue from this cursor')
-    .option('--limit <n>', 'page size (1–100)')
-    .action(async ({ account, cursor, limit }) => {
-      const page = await authed(config())<FilterCorrectionPage>(
-        endpoint('/v1/filtered/corrections', { accountId: account, cursor, limit }),
-      )
-      console.log(JSON.stringify(page, null, 2))
-    })
-  filtered
-    .command('counts')
-    .option('--account <id>', 'filter by Account ID')
-    .action(async ({ account }) => {
-      const counts = await authed(config())<FilterCounts>(
-        endpoint('/v1/filtered/counts', { accountId: account }),
-      )
-      console.log(JSON.stringify(counts, null, 2))
-    })
-  for (const command of ['add', 'restore'] as const) {
-    filtered
+  for (const command of ['filter', 'restore'] as const) {
+    triage
       .command(command)
       .argument('<thread-id>')
       .option('--revision <n>', 'expected Thread revision from triage queue or filtered list')
       .option('--action-id <id>', 'reuse this action UUID on retry')
-      .option('--reason <text>', 'optional owner comment (up to 500 characters)')
-      .action(async (threadId, { revision, actionId, reason }) => {
+      .option('--reason-file <path>', 'read the private reason from a file or - for stdin')
+      .action(async (threadId, { revision, actionId, reasonFile }) => {
         const api = authed(config())
-        if (!revision && (command === 'add' || actionId))
+        if (!revision && (command === 'filter' || actionId))
           throw new Error('Supply the original --revision for this decision')
         if (revision !== undefined && !/^\d+$/.test(revision))
           throw new Error('Expected a nonnegative Thread revision')
@@ -129,15 +115,16 @@ export function registerSmartInboxCommands(
           threadId,
           expectedRevision,
           clientActionId: actionId ?? randomUUID(),
-          reason,
-          decision: command === 'add' ? 'filtered' : 'not filtered',
+          reason: reasonFile ? await readPrivateReason(reasonFile) : undefined,
+          decision: command === 'filter' ? 'filter.filtered' : 'filter.keep',
+          source: 'cli',
         })
         printOwnerAction(
           await api<OwnerActionStatus>('/v1/filtered/decisions', { method: 'POST', body }),
         )
       })
   }
-  filtered
+  triage
     .command('undo')
     .argument('<action-id>')
     .action(async (id) => {
@@ -159,11 +146,13 @@ export function registerSmartInboxCommands(
     .action(async ({ account, status, limit, cursor, json }) => {
       const query = SenderListQuery.parse({ accountId: account, status, limit, cursor })
       const page = await authed(config())<SenderList>(endpoint('/v1/senders', query))
-      if (json) console.log(JSON.stringify(page, null, 2))
+      if (json)
+        console.log(
+          JSON.stringify({ ...page, rows: page.rows.map(({ reason: _, ...row }) => row) }, null, 2),
+        )
       else {
         for (const row of page.rows) {
           console.log(`${row.accountId}\t${row.address}\t${row.status}\t${row.revision}`)
-          if (row.reason) console.log(`  Reason: ${row.reason}`)
           for (const suggestion of row.suggestions) console.log(`  ${JSON.stringify(suggestion)}`)
         }
         if (page.cursor) console.log(`Next cursor ${page.cursor}`)
@@ -176,9 +165,9 @@ export function registerSmartInboxCommands(
       .argument('<address>')
       .requiredOption('--account <id>', 'exact Account ID')
       .option('--revision <n>', 'expected Sender rule revision')
-      .option('--reason <text>', 'optional owner comment (up to 500 characters)')
+      .option('--reason-file <path>', 'read the private reason from a file or - for stdin')
       .option('--action-id <id>', 'reuse this action UUID on retry')
-      .action(async (address: string, { account, revision, actionId, reason }) => {
+      .action(async (address: string, { account, revision, actionId, reasonFile }) => {
         const api = authed(config())
         if (revision !== undefined && !/^\d+$/.test(revision))
           throw new Error('Expected a nonnegative Sender rule revision')
@@ -191,7 +180,7 @@ export function registerSmartInboxCommands(
           expectedRevision:
             revision === undefined ? await senderRevision(api, account, address) : Number(revision),
           clientActionId: actionId ?? randomUUID(),
-          reason,
+          reason: reasonFile ? await readPrivateReason(reasonFile) : undefined,
         })
         const result = await api<OwnerActionStatus>('/v1/senders/decisions', {
           method: 'POST',

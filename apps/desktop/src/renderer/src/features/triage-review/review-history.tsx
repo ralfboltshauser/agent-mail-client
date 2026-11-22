@@ -46,9 +46,10 @@ export function ReviewHistory({
                   Open Outbox
                 </Button>
               )}
-              {(action.decision.kind === 'filter' ||
-                (action.decision.kind === 'sender' &&
-                  action.decision.input.decision === 'block')) &&
+              {import.meta.env.VITE_AMC_PRIVATE_TRIAGE_REASONS === '1' &&
+                (action.decision.kind === 'filter' ||
+                  (action.decision.kind === 'sender' &&
+                    action.decision.input.decision === 'block')) &&
                 action.undo === undefined &&
                 action.error &&
                 /adopt|already in use/.test(action.error) &&
@@ -81,9 +82,10 @@ export function ReviewHistory({
                   {action.status === 'unconfirmed' ? 'Retry decision' : 'Review card'}
                 </Button>
               )}
-              {(action.decision.kind === 'filter' ||
-                (action.decision.kind === 'sender' &&
-                  action.decision.input.decision === 'block')) &&
+              {import.meta.env.VITE_AMC_PRIVATE_TRIAGE_REASONS === '1' &&
+                (action.decision.kind === 'filter' ||
+                  (action.decision.kind === 'sender' &&
+                    action.decision.input.decision === 'block')) &&
                 !['unconfirmed', 'rejected'].includes(action.status) && (
                   <HistoryReason action={action} store={store} />
                 )}
@@ -101,7 +103,8 @@ export function ReviewHistory({
 }
 
 function HistoryReason({ action, store }: { action: ReviewAction; store: ReviewStore }) {
-  const [editing, setEditing] = useState(false)
+  const [editing, setEditing] = useState<{ reason: string; revision: string | null } | null>(null)
+  const [error, setError] = useState(false)
   const original =
     action.decision.kind === 'filter' || action.decision.kind === 'sender'
       ? action.decision.input.reason
@@ -111,11 +114,11 @@ function HistoryReason({ action, store }: { action: ReviewAction; store: ReviewS
     return (
       <ReasonInput
         label="Action reason"
-        initial={reason ?? ''}
-        onCancel={() => setEditing(false)}
+        initial={editing.reason}
+        onCancel={() => setEditing(null)}
         onSave={async (value) => {
-          await store.editReason(action, value)
-          setEditing(false)
+          await store.editReason(action, value, editing.revision)
+          setEditing(null)
         }}
       />
     )
@@ -123,11 +126,14 @@ function HistoryReason({ action, store }: { action: ReviewAction; store: ReviewS
     <Button
       size="sm"
       variant="outline"
-      aria-label={reason ? 'Edit reason' : 'Add reason'}
+      aria-label={error ? 'Retry loading reason' : reason ? 'Edit reason' : 'Add reason'}
       title={reason ?? undefined}
-      onClick={() => setEditing(true)}
+      onClick={() => {
+        setError(false)
+        void store.loadReason(action).then(setEditing, () => setError(true))
+      }}
     >
-      {reason ? 'Edit reason' : 'Add reason'}
+      {error ? 'Retry loading reason' : reason ? 'Edit reason' : 'Add reason'}
     </Button>
   )
 }

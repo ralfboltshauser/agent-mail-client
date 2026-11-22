@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { FilterDecisionLabel } from './decision-labels.ts'
 
 export const SCREENED_OUT_LABEL = 'Screened out'
 export const FILTERED_LABEL = 'Filtered'
@@ -20,34 +21,33 @@ export const OwnerReason = z
   .trim()
   .max(500)
   .regex(/^[^\r\n]*$/)
-export const OwnerActionReasonInput = z.object({ reason: OwnerReason })
+export const OwnerActionReasonInput = z.object({
+  editId: z.uuid(),
+  expectedReasonRevision: id.nullable(),
+  reason: OwnerReason.min(1).nullable(),
+})
+export type OwnerActionReasonInput = z.infer<typeof OwnerActionReasonInput>
 export const FilterReviewInput = z.object({
   threadId: id,
-  decision: z.enum(['filtered', 'not filtered']),
+  decision: FilterDecisionLabel,
+  messageIds: z.array(id).min(1).max(100).optional(),
+  predictionId: id.optional(),
   expectedRevision: z.number().int().nonnegative(),
   clientActionId: z.uuid(),
   reason: OwnerReason.optional(),
-  source: z.enum(['triage-key', 'thread-action']).optional(),
+  source: z.enum(['triage-key', 'thread-action', 'cli']).optional(),
 })
 export type FilterReviewInput = z.infer<typeof FilterReviewInput>
 export interface FilteredPage {
-  threads: { id: string; accountId: string; revision: number }[]
-  cursor: string | null
-}
-
-export interface FilterCounts {
-  autoFiltered: number
-  restored: number
-}
-export interface FilterCorrectionPage {
-  corrections: {
-    actionId: string
+  threads: {
+    id: string
     accountId: string
-    decision: string
-    reason: string | null
-    source: string
-    createdAt: number
-    superseded: boolean
+    revision: number
+    labelId: 'filter.filtered'
+    placements: (
+      | { messageId: string; origin: 'owner'; actionId: string; source: string; status: string }
+      | { messageId: string; origin: 'unknown' }
+    )[]
   }[]
   cursor: string | null
 }
@@ -97,6 +97,8 @@ export interface OwnerActionStatus {
   status: OwnerActionState
   revision?: number
   ownerReason?: string | null
+  reasonRevision?: string | null
+  acceptedTargets?: string[]
   error: string | null
   mutationIds: string[]
   undo: { status: OwnerActionState; error: string | null; mutationIds: string[] } | null
@@ -157,6 +159,8 @@ export interface TriageQueuePage {
     threadRevision: number
     reason: string
     suggestFilter?: true
+    predictionId?: string
+    bucketPredictionId?: string
     suggestions?: SenderSuggestion[]
   }[]
   cursor: string | null

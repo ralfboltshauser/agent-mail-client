@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { getAmc } from '@/lib/amc'
 
@@ -43,9 +44,26 @@ export function RestoreFiltered({ threadId }: { threadId: string }) {
     setError(null)
     try {
       const result = await smart.restoreFiltered?.(threadId, crypto.randomUUID())
-      if (result?.status === 'pending') setActionId(result.actionId)
-      else if (result && result.status !== 'applied')
+      if (result?.status === 'pending' || result?.status === 'applied') {
+        if (result.status === 'pending') setActionId(result.actionId)
+        toast(result.status === 'pending' ? 'Restore queued' : 'Restored to Inbox', {
+          action: {
+            label: 'Undo',
+            onClick: () => {
+              void smart.undoOwnerAction(result.actionId).then(
+                ({ undo }) => {
+                  if (undo?.status === 'applied') toast('Restore undone')
+                  else if (undo?.status === 'pending') toast('Undo queued')
+                  else toast.error(undo?.error ?? 'Could not undo the restore.')
+                },
+                () => toast.error('Could not confirm Undo.'),
+              )
+            },
+          },
+        })
+      } else if (result) {
         setError(result.error ?? 'Could not restore this Thread.')
+      }
     } catch {
       setError('Could not confirm the restore. Refresh the Thread and try again.')
     } finally {
@@ -61,7 +79,7 @@ export function RestoreFiltered({ threadId }: { threadId: string }) {
         disabled={busy || !!actionId}
         onClick={() => void restore()}
       >
-        {busy || actionId ? 'Restoring to Inbox…' : 'Not filtered — move to Inbox'}
+        {busy || actionId ? 'Restoring to Inbox…' : 'Restore to Inbox'}
       </Button>
       {error && (
         <p className="text-sm text-destructive" role="alert">

@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto'
-import type { BucketInput, BucketReviewInput, OwnerActionStatus } from '@amc/protocol'
+import {
+  type BucketReviewInput,
+  bucketLabels,
+  type OwnerActionStatus,
+  type OwnerBucketInput,
+} from '@amc/protocol'
 import type { z } from 'zod'
 import type { Principal } from '../../auth/tokens.ts'
 import { type Db, transaction } from '../../db/database.ts'
@@ -7,7 +12,7 @@ import type { OwnerActionHandler } from '../../http/senders.ts'
 import type { FrozenMessage, Receipt } from '../outbox.ts'
 import { assertOwner, SenderError } from '../senders/actions.ts'
 import type { MailStore } from '../store.ts'
-import { annotate, annotateUndo } from './annotations.ts'
+import { annotate, annotateUndo, ownerReasonRetry, readOwnerReason } from './annotations.ts'
 import { type Assignment, markHandled, threadInput, type Watermark } from './input.ts'
 
 const KIND = 'bucket:review'
@@ -42,10 +47,13 @@ function status(db: Db, id: string): OwnerActionStatus {
   const row = correction(db, id)
   if (!row) throw new SenderError('Owner action unavailable', 404)
   const thread = threadInput(db, row.thread_id)
+  const { reason, reasonRevision } = readOwnerReason(db, id)
   return {
     actionId: id,
     accountId: row.account_id,
     kind: KIND,
+    ownerReason: reason,
+    reasonRevision,
     status:
       row.undo_status === 'applied' || thread?.bucket_revision === row.applied_revision
         ? 'applied'
@@ -67,11 +75,13 @@ export function correctBucket(store: MailStore, principal: Principal, input: Rev
   const { db } = store
   return transaction(db, () => {
     assertOwner(db, principal)
-    const request = JSON.stringify(input)
+    const { ownerReason, ...publicInput } = input
+    const request = JSON.stringify(publicInput)
     const existing = correction(db, input.clientActionId)
     if (existing) {
       if (existing.request !== request || existing.token_id !== principal.tokenId)
         throw new SenderError('Owner action ID was already used')
+      ownerReasonRetry(db, input.clientActionId, ownerReason, true)
       return status(db, input.clientActionId)
     }
     if (db.prepare('SELECT 1 FROM owner_action WHERE id = ?').get(input.clientActionId))
@@ -81,6 +91,12 @@ export function correctBucket(store: MailStore, principal: Principal, input: Rev
     if (!thread) throw new SenderError('Thread is no longer available', 404)
     if (!thread.in_inbox || !thread.input_id || thread.modseq !== input.expectedRevision)
       throw new SenderError('The Inbox input changed. Refresh the Thread and retry.')
+    if (
+      input.predictionId &&
+      (thread.bucket_input_message_id !== thread.input_id ||
+        thread.bucket_producer !== input.predictionId)
+    )
+      throw new SenderError('The displayed Bucket prediction changed. Refresh and retry.')
 
     const {
       account_id,
@@ -121,37 +137,65 @@ export function correctBucket(store: MailStore, principal: Principal, input: Rev
       '{}',
       now,
     )
+    ownerReasonRetry(db, input.clientActionId, ownerReason)
     annotate(db, {
+      axis: 'bucket',
+      revision: modseq,
+      reason: ownerReason,
       actionId: input.clientActionId,
       accountId: account_id,
       threadId: input.threadId,
       mid: input_id,
-      label: input.bucket,
-      source: 'triage-key',
+      label: bucketLabels[input.bucket],
+      predictionId: input.predictionId,
+      source: 'triage_key',
     })
     return status(db, input.clientActionId)
   })
 }
 
-export function setOwnerBucket(store: MailStore, principal: Principal, input: BucketInput) {
+export function setOwnerBucket(store: MailStore, principal: Principal, input: OwnerBucketInput) {
   const { db } = store
   return transaction(db, () => {
+    assertOwner(db, principal, input.ownerReason ? 'admin' : 'organize')
+    const { ownerReason, ...publicInput } = input
+    const request = JSON.stringify(publicInput)
+    const id = input.clientActionId ?? randomUUID()
+    const existing = db
+      .prepare('SELECT kind, token_id, request FROM owner_action WHERE id = ?')
+      .get(id)
+    if (existing) {
+      if (
+        existing.kind !== 'bucket:manual' ||
+        existing.token_id !== principal.tokenId ||
+        existing.request !== request
+      )
+        throw new SenderError('Owner action ID was already used')
+      ownerReasonRetry(db, id, ownerReason, true)
+      return true
+    }
     const thread = threadInput(db, input.threadId)
     if (!thread) return false
+    if (input.expectedRevision !== undefined && input.expectedRevision !== thread.modseq)
+      throw new SenderError('The Thread changed. Refresh and retry.')
+    db.prepare(
+      'INSERT INTO owner_action (id, account_id, token_id, kind, request, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    ).run(id, thread.account_id, principal.tokenId, 'bucket:manual', request, Date.now())
     if (thread.in_inbox && thread.input_id) {
-      const id = randomUUID()
-      db.prepare(
-        'INSERT INTO owner_action (id, account_id, token_id, kind, request, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-      ).run(
-        id,
-        thread.account_id,
-        principal.tokenId,
-        'bucket:manual',
-        JSON.stringify(input),
-        Date.now(),
-      )
       markHandled(db, input.threadId, { message_id: thread.input_id, action_id: id })
     }
+    ownerReasonRetry(db, id, ownerReason)
+    annotate(db, {
+      axis: 'bucket',
+      actionId: id,
+      accountId: thread.account_id,
+      threadId: input.threadId,
+      mid: thread.input_id ?? undefined,
+      revision: thread.modseq,
+      label: input.bucket ? bucketLabels[input.bucket] : 'bucket.clear',
+      source: 'thread_action',
+      reason: ownerReason,
+    })
     return store.setBucket(input, 'owner')
   })
 }
@@ -176,7 +220,7 @@ export function correctionActions(store: MailStore): Record<string, OwnerActionH
             current ? 'applied' : 'superseded',
             id,
           )
-          annotateUndo(db, id)
+          if (current) annotateUndo(db, id)
           if (current) {
             const { assignment, watermark, revision } = JSON.parse(row.previous) as Previous
             db.prepare(

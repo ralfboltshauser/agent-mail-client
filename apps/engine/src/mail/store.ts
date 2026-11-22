@@ -65,6 +65,14 @@ export const threadId = (accountId: string, providerThreadId: string) =>
   `${accountId}:${providerThreadId}`
 export const messageId = (accountId: string, providerId: string) => `${accountId}:${providerId}`
 
+export function canonicalListId(header: string | null | undefined) {
+  const value = header?.trim() ?? ''
+  if (value.length > 1024) return null
+  const id = /^(?:[^<>]*<([^<>\s]+)>|([^<>\s]+))$/.exec(value)
+  const label = id?.[1] ?? id?.[2] ?? ''
+  return /^[a-z0-9._-]{1,255}$/i.test(label) ? label.toLowerCase() : null
+}
+
 function isOlderProviderRead(incoming: string | undefined, stored: string | null): boolean {
   return stored !== null && (incoming === undefined || BigInt(incoming) < BigInt(stored))
 }
@@ -264,7 +272,7 @@ export class MailStore extends EventEmitter<{ change: [] }> {
         stale ? previous.provider_history_id : (msg.providerHistoryId ?? null),
         msg.providerDeliveryHistoryId ?? null,
         msg.deliveredAt ?? null,
-        msg.listId ?? null,
+        canonicalListId(msg.listId),
       )
 
     observeSender(this, mid, providerLabels, ownAddresses)

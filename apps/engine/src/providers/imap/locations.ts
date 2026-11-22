@@ -13,6 +13,7 @@ export interface Location {
   starred: number
   verified: number
   source_blob: string | null
+  arrival_key: string | null
 }
 
 export interface MessageLocation extends Location {
@@ -39,7 +40,7 @@ export class ImapLocations {
   page(path: string, validity: string, after = 0, limit = PAGE): Location[] {
     return this.store.db
       .prepare(
-        `SELECT uid, message_id, label_id, unread, starred, verified, source_blob FROM imap_location
+        `SELECT uid, message_id, label_id, unread, starred, verified, source_blob, arrival_key FROM imap_location
        WHERE account_id = ? AND path_key = ? AND validity = ? AND uid > ? ORDER BY uid LIMIT ?`,
       )
       .all(
@@ -54,7 +55,7 @@ export class ImapLocations {
   get(path: string, validity: string, uid: number): Location | undefined {
     return this.store.db
       .prepare(
-        `SELECT uid, message_id, label_id, unread, starred, verified, source_blob FROM imap_location
+        `SELECT uid, message_id, label_id, unread, starred, verified, source_blob, arrival_key FROM imap_location
        WHERE account_id = ? AND path_key = ? AND validity = ? AND uid = ?`,
       )
       .get(this.accountId, encodeURIComponent(path), validity, uid) as unknown as
@@ -111,6 +112,9 @@ export class ImapLocations {
         `INSERT INTO imap_location (account_id, path_key, validity, uid, message_id, label_id, unread, starred, source_blob)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (account_id, path_key, validity, uid) DO UPDATE SET
+           arrival_key = CASE WHEN imap_location.message_id = excluded.message_id
+             AND imap_location.source_blob IS excluded.source_blob
+             THEN imap_location.arrival_key ELSE lower(hex(randomblob(16))) END,
            message_id = excluded.message_id, label_id = excluded.label_id, unread = excluded.unread,
            starred = excluded.starred, verified = 1, source_blob = excluded.source_blob`,
       ).run(
@@ -296,6 +300,28 @@ export class ImapLocations {
         source.uid,
       )
     this.#refresh(source.message_id)
+  }
+
+  inheritArrival(
+    source: MessageLocation,
+    destination: Folder,
+    validity: string,
+    uid: number,
+  ): void {
+    if (!source.arrival_key) return
+    this.store.db
+      .prepare(`
+      UPDATE imap_location SET arrival_key = ?
+      WHERE account_id = ? AND path_key = ? AND validity = ? AND uid = ? AND message_id = ?
+    `)
+      .run(
+        source.arrival_key,
+        this.accountId,
+        encodeURIComponent(destination.path),
+        validity,
+        uid,
+        source.message_id,
+      )
   }
 
   #refresh(mid: string): void {

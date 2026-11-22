@@ -1,4 +1,4 @@
-import { BucketInput, BucketReviewInput } from '@amc/protocol'
+import { BucketInput, BucketReviewInput, OwnerBucketInput } from '@amc/protocol'
 import { Hono } from 'hono'
 import { setBucketAsAgent } from '../mail/agent-actions.ts'
 import type { MailStore } from '../mail/store.ts'
@@ -16,7 +16,8 @@ export function bucketRoutes(store: MailStore) {
         return c.json({ error: 'bad_request', message: 'Invalid Bucket review intent' }, 400)
       return c.json(correctBucket(store, c.get('principal'), review.data))
     }
-    const parsed = BucketInput.safeParse(body)
+    const principal = c.get('principal')
+    const parsed = (principal.kind === 'agent' ? BucketInput : OwnerBucketInput).safeParse(body)
     if (!parsed.success)
       return c.json(
         {
@@ -25,7 +26,6 @@ export function bucketRoutes(store: MailStore) {
         },
         400,
       )
-    const principal = c.get('principal')
     if (principal.kind === 'agent') {
       const result = setBucketAsAgent(store, principal, parsed.data)
       if (result.status)

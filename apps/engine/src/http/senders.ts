@@ -16,7 +16,7 @@ import {
   undoSender,
 } from '../mail/senders/actions.ts'
 import type { MailStore } from '../mail/store.ts'
-import { editOwnerReason } from '../mail/triage/annotations.ts'
+import { checkOwnerReason, editOwnerReason } from '../mail/triage/annotations.ts'
 import type { AppEnv } from './app.ts'
 
 export interface OwnerActionHandler {
@@ -40,6 +40,7 @@ export function senderRoutes(store: MailStore, queue: Mutations) {
     const parsed = SenderDecision.safeParse(await c.req.json().catch(() => null))
     if (!parsed.success)
       return c.json({ error: 'bad_request', message: 'Invalid Sender decision' }, 400)
+    checkOwnerReason(parsed.data.reason)
     if (parsed.data.decision === 'block')
       await queue.verifyScreeningCapability(parsed.data.accountId, parsed.data.clientActionId)
     const action = decideSender(store, c.get('principal'), parsed.data)
@@ -50,6 +51,8 @@ export function senderRoutes(store: MailStore, queue: Mutations) {
     const parsed = AdoptScreenedDestination.safeParse(await c.req.json().catch(() => null))
     if (!parsed.success)
       return c.json({ error: 'bad_request', message: 'Invalid destination' }, 400)
+    if (parsed.data.destination)
+      return c.json({ error: 'bad_request', message: 'Use the Filtered destination route' }, 400)
     return c.json(
       await queue.adoptScreenedDestination(
         c.get('principal'),
@@ -88,7 +91,8 @@ export function ownerActionRoutes(
     const id = c.req.param('id')
     const owner = handler(id)
     if (!owner) return c.json({ error: 'not_found', message: 'Owner action unavailable' }, 404)
-    return c.json(await owner.get(id))
+    const { ownerReason, ...status } = await owner.get(id)
+    return c.json(c.req.query('includeReason') === '1' ? { ...status, ownerReason } : status)
   })
   routes.put('/:id/reason', async (c) => {
     const id = c.req.param('id')
@@ -100,9 +104,7 @@ export function ownerActionRoutes(
       )
     const principal = c.get('principal')
     assertOwner(store.db, principal)
-    if (!editOwnerReason(store.db, id, input.data.reason))
-      return c.json({ error: 'not_found', message: 'Owner action unavailable' }, 404)
-    return c.json({ reason: input.data.reason || null })
+    return c.json(editOwnerReason(store.db, id, input.data))
   })
   routes.post('/:id/undo', async (c) => {
     const id = c.req.param('id')

@@ -1,10 +1,10 @@
-import { FilterReviewInput } from '@amc/protocol'
+import { AdoptScreenedDestination, FilterReviewInput } from '@amc/protocol'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import type { Mutations } from '../mail/mutations.ts'
 import { assertOwner } from '../mail/senders/actions.ts'
 import type { MailStore } from '../mail/store.ts'
-import { filterCorrections, filterCounts } from '../mail/triage/annotations.ts'
+import { checkOwnerReason } from '../mail/triage/annotations.ts'
 import { listFiltered, reviewFilter } from '../mail/triage/filtering.ts'
 import { threadInput } from '../mail/triage/input.ts'
 import type { AppEnv } from './app.ts'
@@ -29,23 +29,23 @@ export function filteredRoutes(store: MailStore, queue: Mutations) {
     const { accountId, cursor, limit, threadId } = input.data
     return c.json(listFiltered(store.db, accountId, cursor, limit, threadId))
   })
-  routes.get('/counts', (c) => {
-    const input = ListQuery.safeParse(c.req.query())
-    if (!input.success)
-      return c.json({ error: 'bad_request', message: 'Invalid Filtered query' }, 400)
-    return c.json(filterCounts(store.db, input.data.accountId))
-  })
-  routes.get('/corrections', (c) => {
-    const input = ListQuery.safeParse(c.req.query())
-    if (!input.success)
-      return c.json({ error: 'bad_request', message: 'Invalid Filtered query' }, 400)
-    const { accountId, cursor, limit } = input.data
-    return c.json(filterCorrections(store.db, accountId, cursor, limit))
+  routes.post('/destination/adopt', async (c) => {
+    const input = AdoptScreenedDestination.safeParse(await c.req.json().catch(() => null))
+    if (!input.success) return c.json({ error: 'bad_request', message: 'Invalid destination' }, 400)
+    return c.json(
+      await queue.adoptScreenedDestination(
+        c.get('principal'),
+        input.data.accountId,
+        input.data.providerId,
+        true,
+      ),
+    )
   })
   routes.post('/decisions', async (c) => {
     const input = FilterReviewInput.safeParse(await c.req.json().catch(() => null))
     if (!input.success)
       return c.json({ error: 'bad_request', message: 'Invalid filter decision' }, 400)
+    checkOwnerReason(input.data.reason)
     const thread = threadInput(store.db, input.data.threadId)
     if (thread) await queue.verifyScreeningCapability(thread.account_id, input.data.clientActionId)
     const action = reviewFilter(store, c.get('principal'), input.data)

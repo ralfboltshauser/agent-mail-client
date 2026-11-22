@@ -156,7 +156,8 @@ export function TriageReview({
             kind: 'filter',
             input: {
               threadId: card.threadId,
-              decision: 'filtered',
+              decision: 'filter.filtered',
+              ...(card.predictionId ? { predictionId: card.predictionId } : {}),
               expectedRevision: card.threadRevision,
               clientActionId: id,
               source: 'triage-key',
@@ -180,6 +181,7 @@ export function TriageReview({
             kind: 'bucket',
             input: {
               intent: 'review',
+              ...(card.bucketPredictionId ? { predictionId: card.bucketPredictionId } : {}),
               threadId: card.threadId,
               bucket,
               clientActionId: id,
@@ -210,6 +212,7 @@ export function TriageReview({
     if (event.shiftKey) {
       const key = event.key.toLowerCase()
       if ((key === 'f' || key === 'x') && card) {
+        if (import.meta.env.VITE_AMC_PRIVATE_TRIAGE_REASONS !== '1') return
         event.preventDefault()
         if (event.repeat || !canActOn(card)) return
         const reason = unavailable(key)

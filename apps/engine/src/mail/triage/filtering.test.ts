@@ -1,22 +1,23 @@
 import { randomBytes, randomUUID } from 'node:crypto'
-import { FILTERED_LABEL, type FilterReviewInput, type TriageBucketResult } from '@amc/protocol'
-import { expect, it, vi } from 'vitest'
+import { FILTERED_LABEL, type FilterReviewInput, type SubmitTriagePrediction } from '@amc/protocol'
+import { afterEach, expect, it, vi } from 'vitest'
 import { authenticate, issueToken } from '../../auth/tokens.ts'
 import { BlobStore } from '../../blobs.ts'
 import { Sealer } from '../../crypto.ts'
 import { FakeGmail } from '../../providers/gmail/fake.ts'
+import { GmailHttpError } from '../../providers/gmail/http.ts'
 import { fromGmail } from '../../providers/gmail/mapping.ts'
 import { FakeImap } from '../../providers/imap/fake.ts'
 import { SyncManager } from '../../sync/manager.ts'
 import { silentLog, tempDir, testDb } from '../../test-support.ts'
 import { Mutations } from '../mutations.ts'
 import { MailQueries } from '../queries.ts'
-import { decideSender, listSenders } from '../senders/actions.ts'
 import { MailStore } from '../store.ts'
-import { correctionExamples, filterCorrections, filterCounts } from './annotations.ts'
-import { filterActions, listFiltered, reviewFilter, suggestFilter } from './filtering.ts'
+import { editOwnerReason, messageFeatures } from './annotations.ts'
+import { readEffective } from './examples.ts'
+import { filterActions, listFiltered, reviewFilter } from './filtering.ts'
 import { threadInput } from './input.ts'
-import { setModelBucket } from './model.ts'
+import { prepareContext, setModelBucket, submitPrediction } from './model.ts'
 import { triageQueue } from './queue.ts'
 
 function owner(db: ReturnType<typeof testDb>) {
@@ -58,7 +59,7 @@ function fixture() {
   }
   const review = (
     threadId: string,
-    decision: FilterReviewInput['decision'] = 'filtered',
+    decision: FilterReviewInput['decision'] = 'filter.filtered',
     reason?: string,
   ) =>
     reviewFilter(store, principal, {
@@ -69,14 +70,24 @@ function fixture() {
       clientActionId: randomUUID(),
       expectedRevision: threadInput(db, threadId)?.modseq ?? -1,
     })
-  const suggest = (id: string, options: Partial<TriageBucketResult> = {}) =>
-    suggestFilter(store, 'a', `a:t-${id}`, `a:${id}`, {
-      inputRevision: threadInput(db, `a:t-${id}`)?.modseq ?? -1,
-      confidence: 'high',
-      attention: 'routine',
-      version: 'fixture/1',
-      ...options,
+  const lease = () => {
+    const name = `triage-${randomUUID()}`
+    const expiresAt = Date.now() + 60_000
+    const { secret } = issueToken(db, {
+      kind: 'agent',
+      name,
+      accountId: 'a',
+      scopes: ['read', 'organize'],
+      expiresAt,
     })
+    db.prepare('INSERT INTO triage_lease (slot, holder, expires_at) VALUES (1, ?, ?)').run(
+      name,
+      expiresAt,
+    )
+    const agent = authenticate(db, secret)
+    if (!agent) throw new Error('Expected lease bearer')
+    return agent
+  }
   return {
     db,
     store,
@@ -85,27 +96,66 @@ function fixture() {
     principal,
     put,
     review,
-    suggest,
+    lease,
     handlers: filterActions(store, () => {}),
   }
 }
 
-it('moves exact Inbox messages, keeps other Gmail Labels, and supersedes the durable annotation on Undo', async () => {
-  const { db, queue, gmail, principal, put, review, handlers } = fixture()
+afterEach(() => vi.unstubAllEnvs())
+
+it('moves only exact Inbox messages, saves one private reason and appends per-message Undo', async () => {
+  vi.stubEnv('AMC_PRIVATE_TRIAGE_REASONS', '1')
+  const { db, store, queue, gmail, principal, put, handlers } = fixture()
   try {
-    const id = put(
+    const threadId = put(
       'primary',
       { threadId: 'mixed', labels: ['INBOX', 'UNREAD', 'CATEGORY_PROMOTIONS', 'STARRED'] },
       'Fixture List <catalogue.example.test>',
     )
+    put('companion', { threadId: 'mixed' })
     put('already-archived', { threadId: 'mixed', labels: ['UNREAD'] })
     put('spam', { threadId: 'mixed', labels: ['SPAM'] })
-    const action = review(id, 'filtered', 'Synthetic comment')
+    const request = {
+      threadId,
+      expectedRevision: threadInput(db, threadId)?.modseq ?? -1,
+      clientActionId: randomUUID(),
+      decision: 'filter.filtered' as const,
+      reason: 'Synthetic comment',
+    }
+    const action = reviewFilter(store, principal, request)
     expect(action).toMatchObject({ status: 'pending', ownerReason: 'Synthetic comment' })
-    expect(correctionExamples(db, 'a')).toEqual([])
+    expect(action.acceptedTargets.sort()).toEqual(['a:companion', 'a:primary'])
+    expect(reviewFilter(store, principal, request)).toEqual(reviewFilter(store, principal, request))
+    expect(() => reviewFilter(store, principal, { ...request, reason: 'Changed' })).toThrow(
+      /already used/,
+    )
+    const edit = {
+      editId: randomUUID(),
+      expectedReasonRevision: action.reasonRevision ?? null,
+      reason: 'Synthetic revision',
+    }
+    const revision = editOwnerReason(db, action.actionId, edit)
+    expect(editOwnerReason(db, action.actionId, edit)).toEqual(revision)
+    expect(() => editOwnerReason(db, action.actionId, { ...edit, reason: null })).toThrow(
+      /already used/,
+    )
+    expect(() => editOwnerReason(db, action.actionId, { ...edit, editId: randomUUID() })).toThrow(
+      /changed/,
+    )
+    expect(db.prepare('SELECT count(*) AS n FROM triage_owner_reason').get()).toEqual({ n: 2 })
+    const row = db
+      .prepare('SELECT features_json FROM triage_event WHERE action_id = ? AND message_id = ?')
+      .get(action.actionId, 'a:primary')
+    expect(JSON.parse(String(row?.features_json))).toMatchObject({
+      senderHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      senderKeyVersion: 1,
+      domain: 'example.test',
+      listId: 'catalogue.example.test',
+      hasListUnsubscribe: true,
+      category: 'CATEGORY_PROMOTIONS',
+    })
     await settle(queue)
     const label = gmail.labelList.find(({ name }) => name === FILTERED_LABEL)?.id
-    expect(label).toBeDefined()
     expect(await gmail.getMessageLabels('primary')).toEqual([
       'UNREAD',
       'CATEGORY_PROMOTIONS',
@@ -114,180 +164,166 @@ it('moves exact Inbox messages, keeps other Gmail Labels, and supersedes the dur
     ])
     expect(await gmail.getMessageLabels('already-archived')).toEqual(['UNREAD'])
     expect(await gmail.getMessageLabels('spam')).toEqual(['SPAM'])
-    expect(listFiltered(db, 'a', undefined, 50).threads.map((thread) => thread.id)).toEqual([id])
-    expect(correctionExamples(db, 'a')).toMatchObject([
-      { chosen: 'filtered', ownerReason: 'Synthetic comment' },
+    expect(listFiltered(db, 'a', undefined, 50).threads.map((thread) => thread.id)).toEqual([
+      threadId,
     ])
-    const row = db.prepare('SELECT * FROM triage_annotation WHERE id = ?').get(action.actionId)
-    expect(row).toMatchObject({
-      source: 'triage-key',
-      label: 'filtered',
-      error_type: 'false-negative',
-      sender_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
-      sender_domain: 'example.test',
-      list_id: 'catalogue.example.test',
-      has_list_unsubscribe: 1,
-      provider_category: 'CATEGORY_PROMOTIONS',
-    })
     const handler = handlers[action.kind]
-    if (!handler) throw new Error('Expected filter action handler')
+    if (!handler) throw new Error('Missing filter action handler')
     expect((await handler.undo(principal, action.actionId)).undo?.status).toBe('pending')
     await settle(queue)
     expect((await handler.get(action.actionId)).undo?.status).toBe('applied')
     expect(await gmail.getMessageLabels('primary')).toContain('INBOX')
-    expect(correctionExamples(db, 'a')).toEqual([])
-    expect(filterCorrections(db, 'a', undefined, 50).corrections).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ source: 'triage-key', superseded: true }),
-        expect.objectContaining({ source: 'undo' }),
-      ]),
-    )
-  } finally {
-    db.close()
-  }
-})
-
-it('requires owner evidence and high routine confidence and excludes protected mail', async () => {
-  const { db, queue, gmail, store, principal, put, review, suggest } = fixture()
-  try {
-    put('no-examples')
-    suggest('no-examples')
-    await settle(queue)
-    expect(await gmail.getMessageLabels('no-examples')).toContain('INBOX')
-    review(put('example'), 'filtered', 'Synthetic positive example')
-    await settle(queue)
-    const accepted = 'replied@another.example.test'
-    decideSender(store, principal, {
-      accountId: 'a',
-      address: accepted,
-      decision: 'accept',
-      expectedRevision: 0,
-      clientActionId: randomUUID(),
-    })
-    db.prepare("INSERT INTO sender_evidence VALUES ('a', ?, 'fixture-reply')").run(accepted)
-    db.exec("INSERT INTO sender_evidence VALUES ('a', 'known@example.test', 'fixture')")
-    const guarded = [
-      {
-        id: 'low',
-        options: { confidence: 'low' as const },
-        message: { from: 'known@example.test' },
-      },
-      { id: 'medium', options: { confidence: 'medium' as const } },
-      { id: 'interrupt', options: { attention: 'interrupt' as const } },
-      { id: 'security', options: { attention: 'security' as const } },
-      { id: 'uncertain', options: { attention: undefined } },
-      { id: 'protected', message: { subject: 'New sign-in' } },
-      { id: 'replied', message: { from: accepted } },
-      { id: 'important', message: { labels: ['INBOX', 'IMPORTANT'] } },
-      { id: 'old', message: { date: Date.now() - 48 * 60 * 60_000 } },
-    ]
-    for (const { id, options, message } of guarded) {
-      put(id, message)
-      suggest(id, options)
-    }
-    const auto = put('auto')
-    suggest('auto')
-    await settle(queue)
-    for (const { id } of guarded) expect(await gmail.getMessageLabels(id)).toContain('INBOX')
-    expect(await gmail.getMessageLabels('auto')).not.toContain('INBOX')
-    expect(triageQueue(db, { threadId: 'a:t-low', limit: 1 }).cards[0]?.suggestFilter).toBe(true)
-    const restored = review(auto, 'not filtered', 'Synthetic correction')
-    await settle(queue)
-    expect(await gmail.getMessageLabels('auto')).toContain('INBOX')
-    expect(filterCounts(db)).toEqual({ autoFiltered: 1, restored: 1 })
     expect(
       db
-        .prepare(`
-      SELECT n.source, n.error_type, p.label, p.confidence, p.version
-      FROM triage_annotation n JOIN triage_prediction p ON p.id = n.prediction_id
-      WHERE n.id = ? AND p.automatic_action_id IS NOT NULL
-    `)
-        .get(restored.actionId),
-    ).toEqual({
-      source: 'restore-from-filtered',
-      error_type: 'false-positive',
-      label: 'filtered',
-      confidence: 'high',
-      version: 'fixture/1',
-    })
-    expect(correctionExamples(db, 'a')).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ chosen: 'not filtered', ownerReason: 'Synthetic correction' }),
-      ]),
-    )
-  } finally {
-    db.close()
-  }
-})
-
-it('ranks older examples relevant to the listed batch and keeps sender reasons separate', async () => {
-  const { db, store, queue, put, review, principal } = fixture()
-  try {
-    const older = put('older', { from: 'catalogue@example.test' }, '<fixture-list.example.test>')
-    review(older, 'filtered', 'Matching older example')
-    await settle(queue)
-    review(put('newer', { from: 'other@example.net' }), 'filtered', 'Different newer example')
-    await settle(queue)
-    put('query', { from: 'catalogue@example.test' })
-    put('sender-reason', { from: 'sender@example.net' })
-    decideSender(store, principal, {
-      accountId: 'a',
-      address: 'sender@example.net',
-      decision: 'block',
-      reason: 'Synthetic sender-level comment',
-      clientActionId: randomUUID(),
-      expectedRevision: 0,
-    })
-    expect(listSenders(db, { limit: 50 }).rows).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ status: 'blocked', reason: 'Synthetic sender-level comment' }),
-      ]),
-    )
+        .prepare("SELECT count(*) AS n FROM triage_event WHERE kind = 'undo' AND action_id = ?")
+        .get(action.actionId),
+    ).toEqual({ n: 2 })
     expect(
-      correctionExamples(db, 'a', ['a:query'])
-        .filter(({ chosen }) => chosen === 'filtered')
-        .map(({ ownerReason }) => ownerReason),
-    ).toEqual(['Matching older example', 'Different newer example'])
-    expect(correctionExamples(db, 'a', ['a:query'])).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          chosen: 'block sender',
-          ownerReason: 'Synthetic sender-level comment',
-        }),
-      ]),
-    )
+      db
+        .prepare("SELECT count(*) AS n FROM triage_event WHERE kind = 'decision' AND action_id = ?")
+        .get(action.actionId),
+    ).toEqual({ n: 2 })
   } finally {
     db.close()
   }
 })
 
-it('rejects filter proposals without an exact live triage lease and current input revision', () => {
-  const { db, store, put } = fixture()
+function prediction(context: ReturnType<typeof prepareContext>): SubmitTriagePrediction {
+  const ref = context.refs[0]
+  if (!ref) throw new Error('Missing prediction input')
+  const { exampleIds: _, ...input } = ref
+  return {
+    receipt: context.receipt,
+    runId: context.runId,
+    input,
+    producer: {
+      harnessId: 'fixture',
+      modelId: 'fixture-model',
+      adapterVersion: '1',
+      promptVersion: '1',
+    },
+    outputs: {
+      bucket: {
+        labelId: 'bucket.update',
+        confidence: 'high',
+        matchedRuleRevisionId: null,
+        displayReason: 'Synthetic update',
+      },
+      filter: { labelId: 'filter.filtered', confidence: 'high', matchedRuleRevisionId: null },
+      protection: 'billing',
+    },
+  }
+}
+
+it('suggests every Filter result without provider work and validates exact displayed references', async () => {
+  const { db, store, queue, gmail, principal, put, lease } = fixture()
   try {
-    const threadId = put('target')
-    const { secret } = issueToken(db, {
-      kind: 'agent',
-      name: 'Fixture agent',
-      accountId: 'a',
-      scopes: ['read', 'organize'],
-      expiresAt: Date.now() + 60_000,
+    const threadId = put('target', { subject: 'Synthetic invoice' })
+    const agent = lease()
+    const request = prediction(prepareContext(db, agent, 'a', [{ id: threadId }]))
+    const result = submitPrediction(store, agent, request)
+    expect(result).toMatchObject({
+      outcomes: [{ projection: 'applied' }, { projection: 'suggested' }],
     })
-    const principal = authenticate(db, secret)
-    if (!principal) throw new Error('Expected fixture Agent')
+    expect(submitPrediction(store, agent, request)).toEqual(result)
+    expect(
+      submitPrediction(store, agent, {
+        ...request,
+        outputs: { ...request.outputs, protection: 'routine' },
+      }),
+    ).toHaveProperty('error')
+    await settle(queue)
+    expect(await gmail.getMessageLabels('target')).toContain('INBOX')
+    expect(db.prepare('SELECT 1 FROM screening_work').get()).toBeUndefined()
+    const card = triageQueue(db, { threadId, limit: 1 }).cards[0]
+    if (!card) throw new Error('Missing review card')
+    expect(card.suggestFilter).toBe(true)
+    expect(card.predictionId).toBeTruthy()
+    const action = reviewFilter(store, principal, {
+      threadId,
+      predictionId: card.predictionId,
+      expectedRevision: card.threadRevision,
+      clientActionId: randomUUID(),
+      decision: 'filter.filtered',
+    })
+    expect(
+      db.prepare('SELECT prediction_id FROM triage_event WHERE action_id = ?').get(action.actionId),
+    ).toEqual({ prediction_id: card.predictionId })
+    await settle(queue)
+    const restored = reviewFilter(store, principal, {
+      threadId,
+      expectedRevision: threadInput(db, threadId)?.modseq ?? -1,
+      clientActionId: randomUUID(),
+      decision: 'filter.keep',
+    })
+    await settle(queue)
+    expect(await gmail.getMessageLabels('target')).toContain('INBOX')
+    expect(
+      db
+        .prepare('SELECT prediction_id FROM triage_event WHERE action_id = ?')
+        .get(restored.actionId),
+    ).toEqual({ prediction_id: null })
+  } finally {
+    db.close()
+  }
+})
+
+it('keeps stale predictions on the captured arrival and refuses revoked or tampered receipts', () => {
+  const { db, store, put, lease } = fixture()
+  try {
+    const threadId = put('target', { threadId: 'raced', date: Date.now() - 1000 })
+    const agent = lease()
+    const request = prediction(prepareContext(db, agent, 'a', [{ id: threadId }]))
     expect(
       setModelBucket(
         store,
-        principal,
-        { threadId, bucket: null, reason: 'Synthetic' },
-        {
-          inputRevision: threadInput(db, threadId)?.modseq ?? -1,
-          outcome: 'filtered',
-          attention: 'routine',
-          confidence: 'high',
-        },
+        agent,
+        { threadId, bucket: null, reason: 'Legacy' },
+        { inputRevision: request.input.inputRevision },
       ),
     ).toMatchObject({ updated: false })
-    expect(db.prepare('SELECT 1 FROM triage_prediction').get()).toBeUndefined()
+    expect(
+      submitPrediction(store, agent, { ...request, receipt: `${request.receipt}0` }),
+    ).toHaveProperty('error')
+    put('late', { threadId: 'raced' })
+    expect(submitPrediction(store, agent, request)).toMatchObject({
+      outcomes: [{ projection: 'stale' }, { projection: 'stale' }],
+    })
+    expect(db.prepare('SELECT DISTINCT arrival_key FROM triage_event').all()).toEqual([
+      { arrival_key: 'a:target' },
+    ])
+    expect(
+      triageQueue(db, { threadId, limit: 1 }).cards.some(({ suggestFilter }) => suggestFilter),
+    ).toBe(false)
+    const fresh = prediction(prepareContext(db, agent, 'a', [{ id: threadId }]))
+    db.prepare('UPDATE token SET revoked_at = ? WHERE id = ?').run(Date.now(), agent.tokenId)
+    expect(submitPrediction(store, agent, fresh)).toHaveProperty('error')
+    expect(db.prepare('SELECT count(*) AS n FROM triage_event').get()).toEqual({ n: 2 })
+  } finally {
+    db.close()
+  }
+})
+
+it('keeps private reasons off by default and learns eligible judgment despite provider failure', async () => {
+  vi.stubEnv('AMC_PRIVATE_TRIAGE_REASONS', '0')
+  const { db, put, review, queue, gmail, handlers } = fixture()
+  try {
+    const tid = put('sample')
+    expect(() => review(tid, 'filter.filtered', 'Synthetic private reason')).toThrow(/disabled/)
+    const action = review(tid)
+    vi.spyOn(gmail, 'modifyMessage').mockRejectedValue(
+      new GmailHttpError(403, 'forbidden', 'Synthetic provider rejection'),
+    )
+    await settle(queue)
+    expect(await handlers[action.kind]?.get(action.actionId)).toMatchObject({
+      status: expect.stringMatching(/failed|partial/),
+    })
+    put('candidate')
+    const features = messageFeatures(db, 'a', 1, 'a:candidate')
+    expect(readEffective(db, 'a', 1, { arrival: 'a:candidate', features })).toMatchObject([
+      { labelId: 'filter.filtered' },
+    ])
+    expect(db.prepare('SELECT 1 FROM triage_owner_reason').get()).toBeUndefined()
   } finally {
     db.close()
   }
@@ -337,18 +373,19 @@ it.each(['MOVE', 'UIDPLUS'] as const)(
           clientActionId: randomUUID(),
           expectedRevision: threadInput(db, String(target))?.modseq ?? -1,
         })
-      const filter = decide('filtered')
+      const filter = decide('filter.filtered')
       await settle(queue)
       expect(await filterActions(store, () => {})[filter.kind]?.get(filter.actionId)).toMatchObject(
         { status: 'applied' },
       )
       expect(imap.folder('INBOX').messages.has(uid)).toBe(false)
       expect(imap.folder(FILTERED_LABEL).messages.size).toBe(1)
-      const restore = decide('not filtered')
+      const restore = decide('filter.keep')
       await settle(queue)
       expect(
         await filterActions(store, () => {})[restore.kind]?.get(restore.actionId),
       ).toMatchObject({ status: 'applied' })
+      expect(db.prepare('SELECT DISTINCT arrival_key FROM triage_event').all()).toHaveLength(1)
       expect(imap.folder(FILTERED_LABEL).messages.size).toBe(0)
       expect(imap.folder('INBOX').messages.size).toBe(2)
       expect(imap.folder('INBOX').messages.has(unrelated)).toBe(true)

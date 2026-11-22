@@ -21,7 +21,17 @@ export function loadReview(scope: string): SavedReview {
 }
 
 export function saveReview(saved: SavedReview) {
-  localStorage.setItem(storageKey, JSON.stringify(saved))
+  const history = saved.history.map(({ ownerReason: _, ...action }) => {
+    const { decision } = action
+    if (decision.kind !== 'filter' && decision.kind !== 'sender') return action
+    const { reason, ...input } = decision.input
+    return {
+      ...action,
+      decision: { ...decision, input },
+      ...(reason && action.status === 'unconfirmed' ? { privateReasonDraft: true } : {}),
+    }
+  })
+  localStorage.setItem(storageKey, JSON.stringify({ ...saved, history }))
 }
 
 export function statusLabel(status: ActionStatus) {

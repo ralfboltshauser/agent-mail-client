@@ -4,7 +4,7 @@ import type { Sealer } from './crypto.ts'
 import type { Db } from './db/database.ts'
 import { transaction } from './db/database.ts'
 import type { MailStore } from './mail/store.ts'
-import { invalidateAnnotations } from './mail/triage/annotations.ts'
+import { advanceMailboxGeneration } from './mail/triage/annotations.ts'
 import type { AccountState, BackfillState, GmailCursor } from './providers/gmail/sync.ts'
 import { type ImapCredentials, imapEndpoint } from './providers/imap/client.ts'
 
@@ -89,7 +89,7 @@ function upsertAccount(
         db.prepare('DELETE FROM sender_suggestion WHERE account_id = ?').run(existing.id)
         db.prepare('DELETE FROM screened_destination WHERE account_id = ?').run(existing.id)
         db.prepare('DELETE FROM filtered_destination WHERE account_id = ?').run(existing.id)
-        invalidateAnnotations(db, existing.id)
+        advanceMailboxGeneration(db, existing.id)
         db.prepare(
           "UPDATE account SET cursor = '{}', backfill = '{}', last_sync_at = NULL WHERE id = ?",
         ).run(existing.id)

@@ -1,314 +1,348 @@
-import { createHash } from 'node:crypto'
-import type { FilterCorrectionPage, FilterCounts, TriageBucketResult } from '@amc/protocol'
-import type { Db } from '../../db/database.ts'
+import { createHmac, randomUUID } from 'node:crypto'
+import { decisionLabels, type OwnerActionReasonInput, TAXONOMY_VERSION } from '@amc/protocol'
+import { type Db, transaction } from '../../db/database.ts'
+import { SenderError } from '../senders/actions.ts'
 import { normalizeSender } from '../senders/index.ts'
+import { canonicalListId } from '../store.ts'
 
-function messageFeatures(db: Db, accountId: string, mid?: string, sender?: string) {
+type Axis = keyof typeof decisionLabels
+
+export function generation(db: Db, accountId: string) {
+  return Number(
+    db.prepare('SELECT mailbox_generation FROM account WHERE id = ?').get(accountId)
+      ?.mailbox_generation,
+  )
+}
+
+export function privateDigest(db: Db, purpose: string, value: unknown) {
+  const { secret } = db.prepare('SELECT secret FROM triage_key WHERE version = 1').get() as {
+    secret: Uint8Array
+  }
+  return createHmac('sha256', secret)
+    .update(JSON.stringify([purpose, value]))
+    .digest('hex')
+}
+
+// A verified IMAP location carries its identity through verified moves and renames.
+export function arrivalKey(db: Db, mid: string) {
+  const row = db
+    .prepare(`
+    SELECT a.kind FROM message m JOIN account a ON a.id = m.account_id WHERE m.id = ?
+  `)
+    .get(mid)
+  if (row?.kind === 'gmail') return mid
+  if (row?.kind !== 'imap') return null
+  const matches = db
+    .prepare('SELECT arrival_key FROM imap_location WHERE message_id = ? LIMIT 2')
+    .all(mid)
+  const key = matches.length === 1 && matches[0]?.arrival_key
+  return typeof key === 'string' ? `imap:${key}` : null
+}
+
+export function messageFeatures(
+  db: Db,
+  accountId: string,
+  accountGeneration: number,
+  mid?: string,
+  sender?: string,
+) {
   const row = mid
     ? db
         .prepare(`
-    SELECT m.imap_fingerprint, m.list_id, m.list_unsubscribe, m.from_json,
+    SELECT m.list_id, m.list_unsubscribe, m.from_json, a.kind,
       (SELECT value FROM json_each(m.provider_label_ids)
         WHERE value IN (m.account_id || ':CATEGORY_PERSONAL', m.account_id || ':CATEGORY_SOCIAL',
           m.account_id || ':CATEGORY_PROMOTIONS', m.account_id || ':CATEGORY_UPDATES',
           m.account_id || ':CATEGORY_FORUMS') ORDER BY value LIMIT 1) AS category
-    FROM message m WHERE m.id = ? AND m.account_id = ?
+    FROM message m JOIN account a ON a.id = m.account_id WHERE m.id = ? AND m.account_id = ?
   `)
         .get(mid, accountId)
     : undefined
   const address = normalizeSender(sender ?? JSON.parse(String(row?.from_json ?? 'null'))?.address)
-  const listIdHeader = typeof row?.list_id === 'string' ? row.list_id : ''
-  const listId = /<([^<>\s]+)>/.exec(listIdHeader)?.[1] ?? listIdHeader.trim()
+  const header = typeof row?.list_id === 'string' ? row.list_id : ''
   return {
-    messageKey: row?.imap_fingerprint ? `imap:${row.imap_fingerprint}` : (mid ?? null),
+    version: 1,
     senderHash: address
-      ? createHash('sha256').update(accountId).update('\0').update(address).digest('hex')
+      ? privateDigest(db, 'sender', [accountId, accountGeneration, address])
       : null,
+    senderKeyVersion: address ? 1 : null,
     domain: address?.split('@')[1] ?? null,
-    listId: /^[a-z0-9._-]{1,255}$/i.test(listId) ? listId.toLowerCase() : null,
-    hasListUnsubscribe: Number(!!row?.list_unsubscribe),
-    category: typeof row?.category === 'string' ? row.category.slice(accountId.length + 1) : null,
+    listId: canonicalListId(header),
+    hasListUnsubscribe: row ? !!row.list_unsubscribe : null,
+    category:
+      row?.kind === 'gmail' && typeof row.category === 'string'
+        ? row.category.slice(accountId.length + 1)
+        : null,
   }
 }
 
-export function recordPrediction(
-  db: Db,
-  accountId: string,
-  threadId: string,
-  mid: string,
-  label: string,
-  metadata: TriageBucketResult,
-  automaticActionId?: string,
-) {
-  const { messageKey } = messageFeatures(db, accountId, mid)
-  db.prepare(`
-    INSERT INTO triage_prediction (account_id, thread_id, message_key, input_revision, label,
-      confidence, version, automatic_action_id, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    accountId,
-    threadId,
-    messageKey,
-    metadata.inputRevision,
-    label,
-    metadata.confidence ?? null,
-    metadata.version ?? 'legacy',
-    automaticActionId ?? null,
-    Date.now(),
-  )
-}
-
-interface Annotation {
-  actionId: string
+interface Subject {
   accountId: string
-  threadId?: string
-  mid?: string
-  sender?: string
-  label: string
-  source: 'triage-key' | 'thread-action' | 'restore-from-filtered' | 'undo'
-  error?: 'false-negative'
-  restore?: boolean
-  reason?: string
+  accountGeneration: number
+  axis: Axis
+  subjectKey: string
+  threadId: string | null
+  messageId: string | null
+  arrival: string | null
+  revision: number | null
+  features: ReturnType<typeof messageFeatures>
 }
 
-export function annotate(db: Db, input: Annotation) {
-  const { actionId, accountId, threadId, mid, label, source } = input
-  if (input.reason) setOwnerReason(db, actionId, input.reason)
-  const id = source === 'undo' ? `undo:${actionId}` : actionId
-  const meta = messageFeatures(db, accountId, mid, input.sender)
-  const automatic =
-    input.restore &&
-    db
-      .prepare(`
-    SELECT p.id FROM triage_prediction p
-    JOIN screening_work w ON w.action_id = p.automatic_action_id
-    JOIN mutation m ON m.id = w.mutation_id
-    WHERE p.account_id = ? AND p.message_key = ? AND p.invalidated_at IS NULL
-          AND w.status IN ('applied', 'partial')
-      AND EXISTS (SELECT 1 FROM json_each(m.write_journal) j WHERE json_array_length(j.value, '$.applied') > 0)
-    ORDER BY p.id DESC LIMIT 1
-  `)
-      .get(accountId, meta.messageKey)
-  const predicted =
-    automatic ||
-    db
-      .prepare(`
-    SELECT id FROM triage_prediction WHERE account_id = ? AND message_key = ? AND invalidated_at IS NULL
-        ORDER BY id DESC LIMIT 1
-  `)
-      .get(accountId, meta.messageKey)
+export function subject(
+  db: Db,
+  input: {
+    accountId: string
+    axis: Axis
+    threadId?: string
+    mid?: string
+    sender?: string
+    revision?: number
+  },
+): Subject {
+  const { accountId, axis, threadId, mid, sender, revision } = input
+  const accountGeneration = generation(db, accountId)
+  const features = messageFeatures(db, accountId, accountGeneration, mid, sender)
+  const arrival = mid ? arrivalKey(db, mid) : null
+  return {
+    accountId,
+    accountGeneration,
+    axis,
+    subjectKey: JSON.stringify(
+      axis === 'sender' ? features.senderHash : axis === 'filter' ? arrival : [threadId, arrival],
+    ),
+    threadId: threadId ?? null,
+    messageId: mid ?? null,
+    arrival,
+    revision: revision ?? null,
+    features,
+  }
+}
+
+interface Event {
+  kind: 'decision' | 'prediction' | 'undo' | 'reason_revised'
+  source: string
+  dedupe: string
+  label?: string | null
+  actionId?: string
+  targetId?: string
+  predictionId?: string
+  runId?: string
+  confidence?: string | null
+  producer?: {
+    harnessId: string
+    modelId: string | null
+    adapterVersion: string
+    promptVersion: string
+  }
+  detail?: Record<string, unknown>
+}
+
+export function appendEvent(db: Db, item: Subject, event: Event) {
+  if (event.label && !decisionLabels[item.axis].safeParse(event.label).success)
+    throw new Error('Invalid decision label for the axis')
+  const id = randomUUID()
   db.prepare(`
-    INSERT INTO triage_annotation (id, action_id, account_id, thread_id, message_id, message_key,
-      label, source, prediction_id, error_type, sender_hash, sender_domain, list_id,
-      has_list_unsubscribe, provider_category, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING
+    INSERT INTO triage_event (id, account_id, account_generation, axis, subject_key, thread_id,
+      message_id, arrival_key, input_revision, kind, source, taxonomy_version, label_id, created_at,
+      action_id, run_id, target_event_id, prediction_id, confidence, harness_id, model_id,
+      adapter_version, prompt_version, features_json, detail_json, dedupe_key)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
-    actionId,
-    accountId,
-    threadId ?? null,
-    mid ?? null,
-    meta.messageKey,
-    label,
-    source,
-    predicted?.id ?? null,
-    automatic ? 'false-positive' : (input.error ?? null),
-    meta.senderHash,
-    meta.domain,
-    meta.listId,
-    meta.hasListUnsubscribe,
-    meta.category,
+    item.accountId,
+    item.accountGeneration,
+    item.axis,
+    item.subjectKey,
+    item.threadId,
+    item.messageId,
+    item.arrival,
+    item.revision,
+    event.kind,
+    event.source,
+    TAXONOMY_VERSION,
+    event.label ?? null,
     Date.now(),
+    event.actionId ?? null,
+    event.runId ?? null,
+    event.targetId ?? null,
+    event.predictionId ?? null,
+    event.confidence ?? null,
+    event.producer?.harnessId ?? null,
+    event.producer?.modelId ?? null,
+    event.producer?.adapterVersion ?? null,
+    event.producer?.promptVersion ?? null,
+    JSON.stringify(item.features),
+    JSON.stringify({ version: 1, ...event.detail }),
+    event.dedupe,
   )
+  return id
+}
+
+export function privateReasonsEnabled() {
+  return process.env.AMC_PRIVATE_TRIAGE_REASONS === '1'
+}
+
+export function checkOwnerReason(reason?: string | null) {
+  if (reason && !privateReasonsEnabled())
+    throw new SenderError('Private triage reasons are disabled', 400)
+}
+
+export function ownerReasonRetry(db: Db, id: string, reason?: string | null, retry = false) {
+  if (!retry) checkOwnerReason(reason)
+  const digest = privateDigest(db, 'owner reason', [id, reason || null])
+  if (!retry) {
+    db.prepare('INSERT INTO triage_request_fingerprint VALUES (?, ?)').run(id, digest)
+    return
+  }
+  const saved = db.prepare('SELECT digest FROM triage_request_fingerprint WHERE id = ?').get(id)
+  if (saved ? saved.digest !== digest : !!reason)
+    throw new SenderError('Owner action ID was already used')
+}
+
+function saveReason(db: Db, id: string, reason?: string | null) {
+  if (reason) db.prepare('INSERT INTO triage_owner_reason VALUES (?, ?)').run(id, reason)
+}
+
+export function annotate(
+  db: Db,
+  input: Parameters<typeof subject>[1] & {
+    actionId: string
+    label: string
+    source: string
+    reason?: string
+    primaryReasonId?: string
+    predictionId?: string
+    restore?: boolean
+  },
+) {
+  checkOwnerReason(input.reason)
+  const item = subject(db, input)
+  const candidate = input.restore
+    ? db
+        .prepare(`
+    SELECT p.id FROM screening_work w JOIN triage_event p ON p.id = w.prediction_id
+    JOIN mutation m ON m.id = w.mutation_id
+    WHERE p.account_id = ? AND p.account_generation = ? AND p.arrival_key = ?
+      AND w.message_id = ? AND w.status IN ('applied', 'partial')
+      AND EXISTS (SELECT 1 FROM json_each(m.write_journal) j WHERE json_array_length(j.value, '$.applied') > 0)
+    ORDER BY p.seq DESC LIMIT 1
+  `)
+        .get(item.accountId, item.accountGeneration, item.arrival, item.messageId)?.id
+    : input.predictionId
+  const prediction = candidate
+    ? db
+        .prepare(`
+    SELECT id FROM triage_event WHERE id = ? AND kind = 'prediction' AND account_id = ?
+      AND account_generation = ? AND axis = ? AND subject_key = ?
+  `)
+        .get(candidate, item.accountId, item.accountGeneration, item.axis, item.subjectKey)
+    : undefined
+  const id = appendEvent(db, item, {
+    kind: 'decision',
+    source: input.source,
+    label: input.label,
+    actionId: input.actionId,
+    predictionId: prediction?.id ? String(prediction.id) : undefined,
+    detail: { primaryReasonId: input.primaryReasonId },
+    dedupe: JSON.stringify(['decision', input.actionId, item.axis, item.subjectKey]),
+  })
+  saveReason(db, id, input.reason)
+  return id
 }
 
 export function annotateUndo(db: Db, actionId: string) {
-  const id = `undo:${actionId}`
   db.prepare(`
-    INSERT INTO triage_annotation (id, action_id, account_id, thread_id, message_id, message_key,
-      label, source, prediction_id, sender_hash, sender_domain, list_id,
-      has_list_unsubscribe, provider_category, created_at)
-    SELECT ?, action_id, account_id, thread_id, message_id, message_key, label, 'undo',
-      prediction_id, sender_hash, sender_domain, list_id, has_list_unsubscribe, provider_category, ?
-    FROM triage_annotation WHERE id = ? ON CONFLICT (id) DO NOTHING
-  `).run(id, Date.now(), actionId)
-  db.prepare(`
-    UPDATE triage_annotation SET superseded_by = ?
-    WHERE id = ? AND superseded_by IS NULL AND EXISTS (SELECT 1 FROM triage_annotation WHERE id = ?)
-  `).run(id, actionId, id)
+    INSERT INTO triage_event (id, account_id, account_generation, axis, subject_key, thread_id,
+      message_id, arrival_key, input_revision, kind, source, taxonomy_version, created_at,
+      action_id, target_event_id, features_json, detail_json, dedupe_key)
+    SELECT lower(hex(randomblob(16))), account_id, account_generation, axis, subject_key, thread_id,
+      message_id, arrival_key, input_revision, 'undo', source, taxonomy_version, ?, action_id, id,
+      features_json, '{"version":1,"operation":"undo"}', 'undo:' || id
+    FROM triage_event WHERE action_id = ? AND kind = 'decision'
+      AND account_generation = (SELECT mailbox_generation FROM account WHERE id = account_id)
+    ON CONFLICT(dedupe_key) DO NOTHING
+  `).run(Date.now(), actionId)
 }
 
-export function filterCounts(db: Db, accountId?: string): FilterCounts {
-  const row = db
+function primaryDecision(db: Db, actionId: string) {
+  return db
     .prepare(`
-    SELECT count(*) FILTER (WHERE a.kind = 'filter:automatic') AS autoFiltered,
-      count(*) FILTER (WHERE a.kind = 'filter:review') AS restored
-    FROM owner_action a WHERE (?1 IS NULL OR a.account_id = ?1)
-      AND (a.kind = 'filter:automatic' OR (a.kind = 'filter:review' AND a.request ->> 'decision' = 'not filtered'))
-      AND EXISTS (SELECT 1 FROM screening_work w JOIN mutation m ON m.id = w.mutation_id
-        WHERE w.action_id = a.id AND EXISTS (SELECT 1 FROM json_each(m.write_journal) j
-          WHERE json_array_length(j.value, '$.applied') > 0))
+    SELECT id, account_id, account_generation FROM triage_event
+    WHERE action_id = ? AND kind = 'decision' ORDER BY seq LIMIT 1
   `)
-    .get(accountId ?? null)
-  return { autoFiltered: Number(row?.autoFiltered), restored: Number(row?.restored) }
+    .get(actionId)
 }
 
-export function filterCorrections(
-  db: Db,
-  accountId: string | undefined,
-  cursor: string | undefined,
-  limit: number,
-): FilterCorrectionPage {
-  const rows = db
+function reasonHead(db: Db, decisionId: string) {
+  return db
     .prepare(`
-    SELECT n.id, n.action_id AS actionId, n.account_id AS accountId, n.label AS decision,
-      a.reason, n.source, n.created_at AS createdAt, n.superseded_by IS NOT NULL AS superseded
-    FROM triage_annotation n JOIN owner_action a ON a.id = n.action_id
-    WHERE (?1 IS NULL OR n.account_id = ?1) AND n.id > ?2 AND a.kind = 'filter:review'
-    ORDER BY n.id LIMIT ?3
+    SELECT e.id, r.reason FROM triage_event e LEFT JOIN triage_owner_reason r ON e.id = r.event_id
+    WHERE e.id = ? OR (e.kind = 'reason_revised' AND e.target_event_id = ?)
+    ORDER BY e.seq DESC LIMIT 1
   `)
-    .all(accountId ?? null, cursor ?? '', limit + 1) as (Omit<
-    FilterCorrectionPage['corrections'][number],
-    'superseded'
-  > & { id: string; superseded: number })[]
+    .get(decisionId, decisionId)
+}
+
+export function readOwnerReason(db: Db, actionId: string) {
+  const decision = primaryDecision(db, actionId)
+  const head = decision && reasonHead(db, String(decision.id))
   return {
-    corrections: rows
-      .slice(0, limit)
-      .map(({ id: _, superseded, ...row }) => ({ ...row, superseded: !!superseded })),
-    cursor: rows.length > limit ? (rows[limit - 1]?.id ?? null) : null,
+    reason: typeof head?.reason === 'string' ? head.reason : null,
+    reasonRevision: head && (head.id !== decision?.id || head.reason) ? String(head.id) : null,
   }
 }
 
-const verifiedMove = (action: 'n' | 'newer') => `EXISTS (
-  SELECT 1 FROM screening_work w JOIN mutation m ON m.id = w.mutation_id
-  WHERE w.action_id = ${action}.action_id AND w.status = 'applied'
-    AND EXISTS (SELECT 1 FROM json_each(m.write_journal) j WHERE json_array_length(j.value, '$.applied') > 0)
-)`
-const currentFilterExample = `n.label IN ('filtered', 'not filtered')
-  AND n.source != 'undo' AND n.superseded_by IS NULL AND ${verifiedMove('n')}
-  AND NOT EXISTS (
-    SELECT 1 FROM triage_annotation newer
-    WHERE newer.account_id = n.account_id AND newer.message_key = n.message_key
-      AND newer.label IN ('filtered', 'not filtered') AND newer.source != 'undo'
-      AND newer.superseded_by IS NULL
-      AND (newer.created_at, newer.rowid) > (n.created_at, n.rowid)
-      AND ${verifiedMove('newer')}
-  )`
-
-export function hasPositiveFilterExample(db: Db, accountId: string) {
-  return !!db
-    .prepare(`
-    SELECT 1 FROM triage_annotation n
-    WHERE n.account_id = ? AND n.label = 'filtered' AND ${currentFilterExample}
-    LIMIT 1
-  `)
-    .get(accountId)
-}
-
-export function readOwnerReason(db: Db, id?: string | null) {
-  if (!id) return null
-  const row = db.prepare('SELECT reason FROM owner_action WHERE id = ?').get(id)
-  return typeof row?.reason === 'string' ? row.reason : null
-}
-
-export function setOwnerReason(db: Db, id: string, reason: string | null) {
-  db.prepare('UPDATE owner_action SET reason = ? WHERE id = ?').run(reason || null, id)
-}
-
-export function editOwnerReason(db: Db, id: string, reason: string) {
-  return (
-    db
-      .prepare(`
-    UPDATE owner_action SET reason = ? WHERE id = ? AND (
-      (kind = 'sender:decision' AND request ->> 'decision' = 'block') OR kind = 'filter:review'
+export function editOwnerReason(db: Db, actionId: string, input: OwnerActionReasonInput) {
+  return transaction(db, () => {
+    const target = primaryDecision(db, actionId)
+    if (!target) throw new SenderError('Owner action unavailable', 404)
+    const dedupe = `reason:${input.editId}`
+    const fingerprint = [actionId, input.expectedReasonRevision, input.reason]
+    const digest = privateDigest(db, 'reason edit', fingerprint)
+    const existing = db.prepare('SELECT id FROM triage_event WHERE dedupe_key = ?').get(dedupe)
+    if (existing) {
+      if (
+        db.prepare('SELECT digest FROM triage_request_fingerprint WHERE id = ?').get(dedupe)
+          ?.digest !== digest
+      )
+        throw new SenderError('Reason edit ID was already used')
+      return { reason: input.reason, reasonRevision: String(existing.id) }
+    }
+    checkOwnerReason(input.reason)
+    if (
+      target.account_generation !== generation(db, String(target.account_id)) ||
+      readOwnerReason(db, actionId).reasonRevision !== input.expectedReasonRevision
     )
-  `)
-      .run(reason || null, id).changes > 0
-  )
-}
-
-export function annotateFilterUndo(db: Db, id: string) {
-  const auto = db
-    .prepare(`
-    SELECT a.account_id, a.request ->> 'threadId' AS thread_id, w.message_id
-    FROM owner_action a JOIN screening_work w ON w.action_id = a.id
-    WHERE a.id = ? AND a.kind = 'filter:automatic'
-  `)
-    .get(id)
-  if (!auto) return annotateUndo(db, id)
-  annotate(db, {
-    actionId: id,
-    accountId: String(auto.account_id),
-    threadId: String(auto.thread_id),
-    mid: String(auto.message_id),
-    label: 'filtered',
-    source: 'undo',
+      throw new SenderError('The reason changed. Refresh and retry.')
+    const id = randomUUID()
+    db.prepare(`
+      INSERT INTO triage_event (id, account_id, account_generation, axis, subject_key, thread_id,
+        message_id, arrival_key, input_revision, kind, source, taxonomy_version, created_at,
+        action_id, target_event_id, features_json, detail_json, dedupe_key)
+      SELECT ?, account_id, account_generation, axis, subject_key, thread_id, message_id, arrival_key,
+        input_revision, 'reason_revised', source, taxonomy_version, ?, action_id, id,
+        features_json, '{"version":1}', ? FROM triage_event WHERE id = ?
+    `).run(id, Date.now(), dedupe, target.id ?? null)
+    db.prepare('INSERT INTO triage_request_fingerprint VALUES (?, ?)').run(dedupe, digest)
+    saveReason(db, id, input.reason)
+    return { reason: input.reason, reasonRevision: id }
   })
 }
 
-export function invalidateAnnotations(db: Db, accountId: string) {
+export function advanceMailboxGeneration(db: Db, accountId: string) {
+  db.prepare('UPDATE account SET mailbox_generation = mailbox_generation + 1 WHERE id = ?').run(
+    accountId,
+  )
   db.prepare(
     "UPDATE triage_correction SET undo_status = 'superseded' WHERE account_id = ? AND undo_status IS NULL",
   ).run(accountId)
   db.prepare(
-    "UPDATE triage_annotation SET superseded_by = 'imap-endpoint-changed' WHERE account_id = ? AND superseded_by IS NULL",
+    'UPDATE thread SET filter_suggestion_message_id = NULL, filter_suggestion_event_id = NULL WHERE account_id = ?',
   ).run(accountId)
-  db.prepare(
-    'UPDATE triage_prediction SET invalidated_at = ? WHERE account_id = ? AND invalidated_at IS NULL',
-  ).run(Date.now(), accountId)
-}
-
-export function correctionExamples(db: Db, accountId: string, inputs: string[] = []) {
-  const features = inputs.map((mid) => messageFeatures(db, accountId, mid))
-  const rows = db
-    .prepare(`
-    WITH candidates AS MATERIALIZED (
-      SELECT value ->> 'senderHash' AS hash, value ->> 'domain' AS domain, value ->> 'listId' AS list_id
-      FROM json_each(?2)
-    ), examples AS (
-      SELECT c.action_id, c.previous -> 'assignment' ->> 'bucket' AS previous, c.chosen,
-        c.summary, o.reason AS ownerReason, n.sender_hash, n.sender_domain, n.list_id,
-        c.message_id, c.created_at, 'bucket' AS kind
-      FROM triage_correction c JOIN owner_action o ON o.id = c.action_id
-      LEFT JOIN triage_annotation n ON n.id = c.action_id
-      WHERE c.account_id = ?1 AND c.undo_status IS NULL
-      UNION ALL
-      SELECT n.action_id, NULL, n.label, '{}', o.reason, n.sender_hash, n.sender_domain, n.list_id,
-        n.message_id, n.created_at, 'filter'
-      FROM triage_annotation n JOIN owner_action o ON o.id = n.action_id
-      WHERE n.account_id = ?1 AND ${currentFilterExample}
-      UNION ALL
-      SELECT n.action_id, NULL, n.label, '{}', o.reason, n.sender_hash, n.sender_domain, n.list_id,
-        n.message_id, n.created_at, 'sender'
-      FROM triage_annotation n JOIN owner_action o ON o.id = n.action_id
-      JOIN sender_rule r ON r.action_id = o.id AND r.decision = 'block'
-      WHERE n.account_id = ?1 AND n.source != 'undo' AND n.superseded_by IS NULL AND o.reason IS NOT NULL
-    ), ranked AS (
-      SELECT e.*, row_number() OVER (PARTITION BY kind ORDER BY
-        coalesce((SELECT max(4 * (hash IS e.sender_hash AND hash IS NOT NULL)
-          + 2 * (list_id IS e.list_id AND list_id IS NOT NULL)
-          + (domain IS e.sender_domain AND domain IS NOT NULL)) FROM candidates), 0) DESC,
-        e.created_at DESC, e.action_id DESC
-      ) AS rank
-      FROM examples e
-    )
-    SELECT e.previous, e.chosen, e.ownerReason, e.summary,
-      substr(m.subject, 1, 240) AS subject, substr(m.snippet, 1, 480) AS snippet
-    FROM ranked e LEFT JOIN message m ON m.id = e.message_id
-    WHERE e.rank <= CASE WHEN e.kind = 'sender' THEN 6 ELSE 12 END
-    ORDER BY e.rank, e.kind
-  `)
-    .all(accountId, JSON.stringify(features))
-  return rows.map(({ previous, chosen, summary, subject, snippet, ownerReason }) => {
-    const fallback = JSON.parse(String(summary)) as Partial<{ subject: string; snippet: string }>
-    return {
-      previous,
-      chosen,
-      ...(ownerReason ? { ownerReason } : {}),
-      context: {
-        subject: subject ?? fallback.subject ?? '',
-        snippet: snippet ?? fallback.snippet ?? '',
-      },
-    }
-  })
+  db.prepare(`
+    UPDATE screening_work SET status = CASE WHEN status = 'pending' THEN 'superseded' ELSE status END,
+      undo_error = coalesce(undo_error, 'Undo unavailable: mailbox identity changed')
+    WHERE action_id IN (SELECT id FROM owner_action WHERE account_id = ?)
+      AND (undo_id IS NULL OR undo_id IN (SELECT id FROM mutation WHERE status = 'pending'))
+  `).run(accountId)
 }

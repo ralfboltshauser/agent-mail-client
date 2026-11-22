@@ -1218,7 +1218,6 @@ export class Mutations {
     address?: string
     filtered?: boolean
     restore?: boolean
-    automatic?: boolean
   } | null {
     const request = JSON.parse(row.request)
     return request.work === 'screen' || request.work === 'screen-undo' ? request : null
@@ -1294,7 +1293,7 @@ export class Mutations {
               actionId: row.action_id,
               mid: row.message_id,
               filtered: row.kind.startsWith('filter:'),
-              restore: JSON.parse(row.request).decision === 'not filtered',
+              restore: JSON.parse(row.request).decision === 'filter.keep',
             }),
             thread,
             {},
@@ -1341,9 +1340,9 @@ export class Mutations {
       transaction(this.#db, () => {
         const destination = labelId(accountId, providerId)
         const inbox = labelId(accountId, 'INBOX')
-        for (const { action_id, message_id, request, kind } of eligible) {
+        for (const { action_id, message_id, request } of eligible) {
           if (!this.#screeningAllowed(action_id, message_id, filtered)) continue
-          const restore = filtered && JSON.parse(request).decision === 'not filtered'
+          const restore = filtered && JSON.parse(request).decision === 'filter.keep'
           const source = this.#db
             .prepare(`
           SELECT m.thread_id, i.address FROM message m LEFT JOIN sender_index i ON i.message_id = m.id WHERE m.id = ?
@@ -1359,9 +1358,7 @@ export class Mutations {
               actionId: action_id,
               mid: message_id,
               destination,
-              ...(filtered
-                ? { filtered, restore, automatic: kind === 'filter:automatic' }
-                : { address: source.address }),
+              ...(filtered ? { filtered, restore } : { address: source.address }),
             }),
             this.#thread(String(source.thread_id)),
             {},
@@ -2064,7 +2061,6 @@ export class Mutations {
         if (
           screening?.work === 'screen' &&
           (!labels?.includes(sourceLabel) ||
-            (screening.automatic && labels.includes(labelId(account, 'IMPORTANT'))) ||
             ['SPAM', 'TRASH', 'SENT', 'DRAFT'].some((label) =>
               labels.includes(labelId(account, label)),
             ) ||

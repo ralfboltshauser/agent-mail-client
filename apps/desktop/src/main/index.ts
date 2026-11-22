@@ -397,27 +397,36 @@ function registerIpc() {
         threadId,
         clientActionId,
         expectedRevision: thread.revision,
-        decision: 'not filtered',
+        decision: 'filter.keep',
       })
     },
   )
-  ipcMain.handle('amc:editOwnerReason', (_event, actionId: string, reason: unknown) =>
+  ipcMain.handle('amc:editOwnerReason', (_event, actionId: string, input: unknown) =>
     requireEngine().request(`/v1/owner-actions/${encodeURIComponent(actionId)}/reason`, {
       method: 'PUT',
-      body: OwnerActionReasonInput.parse({ reason }),
+      body: OwnerActionReasonInput.parse(input),
       signal: AbortSignal.timeout(10_000),
     }),
   )
-  ipcMain.handle('amc:adoptScreenedDestination', (_event, input: unknown) =>
-    requireEngine().request('/v1/senders/destination/adopt', {
-      method: 'POST',
-      body: AdoptScreenedDestination.parse(input),
-    }),
-  )
-  ipcMain.handle('amc:ownerAction', (_event, id: string) =>
-    requireEngine().get(`/v1/owner-actions/${encodeURIComponent(id)}`, {
-      signal: AbortSignal.timeout(10_000),
-    }),
+  ipcMain.handle('amc:adoptScreenedDestination', (_event, input: unknown) => {
+    const { destination, ...body } = AdoptScreenedDestination.parse(input)
+    return requireEngine().request(
+      destination === 'filtered'
+        ? '/v1/filtered/destination/adopt'
+        : '/v1/senders/destination/adopt',
+      {
+        method: 'POST',
+        body,
+      },
+    )
+  })
+  ipcMain.handle('amc:ownerAction', (_event, id: string, includeReason?: boolean) =>
+    requireEngine().get(
+      `/v1/owner-actions/${encodeURIComponent(id)}${includeReason ? '?includeReason=1' : ''}`,
+      {
+        signal: AbortSignal.timeout(10_000),
+      },
+    ),
   )
   ipcMain.handle('amc:undoOwnerAction', (_event, id: string) =>
     requireEngine().request(`/v1/owner-actions/${encodeURIComponent(id)}/undo`, {
