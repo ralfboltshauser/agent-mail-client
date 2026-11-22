@@ -19,6 +19,8 @@ export function useMailboxQuery<T>(key: string, load: () => Promise<T>, enabled 
     },
     [scope],
     null,
+    // The caller pauses reads and retains accepted data while a snapshot is pending.
+    { preserveOnBootstrap: false },
   )
   const reply = query.value?.scope === scope ? query.value : null
   const [accepted, setAccepted] = useState<{

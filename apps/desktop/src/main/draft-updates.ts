@@ -14,18 +14,28 @@ export class LocalDraftUpdates {
   constructor(db: DatabaseSync) {
     this.#db = db
     db.exec(`CREATE TABLE IF NOT EXISTS draft_update (
-      id TEXT PRIMARY KEY, revision INTEGER NOT NULL, body TEXT NOT NULL
+      id TEXT PRIMARY KEY, revision INTEGER NOT NULL, body TEXT NOT NULL, fields TEXT
     ) STRICT`)
+    const columns = db.prepare('PRAGMA table_info(draft_update)').all()
+    if (!columns.some((column) => column.name === 'fields')) {
+      db.exec('ALTER TABLE draft_update ADD COLUMN fields TEXT')
+    }
   }
 
   stage(id: string, patch: ComposePatch): void {
     this.#db
-      .prepare('INSERT OR REPLACE INTO draft_update VALUES (?, ?, ?)')
-      .run(id, patch.baseRevision, patch.update)
+      .prepare(
+        'INSERT OR REPLACE INTO draft_update (id, revision, body, fields) VALUES (?, ?, ?, ?)',
+      )
+      .run(id, patch.baseRevision, patch.update, JSON.stringify(patch.fields) ?? null)
   }
 
-  acknowledge(id: string, update: string): void {
-    this.#db.prepare('DELETE FROM draft_update WHERE id = ? AND body = ?').run(id, update)
+  acknowledge(id: string, patch: ComposePatch): void {
+    this.#db
+      .prepare(
+        'DELETE FROM draft_update WHERE id = ? AND revision = ? AND body = ? AND fields IS ?',
+      )
+      .run(id, patch.baseRevision, patch.update, JSON.stringify(patch.fields) ?? null)
   }
 
   discard(id: string): void {
@@ -50,17 +60,20 @@ export class LocalDraftUpdates {
       id: string
       revision: number
       body: string
+      fields: string | null
     }[]
     const signal = AbortSignal.timeout(3_000)
     await Promise.all(
-      updates.map(async ({ id, revision, body }) => {
+      updates.map(async ({ id, revision, body, fields }) => {
         try {
+          const patch: ComposePatch = { baseRevision: revision, update: body }
+          if (fields !== null) patch.fields = JSON.parse(fields)
           await engine.request(composeDraftPath(id), {
             method: 'PUT',
-            body: { baseRevision: revision, update: body },
+            body: patch,
             signal,
           })
-          this.acknowledge(id, body)
+          this.acknowledge(id, patch)
         } catch {
           // Keep unacknowledged updates in the replica for the next flush.
         }

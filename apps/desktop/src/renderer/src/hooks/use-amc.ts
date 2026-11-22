@@ -85,21 +85,18 @@ function useLegacyQuery<T>(
   preserveOnBootstrap: boolean,
 ) {
   // Legacy loaders are opaque. Scope a key to each hook and its dependency tuple.
-  const current = useMemo(
-    () => {
-      const loader = { run: load }
-      const query: ReplicaQuery<T> = {
-        key: {},
-        load: () => loader.run(),
-        replacePending: true,
-        retainDuringBootstrap: preserveOnBootstrap ? 'keep-reading' : undefined,
-        isEmpty: legacyIsEmpty,
-      }
-      return { initial, loader, query }
-    },
-    // biome-ignore lint/correctness/useExhaustiveDependencies: the caller supplies the query inputs
-    deps,
-  )
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the caller supplies the query inputs
+  const current = useMemo(() => {
+    const loader = { run: load }
+    const query: ReplicaQuery<T> = {
+      key: {},
+      load: () => loader.run(),
+      replacePending: true,
+      retainDuringBootstrap: preserveOnBootstrap ? 'keep-reading' : undefined,
+      isEmpty: legacyIsEmpty,
+    }
+    return { initial, loader, query }
+  }, [preserveOnBootstrap, ...deps])
   useLayoutEffect(() => {
     current.loader.run = load
   }, [current, load])
@@ -126,8 +123,13 @@ export function useReplica<T>(load: () => Promise<T>, deps: unknown[], initial: 
   return useSyncExternalStore(source.subscribe, read)
 }
 
-export function useReplicaQuery<T>(load: () => Promise<T>, deps: unknown[], initial: T) {
-  const legacy = useLegacyQuery(load, deps, initial, true)
+export function useReplicaQuery<T>(
+  load: () => Promise<T>,
+  deps: unknown[],
+  initial: T,
+  { preserveOnBootstrap = true } = {},
+) {
+  const legacy = useLegacyQuery(load, deps, initial, preserveOnBootstrap)
   const source = useQuerySource(legacy.query)
   const read = useMemo(
     () =>

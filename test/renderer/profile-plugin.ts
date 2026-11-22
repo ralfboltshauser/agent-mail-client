@@ -3,19 +3,21 @@ import ts from 'typescript'
 
 const renderer = fileURLToPath(new URL('../../apps/desktop/src/renderer/src/', import.meta.url))
 const profile = fileURLToPath(new URL('./profile.ts', import.meta.url))
-const components = new Set([
-  'App',
-  'MailWorkspace',
-  'AppSidebar',
-  'ThreadList',
-  'ThreadView',
-  'Composer',
-  'RecipientField',
-])
+const components: Record<string, string> = {
+  'app.tsx': 'App',
+  'components/app-sidebar.tsx': 'AppSidebar',
+  'components/thread-list.tsx': 'ThreadList',
+  'components/thread-view.tsx': 'ThreadView',
+  'components/composer.tsx': 'Composer',
+  'components/recipient-field.tsx': 'RecipientField',
+  'features/composer/footer.tsx': 'ComposerFooter',
+  'features/composer/header-fields.tsx': 'SubjectField',
+  'features/mailbox/mail-workspace.tsx': 'MailWorkspace',
+  'features/thread-list/thread-row.tsx': 'ThreadRow',
+}
 
-function getThreadRow(declaration: ts.VariableDeclaration) {
-  const { name, initializer } = declaration
-  if (!ts.isIdentifier(name) || name.text !== 'ThreadRow') return
+function getMemoRender(declaration: ts.VariableDeclaration) {
+  const { initializer } = declaration
   if (
     initializer &&
     ts.isCallExpression(initializer) &&
@@ -25,7 +27,6 @@ function getThreadRow(declaration: ts.VariableDeclaration) {
     const render = initializer.arguments[0]
     if (render && ts.isFunctionExpression(render)) return render
   }
-  throw new Error('Update the renderer Profiler probe for ThreadRow')
 }
 
 // The renderer project adds probes to the real return values before JSX compilation.
@@ -34,7 +35,9 @@ export function profileRenderer() {
     name: 'amc-renderer-profiler',
     enforce: 'pre' as const,
     transform(code: string, id: string) {
-      if (!id.startsWith(renderer) || !id.endsWith('.tsx')) return
+      if (!id.startsWith(renderer)) return
+      const name = components[id.slice(renderer.length)]
+      if (!name) return
       const source = ts.createSourceFile(id, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
       const edits: { offset: number; text: string }[] = []
       const wrap = (node: ts.Node, prefix: string, suffix: string) => {
@@ -44,7 +47,7 @@ export function profileRenderer() {
 
       function instrument(component: ts.FunctionDeclaration | ts.FunctionExpression, name: string) {
         if (!component.body) throw new Error(`Update the renderer Profiler probe for ${name}`)
-        let profileId = JSON.stringify(name)
+        let profileId = JSON.stringify(name === 'ComposerFooter' ? 'footer' : name)
         if (name === 'ThreadRow') {
           const props = component.parameters[0]?.name
           if (!props || !ts.isObjectBindingPattern(props)) {
@@ -65,13 +68,6 @@ export function profileRenderer() {
         visitReturns(component.body)
 
         function visitJsx(node: ts.Node) {
-          if (
-            name === 'Composer' &&
-            ts.isJsxElement(node) &&
-            node.openingElement.tagName.getText(source) === 'footer'
-          ) {
-            wrap(node, "{__amcProfile('footer', ", ')}')
-          }
           if (
             name === 'ThreadList' &&
             ts.isJsxSelfClosingElement(node) &&
@@ -95,7 +91,7 @@ export function profileRenderer() {
           }
           ts.forEachChild(node, visitJsx)
         }
-        if (name === 'Composer' || name === 'ThreadList') visitJsx(component.body)
+        if (name === 'ThreadList') visitJsx(component.body)
       }
 
       for (const statement of source.statements) {
@@ -107,22 +103,19 @@ export function profileRenderer() {
         ) {
           continue
         }
-        if (
-          ts.isFunctionDeclaration(statement) &&
-          statement.name &&
-          components.has(statement.name.text)
-        ) {
-          instrument(statement, statement.name.text)
+        if (ts.isFunctionDeclaration(statement) && statement.name && statement.name.text === name) {
+          instrument(statement, name)
         }
         if (ts.isVariableStatement(statement)) {
           for (const declaration of statement.declarationList.declarations) {
-            const row = getThreadRow(declaration)
-            if (row) instrument(row, 'ThreadRow')
+            if (!ts.isIdentifier(declaration.name) || declaration.name.text !== name) continue
+            const render = getMemoRender(declaration)
+            if (render) instrument(render, name)
           }
         }
       }
 
-      if (!edits.length) return
+      if (!edits.length) throw new Error(`Update the renderer Profiler probe for ${name}`)
       let instrumented = code
       for (const { offset, text } of edits.sort((a, b) => b.offset - a.offset)) {
         instrumented = instrumented.slice(0, offset) + text + instrumented.slice(offset)

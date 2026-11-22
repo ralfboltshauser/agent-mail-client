@@ -153,12 +153,21 @@ it('recovers the Inbox after an empty page during a same-pairing resnapshot', as
   await act(async () => fireEvent.click(row(secondSubject)))
   const before = mailboxNodes(secondSubject)
   commits.clear()
-  adapter.api.threads.mockResolvedValueOnce([])
-  adapter.api.thread.mockResolvedValueOnce(null)
-  await act(async () => {
-    adapter.emitStatus({ phase: 'bootstrapping', progress: 0 })
-    adapter.emitChanged()
-  })
+  // Reads may be deferred during bootstrap. Only serve partial data during that phase.
+  await adapter.api.threads.withImplementation(
+    async () => [],
+    async () => {
+      await adapter.api.thread.withImplementation(
+        async () => null,
+        async () => {
+          await act(async () => {
+            adapter.emitStatus({ phase: 'bootstrapping', progress: 0 })
+            adapter.emitChanged()
+          })
+        },
+      )
+    },
+  )
   const retainedList = screen.queryByRole('listbox', { name: 'Threads' })
   if (retainedList) expectContinuity(before, secondSubject)
   expectBudget({ workspace: 3, reader: 3 })
