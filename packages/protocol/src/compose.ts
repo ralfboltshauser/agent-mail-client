@@ -47,6 +47,7 @@ export interface ComposePatch {
   fields?: ComposeFields
 }
 
+export const DRAFT_MISSING = 'Draft does not exist'
 export const DRAFT_CHANGED = 'Draft changed. Review before sending'
 export const MIRROR_CHANGED =
   'Send cancelled. The provider draft was changed or removed. Review it before sending.'

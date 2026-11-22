@@ -59,7 +59,14 @@ it.each(['Drafts row', 'composer button', 'composer shortcut'])(
         root.render(
           entry === 'Drafts row'
             ? createElement(DraftsView, { accountId: null, onOpen, onDiscarded })
-            : createElement(Composer, { draft, accounts: [], onMinimise, onQueued, onDiscarded }),
+            : createElement(Composer, {
+                draft,
+                accounts: [],
+                onMinimise,
+                onQueued,
+                onDiscarded,
+                onKept: vi.fn(),
+              }),
         )
       })
       const openConfirmation = async () =>

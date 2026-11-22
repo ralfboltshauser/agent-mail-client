@@ -59,6 +59,7 @@ export function ComposeOverlays({ compose }: { compose: ReturnType<typeof useMai
           accounts={accounts ?? []}
           onQueued={queued}
           onDiscarded={() => setDraft(null)}
+          onKept={setDraft}
           onMinimise={(subject) => {
             setMinimised({ id: draft.id, subject })
             setDraft(null)

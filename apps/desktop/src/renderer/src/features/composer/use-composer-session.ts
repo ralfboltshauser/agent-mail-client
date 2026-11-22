@@ -8,13 +8,13 @@ import {
   type SendRequest,
 } from '@amc/protocol'
 import type { Editor } from '@tiptap/react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useEffectEvent, useRef, useState } from 'react'
 import { getAmc } from '@/lib/amc'
 import { DraftSession } from './draft-session'
 
 type DraftReview = { subject: string; revision: number }
 
-export function useComposerSession(draft: ComposeDraft) {
+export function useComposerSession(draft: ComposeDraft, onDiscarded: (dirty: boolean) => void) {
   const [session] = useState(() => new DraftSession(draft, getAmc))
   const [busy, setBusy] = useState(false)
   const [uploading, setUploading] = useState(false)
@@ -22,6 +22,7 @@ export function useComposerSession(draft: ComposeDraft) {
   const [confirmSend, setConfirmSend] = useState(false)
   const [conflict, setConflict] = useState(false)
   const [error, setError] = useState('')
+  const replacementId = useRef<string | undefined>(undefined)
   const submitting = useRef(false)
   const uploadInFlight = useRef(false)
   const discardReview = useRef<DraftReview | null>(null)
@@ -58,11 +59,20 @@ export function useComposerSession(draft: ComposeDraft) {
     [showConflict],
   )
 
+  const draftDiscarded = useEffectEvent(() => {
+    discardReview.current = null
+    setConfirmDiscard(null)
+    setError('')
+    onDiscarded(session.dirty)
+  })
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: React Effect Events are intentionally excluded from effect dependencies.
   useEffect(
     () =>
       session.connect({
         onStageError: reportError,
         onSaveError: saveError,
+        onDiscarded: () => draftDiscarded(),
         skipPoll: () => submitting.current || Boolean(request.current),
         uploadInFlight: () => uploadInFlight.current,
       }),
@@ -97,6 +107,24 @@ export function useComposerSession(draft: ComposeDraft) {
     try {
       await session.whenSaved()
       return await getAmc().discardDraft(session.id, revision)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const keepAsNew = async (onKept: (draft: ComposeDraft) => void) => {
+    if (submitting.current) return
+    setSubmitting(true)
+    setError('')
+    try {
+      const api = getAmc()
+      const next = replacementId.current
+        ? await api.composeDraft(replacementId.current)
+        : await api.startCompose({ mode: 'new', accountId: session.fields.accountId })
+      replacementId.current = next.id
+      onKept(await api.saveCompose(next.id, session.recoveryPatch(next)))
+    } catch (cause) {
+      reportError(cause)
     } finally {
       setSubmitting(false)
     }
@@ -284,6 +312,7 @@ export function useComposerSession(draft: ComposeDraft) {
     closeDiscard,
     discard,
     minimise,
+    keepAsNew,
     reload,
     send,
     upload,

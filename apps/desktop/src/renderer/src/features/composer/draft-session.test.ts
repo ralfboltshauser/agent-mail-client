@@ -47,6 +47,7 @@ function setup() {
   const disconnect = session.connect({
     onStageError: vi.fn(),
     onSaveError: vi.fn(),
+    onDiscarded: vi.fn(),
     skipPoll: () => false,
     uploadInFlight: () => false,
   })

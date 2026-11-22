@@ -1,4 +1,9 @@
-import type { ComposePatch, ComposeStart, SendRequest } from '@amc/protocol'
+import {
+  type ComposePatch,
+  type ComposeStart,
+  DRAFT_MISSING,
+  type SendRequest,
+} from '@amc/protocol'
 import { type Context, Hono } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
 import { HTTPException } from 'hono/http-exception'
@@ -122,7 +127,7 @@ export function composeRoutes(deps: MailDeps, outbox: Outbox, composerOrigin?: s
   r.get('/drafts', (c) => c.json({ drafts: deps.drafts.list({ limit: 200, editable: true }) }))
   r.get('/drafts/:id', (c) => {
     const draft = deps.drafts.openCompose(c.req.param('id'))
-    if (!draft) throw new HTTPException(404, { message: 'Draft does not exist' })
+    if (!draft) throw new HTTPException(404, { message: DRAFT_MISSING })
     return c.json(draft)
   })
   r.delete('/drafts/:id', async (c) =>

@@ -1,10 +1,12 @@
+import { COMPOSER_FIELD, INLINE_IMAGE_NAME } from '@amc/composer'
 import type { ComposeAttachment, ComposeDraft, ComposeFields, ComposePatch } from '@amc/protocol'
 import * as Y from 'yjs'
 import type { AmcApi } from '../../../../shared/api'
 
+import { DRAFT_POLL_INTERVAL, isMissingDraft } from './draft-availability'
+
 const remote = Symbol('engine')
 const saveDelay = 550
-const pollInterval = 1500
 
 function base64(bytes: Uint8Array) {
   let binary = ''
@@ -127,6 +129,7 @@ export class DraftSession {
   #timer: ReturnType<typeof setTimeout> | undefined
   #active = false
   #paused = false
+  #discarded = false
 
   constructor(draft: ComposeDraft, getApi: () => DraftApi) {
     this.id = draft.id
@@ -226,6 +229,43 @@ export class DraftSession {
     }
   }
 
+  recoveryPatch(draft: ComposeDraft): ComposePatch {
+    const replacement = new DraftSession(draft, this.#getApi)
+    try {
+      const body = replacement.doc.getXmlFragment(COMPOSER_FIELD)
+      const source = this.doc.getXmlFragment(COMPOSER_FIELD)
+      body.delete(0, body.length)
+      body.insert(
+        0,
+        source
+          .toArray()
+          .flatMap((node) =>
+            node instanceof Y.XmlElement || node instanceof Y.XmlText ? [node.clone()] : [],
+          ),
+      )
+      // Attachment IDs belong to the deleted draft. Keep inline image labels as text.
+      for (const node of Array.from(
+        body.createTreeWalker(
+          (node) => node instanceof Y.XmlElement && node.nodeName === INLINE_IMAGE_NAME,
+        ),
+      )) {
+        if (!(node instanceof Y.XmlElement) || !node.parent) continue
+        const parent = node.parent as Y.XmlElement
+        const index = parent.toArray().indexOf(node)
+        const label = new Y.XmlText()
+        label.insert(0, `[Image: ${node.getAttribute('alt') || 'attachment'}]`)
+        parent.delete(index, 1)
+        parent.insert(index, [label])
+      }
+      return {
+        ...replacement.patch(draft.revision),
+        fields: { ...this.#fields, attachmentIds: [] },
+      }
+    } finally {
+      replacement.doc.destroy()
+    }
+  }
+
   save() {
     this.#clearTimer()
     return this.#queueSave()
@@ -235,7 +275,11 @@ export class DraftSession {
     const pending = this.whenSaved().then(async () => {
       if (
         autosaveVersion !== undefined &&
-        (!this.#active || this.#paused || !this.dirty || this.#version !== autosaveVersion)
+        (!this.#active ||
+          this.#paused ||
+          this.#discarded ||
+          !this.dirty ||
+          this.#version !== autosaveVersion)
       ) {
         return this.#baseline
       }
@@ -248,6 +292,7 @@ export class DraftSession {
         .finally(() => {
           this.#savingFields = undefined
         })
+      if (this.#discarded) return updated
       this.#saved = started
       this.rebase(updated, submitted)
       return updated
@@ -277,7 +322,7 @@ export class DraftSession {
   }
 
   #stage() {
-    if (!this.#active) return
+    if (!this.#active || this.#discarded) return
     try {
       // Stage each local edit synchronously for native close and crash recovery.
       this.#getApi().stageComposeBody(this.id, this.patch(this.#baseline.revision))
@@ -296,22 +341,26 @@ export class DraftSession {
 
   #queueAutosave() {
     this.#clearTimer()
-    if (!this.#active || this.#paused || !this.dirty) return
+    if (!this.#active || this.#paused || this.#discarded || !this.dirty) return
     const version = this.#version
     this.#timer = setTimeout(() => {
       this.#timer = undefined
-      void this.#queueSave(version).catch(this.#onSaveError)
+      void this.#queueSave(version).catch((cause) => {
+        if (!this.#discarded) this.#onSaveError(cause)
+      })
     }, saveDelay)
   }
 
   connect({
     onStageError,
     onSaveError,
+    onDiscarded,
     skipPoll,
     uploadInFlight,
   }: {
     onStageError: (cause: unknown) => void
     onSaveError: (cause: unknown) => void
+    onDiscarded: () => void
     skipPoll: () => boolean
     uploadInFlight: () => boolean
   }) {
@@ -326,7 +375,7 @@ export class DraftSession {
     let running = false
     let connected = true
     const poll = setInterval(() => {
-      if (running || skipPoll() || this.dirty) return
+      if (running || this.#discarded || skipPoll()) return
       running = true
       const before = this.#baseline
       const version = this.#version
@@ -336,6 +385,7 @@ export class DraftSession {
           if (
             !connected ||
             skipPoll() ||
+            this.dirty ||
             version !== this.#version ||
             before !== this.#baseline ||
             next.revision < before.revision
@@ -353,11 +403,17 @@ export class DraftSession {
             }
           }
         })
-        .catch(() => {})
+        .catch((cause) => {
+          if (!connected || skipPoll() || uploadInFlight() || !isMissingDraft(cause)) return
+          this.#discarded = true
+          clearInterval(poll)
+          this.#clearTimer()
+          onDiscarded()
+        })
         .finally(() => {
           running = false
         })
-    }, pollInterval)
+    }, DRAFT_POLL_INTERVAL)
     return () => {
       connected = false
       this.#active = false

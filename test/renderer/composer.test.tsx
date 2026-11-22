@@ -259,3 +259,103 @@ it('saves a focused recipient and subject on Escape before the autosave timer', 
     }),
   )
 })
+
+it('clears a remotely discarded minimised draft and starts a fresh draft from Compose', async () => {
+  const { adapter, dialog } = await openComposer()
+  await act(async () =>
+    fireEvent.click(dialog.getByRole('button', { name: 'Minimise and save draft' })),
+  )
+  const tile = screen.getByRole('button', { name: 'Resume draft' })
+  adapter.api.composeDraft.mockRejectedValueOnce(new Error('The Engine is offline'))
+  await act(async () => vi.advanceTimersByTimeAsync(1500))
+  expect(screen.getByRole('button', { name: 'Resume draft' })).toBe(tile)
+
+  await adapter.api.discardDraft('draft-1', 1)
+  await act(async () => vi.advanceTimersByTimeAsync(1500))
+  expect(screen.queryByRole('button', { name: 'Resume draft' })).toBeNull()
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: /^Compose/ })))
+  expect(await adapter.api.startCompose.mock.results[1]?.value).toMatchObject({ id: 'draft-2' })
+  expect(screen.getByRole('dialog', { name: 'Compose' })).toBeTruthy()
+})
+
+it('closes a clean composer with a notice when its draft is discarded elsewhere', async () => {
+  const { adapter } = await openComposer()
+  adapter.api.composeDraft.mockRejectedValueOnce(
+    new Error("Error invoking remote method 'amc:composeDraft': Error: Draft does not exist"),
+  )
+  await act(async () => vi.advanceTimersByTimeAsync(1500))
+  expect(screen.queryByRole('dialog', { name: 'Compose' })).toBeNull()
+  await act(async () => vi.advanceTimersByTimeAsync(100))
+  expect(screen.getByText('This draft was discarded elsewhere')).toBeTruthy()
+})
+
+it('keeps unsaved body and headers in place and saves them into a new draft on request', async () => {
+  const { adapter, dialog, subject, editor, recipient } = await openComposer()
+  const finishPoll = deferred<void>()
+  adapter.api.composeDraft.mockImplementationOnce(async () => {
+    await finishPoll.promise
+    throw new Error('Draft does not exist')
+  })
+  await act(async () => vi.advanceTimersByTimeAsync(1500))
+  await adapter.api.discardDraft('draft-1', 1)
+  await act(async () => {
+    fireEvent.change(subject, { target: { value: 'Local subject' } })
+    fireEvent.change(recipient, { target: { value: 'local@example.test' } })
+    fireEvent.keyDown(recipient, { key: 'Enter' })
+    const paragraph = editor.querySelector('p')
+    if (!paragraph) throw new Error('Missing editor paragraph')
+    editor.focus()
+    const text = document.createTextNode('Local body')
+    paragraph.replaceChildren(text)
+    document.getSelection()?.collapse(text, text.length)
+    fireEvent.input(editor, { data: text.data, inputType: 'insertText' })
+  })
+  await act(async () => finishPoll.resolve())
+  await act(async () => vi.advanceTimersByTimeAsync(1500))
+  expect(adapter.api.saveCompose).not.toHaveBeenCalled()
+  expect(dialog.getByRole('alert').textContent).toContain('This draft was discarded elsewhere')
+  expect(dialog.getByRole('textbox', { name: 'Message body' })).toBe(editor)
+  expect(document.activeElement).toBe(editor)
+  expect(editor.textContent).toBe('Local body')
+  expect(subject.value).toBe('Local subject')
+
+  const keep = dialog.getByRole('button', { name: 'Keep as new draft' })
+  adapter.api.saveCompose.mockRejectedValueOnce(new Error('The Engine is offline'))
+  await act(async () => fireEvent.click(keep))
+  expect(dialog.getByRole('alert').textContent).toContain('The Engine is offline')
+  expect(editor.textContent).toBe('Local body')
+  await act(async () => fireEvent.click(keep))
+  expect(adapter.api.startCompose).toHaveBeenCalledTimes(2)
+  expect(adapter.api.saveCompose).toHaveBeenCalledTimes(2)
+  expect(adapter.api.saveCompose).toHaveBeenLastCalledWith(
+    'draft-2',
+    expect.objectContaining({
+      fields: expect.objectContaining({
+        subject: 'Local subject',
+        to: [{ address: 'local@example.test', name: null }],
+      }),
+    }),
+  )
+  const recovered = within(screen.getByRole('dialog', { name: 'Compose' }))
+  expect(recovered.getByRole<HTMLInputElement>('textbox', { name: 'Subject' }).value).toBe(
+    'Local subject',
+  )
+  expect(recovered.getByRole('textbox', { name: 'Message body' }).textContent).toBe('Local body')
+  expect(recovered.queryByRole('alert')).toBeNull()
+})
+
+it('keeps an uncommitted recipient visible until the user chooses Close', async () => {
+  const { adapter, dialog, recipient } = await openComposer()
+  await act(async () => {
+    recipient.focus()
+    fireEvent.change(recipient, { target: { value: 'partial address' } })
+  })
+  await adapter.api.discardDraft('draft-1', 1)
+  await act(async () => vi.advanceTimersByTimeAsync(1500))
+  expect(adapter.api.stageComposeBody).not.toHaveBeenCalled()
+  expect(dialog.getByRole('alert').textContent).toContain('This draft was discarded elsewhere')
+  expect((recipient as HTMLInputElement).value).toBe('partial address')
+  await act(async () => fireEvent.click(dialog.getByRole('button', { name: 'Close' })))
+  expect(screen.queryByRole('dialog', { name: 'Compose' })).toBeNull()
+  expect(adapter.api.saveCompose).not.toHaveBeenCalled()
+})
