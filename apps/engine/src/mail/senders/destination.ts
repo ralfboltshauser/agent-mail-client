@@ -1,5 +1,6 @@
 import { FILTERED_LABEL, SCREENED_OUT_LABEL } from '@amc/protocol'
 import { transaction } from '../../db/database.ts'
+import { GmailHttpError } from '../../providers/gmail/http.ts'
 import { toIncomingLabel } from '../../providers/gmail/sync.ts'
 import type { GmailApi } from '../../providers/gmail/types.ts'
 import { imapMoveSupport } from '../../providers/imap/client.ts'
@@ -91,7 +92,15 @@ export async function gmailDestination(
 ): Promise<Candidate | undefined> {
   const { table, name } = managedDestination(filtered)
   const current = destination(store, account, table)
-  const labels = (await api.labels()).map(toIncomingLabel)
+  const listLabels = async () => {
+    try {
+      return (await api.labels()).map(toIncomingLabel)
+    } catch (error) {
+      if (!filtered) throw error
+      throw new SenderError(`Could not verify the ${name} Label with Gmail. Retry Filter out.`)
+    }
+  }
+  const labels = await listLabels()
   const matches = (label: IncomingLabel) =>
     gmailUserLabel(label) && label.name.toLowerCase() === name.toLowerCase()
   const choices = labels.filter(matches)
@@ -109,7 +118,33 @@ export async function gmailDestination(
     if (!label) return repair(store, account, `The managed ${name} Label is missing`, table)
     return { label }
   }
-  if (current?.state === 'creating' && current.provider_id) {
+  const recover = (listed: IncomingLabel[], expectedId?: string) => {
+    const named = listed.filter((label) => label.name.toLowerCase() === name.toLowerCase())
+    const label = named[0]
+    if (!label) return
+    if (named.length !== 1)
+      return repair(
+        store,
+        account,
+        `Multiple Labels match ${name}. Resolve the name conflict and retry.`,
+        table,
+      )
+    if (label.name !== name || !label.providerId || !gmailUserLabel(label))
+      return repair(
+        store,
+        account,
+        `The ${name} name is in use. An exact ${name} user Label is required.`,
+        table,
+      )
+    if (expectedId && label.providerId !== expectedId) throw new SenderError(unverified)
+    return ready(store, account, { label }, filtered)
+  }
+  if (filtered) {
+    const expectedId = current?.state === 'creating' ? current.provider_id : null
+    const recovered = recover(labels, expectedId ?? undefined)
+    if (recovered) return recovered
+    if (expectedId) throw new SenderError(unverified)
+  } else if (current?.state === 'creating' && current.provider_id) {
     const label = choices.find(({ providerId }) => providerId === current.provider_id)
     if (label) return ready(store, account, { label }, filtered)
     if (!choices.length) throw new SenderError(unverified)
@@ -130,7 +165,13 @@ export async function gmailDestination(
   let providerId: string | undefined
   try {
     providerId = (await api.createLabel(name))?.id
-  } catch {
+  } catch (error) {
+    if (filtered && error instanceof GmailHttpError && error.status === 409) {
+      const listed = await listLabels()
+      if (!allow()) return
+      const recovered = recover(listed)
+      if (recovered) return recovered
+    }
     return repair(store, account, unverified, table)
   }
   if (!providerId) return repair(store, account, unverified, table)
@@ -139,10 +180,14 @@ export async function gmailDestination(
   store.db
     .prepare(`UPDATE ${table} SET provider_id = ? WHERE account_id = ?`)
     .run(providerId, account)
-  const label = (await api.labels())
-    .map(toIncomingLabel)
-    .find((label) => label.providerId === providerId && matches(label))
+  const listed = await listLabels()
   if (!allow()) return
+  if (filtered) {
+    const verified = recover(listed, providerId)
+    if (verified) return verified
+    throw new SenderError(unverified)
+  }
+  const label = listed.find((label) => label.providerId === providerId && matches(label))
   if (!label) throw new SenderError(unverified)
   return ready(store, account, { label }, filtered)
 }
@@ -158,7 +203,16 @@ export async function imapDestination(
     throw new SenderError('This IMAP Account does not support safe moves')
   const { table, name } = managedDestination(filtered)
   const current = destination(store, account, table)
-  const list = await client.list()
+  const unavailable = `Could not verify the ${name} folder with IMAP. Retry Filter out.`
+  const listFolders = async () => {
+    try {
+      return await client.list()
+    } catch (error) {
+      if (!filtered) throw error
+      throw new SenderError(unavailable)
+    }
+  }
+  const list = await listFolders()
   const folders = mapFolders(list)
   const choices = folders.filter(
     ({ label, path }) =>
@@ -168,11 +222,16 @@ export async function imapDestination(
   )
   if (!allow()) return
   const inspect = async (choice: (typeof choices)[number]): Promise<Candidate> => {
-    const box = await client.mailboxOpen(choice.path, { readOnly: true })
-    return {
-      label: choice.label,
-      validity: String(box.uidValidity),
-      ...(box.mailboxId ? { mailboxId: box.mailboxId } : {}),
+    try {
+      const box = await client.mailboxOpen(choice.path, { readOnly: true })
+      return {
+        label: choice.label,
+        validity: String(box.uidValidity),
+        ...(box.mailboxId ? { mailboxId: box.mailboxId } : {}),
+      }
+    } catch (error) {
+      if (!filtered) throw error
+      throw new SenderError(unavailable)
     }
   }
   if (adopt) {
@@ -191,6 +250,55 @@ export async function imapDestination(
     )
       return repair(store, account, `The managed ${name} folder changed or is missing`, table)
     return candidate
+  }
+  if (filtered && !current?.provider_id) {
+    const recover = async (listed: typeof list) => {
+      if (!allow()) return
+      const named = listed.filter(({ path }) => path.toLowerCase() === name.toLowerCase())
+      if (!named.length) return
+      if (named.length !== 1)
+        return repair(
+          store,
+          account,
+          `Multiple folders match ${name}. Resolve the name conflict and retry.`,
+          table,
+        )
+      const choice = mapFolders(named).find(
+        ({ path, label }) =>
+          path === name && label.kind === 'user' && normalUserFolder(named, path),
+      )
+      if (!choice)
+        return repair(
+          store,
+          account,
+          `The ${name} name is in use. An exact selectable ${name} user folder is required.`,
+          table,
+        )
+      const candidate = await inspect(choice)
+      return allow() ? ready(store, account, candidate, filtered) : undefined
+    }
+    const existing = await recover(list)
+    if (existing || !allow()) return existing
+
+    store.db
+      .prepare(`
+        INSERT INTO ${table} (account_id, state) VALUES (?, 'creating')
+        ON CONFLICT (account_id) DO UPDATE SET state = 'creating', error = NULL
+      `)
+      .run(account)
+    try {
+      await client.mailboxCreate(name)
+    } catch {
+      // CREATE can fail if the folder was created after the initial LIST.
+    }
+    const created = await recover(await listFolders())
+    if (created || !allow()) return created
+    return repair(
+      store,
+      account,
+      `${name} creation could not be verified. Retry when the folder is available.`,
+      table,
+    )
   }
   if (current || list.some(({ path }) => path.toLowerCase() === name.toLowerCase()))
     return repair(

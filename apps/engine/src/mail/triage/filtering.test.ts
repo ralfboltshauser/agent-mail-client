@@ -117,7 +117,8 @@ it('moves only exact Inbox messages, saves one private reason and appends per-me
     )
     put('companion', { threadId: 'mixed' })
     put('already-archived', { threadId: 'mixed', labels: ['UNREAD'] })
-    put('spam', { threadId: 'mixed', labels: ['SPAM'] })
+    put('spam', { threadId: 'mixed', labels: ['INBOX', 'SPAM'] })
+    put('trash', { threadId: 'mixed', labels: ['INBOX', 'TRASH'] })
     const request = {
       threadId,
       expectedRevision: threadInput(db, threadId)?.modseq ?? -1,
@@ -166,7 +167,8 @@ it('moves only exact Inbox messages, saves one private reason and appends per-me
       label,
     ])
     expect(await gmail.getMessageLabels('already-archived')).toEqual(['UNREAD'])
-    expect(await gmail.getMessageLabels('spam')).toEqual(['SPAM'])
+    expect(await gmail.getMessageLabels('spam')).toEqual(['INBOX', 'SPAM'])
+    expect(await gmail.getMessageLabels('trash')).toEqual(['INBOX', 'TRASH'])
     expect(listFiltered(db, 'a', undefined, 50).threads.map((thread) => thread.id)).toEqual([
       threadId,
     ])
@@ -237,6 +239,54 @@ it('reuses the Gmail create ID when labels.list catches up on the next Filter ou
     expect(await handlers[retry.kind]?.get(retry.actionId)).toMatchObject({ status: 'applied' })
     expect(await gmail.getMessageLabels('target')).not.toContain('INBOX')
     expect(create).toHaveBeenCalledOnce()
+    expect(db.prepare('SELECT kind, action_id FROM triage_event ORDER BY rowid').all()).toEqual([
+      { kind: 'decision', action_id: first.actionId },
+      { kind: 'decision', action_id: retry.actionId },
+    ])
+  } finally {
+    db.close()
+  }
+})
+
+it('adopts the exact Gmail user label after create returns 409', async () => {
+  const { db, queue, gmail, put, review, handlers } = fixture()
+  try {
+    const createLabel = gmail.createLabel.bind(gmail)
+    const create = vi.spyOn(gmail, 'createLabel').mockImplementationOnce(async (name) => {
+      await createLabel(name)
+      throw new GmailHttpError(409, 'alreadyExists', 'Synthetic provider details')
+    })
+    const action = review(put('target'))
+    await settle(queue)
+    const label = gmail.labelList.find(({ name }) => name === FILTERED_LABEL)
+    expect(await handlers[action.kind]?.get(action.actionId)).toMatchObject({ status: 'applied' })
+    expect(db.prepare('SELECT state, provider_id FROM filtered_destination').get()).toEqual({
+      state: 'ready',
+      provider_id: label?.id,
+    })
+    expect(await gmail.getMessageLabels('target')).toEqual(['UNREAD', label?.id])
+    expect(create).toHaveBeenCalledOnce()
+    expect(db.prepare('SELECT kind, action_id FROM triage_event').all()).toEqual([
+      { kind: 'decision', action_id: action.actionId },
+    ])
+  } finally {
+    db.close()
+  }
+})
+
+it('reports a safe Filter out error if Gmail refuses the verification list', async () => {
+  const { db, queue, gmail, put, review, handlers } = fixture()
+  try {
+    vi.spyOn(gmail, 'labels')
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new GmailHttpError(503, 'backendError', 'Synthetic private details'))
+    const action = review(put('target'))
+    await settle(queue)
+    expect(await handlers[action.kind]?.get(action.actionId)).toMatchObject({
+      status: 'failed',
+      error: 'Could not verify the Filtered Label with Gmail. Retry Filter out.',
+    })
+    expect(await gmail.getMessageLabels('target')).toEqual(['INBOX', 'UNREAD'])
   } finally {
     db.close()
   }
@@ -245,7 +295,7 @@ it('reuses the Gmail create ID when labels.list catches up on the next Filter ou
 it.each([false, true])(
   'recovers a v23 Gmail repair row on the next Filter out (label already exists: %s)',
   async (exists) => {
-    const { db, queue, gmail, principal, put, review, handlers } = fixture()
+    const { db, queue, gmail, put, review, handlers } = fixture()
     try {
       const existing = exists ? await gmail.createLabel(FILTERED_LABEL) : undefined
       const create = vi.spyOn(gmail, 'createLabel')
@@ -256,21 +306,59 @@ it.each([false, true])(
 
       const action = review(put('target'))
       await settle(queue)
-      if (existing) {
-        expect(await handlers[action.kind]?.get(action.actionId)).toMatchObject({
-          status: 'failed',
-          error: expect.stringContaining('adopt'),
-        })
-        expect(await gmail.getMessageLabels('target')).toContain('INBOX')
-        await queue.adoptScreenedDestination(principal, 'a', existing.id, true)
-        await queue.stop()
-        await settle(queue)
-        expect(create).not.toHaveBeenCalled()
-      } else {
-        expect(create).toHaveBeenCalledOnce()
-      }
+      expect(create).toHaveBeenCalledTimes(exists ? 0 : 1)
       expect(await handlers[action.kind]?.get(action.actionId)).toMatchObject({ status: 'applied' })
-      expect(await gmail.getMessageLabels('target')).not.toContain('INBOX')
+      const label = existing ?? gmail.labelList.find(({ name }) => name === FILTERED_LABEL)
+      expect(db.prepare('SELECT state, provider_id FROM filtered_destination').get()).toEqual({
+        state: 'ready',
+        provider_id: label?.id,
+      })
+      expect(await gmail.getMessageLabels('target')).toEqual(['UNREAD', label?.id])
+    } finally {
+      db.close()
+    }
+  },
+)
+
+it.each([
+  {
+    labels: [
+      { id: 'Label_1', name: FILTERED_LABEL, type: 'user' },
+      { id: 'Label_2', name: FILTERED_LABEL.toLowerCase(), type: 'user' },
+    ],
+    error: 'Multiple Labels match',
+  },
+  {
+    labels: [{ id: 'SPAM', name: FILTERED_LABEL, type: 'user' }],
+    error: 'An exact Filtered user Label is required',
+  },
+  {
+    labels: [{ id: 'CATEGORY_PROMOTIONS', name: FILTERED_LABEL, type: 'system' }],
+    error: 'An exact Filtered user Label is required',
+  },
+  {
+    labels: [{ id: 'Label_1', name: FILTERED_LABEL.toLowerCase(), type: 'user' }],
+    error: 'An exact Filtered user Label is required',
+  },
+] as const)(
+  'keeps mail in Inbox when the Gmail name is unsafe ($labels)',
+  async ({ labels, error }) => {
+    const { db, queue, gmail, put, review, handlers } = fixture()
+    try {
+      gmail.labelList.push(...labels)
+      const create = vi.spyOn(gmail, 'createLabel')
+      const action = review(put('target'))
+      await settle(queue)
+      expect(await handlers[action.kind]?.get(action.actionId)).toMatchObject({
+        status: 'failed',
+        error: expect.stringContaining(error),
+      })
+      expect(create).not.toHaveBeenCalled()
+      expect(await gmail.getMessageLabels('target')).toEqual(['INBOX', 'UNREAD'])
+      expect(db.prepare('SELECT state, provider_id FROM filtered_destination').get()).toEqual({
+        state: 'repair',
+        provider_id: null,
+      })
     } finally {
       db.close()
     }
@@ -485,9 +573,14 @@ it('keeps private reasons off by default and learns eligible judgment despite pr
   }
 })
 
-it.each(['MOVE', 'UIDPLUS'] as const)(
-  'filters and restores using exact IMAP %s and preserves unrelated deleted mail',
-  async (capability) => {
+it.each([
+  { capability: 'MOVE', destination: 'new' },
+  { capability: 'UIDPLUS', destination: 'new' },
+  { capability: 'MOVE', destination: 'existing' },
+  { capability: 'MOVE', destination: 'create-race' },
+] as const)(
+  'filters and restores using IMAP $capability with a $destination destination',
+  async ({ capability, destination }) => {
     const db = testDb()
     const store = new MailStore(db, new BlobStore(tempDir()))
     const sealer = new Sealer(randomBytes(32))
@@ -512,6 +605,18 @@ it.each(['MOVE', 'UIDPLUS'] as const)(
     const queue = new Mutations(store, () => null, silentLog, {
       imap: (account, work) => sync.organiseImap(account, work),
     })
+    const create = vi.spyOn(imap, 'mailboxCreate')
+    if (destination === 'existing') {
+      imap.addFolder(FILTERED_LABEL)
+      db.prepare(
+        "INSERT INTO filtered_destination (account_id, state) VALUES ('a', 'repair')",
+      ).run()
+    } else if (destination === 'create-race') {
+      create.mockImplementationOnce(async (path) => {
+        imap.addFolder(path)
+        return { path, created: false }
+      })
+    }
     sync.start()
     try {
       await vi.waitFor(() => expect(new MailQueries(db).account('a')?.status).toBe('ready'))
@@ -534,6 +639,7 @@ it.each(['MOVE', 'UIDPLUS'] as const)(
       expect(await filterActions(store, () => {})[filter.kind]?.get(filter.actionId)).toMatchObject(
         { status: 'applied' },
       )
+      expect(create).toHaveBeenCalledTimes(destination === 'existing' ? 0 : 1)
       expect(imap.folder('INBOX').messages.has(uid)).toBe(false)
       expect(imap.folder(FILTERED_LABEL).messages.size).toBe(1)
       const restore = decide('filter.keep')
