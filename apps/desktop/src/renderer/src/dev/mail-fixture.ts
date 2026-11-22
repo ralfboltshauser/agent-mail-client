@@ -4,6 +4,7 @@ import {
   applyLabelPatch,
   BUCKETS,
   type ComposeDraft,
+  DRAFT_MISSING,
   type OutboxItem,
   type ThreadSummary,
 } from '@amc/protocol'
@@ -93,6 +94,7 @@ export function createMailFixture(scenario: string) {
       listener()
     })
   let discarded = false
+  let draftNumber = 1
   let draft: ComposeDraft = {
     id: 'draft-1',
     accountId: account.id,
@@ -350,10 +352,14 @@ export function createMailFixture(scenario: string) {
     undoAgentAction: async () => {},
     contacts: async () => [],
     startCompose: async ({ mode, threadId }) => {
+      if (discarded) draftNumber++
       discarded = false
       const thread = threads.find((item) => item.id === threadId)
       draft = {
         ...draft,
+        id: `draft-${draftNumber}`,
+        update: 'AAA=',
+        revision: 1,
         threadId: threadId ?? null,
         subject: thread ? `${mode === 'forward' ? 'Fwd' : 'Re'}: ${thread.subject}` : '',
         to: thread && mode !== 'forward' ? thread.participants : [],
@@ -361,14 +367,18 @@ export function createMailFixture(scenario: string) {
       return draft
     },
     composeDrafts: async () => (discarded ? [] : [draft]),
-    composeDraft: async () => draft,
+    composeDraft: async (id) => {
+      if (discarded || id !== draft.id) throw new Error(DRAFT_MISSING)
+      return draft
+    },
     discardDraft: async (id) => {
-      if (discarded) return { absent: id }
+      if (discarded || id !== draft.id) return { absent: id }
       discarded = true
       return { deleted: id }
     },
     stageComposeBody: () => {},
-    saveCompose: async (_id, patch) => {
+    saveCompose: async (id, patch) => {
+      if (discarded || id !== draft.id) throw new Error(DRAFT_MISSING)
       draft = { ...draft, ...patch.fields, update: patch.update, revision: draft.revision + 1 }
       return draft
     },

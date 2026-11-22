@@ -1,6 +1,7 @@
 import type { ComposeDraft, ComposeStart, OutboxItem, ThreadSummary } from '@amc/protocol'
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
+import { DRAFT_POLL_INTERVAL, isMissingDraft } from '@/features/composer/draft-availability'
 import { getAmc } from '@/lib/amc'
 import { showQueuedSend } from './send-undo'
 
@@ -10,6 +11,31 @@ export function useMailCompose(thread: ThreadSummary | null, composeAccountId: s
   const [openingComposer, setOpeningComposer] = useState(false)
   const opening = useRef(false)
   const [minimised, setMinimised] = useState<{ id: string; subject: string } | null>(null)
+  const minimisedId = minimised?.id
+
+  useEffect(() => {
+    if (!minimisedId || draft || openingComposer) return
+    let active = true
+    let pending = false
+    const timer = setInterval(async () => {
+      if (pending || opening.current) return
+      pending = true
+      try {
+        await getAmc().composeDraft(minimisedId)
+      } catch (cause) {
+        if (active && !opening.current && isMissingDraft(cause)) {
+          setMinimised((current) => (current?.id === minimisedId ? null : current))
+        }
+      } finally {
+        pending = false
+      }
+    }, DRAFT_POLL_INTERVAL)
+    return () => {
+      active = false
+      clearInterval(timer)
+    }
+  }, [minimisedId, draft, openingComposer])
+
   const openDraft = async (id: string) => {
     if (opening.current || draft) return
     opening.current = true
@@ -18,6 +44,9 @@ export function useMailCompose(thread: ThreadSummary | null, composeAccountId: s
       setDraft(await getAmc().composeDraft(id))
       setMinimised(null)
     } catch (cause) {
+      if (isMissingDraft(cause)) {
+        setMinimised((current) => (current?.id === id ? null : current))
+      }
       toast.error((cause as Error).message)
     } finally {
       opening.current = false

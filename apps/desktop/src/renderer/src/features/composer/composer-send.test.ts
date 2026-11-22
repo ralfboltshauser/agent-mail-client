@@ -71,6 +71,7 @@ it.each(['uncertain', 'changed'])('handles a %s send response', async (kind) => 
           accounts: [],
           onMinimise: vi.fn(),
           onDiscarded: vi.fn(),
+          onKept: vi.fn(),
           onQueued,
         }),
       )

@@ -1,6 +1,8 @@
 import type { AccountSummary, ComposeAttachment, ComposeDraft, OutboxItem } from '@amc/protocol'
 import { Minus } from 'lucide-react'
 import { useCallback, useRef, useState } from 'react'
+import { toast } from 'sonner'
+import { DRAFT_DISCARDED_ELSEWHERE } from '@/features/composer/draft-availability'
 import { DraftDetails, DraftStatus, SignatureEditor } from '@/features/composer/draft-details'
 import { ComposerEditor, ComposerToolbar, useComposerEditor } from '@/features/composer/editor'
 import { ComposerFooter } from '@/features/composer/footer'
@@ -17,13 +19,21 @@ export function Composer({
   onMinimise,
   onQueued,
   onDiscarded,
+  onKept,
 }: {
   draft: ComposeDraft
   accounts: AccountSummary[]
   onMinimise: (subject: string) => void
   onQueued: (item: OutboxItem, requestElapsedMs: number) => void
   onDiscarded: () => void
+  onKept: (draft: ComposeDraft) => void
 }) {
+  const surface = useRef<HTMLDivElement>(null)
+  const [discardedElsewhere, setDiscardedElsewhere] = useState(false)
+  const pendingRecipient = () =>
+    Array.from(
+      surface.current?.querySelectorAll<HTMLInputElement>('[data-recipient-input]') ?? [],
+    ).find((input) => input.value.trim())
   const {
     session,
     busy,
@@ -37,13 +47,20 @@ export function Composer({
     closeDiscard,
     discard,
     minimise,
+    keepAsNew,
     reload,
     send: submit,
     upload,
     removeAttachment,
-  } = useComposerSession(draft)
+  } = useComposerSession(draft, (dirty) => {
+    if (dirty || pendingRecipient()) {
+      setDiscardedElsewhere(true)
+    } else {
+      toast.info(DRAFT_DISCARDED_ELSEWHERE)
+      onDiscarded()
+    }
+  })
   const editor = useComposerEditor(session)
-  const surface = useRef<HTMLDivElement>(null)
   const [schedule, setSchedule] = useState(false)
   const [sendAt, setSendAt] = useState('')
   const [signature, setSignature] = useState<string | null>(null)
@@ -102,11 +119,21 @@ export function Composer({
     void minimise(onMinimise)
   }
 
+  const recoverDraft = () => {
+    const input = pendingRecipient()
+    if (input) {
+      reportError(new Error('Finish adding the address or clear the field before saving.'))
+      input.focus()
+      return
+    }
+    void keepAsNew(onKept)
+  }
+
   return (
     <Dialog
       open
       onOpenChange={(open) => {
-        if (!open && !confirmDiscard) minimiseDraft()
+        if (!open && !confirmDiscard && !discardedElsewhere) minimiseDraft()
       }}
     >
       <DialogContent
@@ -135,14 +162,15 @@ export function Composer({
           ) {
             event.preventDefault()
             event.stopPropagation()
-            if (!event.repeat && !locked && !uploading && !confirmDiscard) reviewDiscard()
+            if (!event.repeat && !locked && !uploading && !confirmDiscard && !discardedElsewhere)
+              reviewDiscard()
           }
         }}
         onKeyDown={(event) => {
           if (!event.nativeEvent.isComposing && event.metaKey && event.key === 'Enter') {
             event.preventDefault()
             event.stopPropagation()
-            send()
+            if (!discardedElsewhere) send()
           }
         }}
       >
@@ -152,7 +180,7 @@ export function Composer({
             size="icon-sm"
             variant="ghost"
             aria-label="Minimise and save draft"
-            disabled={busy || uploading}
+            disabled={busy || uploading || discardedElsewhere}
             onClick={minimiseDraft}
           >
             <Minus />
@@ -164,13 +192,13 @@ export function Composer({
           onDragOver={(event) => event.preventDefault()}
           onDrop={(event) => {
             event.preventDefault()
-            addAttachments(Array.from(event.dataTransfer.files))
+            if (!discardedElsewhere) addAttachments(Array.from(event.dataTransfer.files))
           }}
           onPasteCapture={(event) => {
             const files = Array.from(event.clipboardData.files)
             if (files.length) {
               event.preventDefault()
-              addAttachments(files, true)
+              if (!discardedElsewhere) addAttachments(files, true)
             }
           }}
         >
@@ -186,22 +214,42 @@ export function Composer({
             )}
           </fieldset>
         </section>
-        <DraftStatus session={session} error={error} conflict={conflict} onReload={reload} />
-        <ComposerFooter
-          busy={busy}
-          locked={locked}
-          uploading={uploading}
-          ready={Boolean(editor)}
-          confirmSend={confirmSend}
-          schedule={schedule}
-          sendAt={sendAt}
-          onSend={send}
-          onScheduleChange={setSchedule}
-          onSendAtChange={setSendAt}
-          onDiscard={reviewDiscard}
-          onSignature={toggleSignature}
-          onUpload={addAttachments}
-        />
+        {discardedElsewhere ? (
+          <div className="space-y-2 border-t px-5 py-3 text-sm">
+            <div role="alert">
+              <p>{DRAFT_DISCARDED_ELSEWHERE}</p>
+              {session.attachments.length > 0 && <p>Add any attachments again in the new draft.</p>}
+              {error && <p>{error}</p>}
+            </div>
+            <div className="flex gap-2">
+              <Button size="sm" disabled={busy} onClick={recoverDraft}>
+                Keep as new draft
+              </Button>
+              <Button size="sm" variant="outline" disabled={busy} onClick={onDiscarded}>
+                Close
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <DraftStatus session={session} error={error} conflict={conflict} onReload={reload} />
+            <ComposerFooter
+              busy={busy}
+              locked={locked}
+              uploading={uploading}
+              ready={Boolean(editor)}
+              confirmSend={confirmSend}
+              schedule={schedule}
+              sendAt={sendAt}
+              onSend={send}
+              onScheduleChange={setSchedule}
+              onSendAtChange={setSendAt}
+              onDiscard={reviewDiscard}
+              onSignature={toggleSignature}
+              onUpload={addAttachments}
+            />
+          </>
+        )}
       </DialogContent>
       {confirmDiscard && (
         <DiscardDraftDialog
