@@ -12,6 +12,7 @@ import {
 } from 'lucide-react'
 import { useHotkeys } from '@/hooks/use-hotkeys'
 import type { View } from '../../../../shared/api'
+import type { InboxNavigation } from './use-inbox-sections'
 import type { useMailCompose } from './use-mail-compose'
 import type { useMailDialogs } from './use-mail-dialogs'
 import type { useThreadActions } from './use-thread-actions'
@@ -28,6 +29,7 @@ export function useMailCommands({
   goTo,
   selectAccount,
   move,
+  jumpSection,
   searchInput,
   readerScroll,
   clearSearch,
@@ -43,6 +45,7 @@ export function useMailCommands({
   goTo: (view: View) => void
   selectAccount: (id: string | null) => void
   move: (delta: number) => void
+  jumpSection?: InboxNavigation['focus']
   searchInput: React.RefObject<HTMLInputElement | null>
   readerScroll: React.RefObject<HTMLDivElement | null>
   clearSearch: () => void
@@ -175,6 +178,12 @@ export function useMailCommands({
       j: () => move(1),
       arrowdown: () => move(1),
       k: () => move(-1),
+      ...(jumpSection
+        ? {
+            'shift+j': () => jumpSection.current?.jump(1),
+            'shift+k': () => jumpSection.current?.jump(-1),
+          }
+        : {}),
       arrowup: () => move(-1),
       space: () =>
         readerScroll.current?.scrollBy({

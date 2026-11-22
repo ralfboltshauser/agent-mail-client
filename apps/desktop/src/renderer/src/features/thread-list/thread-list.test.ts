@@ -70,12 +70,14 @@ it('keeps virtual rows and keyboard focus keyed by ID as replica replies reorder
   try {
     await render(threads, null)
     const list = document.querySelector<HTMLDivElement>('[role=listbox]')
+    const viewport = list?.closest('[data-thread-viewport]')
     const selected = option('thread-3')
     const sibling = option('thread-4')
-    if (!list || !selected || !sibling) throw new Error('Expected mounted virtual options')
+    if (!list || !viewport || !selected || !sibling)
+      throw new Error('Expected mounted virtual options')
     expect(document.querySelectorAll('[role=option]').length).toBeLessThan(threads.length)
     const scrollTo = vi.fn()
-    Object.defineProperty(list, 'scrollTo', { value: scrollTo })
+    Object.defineProperty(viewport, 'scrollTo', { value: scrollTo })
 
     await act(async () => selected.click())
     expect(select).toHaveBeenCalledWith('thread-3')

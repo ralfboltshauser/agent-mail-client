@@ -21,6 +21,7 @@ import {
   queryFailed,
   selectedThreadQuery,
 } from './mailbox-queries'
+import type { InboxNavigation } from './use-inbox-sections'
 import type { useMailboxRows } from './use-mailbox-rows'
 import { NO_THREAD_IDS } from './use-mailbox-rows'
 
@@ -30,6 +31,7 @@ export function MailPanes({
   accountId,
   mailSearch,
   mailbox,
+  inbox,
   ids,
   selectedId,
   notification,
@@ -43,6 +45,7 @@ export function MailPanes({
   accountId: string | null
   mailSearch: ReturnType<typeof useMailSearch>
   mailbox: ReturnType<typeof useMailboxRows>
+  inbox?: InboxNavigation
   ids: readonly string[] | undefined
   selectedId: string | null
   notification: ThreadSummary | null
@@ -53,6 +56,11 @@ export function MailPanes({
 }) {
   const { search, filterText, runSearch } = mailSearch
   const { query, searchRows } = mailbox
+  const inboxReady = useReplicaSelector(inbox ? query : null, ({ data }) => data !== undefined)
+  const senderAddress = useReplicaSelector(inbox?.senderId ? query : null, ({ data }) =>
+    inbox?.senderId ? data?.inbox?.cards.get(inbox.senderId)?.address : undefined,
+  )
+  const ready = inbox ? inboxReady : ids !== undefined
   const addresses = useReplicaSelector(
     accountsQuery(),
     ({ data }) => data?.map(({ address }) => address.toLowerCase()),
@@ -74,11 +82,20 @@ export function MailPanes({
                   Could not search all mail
                 </RefreshError>
               )
-            : ids !== undefined && <ThreadQueryError query={query} />}
+            : ready && <ThreadQueryError query={query} />}
+          {inbox?.senderId != null && (
+            <div className="flex items-center gap-2 border-b px-3 py-1">
+              <Button variant="outline" size="sm" onClick={() => inbox.openSender(null)}>
+                Back to Inbox
+              </Button>
+              <span className="truncate text-xs">{senderAddress}</span>
+            </div>
+          )}
           <div className="min-h-0 flex-1">
             <ThreadList
               ids={ids ?? NO_THREAD_IDS}
               query={query}
+              inbox={inbox}
               fallbackRows={searchRows?.summaries}
               notification={notification}
               selectedId={selectedId}
@@ -87,7 +104,7 @@ export function MailPanes({
               self={self}
               matchSnippets={searchRows?.snippets}
               empty={
-                ids === undefined ? (
+                !ready ? (
                   search ? (
                     !search.failed && <MailLoading label="Searching mail" />
                   ) : (
@@ -99,6 +116,8 @@ export function MailPanes({
                       ? 'Try a different search.'
                       : 'Press Enter to search your full mail history.'}
                   </MailState>
+                ) : inbox?.senderId ? (
+                  <MailState icon={Inbox} title="No new Threads from this Sender" />
                 ) : view.kind === 'inbox' ? (
                   <MailState icon={Inbox} title="Inbox is clear">
                     New mail will appear here.

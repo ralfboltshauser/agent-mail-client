@@ -22,6 +22,7 @@ import {
   selectedThreadQuery,
 } from './mailbox-queries'
 import { ReaderToolbar } from './reader-toolbar'
+import { useInboxSections } from './use-inbox-sections'
 import { useMailCommands } from './use-mail-commands'
 import { useMailCompose } from './use-mail-compose'
 import { useMailDialogs } from './use-mail-dialogs'
@@ -75,11 +76,28 @@ export function MailWorkspace({
     searching: search !== null,
   })
   const notificationRow = !search && !filter ? notification : null
-  const { selectedId, ids, select, move, setSelection } = useThreadSelection(
+  const sectioned = view.kind === 'inbox' && !search && !filter
+  const inbox = useInboxSections({
+    scope: key,
+    storageKey: JSON.stringify(['amc-inbox-collapse-v1', engineUrl, accountId]),
+  })
+  const { focus: inboxFocus, openSender } = inbox
+  const {
+    selectedId,
+    ids,
+    select,
+    move: moveSelection,
+    setSelection,
+  } = useThreadSelection(
     key,
     mailbox.ids,
     notificationRow?.id,
+    sectioned ? mailbox.query : null,
+    inbox,
   )
+  const move = (delta: number) => {
+    if (!sectioned || !inboxFocus.current?.move(delta)) moveSelection(delta)
+  }
   const selected = useReplicaSelector(mailbox.query, ({ data }) =>
     selectedId === null
       ? undefined
@@ -114,6 +132,7 @@ export function MailWorkspace({
 
   const goTo = (next: View, target?: string) => {
     resetSearch(true)
+    openSender(null)
     setBucketPickerId(null)
     setView(next)
     setNotification(null)
@@ -126,13 +145,22 @@ export function MailWorkspace({
       getAmc().onOpenThread((target) => {
         const next = target.inInbox ? INBOX : { kind: 'all' as const }
         resetSearch(true)
+        openSender(null)
         setBucketPickerId(null)
         setAccountId(null)
         setView(next)
         setNotification(target)
         setSelection({ key: mailboxKey(null, next, ''), id: target.id })
       }),
-    [resetSearch, setAccountId, setView, setNotification, setBucketPickerId, setSelection],
+    [
+      resetSearch,
+      setAccountId,
+      setView,
+      setNotification,
+      setBucketPickerId,
+      setSelection,
+      openSender,
+    ],
   )
 
   const selectAccount = (id: string | null) => {
@@ -155,6 +183,7 @@ export function MailWorkspace({
     goTo,
     selectAccount,
     move,
+    jumpSection: sectioned && inbox.senderId === null ? inboxFocus : undefined,
     searchInput,
     readerScroll,
     clearSearch,
@@ -221,6 +250,7 @@ export function MailWorkspace({
             accountId={accountId}
             mailSearch={mailSearch}
             mailbox={mailbox}
+            inbox={sectioned ? inbox : undefined}
             ids={ids}
             selectedId={selectedId}
             notification={notificationRow}

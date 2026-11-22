@@ -14,6 +14,7 @@ const components: Record<string, string> = {
   'features/composer/footer.tsx': 'ComposerFooter',
   'features/composer/header-fields.tsx': 'SubjectField',
   'features/mailbox/mail-workspace.tsx': 'MailWorkspace',
+  'features/thread-list/inbox-chrome.tsx': 'InboxSectionHeader',
   'features/thread-list/thread-row.tsx': 'ThreadRow',
 }
 
@@ -49,6 +50,7 @@ export function profileRenderer() {
       function instrument(component: ts.FunctionDeclaration | ts.FunctionExpression, name: string) {
         if (!component.body) throw new Error(`Update the renderer Profiler probe for ${name}`)
         let profileId = JSON.stringify(name === 'ComposerFooter' ? 'footer' : name)
+        if (name === 'InboxSectionHeader') profileId = "'section:' + section"
         if (name === 'ThreadRow') {
           const props = component.parameters[0]?.name
           if (!props || !ts.isObjectBindingPattern(props)) {

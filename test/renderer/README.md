@@ -77,3 +77,22 @@ variants record zero composer, recipient and footer commits. The resnapshot
 test keeps all eight rows, reader, focus and selection through the partial
 replica and the return to live. The composer typing and unchanged-poll TODOs
 belong to the composer session refactor in PR #141.
+
+## Sectioned Inbox
+
+The harness verifies the fixed order, the Updates preview, Account-scoped
+collapse after restart, Sender grouping, notification-open, keyboard focus,
+and the scroll anchor when an earlier section collapses. The large fixture
+indexes 5,105 Threads and mounts fewer than 40 options.
+
+| Settled action | Workspace | List | Section headings | Changed row | Sibling rows | Reader | Composer |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Off-reader move from Action/Reply to Follow-up | 0 | 1 | 2 | 1 | 0 | 0 | 0 |
+| Staggered cloned reply after the move | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| Off-reader cross-section move with composer open | 0 | 1 | 2 | 1 | 0 | 0 | 0 |
+| Same-key failure and retry | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+Section membership comes from the query-local index. The list owns changes to
+row geometry and headers subscribe to their counts. The cross-section test
+checks the actual row, listbox, selection, reader and focus nodes in addition
+to the commit budget.

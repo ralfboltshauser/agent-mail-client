@@ -24,6 +24,7 @@ export function useMailboxRows({
   hits: SearchHit[] | null
   searching: boolean
 }) {
+  const sectioned = view.kind === 'inbox' && !searching && !filter
   const query = useMemo(() => {
     if (searching) {
       const summaries = hits && searchSummariesQuery(accountId, hits)
@@ -34,10 +35,13 @@ export function useMailboxRows({
       engineUrl,
       filter
         ? filterQuery(filter, accountId, view)
-        : threadListQuery(getAmc(), { view, accountId }),
+        : threadListQuery(getAmc(), { view, accountId }, sectioned),
     )
-  }, [searching, hits, accountId, view, filter, engineUrl])
-  const replicaIds = useReplicaSelector(searching ? null : query, (snapshot) => snapshot.data?.ids)
+  }, [searching, hits, accountId, view, filter, engineUrl, sectioned])
+  const replicaIds = useReplicaSelector(
+    searching || sectioned ? null : query,
+    (snapshot) => snapshot.data?.ids,
+  )
   const searchRows = useMemo(() => {
     if (!hits) return undefined
     return {
