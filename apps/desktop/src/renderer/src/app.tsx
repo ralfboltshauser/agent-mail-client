@@ -6,24 +6,24 @@ import { Button } from './components/ui/button'
 import { Toaster } from './components/ui/sonner'
 import { TooltipProvider } from './components/ui/tooltip'
 import { MailWorkspace } from './features/mailbox/mail-workspace'
-import { useSyncStatus } from './hooks/use-amc'
+import { usePairingGate } from './hooks/use-amc'
 import { useTheme } from './hooks/use-theme'
 
 export function App() {
-  const status = useSyncStatus()
+  const gate = usePairingGate()
   const { dark, setTheme } = useTheme()
   const toggleTheme = useCallback(() => setTheme(dark ? 'light' : 'dark'), [dark, setTheme])
-  if (!status) return <MailLoading label="Opening AMC" />
+  if (!gate.phase) return <MailLoading label="Opening AMC" />
   return (
     <TooltipProvider delayDuration={400}>
-      {status.phase === 'unpaired' ? (
-        <PairScreen savedEngineUrl={status.engineUrl} recoveryMessage={status.error} />
-      ) : status.phase === 'restoring-pairing' || status.phase === 'pairing-read-error' ? (
-        <SavedPairingState retrying={status.phase === 'restoring-pairing'} />
+      {gate.phase === 'unpaired' ? (
+        <PairScreen savedEngineUrl={gate.engineUrl} recoveryMessage={gate.error} />
+      ) : gate.phase === 'restoring-pairing' || gate.phase === 'pairing-read-error' ? (
+        <SavedPairingState retrying={gate.phase === 'restoring-pairing'} />
       ) : (
         <MailWorkspace
-          key={status.engineUrl}
-          status={status}
+          key={gate.engineUrl}
+          engineUrl={gate.engineUrl ?? null}
           dark={dark}
           onToggleTheme={toggleTheme}
         />

@@ -5,6 +5,7 @@ import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, expect, it, vi } from 'vitest'
 import { ThreadList } from '@/components/thread-list'
+import { createMailFixture } from '@/dev/mail-fixture'
 
 const { renderPaperclip } = vi.hoisted(() => ({ renderPaperclip: vi.fn(() => null) }))
 
@@ -20,6 +21,7 @@ afterEach(() => {
 
 it('keeps virtual rows and keyboard focus keyed by ID as replica replies reorder the list', async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  vi.stubGlobal('amc', createMailFixture('inbox').api)
   vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(360)
   vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(420)
   vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(74 * 60)
@@ -52,7 +54,9 @@ it('keeps virtual rows and keyboard focus keyed by ID as replica replies reorder
     act(async () =>
       root.render(
         createElement(ThreadList, {
-          threads: rows,
+          ids: rows.map((row) => row.id),
+          query: null,
+          fallbackRows: new Map(rows.map((row) => [row.id, row])),
           selectedId,
           onSelect: (id) => select(id),
           onMove: move,

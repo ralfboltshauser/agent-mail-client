@@ -7,6 +7,7 @@ const components: Record<string, string> = {
   'app.tsx': 'App',
   'components/app-sidebar.tsx': 'AppSidebar',
   'components/thread-list.tsx': 'ThreadList',
+  'components/sync-indicator.tsx': 'SyncIndicator',
   'components/thread-view.tsx': 'ThreadView',
   'components/composer.tsx': 'Composer',
   'components/recipient-field.tsx': 'RecipientField',
@@ -53,7 +54,7 @@ export function profileRenderer() {
           if (!props || !ts.isObjectBindingPattern(props)) {
             throw new Error('The renderer row probe needs destructured props')
           }
-          // ThreadList supplies the existing DOM thread ID to the memoized body in tests.
+          // The subscribed row supplies its existing thread ID to the body probe.
           edits.push({ offset: props.getStart(source) + 1, text: ' __amcThreadId,' })
           profileId = "'row:' + __amcThreadId"
         }
@@ -66,32 +67,13 @@ export function profileRenderer() {
           ts.forEachChild(node, visitReturns)
         }
         visitReturns(component.body)
+      }
 
-        function visitJsx(node: ts.Node) {
-          if (
-            name === 'ThreadList' &&
-            ts.isJsxSelfClosingElement(node) &&
-            node.tagName.getText(source) === 'ThreadRow'
-          ) {
-            const parent = node.parent
-            const threadId = ts.isJsxElement(parent)
-              ? parent.openingElement.attributes.properties.find(
-                  (prop): prop is ts.JsxAttribute =>
-                    ts.isJsxAttribute(prop) && prop.name.getText(source) === 'data-thread-id',
-                )
-              : undefined
-            const initializer = threadId?.initializer
-            if (!initializer || !ts.isJsxExpression(initializer) || !initializer.expression) {
-              throw new Error('The renderer row probe needs a thread ID on the list option')
-            }
-            edits.push({
-              offset: node.tagName.end,
-              text: ` __amcThreadId={${initializer.expression.getText(source)}}`,
-            })
-          }
-          ts.forEachChild(node, visitJsx)
+      function visitRowBody(node: ts.Node) {
+        if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(source) === 'ThreadRow') {
+          edits.push({ offset: node.tagName.end, text: ' __amcThreadId={id}' })
         }
-        if (name === 'ThreadList') visitJsx(component.body)
+        ts.forEachChild(node, visitRowBody)
       }
 
       for (const statement of source.statements) {
@@ -108,9 +90,13 @@ export function profileRenderer() {
         }
         if (ts.isVariableStatement(statement)) {
           for (const declaration of statement.declarationList.declarations) {
-            if (!ts.isIdentifier(declaration.name) || declaration.name.text !== name) continue
+            if (!ts.isIdentifier(declaration.name)) continue
             const render = getMemoRender(declaration)
-            if (render) instrument(render, name)
+            if (!render) continue
+            if (declaration.name.text === name) instrument(render, name)
+            if (name === 'ThreadRow' && declaration.name.text === 'SubscribedThreadRow') {
+              visitRowBody(render.body)
+            }
           }
         }
       }

@@ -36,7 +36,14 @@ export async function mount() {
   expect(Object.keys(commitCounts().rows).sort()).toEqual(
     mountedRows.map((option) => option.getAttribute('data-thread-id')).sort(),
   )
-  for (const region of ['App', 'MailWorkspace', 'AppSidebar', 'ThreadList', 'ThreadView']) {
+  for (const region of [
+    'App',
+    'MailWorkspace',
+    'AppSidebar',
+    'SyncIndicator',
+    'ThreadList',
+    'ThreadView',
+  ]) {
     expect(commits.get(region)).toBeGreaterThan(0)
   }
   commits.clear()

@@ -30,6 +30,7 @@ export function commitCounts() {
     app: commits.get('App') ?? 0,
     workspace: commits.get('MailWorkspace') ?? 0,
     sidebar: commits.get('AppSidebar') ?? 0,
+    indicator: commits.get('SyncIndicator') ?? 0,
     list: commits.get('ThreadList') ?? 0,
     reader: commits.get('ThreadView') ?? 0,
     composer: commits.get('Composer') ?? 0,

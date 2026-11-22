@@ -1,17 +1,12 @@
-import type { AccountSummary } from '@amc/protocol'
 import { SquarePen } from 'lucide-react'
 import { Composer } from '@/components/composer'
 import { HandoffDialog } from '@/components/handoff-dialog'
 import { Button } from '@/components/ui/button'
+import { useReplicaSelector } from '@/hooks/use-amc'
+import { accountsQuery } from './mailbox-queries'
 import type { useMailCompose } from './use-mail-compose'
 
-export function ComposeOverlays({
-  accounts,
-  compose,
-}: {
-  accounts: AccountSummary[]
-  compose: ReturnType<typeof useMailCompose>
-}) {
+export function ComposeOverlays({ compose }: { compose: ReturnType<typeof useMailCompose> }) {
   const {
     draft,
     setDraft,
@@ -22,6 +17,19 @@ export function ComposeOverlays({
     openDraft,
     queued,
   } = compose
+  const accounts = useReplicaSelector(
+    draft ? accountsQuery() : null,
+    ({ data }) => data,
+    (left, right) =>
+      left === right ||
+      (left !== undefined &&
+        right !== undefined &&
+        left.length === right.length &&
+        left.every(
+          (account, index) =>
+            account.id === right[index].id && account.address === right[index].address,
+        )),
+  )
   return (
     <>
       {minimised && !draft && (
@@ -48,7 +56,7 @@ export function ComposeOverlays({
         <Composer
           key={draft.id}
           draft={draft}
-          accounts={accounts}
+          accounts={accounts ?? []}
           onQueued={queued}
           onDiscarded={() => setDraft(null)}
           onMinimise={(subject) => {

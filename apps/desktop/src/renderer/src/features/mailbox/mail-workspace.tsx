@@ -1,18 +1,26 @@
-import type { AccountSummary, Label } from '@amc/protocol'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import type { Label } from '@amc/protocol'
+import { useEffect, useRef, useState } from 'react'
 import { AgentActivity } from '@/components/agent-activity'
 import { AppSidebar, systemViews } from '@/components/app-sidebar'
 import { CommandPalette } from '@/components/command-palette'
 import { DraftsView, OutboxView } from '@/components/compose-views'
 import { MailSettings } from '@/components/mail-settings'
-import { OrganisePicker } from '@/components/organise'
+import { OrganiseNotices, OrganisePicker } from '@/components/organise'
 import { ShortcutsDialog } from '@/components/shortcuts-dialog'
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
+import { shareReply } from '@/data/share-reply'
+import { useReplicaSelector, useSyncField } from '@/hooks/use-amc'
 import { getAmc } from '@/lib/amc'
-import type { Counts, SyncStatus, View } from '../../../../shared/api'
+import type { View } from '../../../../shared/api'
 import { useMailSearch } from '../search/use-mail-search'
 import { ComposeOverlays } from './compose-overlays'
 import { MailPanes, MailReader } from './mail-panes'
+import {
+  accountsQuery,
+  labelsQuery,
+  type MailboxAccount,
+  selectedThreadQuery,
+} from './mailbox-queries'
 import { ReaderToolbar } from './reader-toolbar'
 import { useMailCommands } from './use-mail-commands'
 import { useMailCompose } from './use-mail-compose'
@@ -23,95 +31,80 @@ import {
   useMailboxNavigation,
   useThreadSelection,
 } from './use-mailbox-navigation'
-import { useMailboxQuery } from './use-mailbox-query'
 import { useMailboxRows } from './use-mailbox-rows'
 import { useThreadActions } from './use-thread-actions'
 
-const NO_ACCOUNTS: AccountSummary[] = []
+const NO_ACCOUNTS: MailboxAccount[] = []
 const NO_LABELS: Label[] = []
-const NO_COUNTS: Counts = { inbox: 0, inboxUnread: 0, starred: 0, drafts: 0, buckets: {} }
 
 export function MailWorkspace({
-  status,
+  engineUrl,
   dark,
   onToggleTheme,
 }: {
-  status: SyncStatus
+  engineUrl: string | null
   dark: boolean
   onToggleTheme: () => void
 }) {
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const readerScroll = useRef<HTMLDivElement>(null)
-  const snoozeEnabled = status.snoozeEnabled === true
-  const [wasSnapshotPending, setWasSnapshotPending] = useState(false)
-  // Pausing and restarting sync can clear progress before the replica is complete.
-  const snapshotPending =
-    status.phase === 'bootstrapping' ||
-    status.progress != null ||
-    (wasSnapshotPending && status.phase !== 'live')
-  if (snapshotPending !== wasSnapshotPending) setWasSnapshotPending(snapshotPending)
+  const snoozeEnabled = useSyncField((status) => status?.snoozeEnabled === true)
   const { accountId, setAccountId, view, setView, notification, setNotification } =
     useMailboxNavigation(snoozeEnabled)
-  const accountQuery = useMailboxQuery('accounts', () => getAmc().accounts(), !snapshotPending)
-  const accounts = accountQuery.data ?? NO_ACCOUNTS
-  const accountMissing =
-    accountId !== null &&
-    accountQuery.data !== undefined &&
-    !accountQuery.data.some(({ id }) => id === accountId)
-  if (accountMissing) setAccountId(null)
-  const accountKey = JSON.stringify(accountId)
-  const { data: labels = NO_LABELS } = useMailboxQuery(
-    accountKey,
-    () => getAmc().labels(accountId),
-    !snapshotPending,
+  const accountData = useReplicaSelector(
+    accountsQuery(),
+    ({ data }) => data?.map(({ id, kind, imapMoves }) => ({ id, kind, imapMoves })),
+    (left, right) => shareReply(left, right) === left,
   )
-  const { data: counts = NO_COUNTS } = useMailboxQuery(
-    accountKey,
-    () => getAmc().counts(accountId),
-    !snapshotPending,
-  )
-  const self = useMemo(() => new Set(accounts.map((a) => a.address.toLowerCase())), [accounts])
-  const labelNames = useMemo(() => new Map(labels.map((l) => [l.id, l.name])), [labels])
+  const accounts = accountData ?? NO_ACCOUNTS
+  if (accountId !== null && accountData && !accountData.some(({ id }) => id === accountId)) {
+    setAccountId(null)
+  }
+  const labels = useReplicaSelector(labelsQuery(accountId), ({ data }) => data ?? NO_LABELS)
 
   const mailSearch = useMailSearch(accountId)
   const { search, input: searchInput, resetSearch, clearSearch, runSearch } = mailSearch
   const filter = mailSearch.filterText.trim()
   const key = mailboxKey(accountId, view, filter, search?.text)
   const mailbox = useMailboxRows({
+    engineUrl,
     view,
     accountId,
-    key,
     filter,
     hits: search?.hits ?? null,
     searching: search !== null,
-    snapshotPending,
   })
-  const selection = useThreadSelection(key, mailbox.rows, !search && !filter ? notification : null)
-  const { selected, select, move, setSelection } = selection
-  const details = useMailboxQuery(
-    JSON.stringify([key, selected?.accountId, selected?.id]),
-    async () => {
-      if (!selected) return null
-      const data = await getAmc().thread(selected.id)
-      if (
-        data &&
-        (data.thread.id !== selected.id || data.thread.accountId !== selected.accountId)
-      ) {
-        throw new Error('Thread reply does not match the selected thread')
-      }
-      return data
-    },
-    !!selected && !snapshotPending,
+  const notificationRow = !search && !filter ? notification : null
+  const { selectedId, ids, select, move, setSelection } = useThreadSelection(
+    key,
+    mailbox.ids,
+    notificationRow?.id,
   )
-  const activeThread = details.data ?? null
+  const selected = useReplicaSelector(mailbox.query, ({ data }) =>
+    selectedId === null
+      ? undefined
+      : (data?.summaries.get(selectedId) ??
+        mailbox.searchRows?.summaries.get(selectedId) ??
+        (notificationRow?.id === selectedId ? notificationRow : undefined)),
+  )
+  const readerQuery = selectedThreadQuery(engineUrl, selected)
+  const selectedDetail = useReplicaSelector(
+    readerQuery,
+    ({ data }) =>
+      data
+        ? { thread: data.thread, complete: data.messages.length === data.thread.messageCount }
+        : null,
+    (left, right) => left?.thread === right?.thread && left?.complete === right?.complete,
+  )
+  const activeThread = selectedDetail?.thread ?? null
   const actions = useThreadActions({
     selected,
     activeThread,
+    complete: selectedDetail?.complete === true,
     accountId,
     accounts,
     labels,
     snoozeEnabled,
-    syncPhase: status.phase,
   })
   const { organise, organisePicker, canUndoOrganise, setBucketPickerId } = actions
   const compose = useMailCompose(activeThread, accountId ?? accounts[0]?.id)
@@ -169,7 +162,7 @@ export function MailWorkspace({
   const title = search
     ? `Search: ${search.text}`
     : view.kind === 'label'
-      ? (labelNames.get(view.labelId) ?? 'Label')
+      ? (labels.find((label) => label.id === view.labelId)?.name ?? 'Label')
       : view.kind === 'bucket'
         ? view.bucket
         : (systemViews(snoozeEnabled).find((v) => v.view.kind === view.kind)?.title ?? 'Mail')
@@ -181,8 +174,8 @@ export function MailWorkspace({
       className="h-full"
       style={{ '--sidebar-width': '13.5rem' } as React.CSSProperties}
     >
+      <OrganiseNotices />
       <AppSidebar
-        accounts={accounts}
         accountId={accountId}
         onAccount={selectAccount}
         view={view}
@@ -198,9 +191,7 @@ export function MailWorkspace({
           dialogs.setShortcutsOpen(true)
         }}
         composing={openingComposer}
-        counts={counts}
-        labels={labels}
-        status={status}
+        snoozeEnabled={snoozeEnabled}
       />
       <SidebarInset className="min-w-0 overflow-hidden">
         {!sidebarOpen && <div className="app-drag h-11 shrink-0" />}
@@ -227,11 +218,14 @@ export function MailWorkspace({
           <MailPanes
             view={view}
             title={title}
-            inboxCount={counts.inbox}
+            accountId={accountId}
             mailSearch={mailSearch}
             mailbox={mailbox}
-            selection={selection}
-            self={self}
+            ids={ids}
+            selectedId={selectedId}
+            notification={notificationRow}
+            onSelect={select}
+            move={move}
             readerToolbar={
               <ReaderToolbar
                 selected={selected}
@@ -242,19 +236,17 @@ export function MailWorkspace({
             }
             reader={
               <MailReader
-                data={activeThread}
-                loading={!!selected && details.data === undefined && !details.failed}
-                unavailable={!!selected && (details.failed || details.data === null)}
-                failed={details.failed}
-                onRetry={details.refresh}
+                engineUrl={engineUrl}
+                selectedId={selected?.id}
+                selectedAccountId={selected?.accountId}
+                accountId={accountId}
                 snoozeEnabled={snoozeEnabled}
-                labelNames={labelNames}
                 scrollRef={readerScroll}
               />
             }
           />
         )}
-        <ComposeOverlays accounts={accounts} compose={compose} />
+        <ComposeOverlays compose={compose} />
       </SidebarInset>
       {organisePicker && (
         <OrganisePicker
@@ -283,10 +275,9 @@ export function MailWorkspace({
           onCloseAutoFocus={restoreDialogFocus}
         />
       )}
-      <CommandPalette
+      <MailboxCommandPalette
         open={dialogs.paletteOpen}
         onOpenChange={dialogs.setPaletteOpen}
-        accounts={accounts}
         labels={labels}
         onView={goTo}
         onAccount={selectAccount}
@@ -305,4 +296,11 @@ export function MailWorkspace({
       />
     </SidebarProvider>
   )
+}
+
+function MailboxCommandPalette(
+  props: Omit<React.ComponentProps<typeof CommandPalette>, 'accounts'>,
+) {
+  const accounts = useReplicaSelector(props.open ? accountsQuery() : null, ({ data }) => data)
+  return <CommandPalette {...props} accounts={accounts ?? []} />
 }

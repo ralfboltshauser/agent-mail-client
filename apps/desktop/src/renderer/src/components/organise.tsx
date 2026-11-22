@@ -61,16 +61,8 @@ const run = async (action: OrganiseAction, description: string) => {
     toast.error(message)
   }
 }
-export function useOrganise(
-  thread: ThreadSummary | null,
-  snoozeEnabled = false,
-  account?: AccountSummary,
-  labels: Label[] = [],
-) {
-  const imap = account?.kind === 'imap'
-  const canMove = !imap || account.imapMoves !== false
-  const [picker, setPicker] = useState<Picker | null>(null)
-
+export function OrganiseNotices() {
+  // Reading acknowledges notices in SQLite. Handle each reply directly as an event.
   useEffect(() => {
     const showErrors = () => {
       void getAmc()
@@ -95,6 +87,18 @@ export function useOrganise(
     showErrors()
     return getAmc().onChanged(showErrors)
   }, [])
+  return null
+}
+
+export function useOrganise(
+  thread: ThreadSummary | null,
+  snoozeEnabled = false,
+  account?: Pick<AccountSummary, 'kind' | 'imapMoves'>,
+  labels: Label[] = [],
+) {
+  const imap = account?.kind === 'imap'
+  const canMove = !imap || account.imapMoves !== false
+  const [picker, setPicker] = useState<Picker | null>(null)
 
   const openPicker = (kind: Picker['kind'], thread: ThreadSummary, trigger?: HTMLElement) => {
     const active = document.activeElement

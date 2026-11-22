@@ -69,15 +69,39 @@ it('stages one body character without replacing the editor', async () => {
   expectBudget(keystrokeBudget)
 })
 
-it('keeps open compose fields through a no-op replica event', async () => {
-  const { adapter, dialog, subject, editor, recipient } = await openComposer()
-  await act(async () => adapter.emitChanged())
-  expect(dialog.getByRole('textbox', { name: 'Subject' })).toBe(subject)
-  expect(dialog.getByRole('textbox', { name: 'Message body' })).toBe(editor)
-  expect(dialog.getByRole('combobox', { name: 'To' })).toBe(recipient)
-  expect(commits.get('SubjectField') ?? 0).toBe(0)
-  expectBudget(keystrokeBudget)
-})
+it.each(['timestamp', 'immediate', 'staggered', 'off-reader'] as const)(
+  'keeps open compose fields through a %s sync event',
+  async (event) => {
+    const { adapter, dialog, subject, editor, recipient } = await openComposer()
+    act(() => subject.focus())
+    const release = event === 'staggered' ? adapter.staggerReads() : undefined
+    await act(async () => {
+      if (event === 'timestamp') adapter.emitStatus({ lastSyncAt: Date.now() - 25_000 })
+      else if (event === 'off-reader') {
+        await adapter.api.setBucket({
+          threadId: 'thread-2',
+          bucket: 'Later',
+          reason: 'Synthetic edit',
+        })
+      } else adapter.emitChanged()
+    })
+    for (const resolve of release?.() ?? []) await act(async () => resolve())
+    expect(dialog.getByRole('textbox', { name: 'Subject' })).toBe(subject)
+    expect(dialog.getByRole('textbox', { name: 'Message body' })).toBe(editor)
+    expect(dialog.getByRole('combobox', { name: 'To' })).toBe(recipient)
+    expect(document.activeElement).toBe(subject)
+    expect(commits.get('SubjectField') ?? 0).toBe(0)
+    expectBudget({
+      workspace: 0,
+      list: 0,
+      reader: 0,
+      rows: event === 'off-reader' ? 1 : 0,
+      composer: 0,
+      recipient: 0,
+      footer: 0,
+    })
+  },
+)
 
 it('processes an unchanged draft poll while keeping the editor and subject mounted', async () => {
   const { adapter, dialog, subject, editor } = await openComposer()

@@ -1,8 +1,45 @@
+import type { ThreadSummary } from '@amc/protocol'
 import { Paperclip, Star } from 'lucide-react'
 import { memo } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import type { MailboxThreadQuery } from '@/features/mailbox/mailbox-queries'
+import { useReplicaSelector } from '@/hooks/use-amc'
+import { listDate, participantsLine } from '@/lib/format'
 import { cn } from '@/lib/utils'
+
+export const SubscribedThreadRow = memo(function SubscribedThreadRow({
+  id,
+  query,
+  fallback,
+  self,
+  match,
+}: {
+  id: string
+  query: MailboxThreadQuery | null
+  fallback?: ThreadSummary
+  self: Set<string>
+  match?: string
+}) {
+  const thread = useReplicaSelector(query, ({ data }) => data?.summaries.get(id) ?? fallback)
+  if (!thread) return null
+  return (
+    <ThreadRow
+      unread={thread.unreadCount > 0}
+      participants={participantsLine(thread.participants, self)}
+      messageCount={thread.messageCount}
+      hasAttachments={thread.hasAttachments}
+      starred={thread.starred}
+      dateTime={new Date(thread.lastMessageAt).toISOString()}
+      dateLabel={listDate(thread.lastMessageAt)}
+      subject={thread.subject || '(no subject)'}
+      snippet={thread.snippet}
+      match={match}
+      bucket={thread.bucket?.bucket}
+      bucketReason={thread.bucket?.reason}
+    />
+  )
+})
 
 interface RowProps {
   unread: boolean

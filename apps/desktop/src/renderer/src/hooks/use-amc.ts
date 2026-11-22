@@ -1,8 +1,8 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
 import { FIRST_LOAD, type QuerySnapshot, type ReplicaQuery } from '@/data/query-cache'
 import { replicaStoreFor } from '@/data/replica-store'
 import { selectedSnapshot } from '@/data/selection'
-import { messageTextQuery, threadDetailQuery, threadListQuery } from '@/data/thread-queries'
+import { messageTextQuery, threadListQuery } from '@/data/thread-queries'
 import { getAmc } from '@/lib/amc'
 import type { SyncStatus, ThreadQuery } from '../../../shared/api'
 
@@ -67,83 +67,8 @@ export function useThreadSummary(query: ThreadQuery, id: string) {
   )
 }
 
-export function useThreadDetail(id: string | null) {
-  return useReplicaSelector(
-    id === null ? null : threadDetailQuery(getAmc(), id),
-    (snapshot) => snapshot.data,
-  )
-}
-
 export function useMessageText(id: string, bodyRevision: string) {
   return useReplicaState(messageTextQuery(getAmc(), id, bodyRevision))
-}
-
-function useLegacyQuery<T>(
-  load: () => Promise<T>,
-  deps: unknown[],
-  initial: T,
-  preserveOnBootstrap: boolean,
-) {
-  // Legacy loaders are opaque. Scope a key to each hook and its dependency tuple.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: the caller supplies the query inputs
-  const current = useMemo(() => {
-    const loader = { run: load }
-    const query: ReplicaQuery<T> = {
-      key: {},
-      load: () => loader.run(),
-      replacePending: true,
-      retainDuringBootstrap: preserveOnBootstrap ? 'keep-reading' : undefined,
-      isEmpty: legacyIsEmpty,
-    }
-    return { initial, loader, query }
-  }, [preserveOnBootstrap, ...deps])
-  useLayoutEffect(() => {
-    current.loader.run = load
-  }, [current, load])
-  return current
-}
-
-function legacyIsEmpty(value: unknown): boolean {
-  if (value === null) return true
-  if (Array.isArray(value)) return value.length === 0
-  // The legacy reader wraps its result with the requested ID.
-  return typeof value === 'object' && 'id' in value && 'data' in value && value.data === null
-}
-
-function legacyValue<T>(snapshot: QuerySnapshot<T>, initial: T): T {
-  return snapshot.state === 'first-load' || snapshot.state === 'first-error'
-    ? initial
-    : snapshot.data
-}
-
-export function useReplica<T>(load: () => Promise<T>, deps: unknown[], initial: T): T {
-  const legacy = useLegacyQuery(load, deps, initial, false)
-  const source = useQuerySource(legacy.query)
-  const read = () => legacyValue(source.read(), legacy.initial)
-  return useSyncExternalStore(source.subscribe, read)
-}
-
-export function useReplicaQuery<T>(
-  load: () => Promise<T>,
-  deps: unknown[],
-  initial: T,
-  { preserveOnBootstrap = true } = {},
-) {
-  const legacy = useLegacyQuery(load, deps, initial, preserveOnBootstrap)
-  const source = useQuerySource(legacy.query)
-  const read = useMemo(
-    () =>
-      selectedSnapshot(
-        source.read,
-        (snapshot) => ({
-          value: legacyValue(snapshot, legacy.initial),
-          failed: snapshot.state === 'first-error' || snapshot.state === 'cached+error',
-        }),
-        (left, right) => Object.is(left.value, right.value) && left.failed === right.failed,
-      ),
-    [source, legacy],
-  )
-  return { ...useSyncExternalStore(source.subscribe, read), refresh: source.refresh }
 }
 
 /** Select a status value. Supply equality when projecting a new object. */
@@ -160,12 +85,6 @@ export function useSyncField<Value>(
   )
   if (error) throw error
   return value
-}
-
-const wholeStatus = (status: SyncStatus | null) => status
-
-export function useSyncStatus(): SyncStatus | null {
-  return useSyncField(wholeStatus)
 }
 
 function pairingGate(status: SyncStatus | null) {

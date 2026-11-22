@@ -1,5 +1,5 @@
 import type { ThreadSummary } from '@amc/protocol'
-import type { AmcApi, ThreadQuery, ThreadWithMessages } from '../../../shared/api'
+import type { AmcApi, ThreadQuery } from '../../../shared/api'
 import type { ReplicaQuery } from './query-cache'
 import { shareReply } from './share-reply'
 
@@ -34,17 +34,6 @@ export function threadListQuery(
     key: JSON.stringify(['threads', accountId, view.kind, viewId, limit]),
     load: async (previous) => indexThreads(previous, await api.threads(query)),
     isEmpty: (index) => index.ids.length === 0,
-    retainDuringBootstrap: 'defer-reads',
-  }
-}
-
-export function threadDetailQuery(
-  api: Pick<AmcApi, 'thread'>,
-  id: string,
-): ReplicaQuery<ThreadWithMessages | null> {
-  return {
-    key: JSON.stringify(['thread', id]),
-    load: () => api.thread(id),
     retainDuringBootstrap: 'defer-reads',
   }
 }
