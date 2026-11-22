@@ -6,12 +6,15 @@ import { Writable } from 'node:stream'
 import { TriageHistoryQuery } from '@amc/protocol'
 import pino from 'pino'
 import { expect, it } from 'vitest'
-import { issueToken } from '../../auth/tokens.ts'
+import { authenticate, issueToken } from '../../auth/tokens.ts'
+import { BlobStore } from '../../blobs.ts'
 import { restoreDatabase } from '../../db/backups.ts'
 import { backupTo, migrate, openDatabase, transaction } from '../../db/database.ts'
 import { MIGRATIONS } from '../../db/migrations.ts'
 import { createApp } from '../../http/app.ts'
 import { testConfig, testDb } from '../../test-support.ts'
+import { decideSender } from '../senders/actions.ts'
+import { MailStore } from '../store.ts'
 import { advanceMailboxGeneration, annotate, editOwnerReason } from './annotations.ts'
 import { ERASURE_LEDGER_FILE, forgetDecision, openErasureLedger } from './erasure.ts'
 import { exportHistory, readHistory } from './history.ts'
@@ -257,4 +260,45 @@ it('replays the durable erase ledger before publishing an older backup and purge
   const original = new DatabaseSync(backup, { readOnly: true })
   expect(original.prepare('SELECT count(*) AS count FROM triage_owner_reason').get()?.count).toBe(2)
   original.close()
+})
+
+it('rejects replay of a forgotten owner action after restoring a snapshot that predates it', () => {
+  const { dataDir } = testConfig()
+  const path = join(dataDir, 'amc.db')
+  const ledger = join(dataDir, ERASURE_LEDGER_FILE)
+  const backup = join(dataDir, 'before-action.db')
+  let db = openDatabase(path)
+  migrate(db)
+  db.exec(account)
+  const owner = issueToken(db, { kind: 'cli', name: 'owner', scopes: ['admin'] })
+  const principal = authenticate(db, owner.secret)
+  if (!principal) throw new Error('Fixture owner missing')
+  let closeLedger = openErasureLedger(db, ledger)
+  backupTo(db, backup)
+  const action = {
+    accountId: 'fixture-account',
+    address: 'feed@example.test',
+    decision: 'accept' as const,
+    expectedRevision: 0,
+    clientActionId: randomUUID(),
+    reason: CANARY,
+  }
+  decideSender(new MailStore(db, new BlobStore(dataDir)), principal, action)
+  const event = db
+    .prepare('SELECT id FROM triage_event WHERE action_id = ?')
+    .get(action.clientActionId)
+  forgetDecision(db, String(event?.id))
+  closeLedger()
+  db.close()
+
+  restoreDatabase(backup, path)
+  db = openDatabase(path)
+  closeLedger = openErasureLedger(db, ledger)
+  const store = new MailStore(db, new BlobStore(dataDir))
+  expect(() => decideSender(store, principal, action)).toThrow('Owner action ID was already used')
+  expect(db.prepare('SELECT id FROM owner_action').all()).toEqual([])
+  expect(db.prepare('SELECT action_id FROM sender_rule').all()).toEqual([])
+  expect(exportHistory(db, { includeReasons: true })).not.toContain(CANARY)
+  closeLedger()
+  db.close()
 })

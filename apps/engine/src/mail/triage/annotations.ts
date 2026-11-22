@@ -188,7 +188,12 @@ export function checkOwnerReason(reason?: string | null) {
 }
 
 export function ownerReasonRetry(db: Db, id: string, reason?: string | null, retry = false) {
-  if (!retry) checkOwnerReason(reason)
+  if (!retry) {
+    // An older snapshot may predate the action while a Client still has its retry.
+    if (db.prepare('SELECT 1 FROM triage_forgotten_action WHERE id = ?').get(id))
+      throw new SenderError('Owner action ID was already used')
+    checkOwnerReason(reason)
+  }
   const digest = privateDigest(db, 'owner reason', [id, reason || null])
   if (!retry) {
     db.prepare('INSERT INTO triage_request_fingerprint VALUES (?, ?)').run(id, digest)

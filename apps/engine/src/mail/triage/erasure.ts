@@ -65,6 +65,7 @@ function applyErasure(db: Db, { id, action_id, legacy_id }: Erasure) {
   const addTombstone = db.prepare('INSERT OR IGNORE INTO triage_forgotten VALUES (?)')
   addTombstone.run(id)
   addTombstone.run(legacy_id)
+  db.prepare('INSERT OR IGNORE INTO triage_forgotten_action VALUES (?)').run(action_id)
 
   // Batch decisions store one reason on the first event. Revisions also belong to that
   // shared reason, including revisions written after the snapshot being restored.
