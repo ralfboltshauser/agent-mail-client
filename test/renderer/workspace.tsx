@@ -28,12 +28,15 @@ export async function mount() {
       </StrictMode>,
     )
   })
-  expect(options()).toHaveLength(threadCount)
+  const mountedRows = options()
+  expect(mountedRows).toHaveLength(threadCount)
   expect(selected()).toBe(row(firstSubject))
   expect(reader().isConnected).toBe(true)
   // Fail visibly if a probe has stopped attaching to the real renderer.
-  expect(Object.keys(commitCounts().rows)).toHaveLength(threadCount)
-  for (const region of ['App', 'MailApp', 'AppSidebar', 'ThreadList', 'ThreadView']) {
+  expect(Object.keys(commitCounts().rows).sort()).toEqual(
+    mountedRows.map((option) => option.getAttribute('data-thread-id')).sort(),
+  )
+  for (const region of ['App', 'MailWorkspace', 'AppSidebar', 'ThreadList', 'ThreadView']) {
     expect(commits.get(region)).toBeGreaterThan(0)
   }
   commits.clear()

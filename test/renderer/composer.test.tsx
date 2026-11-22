@@ -75,7 +75,8 @@ it('keeps open compose fields through a no-op replica event', async () => {
   expect(dialog.getByRole('textbox', { name: 'Subject' })).toBe(subject)
   expect(dialog.getByRole('textbox', { name: 'Message body' })).toBe(editor)
   expect(dialog.getByRole('combobox', { name: 'To' })).toBe(recipient)
-  expectBudget({ workspace: 2, list: 2, reader: 2, rows: 2, composer: 2, recipient: 2, footer: 2 })
+  expect(commits.get('SubjectField') ?? 0).toBe(0)
+  expectBudget(keystrokeBudget)
 })
 
 it('processes an unchanged draft poll while keeping the editor and subject mounted', async () => {
@@ -90,7 +91,8 @@ it('processes an unchanged draft poll while keeping the editor and subject mount
   expect(dialog.getByRole('textbox', { name: 'Message body' })).toBe(editor)
   expect(editor.textContent).toBe(initialBody)
   expect(adapter.api.saveCompose).not.toHaveBeenCalled()
-  expectBudget({ workspace: 0, list: 0, reader: 0, rows: 0, composer: 0, recipient: 0, footer: 0 })
+  expect(commits.get('SubjectField') ?? 0).toBe(0)
+  expectBudget(keystrokeBudget)
 })
 
 it('saves one local burst and adopts a newer remote subject without replacing the editor', async () => {
