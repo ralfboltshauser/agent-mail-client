@@ -18,12 +18,14 @@ import { DraftError } from '../mail/drafts.ts'
 import type { Mutations } from '../mail/mutations.ts'
 import type { Outbox } from '../mail/outbox.ts'
 import { assertOwner, SenderError } from '../mail/senders/actions.ts'
+import { filterActions } from '../mail/triage/filtering.ts'
 import { buildMcpServer } from '../mcp/server.ts'
 import { VERSION } from '../version.ts'
 import { agentActionRoutes } from './agent-actions.ts'
 import { bucketRoutes } from './buckets.ts'
 import { composeRoutes } from './compose.ts'
 import { composerLinkRoutes } from './composer-link.ts'
+import { filteredRoutes } from './filtered.ts'
 import { type MailDeps, mailRoutes } from './mail.ts'
 import { mutationRoutes } from './mutations.ts'
 import { type OwnerActionHandler, ownerActionRoutes, senderRoutes } from './senders.ts'
@@ -183,7 +185,14 @@ export function createApp({
     v1.route('/', agentActionRoutes(db, mutations))
     if (mail) {
       v1.route('/senders', senderRoutes(mail.store, mutations))
-      v1.route('/owner-actions', ownerActionRoutes(mail.store, mutations, smartInbox?.ownerActions))
+      v1.route('/filtered', filteredRoutes(mail.store, mutations))
+      v1.route(
+        '/owner-actions',
+        ownerActionRoutes(mail.store, mutations, {
+          ...smartInbox?.ownerActions,
+          ...filterActions(mail.store, () => mutations.kick()),
+        }),
+      )
     }
   }
   const smartInboxOwner: MiddlewareHandler<AppEnv> = async (c, next) => {

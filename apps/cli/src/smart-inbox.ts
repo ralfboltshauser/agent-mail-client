@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto'
-import { writeFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { domainToASCII } from 'node:url'
 import {
+  type FilteredPage,
+  FilterReviewInput,
   type OwnerActionStatus,
   type SenderAvatarResults,
   SenderDecision,
@@ -14,8 +16,17 @@ import type { Command } from 'commander'
 import { authed } from './client.ts'
 import type { CliConfig } from './config.ts'
 
+async function readPrivateReason(path: string) {
+  if (path !== '-') return (await readFile(path, 'utf8')).trim()
+  let value = ''
+  process.stdin.setEncoding('utf8')
+  for await (const chunk of process.stdin) value += chunk
+  return value.trim()
+}
+
 export function printOwnerAction(action: OwnerActionStatus, undo = false) {
-  console.log(JSON.stringify(action, null, 2))
+  const { ownerReason: _ownerReason, ...status } = action
+  console.log(JSON.stringify(status, null, 2))
   const outcomes = undo ? [action.undo?.status] : [action.status, action.undo?.status ?? 'applied']
   if (outcomes.some((outcome) => !outcome || ['failed', 'partial', 'superseded'].includes(outcome)))
     process.exitCode = 1
@@ -69,6 +80,61 @@ export function registerSmartInboxCommands(
       }
     })
 
+  triage
+    .command('filtered')
+    .description('List Filtered Threads')
+    .option('--account <id>', 'filter by Account ID')
+    .option('--cursor <cursor>', 'continue from this cursor')
+    .option('--limit <n>', 'page size (1–100)')
+    .action(async ({ account, cursor, limit }) => {
+      const page = await authed(config())<FilteredPage>(
+        endpoint('/v1/filtered', { accountId: account, cursor, limit }),
+      )
+      console.log(JSON.stringify(page, null, 2))
+    })
+  for (const command of ['filter', 'restore'] as const) {
+    triage
+      .command(command)
+      .argument('<thread-id>')
+      .option('--revision <n>', 'expected Thread revision from triage queue or filtered list')
+      .option('--action-id <id>', 'reuse this action UUID on retry')
+      .option('--reason-file <path>', 'read the private reason from a file or - for stdin')
+      .action(async (threadId, { revision, actionId, reasonFile }) => {
+        const api = authed(config())
+        if (!revision && (command === 'filter' || actionId))
+          throw new Error('Supply the original --revision for this decision')
+        if (revision !== undefined && !/^\d+$/.test(revision))
+          throw new Error('Expected a nonnegative Thread revision')
+        const expectedRevision =
+          revision === undefined
+            ? (await api<FilteredPage>(endpoint('/v1/filtered', { threadId, limit: 1 }))).threads[0]
+                ?.revision
+            : Number(revision)
+        if (expectedRevision === undefined) throw new Error('Thread is unavailable in Filtered')
+        const body = FilterReviewInput.parse({
+          threadId,
+          expectedRevision,
+          clientActionId: actionId ?? randomUUID(),
+          reason: reasonFile ? await readPrivateReason(reasonFile) : undefined,
+          decision: command === 'filter' ? 'filter.filtered' : 'filter.keep',
+          source: 'cli',
+        })
+        printOwnerAction(
+          await api<OwnerActionStatus>('/v1/filtered/decisions', { method: 'POST', body }),
+        )
+      })
+  }
+  triage
+    .command('undo')
+    .argument('<action-id>')
+    .action(async (id) => {
+      const result = await authed(config())<OwnerActionStatus>(
+        `/v1/owner-actions/${encodeURIComponent(id)}/undo`,
+        { method: 'POST' },
+      )
+      printOwnerAction(result, true)
+    })
+
   const senders = program.command('senders').description('Review Account Sender rules')
   senders
     .command('list')
@@ -80,7 +146,10 @@ export function registerSmartInboxCommands(
     .action(async ({ account, status, limit, cursor, json }) => {
       const query = SenderListQuery.parse({ accountId: account, status, limit, cursor })
       const page = await authed(config())<SenderList>(endpoint('/v1/senders', query))
-      if (json) console.log(JSON.stringify(page, null, 2))
+      if (json)
+        console.log(
+          JSON.stringify({ ...page, rows: page.rows.map(({ reason: _, ...row }) => row) }, null, 2),
+        )
       else {
         for (const row of page.rows) {
           console.log(`${row.accountId}\t${row.address}\t${row.status}\t${row.revision}`)
@@ -96,8 +165,9 @@ export function registerSmartInboxCommands(
       .argument('<address>')
       .requiredOption('--account <id>', 'exact Account ID')
       .option('--revision <n>', 'expected Sender rule revision')
+      .option('--reason-file <path>', 'read the private reason from a file or - for stdin')
       .option('--action-id <id>', 'reuse this action UUID on retry')
-      .action(async (address: string, { account, revision, actionId }) => {
+      .action(async (address: string, { account, revision, actionId, reasonFile }) => {
         const api = authed(config())
         if (revision !== undefined && !/^\d+$/.test(revision))
           throw new Error('Expected a nonnegative Sender rule revision')
@@ -110,6 +180,7 @@ export function registerSmartInboxCommands(
           expectedRevision:
             revision === undefined ? await senderRevision(api, account, address) : Number(revision),
           clientActionId: actionId ?? randomUUID(),
+          reason: reasonFile ? await readPrivateReason(reasonFile) : undefined,
         })
         const result = await api<OwnerActionStatus>('/v1/senders/decisions', {
           method: 'POST',

@@ -364,7 +364,16 @@ export class ReviewStore {
       this.#update(action, { status: 'unconfirmed', error: null }, true)
       const smart = await this.#ownerApi()
       const result = await submit(smart, action)
-      const updated = this.#update(action, { status: result.status, error: result.error })
+      const decision = action.decision
+      const saved =
+        decision.kind === 'filter' || decision.kind === 'sender'
+          ? ({ ...decision, input: { ...decision.input, reason: undefined } } as Decision)
+          : decision
+      const updated = this.#update(action, {
+        decision: saved,
+        status: result.status,
+        error: result.error,
+      })
       this.#announce(updated, true)
       if (result.status === 'applied' || result.status === 'pending') {
         await this.#advance(
@@ -394,12 +403,57 @@ export class ReviewStore {
     }
     this.#working = true
     try {
+      if (action.privateReasonDraft) {
+        const smart = await this.#ownerApi()
+        const receipt = await smart.ownerAction(action.id)
+        const accepted = this.#update(action, {
+          privateReasonDraft: undefined,
+          status: receipt.status,
+          error: receipt.error,
+        })
+        this.#announce(accepted)
+        if (receipt.status === 'pending' || receipt.status === 'applied')
+          await this.#advance(
+            accepted,
+            action.card.kind === 'sender' && action.decision.kind !== 'sender',
+          )
+        return
+      }
       await this.#submit(action)
     } catch (error) {
+      if (action.privateReasonDraft && reviewError(error).includes('Owner action unavailable')) {
+        this.#announce(
+          this.#update(action, {
+            privateReasonDraft: undefined,
+            status: 'rejected',
+            error:
+              'The Engine did not accept this decision. Review the card to enter a new reason.',
+          }),
+        )
+        return
+      }
       this.#announce(this.#update(action, { error: reviewError(error) }))
     } finally {
       this.#working = false
     }
+  }
+
+  async loadReason(action: ReviewAction) {
+    const smart = await this.#ownerApi()
+    const result = await smart.ownerAction(action.id, true)
+    return { reason: result.ownerReason ?? '', revision: result.reasonRevision ?? null }
+  }
+
+  async editReason(action: ReviewAction, reason: string, expectedReasonRevision: string | null) {
+    const smart = await this.#ownerApi()
+    if (!smart.editOwnerReason) throw new Error('Reason editing is unavailable')
+    const result = await smart.editOwnerReason(action.id, {
+      editId: crypto.randomUUID(),
+      expectedReasonRevision,
+      reason: reason || null,
+    })
+    const updated = this.#history.find(({ id }) => id === action.id)
+    if (updated) this.#update(updated, { ownerReason: result.reason })
   }
 
   async adoptDestination(action: ReviewAction, providerId: string) {
@@ -407,7 +461,11 @@ export class ReviewStore {
     this.#working = true
     try {
       const smart = await this.#ownerApi()
-      await smart.adoptScreenedDestination({ accountId: action.accountId, providerId })
+      await smart.adoptScreenedDestination({
+        accountId: action.accountId,
+        providerId,
+        ...(action.decision.kind === 'filter' ? { destination: 'filtered' } : {}),
+      })
       this.#announce(this.#update(action, { status: 'pending', error: null }))
     } catch (error) {
       this.#publish({ notice: reviewError(error) })

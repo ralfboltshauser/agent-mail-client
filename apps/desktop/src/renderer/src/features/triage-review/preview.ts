@@ -15,7 +15,7 @@ export async function loadPreview(
             (entry) =>
               entry.batch === batch &&
               cardKey(entry.card) === cardKey(id) &&
-              ['organise', 'bucket', 'reply'].includes(entry.decision.kind) &&
+              ['organise', 'bucket', 'reply', 'filter'].includes(entry.decision.kind) &&
               ['pending', 'applied'].includes(entry.status) &&
               entry.undo?.status !== 'applied',
           )

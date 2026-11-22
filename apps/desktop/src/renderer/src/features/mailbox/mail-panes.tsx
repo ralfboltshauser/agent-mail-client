@@ -241,6 +241,11 @@ export const MailReader = memo(function MailReader({
           onRetry={refresh}
           snoozeEnabled={snoozeEnabled}
           labelNames={labelNames}
+          filtered={
+            !!labels?.some(
+              (label) => label.managed === 'filtered' && data?.thread.labelIds.includes(label.id),
+            )
+          }
           scrollRef={scrollRef}
         />
       </div>

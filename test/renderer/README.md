@@ -141,3 +141,5 @@ Opening an already visible Thread adds zero avatar requests.
 
 The scenario checks the same 32×32 slot before and after the logo arrives,
 plus DOM identity for the rows, selection, and reader.
+
+The triage harness also covers Filter out, exact Undo, the Filtered count and restore action, and inline reasons for Filter out and Block sender. Typing a reason has a budget of zero workspace, list, reader, and review card commits.

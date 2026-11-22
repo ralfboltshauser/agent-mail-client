@@ -3,6 +3,7 @@ import {
   hasScope,
   type OrganiseAction,
   type Scope,
+  SubmitTriagePrediction,
   TRIAGE_RECENT_WINDOW_MS,
   TriageBucketResult,
   UntriagedLimit,
@@ -25,9 +26,14 @@ import type { Mutations } from '../mail/mutations.ts'
 import type { MailQueries } from '../mail/queries.ts'
 import { suggestSenderRule } from '../mail/senders/suggestions.ts'
 import type { MailStore } from '../mail/store.ts'
-import { correctionExamples } from '../mail/triage/corrections.ts'
 import { threadInput } from '../mail/triage/input.ts'
-import { hasTriageLease, setLegacyUntriagedBucket, setModelBucket } from '../mail/triage/model.ts'
+import {
+  hasTriageLease,
+  prepareContext,
+  setLegacyUntriagedBucket,
+  setModelBucket,
+  submitPrediction,
+} from '../mail/triage/model.ts'
 import { VERSION } from '../version.ts'
 
 export interface McpDeps {
@@ -152,17 +158,32 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
           const result = onlyUntriaged
             ? setLegacyUntriagedBucket(deps.store, agent, input)
             : setBucketAsAgent(deps.store, agent, input)
-          return 'error' in result && result.error
+          return 'error' in result && typeof result.error === 'string'
             ? failure(result.error)
             : json({ updated: result.updated })
         }
         const result = setModelBucket(deps.store, agent, input, triage)
-        return result.error
+        return 'error' in result && typeof result.error === 'string'
           ? failure(result.error)
           : json({
               updated: result.updated,
               ...('reason' in result && result.reason ? { reason: result.reason } : {}),
             })
+      },
+    )
+  }
+
+  if (agent && can('organize') && hasTriageLease(db, agent, 'organize')) {
+    server.registerTool(
+      'submit_triage_prediction',
+      {
+        description:
+          'Submit independent Bucket and Filter assessments for one captured triage input.',
+        inputSchema: SubmitTriagePrediction,
+      },
+      async (request) => {
+        const result = submitPrediction(deps.store, agent, request)
+        return 'error' in result && result.error ? failure(result.error) : json(result)
       },
     )
   }
@@ -175,6 +196,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
         inputSchema: {
           limit: UntriagedLimit,
           reviewContext: z.boolean().optional(),
+          decisionLogVersion: z.number().int().optional(),
           account_id: z.string().optional(),
           recent: z
             .boolean()
@@ -183,7 +205,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
         },
         annotations: { readOnlyHint: true },
       },
-      async ({ limit, account_id, recent, reviewContext }) => {
+      async ({ limit, account_id, recent, reviewContext, decisionLogVersion }) => {
         const target = account_id ?? accountId
         if (!withinAccount(principal, target)) return failure('Account unavailable to this Agent')
         const list = () =>
@@ -199,13 +221,21 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
         if (!target || !agent || !hasTriageLease(db, agent, 'read'))
           return failure('A live Account-scoped triage lease is required')
         return json(
-          transaction(db, () => ({
-            threads: list().map((thread) => ({
-              ...thread,
-              inputRevision: threadInput(db, thread.id)?.modseq,
-            })),
-            examples: correctionExamples(db, target),
-          })),
+          transaction(db, () => {
+            const threads = list()
+            if (decisionLogVersion === 1) {
+              const context = prepareContext(db, agent, target, threads)
+              const available = new Set(context.refs.map(({ threadId }) => threadId))
+              return { threads: threads.filter(({ id }) => available.has(id)), ...context }
+            }
+            return {
+              threads: threads.map((thread) => ({
+                ...thread,
+                inputRevision: threadInput(db, thread.id)?.modseq,
+              })),
+              examples: [],
+            }
+          }),
         )
       },
     )

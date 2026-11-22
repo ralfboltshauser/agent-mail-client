@@ -1,3 +1,4 @@
+import { SubmitTriagePrediction } from '@amc/protocol'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -17,10 +18,14 @@ function fixture({
   recent = false,
   busy = false,
   modern = false,
+  decisionLog = false,
 } = {}) {
   const setBucket = vi.fn(() =>
     modern ? { updated: false, reason: 'The Inbox input changed' } : { updated: true },
   )
+  const submit = vi.fn()
+  const runId = 'f6c88c1e-10ed-47b7-84ed-ef7b28b88136'
+  const ref = { threadId: 'a:t1', messageId: 'a:m1', arrivalKey: 'a:m1', inputRevision: 19 }
   const getThread = vi.fn(() => ({ id: 'a:t1' }))
   const revoke = vi.fn()
   const list = vi.fn()
@@ -90,11 +95,42 @@ function fixture({
           limit: z.number(),
           recent: z.boolean().optional(),
           reviewContext: z.boolean(),
+          decisionLogVersion: z.number().optional(),
         },
       },
       async (args) => {
         expect(args.recent).toBe(recent ? true : undefined)
         expect(args.reviewContext).toBe(true)
+        if (decisionLog) {
+          expect(args.decisionLogVersion).toBe(1)
+          return json({
+            threads: [{ id: 'a:t1', subject: 'Fixture' }],
+            decisionLogVersion: 1,
+            receipt: 'opaque',
+            runId,
+            refs: [{ ...ref, exampleIds: ['fixture-event'] }],
+            examples: {
+              targets: { 'a:t1': ['fixture-event'] },
+              examples: [
+                {
+                  id: 'fixture-event',
+                  axis: 'filter',
+                  labelId: 'filter.keep',
+                  features: {
+                    version: 1,
+                    senderHash: null,
+                    senderKeyVersion: null,
+                    domain: 'example.test',
+                    listId: null,
+                    hasListUnsubscribe: null,
+                    category: null,
+                  },
+                  ignoredPrivateField: 'Synthetic private canary',
+                },
+              ],
+            },
+          })
+        }
         if (modern)
           return json({
             threads: [{ id: 'a:t1', subject: 'Fixture', inputRevision: 19 }],
@@ -102,6 +138,7 @@ function fixture({
               {
                 previous: 'Action',
                 chosen: 'Later',
+                ownerReason: 'Synthetic owner preference',
                 context: { subject: 'Synthetic example', snippet: '' },
               },
             ],
@@ -132,11 +169,28 @@ function fixture({
         return json(setBucket())
       },
     )
+    if (decisionLog) {
+      server.registerTool(
+        'submit_triage_prediction',
+        { inputSchema: SubmitTriagePrediction },
+        async (input) => {
+          expect(input).toMatchObject({ receipt: 'opaque', runId, input: ref })
+          submit(input)
+          return json({
+            runId,
+            outcomes: [
+              { axis: 'bucket', eventId: 'fixture-bucket', projection: 'applied' },
+              { axis: 'filter', eventId: 'fixture-filter', projection: 'suggested' },
+            ],
+          })
+        },
+      )
+    }
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true })
     await server.connect(transport)
     return transport.handleRequest(req)
   })
-  return { getThread, setBucket, revoke, list, mint }
+  return { getThread, setBucket, revoke, list, mint, submit }
 }
 
 const harness: TriageHarness = async ({ url, bearer, allowReads }) => {
@@ -192,17 +246,58 @@ describe('amc triage', () => {
     },
   )
 
-  it('includes owner examples in the prompt and submits the captured revision and confidence', async () => {
+  it('ignores legacy private and copied examples while submitting Bucket metadata', async () => {
     fixture({ modern: true })
     const results = await runTriage(config, 'a', false, signal(), async ({ prompt }) => {
-      expect(prompt).toContain('Synthetic example')
-      expect(prompt).toContain('"chosen":"Later"')
+      expect(prompt).not.toContain('Synthetic example')
+      expect(prompt).not.toContain('Synthetic owner preference')
+      expect(prompt).not.toContain('"chosen":"Later"')
       return { decisions: [{ ...decision, confidence: 'low', inputRevision: 99 }] }
     })
     expect(results).toEqual([
       { ...decision, confidence: 'low', updated: false, skipped: 'The Inbox input changed' },
     ])
   })
+
+  it.each([true, false])(
+    'uses the advertised decision log contract and separate axes (dry-run %s)',
+    async (dryRun) => {
+      const { submit, setBucket, revoke } = fixture({ decisionLog: true, dryRun })
+      const outputs = {
+        bucket: {
+          labelId: 'bucket.reply',
+          confidence: 'low',
+          matchedRuleRevisionId: null,
+          displayReason: 'Synthetic display reason',
+        },
+        filter: { labelId: 'filter.filtered', confidence: 'high', matchedRuleRevisionId: null },
+        protection: 'billing',
+      }
+      const result = await runTriage(config, 'a', dryRun, signal(), async (request) => {
+        expect(request.prompt).toContain('"fixture-event"')
+        expect(request.prompt).toContain('"filter.keep"')
+        expect(request.prompt).not.toContain('Synthetic private canary')
+        expect(request.prompt).not.toContain('opaque')
+        await harness(request)
+        request.onModel?.('fixture-model')
+        return { decisions: [{ threadId: 'a:t1', ...outputs }] }
+      })
+      expect(result).toMatchObject([{ threadId: 'a:t1', ...outputs }])
+      expect(setBucket).not.toHaveBeenCalled()
+      expect(submit).toHaveBeenCalledTimes(dryRun ? 0 : 1)
+      if (!dryRun)
+        expect(submit).toHaveBeenCalledWith(
+          expect.objectContaining({
+            outputs,
+            producer: expect.objectContaining({
+              modelId: 'fixture-model',
+              promptVersion: expect.stringMatching(/^[a-f0-9]{64}$/),
+            }),
+          }),
+        )
+      expect(revoke).toHaveBeenCalledOnce()
+    },
+  )
 
   it('requests recent deliveries when opted in', async () => {
     fixture({ recent: true })

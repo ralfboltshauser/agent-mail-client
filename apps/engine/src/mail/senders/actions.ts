@@ -11,6 +11,7 @@ import {
 import type { Principal } from '../../auth/tokens.ts'
 import { type Db, transaction } from '../../db/database.ts'
 import type { MailStore } from '../store.ts'
+import { annotate, annotateUndo, ownerReasonRetry, readOwnerReason } from '../triage/annotations.ts'
 import {
   enqueueScreening,
   isOwnerAddress,
@@ -27,22 +28,22 @@ export class SenderError extends Error {
   }
 }
 
-export function liveOwner(db: Db, tokenId: string): boolean {
+export function liveOwner(db: Db, tokenId: string, scope: 'admin' | 'organize' = 'admin'): boolean {
   return !!db
     .prepare(`
     SELECT 1 FROM token WHERE id = ? AND kind IN ('desktop', 'cli')
     AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
     AND account_id IS NULL AND thread_id IS NULL
-    AND 'admin' IN (SELECT value FROM json_each(scopes))
+    AND (? IN (SELECT value FROM json_each(scopes)) OR 'admin' IN (SELECT value FROM json_each(scopes)))
   `)
-    .get(tokenId, Date.now())
+    .get(tokenId, Date.now(), scope)
 }
 
-export function assertOwner(db: Db, principal: Principal) {
+export function assertOwner(db: Db, principal: Principal, scope: 'admin' | 'organize' = 'admin') {
   if (
     !['desktop', 'cli'].includes(principal.kind) ||
-    !hasScope(principal.scopes, 'admin') ||
-    !liveOwner(db, principal.tokenId)
+    !hasScope(principal.scopes, scope) ||
+    !liveOwner(db, principal.tokenId, scope)
   )
     throw new SenderError('This action requires a paired owner Client', 403)
 }
@@ -68,6 +69,7 @@ interface DecisionRecord {
   decision: SenderDecision['decision']
   previous: Rule | undefined
   revision: number
+  source?: SenderDecision['source']
 }
 
 function action(db: Db, id: string): Action | undefined {
@@ -116,6 +118,37 @@ export function senderActionStatus(db: Db, id: string): OwnerActionStatus {
     throw new SenderError('Owner action unavailable', 404)
   const request = JSON.parse(row.request) as DecisionRecord
   const current = rule(db, row.account_id, request.address)
+  return workActionStatus(db, row, {
+    revision: request.revision === undefined ? undefined : (current?.revision ?? request.revision),
+    superseded: current?.action_id !== id,
+    destinationError:
+      current?.action_id === id && current.decision === 'block'
+        ? String(
+            db
+              .prepare(
+                "SELECT error FROM screened_destination WHERE account_id = ? AND state = 'repair'",
+              )
+              .get(row.account_id)?.error ?? '',
+          ) || null
+        : null,
+  })
+}
+
+export function workActionStatus(
+  db: Db,
+  row: Pick<Action, 'id' | 'account_id' | 'kind' | 'undo_requested_at'>,
+  {
+    revision,
+    superseded,
+    destinationError,
+  }: {
+    revision?: number
+    superseded?: boolean
+    destinationError?: string | null
+  } = {},
+): OwnerActionStatus {
+  const { id } = row
+  const { reason, reasonRevision } = readOwnerReason(db, id)
   const work = db
     .prepare(`
     SELECT w.mutation_id, coalesce(m.status, w.status) AS status,
@@ -139,16 +172,7 @@ export function senderActionStatus(db: Db, id: string): OwnerActionStatus {
     undo_superseded: number
     undo_applied: number
   }[]
-  const destinationError =
-    current?.action_id === id && current.decision === 'block'
-      ? db
-          .prepare(
-            "SELECT error FROM screened_destination WHERE account_id = ? AND state = 'repair'",
-          )
-          .get(row.account_id)?.error
-      : null
-  const error =
-    work.find((item) => item.error)?.error ?? (destinationError ? String(destinationError) : null)
+  const error = work.find((item) => item.error)?.error ?? destinationError ?? null
   const status = aggregate(
     work.map((item) =>
       item.status === 'applied' && item.superseded
@@ -176,8 +200,10 @@ export function senderActionStatus(db: Db, id: string): OwnerActionStatus {
     actionId: id,
     accountId: row.account_id,
     kind: row.kind,
-    ...(request.revision === undefined ? {} : { revision: current?.revision ?? request.revision }),
-    status: current?.action_id !== id && !work.length ? 'superseded' : status,
+    ...(revision === undefined ? {} : { revision }),
+    ...(reason ? { ownerReason: reason } : {}),
+    reasonRevision,
+    status: superseded && !work.length ? 'superseded' : status,
     error,
     mutationIds: work.flatMap(({ mutation_id }) => (mutation_id ? [mutation_id] : [])),
     undo:
@@ -207,9 +233,11 @@ export function decideSender(store: MailStore, principal: Principal, input: Send
         existing.kind !== 'sender:decision' ||
         request.address !== address ||
         request.decision !== decision ||
-        request.revision !== expectedRevision + 1
+        request.revision !== expectedRevision + 1 ||
+        request.source !== input.source
       )
         throw new SenderError('Client action ID is already in use')
+      ownerReasonRetry(db, clientActionId, input.reason, true)
       return senderActionStatus(db, clientActionId)
     }
     const account = db.prepare('SELECT kind, cursor FROM account WHERE id = ?').get(accountId)
@@ -233,9 +261,34 @@ export function decideSender(store: MailStore, principal: Principal, input: Send
       accountId,
       principal.tokenId,
       'sender:decision',
-      JSON.stringify({ address, decision, previous, revision }),
+      JSON.stringify({
+        address,
+        decision,
+        previous,
+        revision,
+        source: input.source,
+      }),
       Date.now(),
     )
+    const sample = db
+      .prepare(`
+      SELECT m.id, m.thread_id FROM message m JOIN sender_index i ON i.message_id = m.id
+      WHERE i.account_id = ? AND i.address = ? AND i.in_inbox = 1
+      ORDER BY coalesce(m.delivered_at, m.sent_at) DESC, m.id DESC LIMIT 1
+    `)
+      .get(accountId, address)
+    ownerReasonRetry(db, clientActionId, input.reason)
+    annotate(db, {
+      axis: 'sender',
+      actionId: clientActionId,
+      accountId,
+      sender: address,
+      mid: sample?.id ? String(sample.id) : undefined,
+      threadId: sample?.thread_id ? String(sample.thread_id) : undefined,
+      label: `sender.${decision}`,
+      source: input.source?.replace('-', '_') ?? 'sender_review',
+      reason: input.reason,
+    })
     saveRule(
       store,
       accountId,
@@ -265,6 +318,7 @@ export function undoSender(store: MailStore, principal: Principal, id: string) {
       principal.tokenId,
       id,
     )
+    annotateUndo(db, id)
     if (current?.action_id === id) {
       const restored = randomUUID()
       db.prepare(
@@ -326,7 +380,7 @@ export function listSenders(db: Db, input: SenderListQuery): SenderList {
       UNION SELECT account_id, address FROM sender_suggestion
     ), senders AS (
       SELECT i.account_id AS accountId, i.address, coalesce(r.revision, 0) AS revision,
-        ${senderStatusSql} AS status
+        ${senderStatusSql} AS status, r.action_id
       FROM identities i LEFT JOIN sender_rule r USING (account_id, address)
       WHERE (?1 IS NULL OR i.account_id = ?1) AND (i.account_id, i.address) > (?2, ?3)
     )
@@ -339,14 +393,22 @@ export function listSenders(db: Db, input: SenderListQuery): SenderList {
       3: boundary[1],
       4: input.status ?? null,
       5: input.limit + 1,
-    }) as { accountId: string; address: string; revision: number; status: SenderStatus }[]
+    }) as {
+    accountId: string
+    address: string
+    revision: number
+    status: SenderStatus
+    action_id: string | null
+  }[]
   const page = rows.slice(0, input.limit)
   const last = page.at(-1)
   return {
-    rows: page.map((row) => ({
-      ...row,
-      suggestions: senderSuggestions(db, row.accountId, row.address),
-    })),
+    rows: page.map(({ action_id, ...row }) => {
+      return {
+        ...row,
+        suggestions: senderSuggestions(db, row.accountId, row.address),
+      }
+    }),
     cursor:
       last && rows.length > input.limit ? JSON.stringify([last.accountId, last.address]) : null,
   }

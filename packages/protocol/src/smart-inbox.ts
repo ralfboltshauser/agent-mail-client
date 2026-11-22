@@ -1,6 +1,8 @@
 import { z } from 'zod'
+import { FilterDecisionLabel } from './decision-labels.ts'
 
 export const SCREENED_OUT_LABEL = 'Screened out'
+export const FILTERED_LABEL = 'Filtered'
 export const SenderStatus = z.enum(['unresolved', 'new', 'known', 'blocked'])
 export type SenderStatus = z.infer<typeof SenderStatus>
 export const ScreeningDisposition = z.enum(['pending', 'screened', 'failed', 'returned'])
@@ -14,16 +16,58 @@ export const InboxSender = z.object({
 export type InboxSender = z.infer<typeof InboxSender>
 
 const id = z.string().min(1).max(512)
+export const OwnerReason = z
+  .string()
+  .trim()
+  .max(500)
+  .regex(/^[^\r\n]*$/)
+export const OwnerActionReasonInput = z.object({
+  editId: z.uuid(),
+  expectedReasonRevision: id.nullable(),
+  reason: OwnerReason.min(1).nullable(),
+})
+export type OwnerActionReasonInput = z.infer<typeof OwnerActionReasonInput>
+export const FilterReviewInput = z.object({
+  threadId: id,
+  decision: FilterDecisionLabel,
+  messageIds: z.array(id).min(1).max(100).optional(),
+  predictionId: id.optional(),
+  expectedRevision: z.number().int().nonnegative(),
+  clientActionId: z.uuid(),
+  reason: OwnerReason.optional(),
+  source: z.enum(['triage-key', 'thread-action', 'cli']).optional(),
+})
+export type FilterReviewInput = z.infer<typeof FilterReviewInput>
+export interface FilteredPage {
+  threads: {
+    id: string
+    accountId: string
+    revision: number
+    labelId: 'filter.filtered'
+    placements: (
+      | { messageId: string; origin: 'owner'; actionId: string; source: string; status: string }
+      | { messageId: string; origin: 'unknown' }
+    )[]
+  }[]
+  cursor: string | null
+}
+
 export const SenderDecision = z.object({
   accountId: id,
   address: id,
   decision: z.enum(['accept', 'block', 'clear']),
   expectedRevision: z.number().int().nonnegative(),
   clientActionId: z.uuid(),
+  reason: OwnerReason.optional(),
+  source: z.enum(['triage-key', 'thread-action']).optional(),
 })
 export type SenderDecision = z.infer<typeof SenderDecision>
 
-export const AdoptScreenedDestination = z.object({ accountId: id, providerId: id })
+export const AdoptScreenedDestination = z.object({
+  accountId: id,
+  providerId: id,
+  destination: z.literal('filtered').optional(),
+})
 export type AdoptScreenedDestination = z.infer<typeof AdoptScreenedDestination>
 export const SenderListQuery = z.object({
   accountId: id.optional(),
@@ -41,7 +85,7 @@ export interface SenderSuggestion {
   reason: string
 }
 export interface SenderList {
-  rows: (Omit<InboxSender, 'messageId'> & { suggestions: SenderSuggestion[] })[]
+  rows: (Omit<InboxSender, 'messageId'> & { suggestions: SenderSuggestion[]; reason?: string })[]
   cursor: string | null
 }
 
@@ -52,6 +96,9 @@ export interface OwnerActionStatus {
   kind: string
   status: OwnerActionState
   revision?: number
+  ownerReason?: string | null
+  reasonRevision?: string | null
+  acceptedTargets?: string[]
   error: string | null
   mutationIds: string[]
   undo: { status: OwnerActionState; error: string | null; mutationIds: string[] } | null
@@ -111,6 +158,9 @@ export interface TriageQueuePage {
     revision: number
     threadRevision: number
     reason: string
+    suggestFilter?: true
+    predictionId?: string
+    bucketPredictionId?: string
     suggestions?: SenderSuggestion[]
   }[]
   cursor: string | null

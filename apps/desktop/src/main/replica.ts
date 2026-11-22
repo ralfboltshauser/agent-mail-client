@@ -454,7 +454,17 @@ export class Replica {
       GROUP BY bucket
     `)
       .all(accountId) as { bucket: Bucket; n: number }[]
+    const filtered = this.db
+      .prepare(`
+      SELECT l.id, (SELECT count(*) FROM effective_thread t
+        WHERE t.account_id = l.account_id AND l.id IN (SELECT value FROM json_each(t.label_ids))) AS n
+      FROM label l WHERE (?1 IS NULL OR l.account_id = ?1) AND json_extract(l.data, '$.managed') = 'filtered'
+    `)
+      .all(accountId) as { id: string; n: number }[]
     return {
+      ...(filtered.length
+        ? { filteredByLabel: Object.fromEntries(filtered.map(({ id, n }) => [id, n])) }
+        : {}),
       buckets: Object.fromEntries(buckets.map(({ bucket, n }) => [bucket, n])),
       inbox: row.inbox ?? 0,
       inboxUnread: row.inbox_unread ?? 0,

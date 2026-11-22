@@ -21,7 +21,17 @@ export function loadReview(scope: string): SavedReview {
 }
 
 export function saveReview(saved: SavedReview) {
-  localStorage.setItem(storageKey, JSON.stringify(saved))
+  const history = saved.history.map(({ ownerReason: _, ...action }) => {
+    const { decision } = action
+    if (decision.kind !== 'filter' && decision.kind !== 'sender') return action
+    const { reason, ...input } = decision.input
+    return {
+      ...action,
+      decision: { ...decision, input },
+      ...(reason && action.status === 'unconfirmed' ? { privateReasonDraft: true } : {}),
+    }
+  })
+  localStorage.setItem(storageKey, JSON.stringify({ ...saved, history }))
 }
 
 export function statusLabel(status: ActionStatus) {
@@ -59,6 +69,9 @@ export async function submit(api: SmartInboxApi & ReviewApi, action: ReviewActio
   switch (decision.kind) {
     case 'sender':
       return api.decideSender(decision.input)
+    case 'filter':
+      if (!api.reviewFilter) throw new Error('Filter out is unavailable')
+      return api.reviewFilter(decision.input)
     case 'bucket':
       return api.reviewBucket(decision.input)
     case 'organise':

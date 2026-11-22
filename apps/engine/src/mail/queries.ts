@@ -216,8 +216,10 @@ export class MailQueries {
   labels(accountId?: string): Label[] {
     const rows = this.db
       .prepare(
-        `SELECT id, account_id, provider_id, name, kind, color FROM label
-         WHERE (?1 IS NULL OR account_id = ?1) ORDER BY kind, name COLLATE NOCASE`,
+        `SELECT l.id, l.account_id, l.provider_id, l.name, l.kind, l.color,
+           EXISTS (SELECT 1 FROM filtered_destination d WHERE d.account_id = l.account_id
+             AND d.provider_id = l.provider_id) AS filtered
+         FROM label l WHERE (?1 IS NULL OR l.account_id = ?1) ORDER BY l.kind, l.name COLLATE NOCASE`,
       )
       .all(accountId ?? null) as {
       id: string
@@ -226,6 +228,7 @@ export class MailQueries {
       name: string
       kind: 'system' | 'user'
       color: string | null
+      filtered: number
     }[]
     return rows.map((r) => ({
       id: r.id,
@@ -234,6 +237,7 @@ export class MailQueries {
       name: r.name,
       kind: r.kind,
       color: r.color,
+      ...(r.filtered ? { managed: 'filtered' as const } : {}),
     }))
   }
 
@@ -254,7 +258,8 @@ export class MailQueries {
     if (query.untriaged) where.push('t.bucket IS NULL')
     if (query.triageInput)
       where.push(`
-      ${latestInboxMessageSql} IS NOT NULL AND NOT EXISTS (
+      ${latestInboxMessageSql} IS NOT NULL AND t.filter_suggestion_message_id IS NOT ${latestInboxMessageSql}
+      AND NOT EXISTS (
         SELECT 1 FROM owner_handled h WHERE h.thread_id = t.id AND h.message_id = ${latestInboxMessageSql}
       )
     `)

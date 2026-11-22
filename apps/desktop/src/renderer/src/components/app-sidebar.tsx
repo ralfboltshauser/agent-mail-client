@@ -1,4 +1,4 @@
-import { type AccountSummary, BUCKETS, type Label } from '@amc/protocol'
+import { type AccountSummary, BUCKETS, type Label, SCREENED_OUT_LABEL } from '@amc/protocol'
 import {
   Activity,
   Archive,
@@ -159,9 +159,10 @@ export function AppSidebar({
       .catch(() => toast.error('Could not start triage.'))
   }
   const current = accounts.find((a) => a.id === accountId) ?? null
-  const folderLabels = navigableLabels(labels, accounts).sort((a, b) =>
-    a.name.localeCompare(b.name),
-  )
+  const folderLabels = navigableLabels(labels, accounts).sort((a, b) => {
+    const name = (label: Label) => (label.managed === 'filtered' ? SCREENED_OUT_LABEL : label.name)
+    return name(a).localeCompare(name(b)) || Number(!!a.managed) - Number(!!b.managed)
+  })
 
   if (!open) return null
   return (
@@ -314,7 +315,12 @@ export function AppSidebar({
                     <SidebarMenuItem key={label.id}>
                       <SidebarMenuButton isActive={sameView(view, v)} onClick={() => onView(v)}>
                         <Tag style={label.color ? { color: label.color } : undefined} />
-                        <span className="truncate">{label.name}</span>
+                        <span className="truncate">
+                          {label.managed === 'filtered' ? 'Filtered' : label.name}
+                        </span>
+                        {label.managed === 'filtered' && (
+                          <FilteredCount accountId={accountId} labelId={label.id} />
+                        )}
                       </SidebarMenuButton>
                     </SidebarMenuItem>
                   )
@@ -372,4 +378,12 @@ function BucketCountBadge({
 }) {
   const count = useReplicaSelector(countsQuery(accountId), ({ data }) => data?.buckets[bucket])
   return <SidebarMenuBadge className="tabular-nums">{count?.toLocaleString()}</SidebarMenuBadge>
+}
+
+function FilteredCount({ accountId, labelId }: { accountId: string | null; labelId: string }) {
+  const count = useReplicaSelector(
+    countsQuery(accountId),
+    ({ data }) => data?.filteredByLabel?.[labelId] ?? 0,
+  )
+  return <span className="ml-auto tabular-nums text-muted-foreground">{count}</span>
 }

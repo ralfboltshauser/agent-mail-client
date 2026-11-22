@@ -23,6 +23,9 @@ interface QueueRow {
   ruleRevision: number
   reason: string
   at: number
+  suggestFilter: number
+  predictionId: string | null
+  bucketPredictionId: string | null
 }
 
 export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
@@ -57,6 +60,8 @@ export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
       WITH inbox AS MATERIALIZED (
         SELECT t.id, t.account_id, t.modseq, t.last_message_at, t.bucket_confidence,
           t.bucket_input_message_id, t.bucket_reason,
+          (SELECT id FROM triage_event p WHERE p.id = t.bucket_producer) AS bucket_prediction_id,
+          t.filter_suggestion_message_id, t.filter_suggestion_event_id, t.bucket, ${latestInboxMessageSql} AS latest,
           (SELECT json_object('id', m.id, 'address', i.address, 'revision', coalesce(r.revision, 0),
              'status', ${senderStatusSql})
            FROM message m JOIN sender_index i ON i.message_id = m.id
@@ -76,15 +81,21 @@ export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
       ), cards AS (
         SELECT 0 AS tier, id AS threadId, modseq AS threadRevision, account_id AS accountId,
           sender ->> 'id' AS messageId, sender ->> 'address' AS address,
-          sender ->> 'revision' AS ruleRevision, 'New sender' AS reason, last_message_at AS at
+          sender ->> 'revision' AS ruleRevision, 'New sender' AS reason, last_message_at AS at,
+          (filter_suggestion_message_id IS latest AND latest IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM owner_handled h WHERE h.thread_id = id AND h.message_id = latest)) AS suggestFilter, filter_suggestion_event_id AS predictionId, NULL AS bucketPredictionId
         FROM new_senders WHERE sender_rank = 1
         UNION ALL
-        SELECT 1, t.id, t.modseq, t.account_id, t.bucket_input_message_id, null, 0,
-          t.bucket_reason, t.last_message_at
+        SELECT 1, t.id, t.modseq, t.account_id, t.latest, null, 0,
+          coalesce(t.bucket_reason, ''), t.last_message_at,
+          (t.filter_suggestion_message_id IS t.latest), t.filter_suggestion_event_id,
+          CASE WHEN t.bucket_input_message_id IS t.latest THEN t.bucket_prediction_id END
         FROM inbox t LEFT JOIN owner_handled h ON h.thread_id = t.id
-        WHERE ?7 IS NULL AND t.bucket_confidence = 'low' AND t.sender ->> 'status' IS NOT 'new'
-          AND t.bucket_input_message_id = ${latestInboxMessageSql}
-          AND h.message_id IS NOT t.bucket_input_message_id
+        WHERE ?7 IS NULL AND (t.sender ->> 'status' IS NOT 'new' OR (t.filter_suggestion_message_id = t.latest
+            AND NOT EXISTS (SELECT 1 FROM new_senders n WHERE n.id = t.id AND n.sender_rank = 1)))
+          AND t.latest IS NOT NULL AND h.message_id IS NOT t.latest
+          AND ((t.bucket_confidence = 'low' AND t.bucket_input_message_id = t.latest)
+            OR (t.filter_suggestion_message_id = t.latest))
       )
       SELECT * FROM cards
       WHERE ?2 IS NULL OR tier > ?2 OR (tier = ?2 AND (at, threadId) < (?3, ?4))
@@ -106,7 +117,18 @@ export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
       reviewLookup: true,
       revision,
       cards: page.map(
-        ({ address, accountId, threadId, threadRevision, messageId, ruleRevision, reason }) => ({
+        ({
+          address,
+          accountId,
+          threadId,
+          threadRevision,
+          messageId,
+          ruleRevision,
+          reason,
+          suggestFilter,
+          predictionId,
+          bucketPredictionId,
+        }) => ({
           id: address ? { kind: 'sender', accountId, address } : { kind: 'thread', threadId },
           accountId,
           threadId,
@@ -114,6 +136,10 @@ export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
           messageId,
           revision: address ? ruleRevision : threadRevision,
           reason,
+          ...(suggestFilter
+            ? { suggestFilter: true as const, ...(predictionId ? { predictionId } : {}) }
+            : {}),
+          ...(bucketPredictionId && !suggestFilter ? { bucketPredictionId } : {}),
           ...(input.senderAddress && address
             ? { suggestions: senderSuggestions(db, accountId, address) }
             : {}),

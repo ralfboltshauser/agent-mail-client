@@ -1,6 +1,7 @@
 export * from './api.ts'
 export * from './buckets.ts'
 export * from './compose.ts'
+export * from './decision-labels.ts'
 export * from './doctor.ts'
 export * from './mail.ts'
 export * from './organise.ts'

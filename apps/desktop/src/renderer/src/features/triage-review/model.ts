@@ -1,5 +1,6 @@
 import type {
   BucketReviewInput,
+  FilterReviewInput,
   SenderDecision,
   TriageCardId,
   TriageQueuePage,
@@ -14,6 +15,7 @@ export type Preview = Candidate & {
 }
 export type Decision =
   | { kind: 'sender'; input: SenderDecision }
+  | { kind: 'filter'; input: FilterReviewInput }
   | { kind: 'bucket'; input: BucketReviewInput }
   | { kind: 'organise'; input: Exclude<ReviewOrganiseAction, { kind: 'undo' }> }
   | { kind: 'skip' }
@@ -38,6 +40,8 @@ export interface ReviewAction {
   index: number
   batch: string
   label: string
+  ownerReason?: string | null
+  privateReasonDraft?: true
   decision: Decision
   status: ActionStatus
   error: string | null
@@ -67,6 +71,8 @@ export function sameTarget(a: Candidate, b: Candidate) {
     a.threadId === b.threadId &&
     a.messageId === b.messageId &&
     a.threadRevision === b.threadRevision &&
-    a.revision === b.revision
+    a.revision === b.revision &&
+    a.predictionId === b.predictionId &&
+    a.bucketPredictionId === b.bucketPredictionId
   )
 }

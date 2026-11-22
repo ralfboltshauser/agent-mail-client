@@ -23,7 +23,10 @@ import {
   AdoptScreenedDestination,
   BucketInput,
   BucketReviewInput,
+  type FilteredPage,
+  FilterReviewInput,
   MutationRequest,
+  OwnerActionReasonInput,
   SenderAvatarResolve,
   SenderDecision,
   SenderListQuery,
@@ -370,16 +373,60 @@ function registerIpc() {
       })
       .catch(reportReviewRejection),
   )
-  ipcMain.handle('amc:adoptScreenedDestination', (_event, input: unknown) =>
-    requireEngine().request('/v1/senders/destination/adopt', {
-      method: 'POST',
-      body: AdoptScreenedDestination.parse(input),
-    }),
+  const submitFilter = (input: unknown) =>
+    requireEngine()
+      .request('/v1/filtered/decisions', {
+        method: 'POST',
+        body: FilterReviewInput.parse(input),
+        signal: AbortSignal.timeout(10_000),
+      })
+      .catch(reportReviewRejection)
+  ipcMain.handle('amc:reviewFilter', (_event, input: unknown) => submitFilter(input))
+  ipcMain.handle(
+    'amc:restoreFiltered',
+    async (_event, threadId: string, clientActionId: string) => {
+      const engine = requireEngine()
+      const params = queryString({ threadId, limit: 1 })
+      const page = await engine.get<FilteredPage>(`/v1/filtered?${params}`, {
+        signal: AbortSignal.timeout(10_000),
+      })
+      const thread = page.threads[0]
+      if (!thread || requireEngine() !== engine)
+        throw new Error('Thread is unavailable in Filtered')
+      return submitFilter({
+        threadId,
+        clientActionId,
+        expectedRevision: thread.revision,
+        decision: 'filter.keep',
+      })
+    },
   )
-  ipcMain.handle('amc:ownerAction', (_event, id: string) =>
-    requireEngine().get(`/v1/owner-actions/${encodeURIComponent(id)}`, {
+  ipcMain.handle('amc:editOwnerReason', (_event, actionId: string, input: unknown) =>
+    requireEngine().request(`/v1/owner-actions/${encodeURIComponent(actionId)}/reason`, {
+      method: 'PUT',
+      body: OwnerActionReasonInput.parse(input),
       signal: AbortSignal.timeout(10_000),
     }),
+  )
+  ipcMain.handle('amc:adoptScreenedDestination', (_event, input: unknown) => {
+    const { destination, ...body } = AdoptScreenedDestination.parse(input)
+    return requireEngine().request(
+      destination === 'filtered'
+        ? '/v1/filtered/destination/adopt'
+        : '/v1/senders/destination/adopt',
+      {
+        method: 'POST',
+        body,
+      },
+    )
+  })
+  ipcMain.handle('amc:ownerAction', (_event, id: string, includeReason?: boolean) =>
+    requireEngine().get(
+      `/v1/owner-actions/${encodeURIComponent(id)}${includeReason ? '?includeReason=1' : ''}`,
+      {
+        signal: AbortSignal.timeout(10_000),
+      },
+    ),
   )
   ipcMain.handle('amc:undoOwnerAction', (_event, id: string) =>
     requireEngine().request(`/v1/owner-actions/${encodeURIComponent(id)}/undo`, {

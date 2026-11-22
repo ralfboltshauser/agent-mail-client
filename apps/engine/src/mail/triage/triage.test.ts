@@ -16,16 +16,21 @@ import { silentLog, tempDir, testConfig } from '../../test-support.ts'
 import { Drafts } from '../drafts.ts'
 import { Mutations } from '../mutations.ts'
 import { MailQueries } from '../queries.ts'
+import { senderActionStatus, undoSender } from '../senders/actions.ts'
 import { MailStore } from '../store.ts'
-import { correctionActions, correctionExamples, markConfirmedReply } from './corrections.ts'
+import { messageFeatures } from './annotations.ts'
+import { correctionActions, markConfirmedReply } from './corrections.ts'
+import { readEffective } from './examples.ts'
 import { threadInput } from './input.ts'
 
-function setup(legacy = false) {
+function setup(legacyVersion?: number) {
   const dir = tempDir()
   const path = join(dir, 'triage.db')
   const db = openDatabase(path)
   migrate(db, {
-    migrations: legacy ? MIGRATIONS.filter((migration) => migration.version < 22) : MIGRATIONS,
+    migrations: legacyVersion
+      ? MIGRATIONS.filter((migration) => migration.version <= legacyVersion)
+      : MIGRATIONS,
   })
   for (const id of ['a', 'b']) {
     db.prepare(
@@ -186,6 +191,13 @@ it('paginates grouped new Senders before explicit current low confidence with ex
   }
 })
 
+function effective(db: ReturnType<typeof openDatabase>, account: string) {
+  return readEffective(db, account, 1, {
+    arrival: 'fixture-target',
+    features: messageFeatures(db, account, 1, undefined, 'person@example.test'),
+  }).map(({ labelId }) => labelId)
+}
+
 it('rejects raced model writes and restores an assignment and prompt eligibility durably on Undo', async () => {
   const { db, path, put, http, lease, queries } = setup()
   const agent = await lease()
@@ -220,16 +232,9 @@ it('rejects raced model writes and restores an assignment and prompt eligibility
     expect(await agent.set(tid, current)).toMatchObject({ updated: false })
     const restarted = openDatabase(path)
     try {
-      const examples = [
-        {
-          previous: 'Later',
-          chosen: 'Reply',
-          context: expect.objectContaining({ subject: 'Fixture subject' }),
-        },
-      ]
-      expect(correctionExamples(restarted, 'a')).toEqual(examples)
-      expect(correctionExamples(restarted, 'b')).toEqual([])
-      expect((await agent.list()).examples).toEqual(examples)
+      expect(effective(restarted, 'a')).toEqual(['bucket.reply', 'bucket.clear'])
+      expect(effective(restarted, 'b')).toEqual([])
+      expect((await agent.list()).examples).toEqual([])
       expect(await (await http(`/v1/owner-actions/${actionId}/undo`, 'POST')).json()).toMatchObject(
         { actionId, undo: { status: 'applied' } },
       )
@@ -237,7 +242,7 @@ it('rejects raced model writes and restores an assignment and prompt eligibility
         bucket: 'Later',
         confidence: 'low',
       })
-      expect(correctionExamples(restarted, 'a')).toEqual([])
+      expect(effective(restarted, 'a')).toEqual(['bucket.clear'])
       expect((await agent.list()).examples).toEqual([])
     } finally {
       restarted.close()
@@ -253,9 +258,16 @@ it('rejects raced model writes and restores an assignment and prompt eligibility
 })
 
 it('upgrades populated pre-confidence databases and keeps existing Buckets outside the low-confidence tier', async () => {
-  const { db, put, http, store, queries } = setup(true)
+  const { db, http, store, queries } = setup(21)
   try {
-    const tid = put('a', 'legacy', 'person@example.test', 10)
+    const tid = 'a:legacy'
+    db.prepare(
+      "INSERT INTO thread (id, account_id, provider_thread_id, in_inbox) VALUES (?, 'a', 'legacy', 1)",
+    ).run(tid)
+    db.prepare(`
+      INSERT INTO message (id, thread_id, account_id, provider_id, sent_at, label_ids)
+      VALUES ('a:legacy', ?, 'a', 'legacy', 10, '["a:INBOX"]')
+    `).run(tid)
     store.setBucket({ threadId: tid, bucket: 'Later', reason: 'Legacy reason' }, 'owner')
     db.prepare("INSERT INTO sender_evidence VALUES ('a', 'person@example.test', 'fixture')").run()
     expect(migrate(db)).toBe(MIGRATIONS.at(-1)?.version)
@@ -266,6 +278,56 @@ it('upgrades populated pre-confidence databases and keeps existing Buckets outsi
       setAt: expect.any(Number),
     })
     expect((await (await http('/v1/triage/queue')).json()).cards).toEqual([])
+  } finally {
+    db.close()
+  }
+})
+
+it('upgrades v22 with existing Sender rules, corrections and working inverses', async () => {
+  const { db, http, store, queries } = setup(22)
+  try {
+    const principal = authenticate(
+      db,
+      issueToken(db, { kind: 'cli', scopes: ['admin'], name: 'Legacy fixture' }).secret,
+    )
+    if (!principal) throw new Error('Missing fixture credentials')
+    db.exec(`
+      INSERT INTO thread (id, account_id, provider_thread_id, in_inbox) VALUES ('a:legacy', 'a', 'legacy', 1);
+      INSERT INTO message (id, thread_id, account_id, provider_id, sent_at, label_ids)
+      VALUES ('a:legacy', 'a:legacy', 'a', 'legacy', 10, '["a:INBOX"]');
+    `)
+    store.setBucket(
+      { threadId: 'a:legacy', bucket: 'Later', reason: 'Synthetic v22 display reason' },
+      'owner',
+    )
+    db.prepare(`
+      INSERT INTO owner_action (id, account_id, token_id, kind, request, created_at)
+      VALUES ('legacy-sender', 'a', ?1, 'sender:decision', '{"address":"legacy@example.test","decision":"accept","previous":null,"revision":1}', 10),
+        ('legacy-bucket', 'a', ?1, 'bucket:review', '{}', 11)
+    `).run(principal.tokenId)
+    db.exec(`
+      INSERT INTO sender_rule VALUES ('a', 'legacy@example.test', 'accept', 1, 'legacy-sender', 10);
+      INSERT INTO triage_correction
+      SELECT 'legacy-bucket', 'a', id, 'a:legacy', modseq, bucket_revision,
+        '{"assignment":{"bucket":null,"bucket_reason":null,"bucket_set_by":null,"bucket_set_at":null,"bucket_confidence":null,"bucket_input_revision":null,"bucket_input_message_id":null,"bucket_producer":null},"revision":null}',
+        'Later', '{"subject":"Legacy canary","snippet":"Legacy canary"}', 11, NULL
+      FROM thread WHERE id = 'a:legacy';
+      INSERT INTO owner_handled (thread_id, message_id, action_id) VALUES ('a:legacy', 'a:legacy', 'legacy-bucket');
+    `)
+    expect(migrate(db)).toBe(23)
+    expect(queries.threadSummary('a:legacy')?.bucket?.bucket).toBe('Later')
+    expect(senderActionStatus(db, 'legacy-sender')).toMatchObject({
+      revision: 1,
+      status: 'applied',
+    })
+    expect(undoSender(store, principal, 'legacy-sender').undo?.status).toBe('applied')
+    const undo = await http('/v1/owner-actions/legacy-bucket/undo', 'POST')
+    expect(await undo.json()).toMatchObject({ undo: { status: 'applied' } })
+    expect(queries.threadSummary('a:legacy')?.bucket).toBeNull()
+    expect(db.prepare('SELECT summary FROM triage_correction').get()).toEqual({
+      summary: '{"subject":"Legacy canary","snippet":"Legacy canary"}',
+    })
+    expect(db.prepare('SELECT 1 FROM triage_event').get()).toBeUndefined()
   } finally {
     db.close()
   }
@@ -295,7 +357,7 @@ it('keeps a superseding Bucket on a reimported Thread and removes the abandoned 
     const undone = await (await http(`/v1/owner-actions/${actionId}/undo`, 'POST')).json()
     expect(undone).toMatchObject({ status: 'superseded', undo: { status: 'superseded' } })
     expect(queries.threadSummary(tid)?.bucket?.bucket).toBe('Action')
-    expect(correctionExamples(db, 'a')).toEqual([])
+    expect(effective(db, 'a')).toEqual(['bucket.action'])
   } finally {
     db.close()
   }
@@ -355,7 +417,7 @@ it('marks only the exact still-current incoming message after a confirmed Reply'
     expect(queries.threadSummary(threadId)?.bucket?.bucket).toBe('Later')
     expect(await undo(first)).toMatchObject({ undo: { status: 'applied' } })
     expect(queries.threadSummary(threadId)?.bucket).toBeNull()
-    expect(correctionExamples(db, 'a')).toEqual([])
+    expect(effective(db, 'a')).toEqual([])
     expect(
       db.prepare('SELECT action_id FROM owner_handled WHERE thread_id = ?').get(threadId),
     ).toMatchObject({ action_id: 'reply:outbox' })
