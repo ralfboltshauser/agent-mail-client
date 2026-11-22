@@ -140,6 +140,10 @@ export interface TriageStatus {
   notice: string | null
 }
 
+export interface DesktopSenderAvatarResults {
+  rows: (SenderAvatarResults['rows'][number] & { image?: string | null })[]
+}
+
 export interface SmartInboxApi {
   listSenders(query: Partial<SenderListQuery>): Promise<SenderList>
   decideSender(input: SenderDecision): Promise<OwnerActionStatus>
@@ -149,7 +153,10 @@ export interface SmartInboxApi {
   ownerAction(id: string): Promise<OwnerActionStatus>
   undoOwnerAction(id: string): Promise<OwnerActionStatus>
   triageQueue(query: Partial<TriageQueueQuery>): Promise<TriageQueuePage>
-  resolveSenderAvatars(input: SenderAvatarResolve): Promise<SenderAvatarResults>
+  resolveSenderAvatars(
+    input: SenderAvatarResolve,
+    knownDigests?: readonly string[],
+  ): Promise<DesktopSenderAvatarResults>
 }
 
 export interface AmcApi {

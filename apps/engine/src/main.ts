@@ -11,8 +11,11 @@ import { backupDatabase, lockDatabaseFiles, restoreDatabase } from './db/backups
 import { migrate, openDatabase } from './db/database.ts'
 import { createApp } from './http/app.ts'
 import { serveComposerSocket } from './http/composer-socket.ts'
+import { senderAvatarRoutes } from './http/sender-avatars.ts'
 import { triageRoutes } from './http/triage.ts'
 import { createLogger } from './log.ts'
+import { SenderAvatars } from './mail/avatars/index.ts'
+import { openAvatarIndex } from './mail/avatars/store.ts'
 import { gmailDelivery, imapDelivery, imapDraftMirror, publishSent } from './mail/delivery.ts'
 import { Drafts } from './mail/drafts.ts'
 import { Mutations } from './mail/mutations.ts'
@@ -159,6 +162,10 @@ async function main(argv: string[]) {
       const stopping = new AbortController()
       setMaxListeners(0, stopping.signal)
       let editorScript: Promise<string> | undefined
+      const avatars = new SenderAvatars(openAvatarIndex(config.dataDir, dbPath, log), log, {
+        enabled: process.env.AMC_REMOTE_AVATARS !== '0',
+        shutdown: stopping.signal,
+      })
       const app = createApp({
         db,
         config,
@@ -166,7 +173,11 @@ async function main(argv: string[]) {
         mutations,
         outbox,
         shutdownSignal: stopping.signal,
-        smartInbox: { triage: triageRoutes(db), ownerActions: correctionActions(store) },
+        smartInbox: {
+          avatars: senderAvatarRoutes(db, avatars),
+          triage: triageRoutes(db),
+          ownerActions: correctionActions(store),
+        },
         composerScript: () => {
           editorScript ??= composerScript()
           return editorScript
