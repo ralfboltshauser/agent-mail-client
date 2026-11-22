@@ -286,13 +286,18 @@ export function listFiltered(
     .prepare(`
     SELECT t.id, t.account_id AS accountId, t.modseq AS revision, t.account_id || ':' || d.provider_id AS destination
     FROM thread t JOIN filtered_destination d ON d.account_id = t.account_id
-    WHERE (?1 IS NULL OR t.account_id = ?1) AND t.id > ?2
-      AND (?4 IS NULL OR t.id = ?4)
+    WHERE (:accountId IS NULL OR t.account_id = :accountId) AND t.id > :cursor
+      AND (:threadId IS NULL OR t.id = :threadId)
       AND d.state = 'ready'
       AND t.account_id || ':' || d.provider_id IN (SELECT value FROM json_each(t.label_ids))
-    ORDER BY t.id LIMIT ?3
+    ORDER BY t.id LIMIT :limit
   `)
-    .all(accountId ?? null, cursor ?? '', limit + 1, threadId ?? null) as {
+    .all({
+      accountId: accountId ?? null,
+      cursor: cursor ?? '',
+      limit: limit + 1,
+      threadId: threadId ?? null,
+    }) as {
     id: string
     accountId: string
     revision: number

@@ -1,9 +1,12 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { FILTERED_LABEL, type FilterReviewInput, type SubmitTriagePrediction } from '@amc/protocol'
+import { Hono } from 'hono'
 import { afterEach, expect, it, vi } from 'vitest'
 import { authenticate, issueToken } from '../../auth/tokens.ts'
 import { BlobStore } from '../../blobs.ts'
 import { Sealer } from '../../crypto.ts'
+import type { AppEnv } from '../../http/app.ts'
+import { filteredRoutes } from '../../http/filtered.ts'
 import { FakeGmail } from '../../providers/gmail/fake.ts'
 import { GmailHttpError } from '../../providers/gmail/http.ts'
 import { fromGmail } from '../../providers/gmail/mapping.ts'
@@ -183,6 +186,129 @@ it('moves only exact Inbox messages, saves one private reason and appends per-me
         .prepare("SELECT count(*) AS n FROM triage_event WHERE kind = 'decision' AND action_id = ?")
         .get(action.actionId),
     ).toEqual({ n: 2 })
+  } finally {
+    db.close()
+  }
+})
+
+it('verifies a sparse Gmail create response using the provider ID from labels.list', async () => {
+  const { db, queue, gmail, put, review, handlers } = fixture()
+  try {
+    const createLabel = gmail.createLabel.bind(gmail)
+    const create = vi.spyOn(gmail, 'createLabel').mockImplementation(async (name) => {
+      const { id } = await createLabel(name)
+      // The create response can omit type even though the list includes it.
+      return { id, name }
+    })
+    const action = review(put('target'))
+    await settle(queue)
+    const label = gmail.labelList.find(({ name }) => name === FILTERED_LABEL)
+    expect(await handlers[action.kind]?.get(action.actionId)).toMatchObject({ status: 'applied' })
+    expect(db.prepare('SELECT state, provider_id FROM filtered_destination').get()).toEqual({
+      state: 'ready',
+      provider_id: label?.id,
+    })
+    expect(await gmail.getMessageLabels('target')).toContain(label?.id)
+    expect(await gmail.getMessageLabels('target')).not.toContain('INBOX')
+    expect(create).toHaveBeenCalledOnce()
+  } finally {
+    db.close()
+  }
+})
+
+it('reuses the Gmail create ID when labels.list catches up on the next Filter out', async () => {
+  const { db, store, queue, gmail, put, review, handlers } = fixture()
+  try {
+    const create = vi.spyOn(gmail, 'createLabel')
+    vi.spyOn(gmail, 'labels').mockResolvedValueOnce([]).mockResolvedValueOnce([])
+    const threadId = put('target')
+    const first = review(threadId)
+    await settle(queue)
+    const label = gmail.labelList.find(({ name }) => name === FILTERED_LABEL)
+    expect(await handlers[first.kind]?.get(first.actionId)).toMatchObject({ status: 'failed' })
+    expect(db.prepare('SELECT state, provider_id FROM filtered_destination').get()).toEqual({
+      state: 'creating',
+      provider_id: label?.id,
+    })
+    expect(await gmail.getMessageLabels('target')).toContain('INBOX')
+
+    const retry = review(threadId)
+    await settle(new Mutations(store, () => gmail, silentLog))
+    expect(await handlers[retry.kind]?.get(retry.actionId)).toMatchObject({ status: 'applied' })
+    expect(await gmail.getMessageLabels('target')).not.toContain('INBOX')
+    expect(create).toHaveBeenCalledOnce()
+  } finally {
+    db.close()
+  }
+})
+
+it.each([false, true])(
+  'recovers a v23 Gmail repair row on the next Filter out (label already exists: %s)',
+  async (exists) => {
+    const { db, queue, gmail, principal, put, review, handlers } = fixture()
+    try {
+      const existing = exists ? await gmail.createLabel(FILTERED_LABEL) : undefined
+      const create = vi.spyOn(gmail, 'createLabel')
+      db.prepare(`
+        INSERT INTO filtered_destination (account_id, state, error)
+        VALUES ('a', 'repair', 'Filtered creation could not be verified')
+      `).run()
+
+      const action = review(put('target'))
+      await settle(queue)
+      if (existing) {
+        expect(await handlers[action.kind]?.get(action.actionId)).toMatchObject({
+          status: 'failed',
+          error: expect.stringContaining('adopt'),
+        })
+        expect(await gmail.getMessageLabels('target')).toContain('INBOX')
+        await queue.adoptScreenedDestination(principal, 'a', existing.id, true)
+        await queue.stop()
+        await settle(queue)
+        expect(create).not.toHaveBeenCalled()
+      } else {
+        expect(create).toHaveBeenCalledOnce()
+      }
+      expect(await handlers[action.kind]?.get(action.actionId)).toMatchObject({ status: 'applied' })
+      expect(await gmail.getMessageLabels('target')).not.toContain('INBOX')
+    } finally {
+      db.close()
+    }
+  },
+)
+
+it('scopes Filtered HTTP pages to the requested account before applying the limit', async () => {
+  const { db, store, queue, principal } = fixture()
+  try {
+    db.exec(`
+      INSERT INTO account (id, kind, address, credentials, created_at)
+      VALUES ('b', 'imap', 'owner-imap@example.test', X'00', 0);
+      INSERT INTO filtered_destination (account_id, provider_id, state)
+      VALUES ('a', 'Label_1', 'ready'), ('b', 'folder:Filtered', 'ready');
+      INSERT INTO thread (id, account_id, provider_thread_id, label_ids)
+      VALUES ('a:t', 'a', 't', '["a:Label_1"]'), ('b:t', 'b', 't', '["b:folder:Filtered"]');
+      INSERT INTO message (id, account_id, thread_id, provider_id, sent_at, label_ids)
+      VALUES ('a:m', 'a', 'a:t', 'm', 0, '["a:Label_1"]'),
+             ('b:m', 'b', 'b:t', 'm', 0, '["b:folder:Filtered"]');
+      INSERT INTO imap_location (account_id, path_key, validity, uid, message_id, label_id, unread, starred)
+      VALUES ('b', 'Filtered', '1', 1, 'b:m', 'b:folder:Filtered', 0, 0);
+    `)
+    const app = new Hono<AppEnv>()
+    app.use('*', async (c, next) => {
+      c.set('principal', principal)
+      await next()
+    })
+    app.route('/v1/filtered', filteredRoutes(store, queue))
+    const list = async (query: string) => {
+      const response = await app.request(`/v1/filtered${query}`)
+      expect(response.status).toBe(200)
+      const page = await response.json()
+      return { ids: page.threads.map(({ id }: { id: string }) => id), cursor: page.cursor }
+    }
+    expect(await list('')).toEqual({ ids: ['a:t', 'b:t'], cursor: null })
+    expect(await list('?accountId=a')).toEqual({ ids: ['a:t'], cursor: null })
+    expect(await list('?accountId=b&limit=1')).toEqual({ ids: ['b:t'], cursor: null })
+    expect(await list('?accountId=a&threadId=b%3At')).toEqual({ ids: [], cursor: null })
   } finally {
     db.close()
   }

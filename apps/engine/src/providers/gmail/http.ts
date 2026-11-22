@@ -6,6 +6,7 @@ import type {
   GmailDraft,
   GmailHistoryList,
   GmailLabel,
+  GmailLabelCreation,
   GmailListMessages,
   GmailMessage,
   GmailMessageRef,
@@ -329,7 +330,7 @@ export class GmailHttpApi implements GmailApi {
     })
   }
 
-  createLabel(name: string, signal?: AbortSignal): Promise<GmailLabel> {
+  createLabel(name: string, signal?: AbortSignal): Promise<GmailLabelCreation> {
     return this.#call('/labels', {
       method: 'POST',
       body: { name, labelListVisibility: 'labelShow', messageListVisibility: 'show' },

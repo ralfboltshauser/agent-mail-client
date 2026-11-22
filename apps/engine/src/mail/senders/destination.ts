@@ -92,9 +92,10 @@ export async function gmailDestination(
   const { table, name } = managedDestination(filtered)
   const current = destination(store, account, table)
   const labels = (await api.labels()).map(toIncomingLabel)
-  const choices = labels.filter(
-    (label) => gmailUserLabel(label) && label.name.toLowerCase() === name.toLowerCase(),
-  )
+  const matches = (label: IncomingLabel) =>
+    gmailUserLabel(label) && label.name.toLowerCase() === name.toLowerCase()
+  const choices = labels.filter(matches)
+  const unverified = `${name} creation could not be verified. Retry when the Label is available.`
   if (!allow()) return
   if (adopt) {
     const label = choices.find(({ providerId }) => providerId === adopt)
@@ -108,29 +109,42 @@ export async function gmailDestination(
     if (!label) return repair(store, account, `The managed ${name} Label is missing`, table)
     return { label }
   }
-  if (current || choices.length)
-    return repair(
-      store,
-      account,
-      current?.error ?? `Verify and adopt the existing ${name} Label`,
-      table,
-    )
+  if (current?.state === 'creating' && current.provider_id) {
+    const label = choices.find(({ providerId }) => providerId === current.provider_id)
+    if (label) return ready(store, account, { label }, filtered)
+    if (!choices.length) throw new SenderError(unverified)
+  }
+  if (choices.length)
+    return repair(store, account, `Verify and adopt the existing ${name} Label`, table)
   if (labels.some(({ name: existing }) => existing.toLowerCase() === name.toLowerCase()))
     return repair(store, account, `The ${name} name is already in use`, table)
-  store.db.prepare(`INSERT INTO ${table} (account_id, state) VALUES (?, 'creating')`).run(account)
+  if (current && (!filtered || current.provider_id))
+    return repair(store, account, current.error ?? unverified, table)
+
+  store.db
+    .prepare(`
+      INSERT INTO ${table} (account_id, state) VALUES (?, 'creating')
+      ON CONFLICT (account_id) DO UPDATE SET state = 'creating', error = NULL
+    `)
+    .run(account)
+  let providerId: string | undefined
   try {
-    const label = toIncomingLabel(await api.createLabel(name))
-    if (gmailUserLabel(label) && label.name === name)
-      return ready(store, account, { label }, filtered)
+    providerId = (await api.createLabel(name))?.id
   } catch {
-    return repair(
-      store,
-      account,
-      `${name} creation could not be verified. Verify the Label before adopting it.`,
-      table,
-    )
+    return repair(store, account, unverified, table)
   }
-  return repair(store, account, `${name} creation could not be verified`, table)
+  if (!providerId) return repair(store, account, unverified, table)
+
+  // Gmail can return a sparse create response. Persist its ID before checking the full label.
+  store.db
+    .prepare(`UPDATE ${table} SET provider_id = ? WHERE account_id = ?`)
+    .run(providerId, account)
+  const label = (await api.labels())
+    .map(toIncomingLabel)
+    .find((label) => label.providerId === providerId && matches(label))
+  if (!allow()) return
+  if (!label) throw new SenderError(unverified)
+  return ready(store, account, { label }, filtered)
 }
 
 export async function imapDestination(

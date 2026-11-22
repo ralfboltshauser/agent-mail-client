@@ -86,7 +86,8 @@ export function registerSmartInboxCommands(
     .option('--account <id>', 'filter by Account ID')
     .option('--cursor <cursor>', 'continue from this cursor')
     .option('--limit <n>', 'page size (1–100)')
-    .action(async ({ account, cursor, limit }) => {
+    .action(async (_opts, command: Command) => {
+      const { account, cursor, limit } = command.optsWithGlobals()
       const page = await authed(config())<FilteredPage>(
         endpoint('/v1/filtered', { accountId: account, cursor, limit }),
       )
