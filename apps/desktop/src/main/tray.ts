@@ -5,6 +5,7 @@ import { app, Menu, type MenuItemConstructorOptions, nativeImage, shell, Tray } 
 export function createTray(
   openWindow: () => void,
   openSettings: () => void,
+  openFeedback: () => void,
   toggleSync: () => void,
   loginItem: boolean,
 ) {
@@ -76,6 +77,7 @@ export function createTray(
       Menu.buildFromTemplate([
         { label: 'Open AMC', click: openWindow },
         { label: 'Settings…', click: openSettings },
+        { label: 'Send Feedback…', click: openFeedback },
         { type: 'separator' },
         ...(paused ? [{ label: 'Sync paused', enabled: false }] : []),
         { label: paused ? 'Resume Sync' : 'Pause Sync', enabled: paired, click: toggleSync },

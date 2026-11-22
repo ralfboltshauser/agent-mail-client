@@ -30,6 +30,8 @@ import type {
   VersionedDraft,
 } from '@amc/protocol'
 
+import type { FeedbackApi } from './feedback'
+
 /** Which Threads a list shows. */
 export type View =
   | { kind: 'inbox' }
@@ -179,6 +181,7 @@ export interface SmartInboxApi {
 }
 
 export interface AmcApi {
+  feedback: FeedbackApi
   smartInbox?: SmartInboxApi
   notificationSettings(): Promise<NotificationSettings>
   saveNotificationSettings(settings: NotificationSettings): Promise<void>

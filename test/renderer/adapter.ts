@@ -12,6 +12,7 @@ export function deferred<T>() {
 
 export function rendererAdapter() {
   const fixture = createMailFixture('inbox')
+  const feedbackListeners = new Set<() => void>()
   const settingsListeners = new Set<() => void>()
   let pause: (() => Promise<void>) | undefined
 
@@ -26,6 +27,19 @@ export function rendererAdapter() {
 
   const api = {
     ...fixture.api,
+    feedback: {
+      ...fixture.api.feedback,
+      onOpen(listener: () => void) {
+        feedbackListeners.add(listener)
+        return () => feedbackListeners.delete(listener)
+      },
+      capture: vi.fn(async (_view: string, viewport: { width: number; height: number }) => ({
+        id: 'renderer-fixture',
+        ...viewport,
+      })),
+      send: vi.fn(fixture.api.feedback.send),
+      copy: vi.fn(fixture.api.feedback.copy),
+    },
     accounts: read(fixture.api.accounts),
     labels: read(fixture.api.labels),
     counts: read(fixture.api.counts),
@@ -51,6 +65,9 @@ export function rendererAdapter() {
 
   return {
     api,
+    emitFeedback() {
+      for (const listener of feedbackListeners) listener()
+    },
     emitOpenSettings() {
       for (const listener of settingsListeners) listener()
     },

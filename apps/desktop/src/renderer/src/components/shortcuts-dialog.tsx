@@ -1,4 +1,5 @@
 import { BUCKETS } from '@amc/protocol'
+import { feedbackShortcut } from '../../../shared/feedback'
 import { systemViews } from './app-sidebar'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
 import { Kbd } from './ui/kbd'
@@ -20,6 +21,7 @@ export function ShortcutsDialog({
       keys: [
         ['Command palette', '⌘K'],
         ['Settings', '⌘,'],
+        ['Send Feedback', feedbackShortcut],
         ['Toggle sidebar', '⌘B'],
         ['Filter mail', '/'],
         ['Next / previous thread', 'J / K'],

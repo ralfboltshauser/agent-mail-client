@@ -135,10 +135,17 @@ export function cliLauncher(
         throw new Error('AMC could not read local T3 projects. Open T3 Code and try again.')
       }
     },
-    async launch(request) {
+    async launch(request, imagePath) {
       try {
         // Check we can construct a navigation link before handing off the prompt.
         const environment = environmentId()
+        if (
+          imagePath &&
+          !supportsRuntimeMode &&
+          projectRuntimeModes(state)(request.projectId) !== request.runtimeMode
+        ) {
+          throw new Error('The local T3 CLI cannot require approval for this project.')
+        }
         const runtime = supportsRuntimeMode ? ['--runtime-mode', request.runtimeMode] : []
         const thread = JSON.parse(
           await run(
@@ -154,7 +161,7 @@ export function cliLauncher(
               request.projectId,
               '-',
             ],
-            request.message,
+            imagePath ? `${request.message}\nLocal screenshot: ${imagePath}` : request.message,
           ),
         ) as T3Thread
         if (typeof thread?.threadId !== 'string' || !thread.threadId)

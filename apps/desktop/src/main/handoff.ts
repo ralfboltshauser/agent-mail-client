@@ -38,7 +38,7 @@ export function t3NavigationLink(value: string): string | null {
 export interface T3Launcher {
   key: string
   projects(): Promise<T3Project[]>
-  launch(request: T3Launch): Promise<T3Thread>
+  launch(request: T3Launch, imagePath?: string): Promise<T3Thread>
 }
 
 export function handoffRequest(

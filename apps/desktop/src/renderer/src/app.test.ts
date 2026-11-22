@@ -69,6 +69,13 @@ async function openMailbox(api: Partial<AmcApi>) {
   vi.spyOn(Element.prototype, 'clientWidth', 'get').mockReturnValue(400)
   vi.spyOn(Element.prototype, 'clientHeight', 'get').mockReturnValue(600)
   const amc: Partial<AmcApi> = {
+    feedback: {
+      onOpen: () => () => {},
+      capture: async () => ({ id: 'fixture', width: 1360, height: 860 }),
+      send: async () => ({ opened: true }),
+      copy: async () => {},
+      release: async () => {},
+    },
     status: async () => live,
     onStatus: (callback) => {
       status = callback

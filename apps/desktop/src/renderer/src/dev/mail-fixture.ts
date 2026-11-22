@@ -182,6 +182,13 @@ export function createMailFixture(scenario: string) {
   let triage: TriageStatus = { enabled: true, running: false, lastRun: null, notice: null }
   const triageListeners = new Set<(status: TriageStatus) => void>()
   const api: AmcApi = {
+    feedback: {
+      onOpen: () => () => {},
+      capture: async () => ({ id: 'fixture', width: 1360, height: 860 }),
+      send: async () => ({ opened: true }),
+      release: async () => {},
+      copy: async () => {},
+    },
     triageStatus: async () => triage,
     setAutoTriage: async (enabled) => {
       triage = { ...triage, enabled }

@@ -42,10 +42,12 @@ import {
   shell,
 } from 'electron'
 import type { SyncStatus, ThreadQuery, TriageStatus } from '../shared/api'
+import { feedbackAccelerator } from '../shared/feedback'
 import { clearPairing, loadPairing, savePairing } from './auth'
 import { AutoTriage } from './auto-triage'
 import { composeDraftPath } from './draft-updates'
 import { EngineClient, EngineError } from './engine'
+import { registerFeedbackIpc } from './feedback-ipc'
 import { Handoff, type T3Launcher, t3NavigationLink } from './handoff'
 import { protectRemoteImageRequests } from './message-image-requests'
 import {
@@ -79,6 +81,7 @@ let threadNavigationReady = false
 let pendingThreadId: string | null = null
 let pendingSettings = false
 const notificationSettingsFile = () => join(app.getPath('userData'), 'notifications.json')
+let feedback: ReturnType<typeof registerFeedbackIpc>
 let handoff: Handoff
 let triage: AutoTriage
 const quittingTriage = new AbortController()
@@ -733,9 +736,13 @@ function createWindow() {
   const current = window
   threadNavigationReady = false
   current.webContents.on('did-start-navigation', ({ isMainFrame, isSameDocument }) => {
-    if (isMainFrame && !isSameDocument) threadNavigationReady = false
+    if (isMainFrame && !isSameDocument) {
+      threadNavigationReady = false
+      feedback.reset()
+    }
   })
   current.webContents.on('render-process-gone', () => {
+    feedback.reset()
     threadNavigationReady = false
   })
   current.once('ready-to-show', () => current.show())
@@ -783,6 +790,7 @@ function createWindow() {
     })
   })
   window.on('closed', () => {
+    feedback.reset()
     window = null
   })
 }
@@ -825,6 +833,17 @@ function buildMenu() {
       ],
     },
     { role: 'windowMenu' },
+    {
+      role: 'help',
+      submenu: [
+        {
+          id: 'send-feedback',
+          label: 'Send Feedback…',
+          accelerator: feedbackAccelerator,
+          click: feedback.open,
+        },
+      ],
+    },
   ])
   if (process.platform === 'darwin') {
     const appMenu = menu.getMenuItemById('app-menu')?.submenu
@@ -849,6 +868,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', openWindow)
   app.whenReady().then(() => {
     protectRemoteImageRequests(session.defaultSession)
+    feedback = registerFeedbackIpc(() => window, openWindow)
     buildMenu()
     triage = new AutoTriage({
       enabled: !existsSync(triageOffFile()),
@@ -882,7 +902,7 @@ if (!app.requestSingleInstanceLock()) {
       }
     }
     if (process.platform === 'darwin') {
-      tray = createTray(openWindow, openSettings, toggleSync, loginItem)
+      tray = createTray(openWindow, openSettings, feedback.open, toggleSync, loginItem)
       if (Notification.isSupported()) {
         // Keep Electron's JavaScript wrappers alive while their alerts can be clicked.
         const active = new Set<Notification>()

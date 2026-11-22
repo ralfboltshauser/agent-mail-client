@@ -145,6 +145,24 @@ it('opens Settings from the native menu and returns to the same triage card', as
   expect(document.activeElement).toBe(focus)
 })
 
+it('keeps the same triage card and focus when Escape closes feedback', async () => {
+  const { adapter } = await fixture()
+  await mount(adapter)
+  await open()
+  const heading = within(review()).getByRole('heading', { name: firstSubject })
+  const focus = document.activeElement
+
+  vi.useRealTimers()
+  await act(async () => adapter.emitFeedback())
+  const feedback = await screen.findByRole('dialog', { name: 'Send Feedback' })
+  expect(feedback.contains(document.activeElement)).toBe(true)
+  await press('Escape')
+
+  expect(screen.queryByRole('dialog', { name: 'Send Feedback' })).toBeNull()
+  expect(within(review()).getByRole('heading', { name: firstSubject })).toBe(heading)
+  expect(document.activeElement).toBe(focus)
+})
+
 it('keeps one card, isolates cursor commits, and resumes through exit and restart', async () => {
   const { adapter } = await fixture()
   await mount(adapter)
