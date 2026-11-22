@@ -1,15 +1,18 @@
 import type { ThreadSummary } from '@amc/protocol'
 import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual'
 import { type MouseEvent, useCallback, useEffect, useId, useRef } from 'react'
-import { ThreadRow } from '@/features/thread-list/thread-row'
-import { listDate, participantsLine } from '@/lib/format'
+import type { MailboxThreadQuery } from '@/features/mailbox/mailbox-queries'
+import { SubscribedThreadRow } from '@/features/thread-list/thread-row'
 import { cn } from '@/lib/utils'
 
 const ROW = 74
 const estimateSize = () => ROW
 
 interface Props {
-  threads: ThreadSummary[]
+  ids: readonly string[]
+  query: MailboxThreadQuery | null
+  fallbackRows?: ReadonlyMap<string, ThreadSummary>
+  notification?: ThreadSummary | null
   selectedId: string | null
   onSelect: (id: string) => void
   self: Set<string>
@@ -20,7 +23,10 @@ interface Props {
 }
 
 export function ThreadList({
-  threads,
+  ids,
+  query,
+  fallbackRows,
+  notification,
   selectedId,
   onSelect,
   self,
@@ -31,9 +37,9 @@ export function ThreadList({
   const listId = useId()
   const scrollRef = useRef<HTMLDivElement>(null)
   const getScrollElement = useCallback(() => scrollRef.current, [])
-  const selectedIndex = selectedId === null ? -1 : threads.findIndex((t) => t.id === selectedId)
+  const selectedIndex = selectedId === null ? -1 : ids.indexOf(selectedId)
   // The key extractor must change when the order changes so the virtualizer rebuilds offsets.
-  const getItemKey = useCallback((index: number) => threads[index]?.id ?? index, [threads])
+  const getItemKey = useCallback((index: number) => ids[index] ?? index, [ids])
   const rangeExtractor = useCallback(
     (range: Parameters<typeof defaultRangeExtractor>[0]) => {
       const indexes = defaultRangeExtractor(range)
@@ -47,7 +53,7 @@ export function ThreadList({
     [selectedIndex],
   )
   const virtualizer = useVirtualizer({
-    count: threads.length,
+    count: ids.length,
     getScrollElement,
     estimateSize,
     getItemKey,
@@ -73,7 +79,7 @@ export function ThreadList({
     [onSelect],
   )
 
-  if (threads.length === 0) return empty
+  if (ids.length === 0) return empty
 
   return (
     <div
@@ -91,19 +97,19 @@ export function ThreadList({
     >
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
         {virtualizer.getVirtualItems().map((item) => {
-          const thread = threads[item.index]
-          if (!thread) return null
-          const selected = thread.id === selectedId
+          const id = ids[item.index]
+          if (id === undefined) return null
+          const selected = id === selectedId
           return (
             // biome-ignore lint/a11y/useFocusableInteractive: DOM focus stays on the listbox with aria-activedescendant.
             // biome-ignore lint/a11y/useKeyWithClickEvents: Each option is selected by the listbox keyboard handler.
             <div
               key={item.key}
               role="option"
-              id={`${listId}-${thread.id}`}
-              data-thread-id={thread.id}
+              id={`${listId}-${id}`}
+              data-thread-id={id}
               aria-posinset={item.index + 1}
-              aria-setsize={threads.length}
+              aria-setsize={ids.length}
               aria-selected={selected}
               onClick={selectRow}
               className={cn(
@@ -112,19 +118,14 @@ export function ThreadList({
               )}
               style={{ height: ROW, transform: `translateY(${item.start}px)` }}
             >
-              <ThreadRow
-                unread={thread.unreadCount > 0}
-                participants={participantsLine(thread.participants, self)}
-                messageCount={thread.messageCount}
-                hasAttachments={thread.hasAttachments}
-                starred={thread.starred}
-                dateTime={new Date(thread.lastMessageAt).toISOString()}
-                dateLabel={listDate(thread.lastMessageAt)}
-                subject={thread.subject || '(no subject)'}
-                snippet={thread.snippet}
-                match={matchSnippets?.get(thread.id)}
-                bucket={thread.bucket?.bucket}
-                bucketReason={thread.bucket?.reason}
+              <SubscribedThreadRow
+                id={id}
+                query={query}
+                fallback={
+                  fallbackRows?.get(id) ?? (notification?.id === id ? notification : undefined)
+                }
+                self={self}
+                match={matchSnippets?.get(id)}
               />
             </div>
           )

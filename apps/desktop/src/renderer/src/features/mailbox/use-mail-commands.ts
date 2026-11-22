@@ -1,4 +1,4 @@
-import { type AccountSummary, BUCKETS, type ThreadSummary } from '@amc/protocol'
+import { BUCKETS, type ThreadSummary } from '@amc/protocol'
 import {
   Activity,
   CircleHelp,
@@ -32,7 +32,7 @@ export function useMailCommands({
   readerScroll,
   clearSearch,
 }: {
-  accounts: AccountSummary[]
+  accounts: { id: string }[]
   selected: ThreadSummary | undefined
   hasThread: boolean
   ownView: boolean

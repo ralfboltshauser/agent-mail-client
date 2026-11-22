@@ -18,15 +18,15 @@ editing, IPC latency, and frame timing require a separate Electron run.
 3. Assert visible content, selection, focus, and node identity as appropriate.
    These assertions catch updates that are accidentally dropped.
 4. Add an `expectBudget` ceiling for the affected regions and record the
-   observed counts here. Where the audit target is lower, keep a Phase 2
-   `it.todo` until the target can be enforced. For failure and resnapshot, add
-   `expectContinuity` at each checkpoint when retention lands.
+   observed counts here. Assert the exact changed row IDs when the scenario
+   should update only particular rows. For failure and resnapshot, check
+   `expectContinuity` at each checkpoint.
 
 `profile-plugin.ts` inserts test-only React Profiler boundaries around the
 return values of tracked components found by name in renderer exports. Each
 boundary counts its new render output once, even if a descendant later commits
-on its own. The list option supplies its thread ID to the probe inside the
-memoized `ThreadRow` body. The inline composer footer has its own probe. The
+on its own. The subscribed row supplies its thread ID to the probe inside the memoized
+`ThreadRow` body. The inline composer footer has its own probe. The
 mount checks detect missing probes and verify that row counts use the mounted
 thread IDs.
 
@@ -57,3 +57,23 @@ The failed refresh detaches the listbox and all eight rows. Retrying replaces
 the rows and preserves the reader. The empty resnapshot detaches all eight
 rows and resets the selection from the second thread to the first. See
 [the audit](../../docs/desktop-react-audit.md#keep-it-that-way) for Phase 2 targets.
+
+## Selector integration
+
+Before counts come from Phase 1 main at `8bf447d`. The columns show committed
+renders. Count badges and the Inbox total have their own subscriptions.
+
+| Settled action | Workspace before → after | List before → after | Row bodies before → after | Reader before → after | Composer before → after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Status timestamp | 1 → 0 | 1 → 0 | 0 → 0 | 1 → 0 | Closed |
+| No-op replica, immediate or staggered | 0 → 0 | 0 → 0 | 0 → 0 | 0 → 0 | Closed |
+| No-op replica with composer | 0 → 0 | 0 → 0 | 0 → 0 | 0 → 0 | 0 → 0 |
+| Off-reader bucket edit | 1 → 0 | 1 → 0 | 1 → 1 | 1 → 0 | Closed |
+| Same-key list failure | 1 → 0 | 1 → 0 | 0 → 0 | 1 → 0 | Closed |
+| Same-key list retry | 1 → 0 | 1 → 0 | 0 → 0 | 1 → 0 | Closed |
+
+The timestamp test records one sync indicator commit. The open-composer
+variants record zero composer, recipient and footer commits. The resnapshot
+test keeps all eight rows, reader, focus and selection through the partial
+replica and the return to live. The composer typing and unchanged-poll TODOs
+belong to the composer session refactor in PR #141.

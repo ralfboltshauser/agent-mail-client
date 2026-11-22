@@ -7,15 +7,16 @@ const components = new Set([
   'App',
   'MailWorkspace',
   'AppSidebar',
+  'SyncIndicator',
   'ThreadList',
   'ThreadView',
   'Composer',
   'RecipientField',
 ])
 
-function getThreadRow(declaration: ts.VariableDeclaration) {
+function getRowRender(declaration: ts.VariableDeclaration) {
   const { name, initializer } = declaration
-  if (!ts.isIdentifier(name) || name.text !== 'ThreadRow') return
+  if (!ts.isIdentifier(name) || !['ThreadRow', 'SubscribedThreadRow'].includes(name.text)) return
   if (
     initializer &&
     ts.isCallExpression(initializer) &&
@@ -50,7 +51,7 @@ export function profileRenderer() {
           if (!props || !ts.isObjectBindingPattern(props)) {
             throw new Error('The renderer row probe needs destructured props')
           }
-          // ThreadList supplies the existing DOM thread ID to the memoized body in tests.
+          // The subscribed row supplies its existing thread ID to the body probe.
           edits.push({ offset: props.getStart(source) + 1, text: ' __amcThreadId,' })
           profileId = "'row:' + __amcThreadId"
         }
@@ -72,30 +73,16 @@ export function profileRenderer() {
           ) {
             wrap(node, "{__amcProfile('footer', ", ')}')
           }
-          if (
-            name === 'ThreadList' &&
-            ts.isJsxSelfClosingElement(node) &&
-            node.tagName.getText(source) === 'ThreadRow'
-          ) {
-            const parent = node.parent
-            const threadId = ts.isJsxElement(parent)
-              ? parent.openingElement.attributes.properties.find(
-                  (prop): prop is ts.JsxAttribute =>
-                    ts.isJsxAttribute(prop) && prop.name.getText(source) === 'data-thread-id',
-                )
-              : undefined
-            const initializer = threadId?.initializer
-            if (!initializer || !ts.isJsxExpression(initializer) || !initializer.expression) {
-              throw new Error('The renderer row probe needs a thread ID on the list option')
-            }
-            edits.push({
-              offset: node.tagName.end,
-              text: ` __amcThreadId={${initializer.expression.getText(source)}}`,
-            })
-          }
           ts.forEachChild(node, visitJsx)
         }
-        if (name === 'Composer' || name === 'ThreadList') visitJsx(component.body)
+        if (name === 'Composer') visitJsx(component.body)
+      }
+
+      function visitRowBody(node: ts.Node) {
+        if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(source) === 'ThreadRow') {
+          edits.push({ offset: node.tagName.end, text: ' __amcThreadId={id}' })
+        }
+        ts.forEachChild(node, visitRowBody)
       }
 
       for (const statement of source.statements) {
@@ -116,8 +103,9 @@ export function profileRenderer() {
         }
         if (ts.isVariableStatement(statement)) {
           for (const declaration of statement.declarationList.declarations) {
-            const row = getThreadRow(declaration)
-            if (row) instrument(row, 'ThreadRow')
+            const row = getRowRender(declaration)
+            if (row?.name?.text === 'ThreadRow') instrument(row, 'ThreadRow')
+            if (row?.name?.text === 'SubscribedThreadRow') visitRowBody(row.body)
           }
         }
       }

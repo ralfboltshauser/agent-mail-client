@@ -55,14 +55,38 @@ it('stages one body character without replacing the editor', async () => {
   expectBudget(keystrokeBudget)
 })
 
-it('keeps open compose fields through a no-op replica event', async () => {
-  const { adapter, dialog, subject, editor, recipient } = await openComposer()
-  await act(async () => adapter.emitChanged())
-  expect(dialog.getByRole('textbox', { name: 'Subject' })).toBe(subject)
-  expect(dialog.getByRole('textbox', { name: 'Message body' })).toBe(editor)
-  expect(dialog.getByRole('combobox', { name: 'To' })).toBe(recipient)
-  expectBudget({ workspace: 2, list: 2, reader: 2, rows: 2, composer: 2, recipient: 2, footer: 2 })
-})
+it.each(['timestamp', 'immediate', 'staggered', 'off-reader'] as const)(
+  'keeps open compose fields through a %s sync event',
+  async (event) => {
+    const { adapter, dialog, subject, editor, recipient } = await openComposer()
+    act(() => subject.focus())
+    const release = event === 'staggered' ? adapter.staggerReads() : undefined
+    await act(async () => {
+      if (event === 'timestamp') adapter.emitStatus({ lastSyncAt: Date.now() - 25_000 })
+      else if (event === 'off-reader') {
+        await adapter.api.setBucket({
+          threadId: 'thread-2',
+          bucket: 'Later',
+          reason: 'Synthetic edit',
+        })
+      } else adapter.emitChanged()
+    })
+    for (const resolve of release?.() ?? []) await act(async () => resolve())
+    expect(dialog.getByRole('textbox', { name: 'Subject' })).toBe(subject)
+    expect(dialog.getByRole('textbox', { name: 'Message body' })).toBe(editor)
+    expect(dialog.getByRole('combobox', { name: 'To' })).toBe(recipient)
+    expect(document.activeElement).toBe(subject)
+    expectBudget({
+      workspace: 0,
+      list: 0,
+      reader: 0,
+      rows: event === 'off-reader' ? 1 : 0,
+      composer: 0,
+      recipient: 0,
+      footer: 0,
+    })
+  },
+)
 
 it('processes an unchanged draft poll while keeping the editor and subject mounted', async () => {
   const { adapter, dialog, subject, editor } = await openComposer()
@@ -113,7 +137,8 @@ const keystrokeBudget = {
   footer: 1,
 }
 
+// The composer session refactor in PR #141 owns these content-level budgets.
 it.todo(
-  'Phase 2: a subject or body character commits no mailbox, recipient or unchanged footer and at most one edited region',
+  'Composer session: a subject or body character commits no mailbox, recipient or unchanged footer and at most one edited region',
 )
-it.todo('Phase 2: an unchanged clean-draft poll commits zero composer content')
+it.todo('Composer session: an unchanged clean-draft poll commits zero composer content')

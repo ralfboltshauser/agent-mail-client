@@ -16,7 +16,7 @@ import {
   Tag,
   Trash2,
 } from 'lucide-react'
-import { useEffect } from 'react'
+import { useEffect, useMemo } from 'react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import {
@@ -42,13 +42,18 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from '@/components/ui/sidebar'
-import { useReplicaQuery } from '@/hooks/use-amc'
+import { replicaStoreFor } from '@/data/replica-store'
+import { shareReply } from '@/data/share-reply'
+import { accountsQuery, countsQuery, labelsQuery } from '@/features/mailbox/mailbox-queries'
+import { useReplicaSelector, useSyncField } from '@/hooks/use-amc'
 import { getAmc } from '@/lib/amc'
 import { cn } from '@/lib/utils'
-import type { Counts, SyncStatus, View } from '../../../shared/api'
+import type { Counts, View } from '../../../shared/api'
 import { SyncIndicator } from './sync-indicator'
 import { LastTriageRun, useTriageStatus } from './triage-status'
 import { Kbd } from './ui/kbd'
+
+const NO_LABELS: Label[] = []
 
 const SYSTEM_VIEWS: { view: View; title: string; icon: typeof Inbox; keys: string }[] = [
   { view: { kind: 'inbox' }, title: 'Inbox', icon: Inbox, keys: 'G I' },
@@ -73,7 +78,10 @@ export function sameView(a: View, b: View): boolean {
   )
 }
 
-export function navigableLabels(labels: Label[], accounts: AccountSummary[]): Label[] {
+export function navigableLabels(
+  labels: Label[],
+  accounts: Pick<AccountSummary, 'id' | 'kind'>[],
+): Label[] {
   const imapAccounts = new Set(
     accounts.filter((account) => account.kind === 'imap').map((account) => account.id),
   )
@@ -85,7 +93,6 @@ export function navigableLabels(labels: Label[], accounts: AccountSummary[]): La
 }
 
 interface Props {
-  accounts: AccountSummary[]
   accountId: string | null
   onAccount: (id: string | null) => void
   view: View
@@ -95,9 +102,7 @@ interface Props {
   onShortcuts: () => void
   onAgent: () => void
   composing: boolean
-  counts: Counts
-  labels: Label[]
-  status: SyncStatus | null
+  snoozeEnabled: boolean
 }
 
 function AccountBadge({ text, className }: { text: string; className?: string }) {
@@ -114,7 +119,6 @@ function AccountBadge({ text, className }: { text: string; className?: string })
 }
 
 export function AppSidebar({
-  accounts,
   accountId,
   onAccount,
   view,
@@ -124,23 +128,31 @@ export function AppSidebar({
   onShortcuts,
   onAgent,
   composing,
-  counts,
-  labels,
-  status,
+  snoozeEnabled,
 }: Props) {
   const { open } = useSidebar()
   const triage = useTriageStatus()
-  const { value: backlog, refresh: refreshBacklog } = useReplicaQuery(
-    async () => ({ accountId, ...(await getAmc().triageCounts(accountId)) }),
-    [accountId],
-    null,
+  const api = getAmc()
+  const triageQuery = useMemo(
+    () => ({
+      key: JSON.stringify(['triage-counts', accountId]),
+      load: () => api.triageCounts(accountId),
+    }),
+    [api, accountId],
   )
+  const triageCounts = useReplicaSelector(triageQuery, ({ data }) => data)
   useEffect(() => {
-    const timer = setInterval(refreshBacklog, 60_000)
+    const timer = setInterval(() => void replicaStoreFor(api).refresh(triageQuery), 60_000)
     return () => clearInterval(timer)
-  }, [refreshBacklog])
-  const triageCounts = backlog?.accountId === accountId ? backlog : null
-  const triageDisabled = status?.phase !== 'live' || !triage || triage.running
+  }, [api, triageQuery])
+  const syncIsLive = useSyncField((status) => status?.phase === 'live')
+  const triageDisabled = !syncIsLive || !triage || triage.running
+  const accounts = useReplicaSelector(
+    accountsQuery(),
+    ({ data }) => data?.map(({ id, address, kind }) => ({ id, address, kind })) ?? [],
+    (left, right) => shareReply(left, right) === left,
+  )
+  const labels = useReplicaSelector(labelsQuery(accountId), ({ data }) => data ?? NO_LABELS)
   const runTriage = (scope: 'recent' | 'account') => {
     void getAmc()
       .triageNow(accountId, scope)
@@ -150,12 +162,6 @@ export function AppSidebar({
   const folderLabels = navigableLabels(labels, accounts).sort((a, b) =>
     a.name.localeCompare(b.name),
   )
-
-  const badge = (kind: View['kind']) => {
-    if (kind === 'inbox') return counts.inboxUnread || null
-    if (kind === 'drafts') return counts.drafts || null
-    return null
-  }
 
   if (!open) return null
   return (
@@ -221,7 +227,7 @@ export function AppSidebar({
         <SidebarGroup>
           <SidebarGroupContent>
             <SidebarMenu className="gap-0.5">
-              {systemViews(status?.snoozeEnabled === true).map((item) => (
+              {systemViews(snoozeEnabled).map((item) => (
                 <SidebarMenuItem key={item.view.kind}>
                   <SidebarMenuButton
                     isActive={sameView(view, item.view)}
@@ -232,10 +238,11 @@ export function AppSidebar({
                     <item.icon />
                     <span>{item.title}</span>
                   </SidebarMenuButton>
-                  {badge(item.view.kind) !== null && (
-                    <SidebarMenuBadge className="tabular-nums">
-                      {badge(item.view.kind)}
-                    </SidebarMenuBadge>
+                  {(item.view.kind === 'inbox' || item.view.kind === 'drafts') && (
+                    <CountBadge
+                      accountId={accountId}
+                      field={item.view.kind === 'inbox' ? 'inboxUnread' : 'drafts'}
+                    />
                   )}
                 </SidebarMenuItem>
               ))}
@@ -288,9 +295,7 @@ export function AppSidebar({
                       <Layers className="text-muted-foreground" />
                       <span>{bucket}</span>
                     </SidebarMenuButton>
-                    <SidebarMenuBadge className="tabular-nums">
-                      {counts.buckets[bucket]?.toLocaleString()}
-                    </SidebarMenuBadge>
+                    <BucketCountBadge accountId={accountId} bucket={bucket} />
                   </SidebarMenuItem>
                 )
               })}
@@ -341,8 +346,30 @@ export function AppSidebar({
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
-        <SyncIndicator status={status} accounts={accounts} />
+        <SyncIndicator />
       </SidebarFooter>
     </Sidebar>
   )
+}
+
+function CountBadge({
+  accountId,
+  field,
+}: {
+  accountId: string | null
+  field: 'inboxUnread' | 'drafts'
+}) {
+  const count = useReplicaSelector(countsQuery(accountId), ({ data }) => data?.[field] ?? 0)
+  return count > 0 ? <SidebarMenuBadge className="tabular-nums">{count}</SidebarMenuBadge> : null
+}
+
+function BucketCountBadge({
+  accountId,
+  bucket,
+}: {
+  accountId: string | null
+  bucket: keyof Counts['buckets']
+}) {
+  const count = useReplicaSelector(countsQuery(accountId), ({ data }) => data?.buckets[bucket])
+  return <SidebarMenuBadge className="tabular-nums">{count?.toLocaleString()}</SidebarMenuBadge>
 }

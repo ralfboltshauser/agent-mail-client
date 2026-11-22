@@ -1,7 +1,7 @@
 import { act, fireEvent, screen, within } from '@testing-library/react'
 import { expect, it } from 'vitest'
 import { deferred } from './adapter'
-import { commits, expectBudget } from './profile'
+import { commitCounts, commits, expectBudget } from './profile'
 import {
   firstSubject,
   listbox,
@@ -33,14 +33,27 @@ function expectContinuity(before: ReturnType<typeof mailboxNodes>, subject = fir
   expect(document.activeElement).toBe(before.list)
 }
 
+const idleMailbox = {
+  app: 0,
+  workspace: 0,
+  sidebar: 0,
+  indicator: 0,
+  list: 0,
+  reader: 0,
+  composer: 0,
+  rows: 0,
+}
+
 it('preserves the mailbox on a status-only timestamp change', async () => {
   const adapter = await mount()
   const before = mailboxNodes()
   adapter.api.threads.mockClear()
-  await act(async () => adapter.emitStatus({ lastSyncAt: Date.now() + 1000 }))
+  await act(async () => adapter.emitStatus({ lastSyncAt: Date.now() - 25_000 }))
+  expect(screen.getByText('Up to date · 25s ago')).toBeTruthy()
   expect(adapter.api.threads).not.toHaveBeenCalled()
   expectContinuity(before)
-  expectBudget({ app: 1, workspace: 1, sidebar: 1, list: 1, reader: 1, rows: 1 })
+  expectBudget({ ...idleMailbox, indicator: 1 })
+  expect(commitCounts().indicator).toBe(1)
 })
 
 it.each(['immediate', 'staggered'] as const)(
@@ -67,15 +80,7 @@ it.each(['immediate', 'staggered'] as const)(
     }
     for (const query of queries) expect(query).toHaveBeenCalledTimes(1)
     expectContinuity(before)
-    const region = timing === 'staggered' ? 7 : 2
-    expectBudget({
-      app: 0,
-      workspace: region,
-      sidebar: timing === 'staggered' ? 8 : 2,
-      list: region,
-      reader: region,
-      rows: region,
-    })
+    expectBudget(idleMailbox)
   },
 )
 
@@ -90,8 +95,73 @@ it('applies one off-reader bucket change to the existing row', async () => {
   expect(within(changed).getByText('Later')).toBeTruthy()
   expect(options()).toEqual(before.rows)
   expectContinuity(before)
-  expectBudget({ workspace: 2, list: 2, reader: 2, rows: 2 })
+  expectBudget({ ...idleMailbox, rows: 1 })
+  expect(commitCounts().rows).toEqual({ 'thread-2': 1 })
 })
+
+it('updates each count at its display site without committing the surrounding mailbox', async () => {
+  const adapter = await mount()
+  const before = mailboxNodes()
+  const inbox = screen.getByRole('heading', { name: 'Inbox' }).parentElement
+  const later = screen.getByRole('button', { name: 'Later' }).closest('li')
+  if (!inbox || !later) throw new Error('Expected Inbox header and Later badge')
+  const counts = await adapter.api.counts(null)
+  adapter.api.counts.mockResolvedValueOnce({
+    ...counts,
+    inbox: 101,
+    buckets: { ...counts.buckets, Later: 53 },
+  })
+  await act(async () => adapter.emitChanged())
+  expect(within(inbox).getByText('101')).toBeTruthy()
+  expect(within(later).getByText('53')).toBeTruthy()
+  expectContinuity(before)
+  expectBudget(idleMailbox)
+})
+
+it('commits only the indicator when an account reports a sync error', async () => {
+  const adapter = await mount()
+  const before = mailboxNodes()
+  const accounts = await adapter.api.accounts()
+  adapter.api.accounts.mockResolvedValueOnce(
+    accounts.map((account) => ({ ...account, status: 'auth_expired' })),
+  )
+  await act(async () => adapter.emitChanged())
+  expect(screen.getByText('Sign in again needed')).toBeTruthy()
+  expectContinuity(before)
+  expectBudget({ ...idleMailbox, indicator: 1 })
+  expect(commitCounts().indicator).toBe(1)
+})
+
+it.each(['filter', 'history'] as const)(
+  'refreshes one %s result without committing other rows or the reader',
+  async (mode) => {
+    const adapter = await mount()
+    const input = screen.getByRole('textbox', { name: /Filter mail/ })
+    await act(async () => fireEvent.change(input, { target: { value: 'e' } }))
+    if (mode === 'history') {
+      await act(async () => fireEvent.keyDown(input, { key: 'Enter' }))
+      expect(adapter.api.search).toHaveBeenCalledExactlyOnceWith('e', null)
+      expect(adapter.api.summaries).toHaveBeenCalled()
+    } else {
+      expect(adapter.api.filter).toHaveBeenCalledExactlyOnceWith('e', null)
+    }
+    const changed = row(secondSubject)
+    const before = mailboxNodes()
+    commits.clear()
+
+    await act(async () => {
+      await adapter.api.setBucket({
+        threadId: 'thread-2',
+        bucket: 'Later',
+        reason: 'Search result edit',
+      })
+    })
+    expect(within(changed).getByText('Later')).toBeTruthy()
+    expectContinuity(before)
+    expectBudget({ ...idleMailbox, rows: 1 })
+    expect(commitCounts().rows).toEqual({ 'thread-2': 1 })
+  },
+)
 
 it('reorders existing rows while retaining selection and focus by thread', async () => {
   const adapter = await mount()
@@ -110,15 +180,15 @@ it('reorders existing rows while retaining selection and focus by thread', async
     ...rest,
   ])
   await act(async () => adapter.emitChanged())
-  expect(options()).toEqual([before.rows[1], before.rows[0], ...before.rows.slice(2)])
+  expect(options()).toEqual(before.rows)
   expectContinuity(before)
-  expectBudget({ workspace: 2, list: 2, reader: 2, rows: 2 })
+  expectBudget(idleMailbox)
 
-  commits.clear()
   await act(async () => stale.resolve(source))
   expect(options()).toEqual([before.rows[1], before.rows[0], ...before.rows.slice(2)])
   expectContinuity(before)
-  expectBudget({ list: 0, reader: 0, rows: 0 })
+  expectBudget({ list: 1, reader: 0, rows: 1 })
+  expect(commitCounts().rows).toEqual({ 'thread-2': 1 })
 })
 
 it('recovers from a same-key list failure and keeps the reader through a pending retry', async () => {
@@ -128,65 +198,50 @@ it('recovers from a same-key list failure and keeps the reader through a pending
   await act(async () => adapter.emitChanged())
   expect(screen.getByText('Could not load threads')).toBeTruthy()
   expect(reader()).toBe(before.heading)
-  // If the renderer keeps the list through the error, reject replacement DOM.
-  const retainedList = screen.queryByRole('listbox', { name: 'Threads' })
-  if (retainedList) expectContinuity(before)
-  expectBudget({ workspace: 2, reader: 2 })
+  expectContinuity(before)
+  expectBudget(idleMailbox)
 
   const source = await adapter.api.threads({ view: { kind: 'inbox' }, accountId: null })
   const retry = deferred<typeof source>()
   adapter.api.threads.mockReturnValueOnce(retry.promise)
   commits.clear()
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Retry' })))
-  expect(reader()).toBe(before.heading)
+  expectContinuity(before)
   await act(async () => retry.resolve(source))
-  expect(options()).toHaveLength(threadCount)
-  expect(selected()).toBe(row(firstSubject))
-  expect(reader()).toBe(before.heading)
   expect(screen.queryByText('Could not load threads')).toBeNull()
-  if (retainedList) expect(listbox()).toBe(before.list)
-  expectBudget({ workspace: 2, list: 3, reader: 2, rows: 2 })
+  expectContinuity(before)
+  expectBudget(idleMailbox)
 })
 
-it('recovers the Inbox after an empty page during a same-pairing resnapshot', async () => {
+it('retains the selected thread and mounted Inbox through a same-pairing resnapshot', async () => {
   const adapter = await mount()
   await act(async () => fireEvent.click(row(secondSubject)))
   const before = mailboxNodes(secondSubject)
   commits.clear()
-  adapter.api.threads.mockResolvedValueOnce([])
-  adapter.api.thread.mockResolvedValueOnce(null)
+  const threadRead = adapter.api.thread.getMockImplementation()
+  const listRead = adapter.api.threads.getMockImplementation()
+  if (!listRead || !threadRead) throw new Error('Expected synthetic mailbox reads')
+  adapter.api.threads.mockClear().mockResolvedValue([])
+  adapter.api.thread.mockClear().mockResolvedValue(null)
   await act(async () => {
     adapter.emitStatus({ phase: 'bootstrapping', progress: 0 })
     adapter.emitChanged()
   })
-  const retainedList = screen.queryByRole('listbox', { name: 'Threads' })
-  if (retainedList) expectContinuity(before, secondSubject)
-  expectBudget({ workspace: 3, reader: 3 })
+  expect(adapter.api.threads).not.toHaveBeenCalled()
+  expect(adapter.api.thread).not.toHaveBeenCalled()
+  expectContinuity(before, secondSubject)
+  expectBudget({ app: 0, reader: 0, rows: 0 })
+
   commits.clear()
+  adapter.api.threads.mockImplementation(listRead)
+  adapter.api.thread.mockImplementation(threadRead)
   await act(async () => {
     adapter.emitChanged()
     adapter.emitStatus({ phase: 'live', progress: null })
   })
+  expect(adapter.api.threads).toHaveBeenCalledTimes(1)
+  expect(adapter.api.thread).toHaveBeenCalledExactlyOnceWith('thread-2')
   expect(options()).toHaveLength(threadCount)
-  const selectedSubject = selected().textContent?.includes(secondSubject)
-    ? secondSubject
-    : firstSubject
-  expect(selected()).toBe(row(selectedSubject))
-  expect(reader(selectedSubject).isConnected).toBe(true)
-  if (retainedList) expectContinuity(before, secondSubject)
-  expectBudget({ workspace: 4, list: 4, reader: 4, rows: 3 })
+  expectContinuity(before, secondSubject)
+  expectBudget({ app: 0, reader: 0, rows: 0 })
 })
-
-it.todo(
-  'Phase 2: a timestamp-only status event commits zero workspace, list, reader or composer regions',
-)
-it.todo(
-  'Phase 2: an immediate or staggered no-op event commits zero list, row, reader or composer regions',
-)
-it.todo(
-  'Phase 2: an off-reader change commits the changed row once and zero sibling, reader or composer regions',
-)
-it.todo('Phase 2: same-key failure and retry retain the listbox, every row, focus and selection')
-it.todo(
-  'Phase 2: a same-pairing resnapshot retains the listbox, rows, reader, focus and selected thread',
-)

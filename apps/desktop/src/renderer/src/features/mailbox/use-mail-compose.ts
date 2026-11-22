@@ -1,14 +1,10 @@
-import type { ComposeDraft, ComposeStart, OutboxItem } from '@amc/protocol'
+import type { ComposeDraft, ComposeStart, OutboxItem, ThreadSummary } from '@amc/protocol'
 import { useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { getAmc } from '@/lib/amc'
-import type { ThreadWithMessages } from '../../../../shared/api'
 import { showQueuedSend } from './send-undo'
 
-export function useMailCompose(
-  thread: ThreadWithMessages | null,
-  composeAccountId: string | undefined,
-) {
+export function useMailCompose(thread: ThreadSummary | null, composeAccountId: string | undefined) {
   const [draft, setDraft] = useState<ComposeDraft | null>(null)
   const [handoffThread, setHandoffThread] = useState<string | null>(null)
   const [openingComposer, setOpeningComposer] = useState(false)
@@ -32,7 +28,7 @@ export function useMailCompose(
   const startCompose = async (mode: ComposeStart['mode']) => {
     if (opening.current || draft || (mode !== 'new' && !thread)) return
     if (mode === 'new' && minimised) return openDraft(minimised.id)
-    const from = mode !== 'new' ? thread?.thread.accountId : composeAccountId
+    const from = mode !== 'new' ? thread?.accountId : composeAccountId
     if (!from) {
       toast.error('Add an Account before composing.')
       return
@@ -44,7 +40,7 @@ export function useMailCompose(
         await getAmc().startCompose({
           mode,
           accountId: from,
-          threadId: mode === 'new' ? undefined : thread?.thread.id,
+          threadId: mode === 'new' ? undefined : thread?.id,
         }),
       )
     } catch (cause) {

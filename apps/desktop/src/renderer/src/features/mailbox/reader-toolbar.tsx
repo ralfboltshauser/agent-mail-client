@@ -3,7 +3,6 @@ import { Forward, Reply, ReplyAll } from 'lucide-react'
 import { BucketPicker } from '@/components/bucket-picker'
 import { OrganiseToolbar } from '@/components/organise'
 import { Button } from '@/components/ui/button'
-import type { ThreadWithMessages } from '../../../../shared/api'
 import type { useMailCompose } from './use-mail-compose'
 import type { useThreadActions } from './use-thread-actions'
 
@@ -14,7 +13,7 @@ export function ReaderToolbar({
   compose,
 }: {
   selected: ThreadSummary | undefined
-  activeThread: ThreadWithMessages | null
+  activeThread: ThreadSummary | null
   actions: ReturnType<typeof useThreadActions>
   compose: ReturnType<typeof useMailCompose>
 }) {
@@ -74,7 +73,7 @@ export function ReaderToolbar({
             variant="ghost"
             title="Hand off (T)"
             disabled={Boolean(draft) || openingComposer}
-            onClick={() => setHandoffThread(activeThread.thread.id)}
+            onClick={() => setHandoffThread(activeThread.id)}
           >
             Hand off
           </Button>

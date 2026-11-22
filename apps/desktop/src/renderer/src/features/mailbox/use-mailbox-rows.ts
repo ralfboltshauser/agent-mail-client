@@ -1,56 +1,50 @@
 import type { SearchHit, ThreadSummary } from '@amc/protocol'
 import { useMemo } from 'react'
-import { useReplica } from '@/hooks/use-amc'
+import { threadListQuery } from '@/data/thread-queries'
+import { useReplicaSelector } from '@/hooks/use-amc'
 import { getAmc } from '@/lib/amc'
 import type { View } from '../../../../shared/api'
-import { useMailboxQuery } from './use-mailbox-query'
+import { filterQuery, searchSummariesQuery } from '../search/search-queries'
+import { forEngine } from './mailbox-queries'
 
-export const NO_THREADS: ThreadSummary[] = []
+export const NO_THREAD_IDS: readonly string[] = []
 
 export function useMailboxRows({
+  engineUrl,
   view,
   accountId,
-  key,
   filter,
   hits,
   searching,
-  snapshotPending,
 }: {
+  engineUrl: string | null
   view: View
   accountId: string | null
-  key: string
   filter: string
   hits: SearchHit[] | null
   searching: boolean
-  snapshotPending: boolean
 }) {
-  const list = useMailboxQuery(
-    key,
-    () => (filter ? getAmc().filter(filter, accountId) : getAmc().threads({ view, accountId })),
-    !searching && !snapshotPending && view.kind !== 'drafts' && view.kind !== 'outbox',
-  )
-  const summaries = useReplica(
-    async () => (hits ? { hits, rows: await getAmc().summaries(hits.map(({ id }) => id)) } : null),
-    [hits],
-    null,
-  )
-  const currentSummaries = summaries?.hits === hits ? summaries.rows : undefined
-  const filtered = useMemo(
-    () =>
-      filter && view.kind === 'bucket'
-        ? list.data?.filter((row) => row.bucket?.bucket === view.bucket)
-        : list.data,
-    [filter, view, list.data],
-  )
+  const query = useMemo(() => {
+    if (searching) {
+      const summaries = hits && searchSummariesQuery(accountId, hits)
+      return summaries ? forEngine(engineUrl, summaries) : null
+    }
+    if (view.kind === 'drafts' || view.kind === 'outbox') return null
+    return forEngine(
+      engineUrl,
+      filter
+        ? filterQuery(filter, accountId, view)
+        : threadListQuery(getAmc(), { view, accountId }),
+    )
+  }, [searching, hits, accountId, view, filter, engineUrl])
+  const replicaIds = useReplicaSelector(searching ? null : query, (snapshot) => snapshot.data?.ids)
   const searchRows = useMemo(() => {
     if (!hits) return undefined
-    if (!currentSummaries) return hits
-    const byId = new Map(currentSummaries.map((summary) => [summary.id, summary]))
-    return hits.map((hit) => byId.get(hit.id) ?? hit)
-  }, [hits, currentSummaries])
-  const matchSnippets = useMemo(
-    () => (hits ? new Map(hits.map(({ id, matchSnippet }) => [id, matchSnippet])) : undefined),
-    [hits],
-  )
-  return { list, rows: searching ? searchRows : filtered, matchSnippets }
+    return {
+      ids: hits.map(({ id }) => id),
+      summaries: new Map<string, ThreadSummary>(hits.map((hit) => [hit.id, hit])),
+      snippets: new Map(hits.map(({ id, matchSnippet }) => [id, matchSnippet])),
+    }
+  }, [hits])
+  return { query, ids: searching ? searchRows?.ids : replicaIds, searchRows }
 }

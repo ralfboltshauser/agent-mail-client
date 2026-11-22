@@ -1,5 +1,5 @@
 import type { ThreadSummary } from '@amc/protocol'
-import { useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import type { View } from '../../../../shared/api'
 
 export const INBOX: View = { kind: 'inbox' }
@@ -23,34 +23,36 @@ export function useMailboxNavigation(snoozeEnabled: boolean) {
 
 export function useThreadSelection(
   key: string,
-  rows: ThreadSummary[] | undefined,
-  notification: ThreadSummary | null,
+  ids: readonly string[] | undefined,
+  notificationId: string | undefined,
 ) {
   const [selection, setSelection] = useState<{ key: string; id: string | null }>({ key, id: null })
   const requestedId = selection.key === key ? selection.id : null
-  const threads =
-    notification &&
-    notification.id === requestedId &&
-    !rows?.some((row) => row.id === notification.id)
-      ? [notification, ...(rows ?? [])]
-      : rows
-  const selected = threads?.find((row) => row.id === requestedId) ?? threads?.[0]
-  const id = threads === undefined ? requestedId : (selected?.id ?? null)
-  if (selection.key !== key || selection.id !== id) setSelection({ key, id })
+  const includeNotification =
+    notificationId !== undefined && notificationId === requestedId && !ids?.includes(notificationId)
+  const orderedIds = useMemo(
+    () => (includeNotification ? [notificationId, ...(ids ?? [])] : ids),
+    [includeNotification, notificationId, ids],
+  )
+  const selectedId =
+    orderedIds === undefined || (requestedId !== null && orderedIds.includes(requestedId))
+      ? requestedId
+      : (orderedIds[0] ?? null)
+  if (selection.key !== key || selection.id !== selectedId) setSelection({ key, id: selectedId })
 
-  return {
-    selected,
-    threads,
-    setSelection,
-    select: (id: string | null, destination = key) => setSelection({ key: destination, id }),
-    move: (delta: number) => {
-      if (!threads?.length) return
-      const index = Math.max(
-        0,
-        threads.findIndex((row) => row.id === id),
-      )
-      const next = threads[Math.min(threads.length - 1, Math.max(0, index + delta))]
-      if (next) setSelection({ key, id: next.id })
+  const select = useCallback(
+    (id: string | null, destination = key) => setSelection({ key: destination, id }),
+    [key],
+  )
+  const move = useCallback(
+    (delta: number) => {
+      if (!orderedIds?.length) return
+      const index = selectedId === null ? 0 : Math.max(0, orderedIds.indexOf(selectedId))
+      const next = orderedIds[Math.min(orderedIds.length - 1, Math.max(0, index + delta))]
+      if (next) setSelection({ key, id: next })
     },
-  }
+    [key, orderedIds, selectedId],
+  )
+
+  return { selectedId, ids: orderedIds, setSelection, select, move }
 }
