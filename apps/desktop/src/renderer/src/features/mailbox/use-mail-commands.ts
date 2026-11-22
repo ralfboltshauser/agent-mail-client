@@ -4,6 +4,7 @@ import {
   CircleHelp,
   Forward,
   Layers,
+  ListChecks,
   Reply,
   ReplyAll,
   Settings2,
@@ -33,6 +34,8 @@ export function useMailCommands({
   searchInput,
   readerScroll,
   clearSearch,
+  reviewOpen,
+  openReview,
 }: {
   accounts: { id: string }[]
   selected: ThreadSummary | undefined
@@ -49,6 +52,8 @@ export function useMailCommands({
   searchInput: React.RefObject<HTMLInputElement | null>
   readerScroll: React.RefObject<HTMLDivElement | null>
   clearSearch: () => void
+  reviewOpen: boolean
+  openReview?: () => void
 }) {
   const {
     bucketPickerOpen,
@@ -127,6 +132,9 @@ export function useMailCommands({
       : []),
   ]
   const appActions = [
+    ...(openReview
+      ? [{ name: 'Triage Inbox', icon: ListChecks, shortcut: 'T', run: openReview }]
+      : []),
     { name: 'Agent activity', icon: Activity, run: () => setAgentOpen(true) },
     { name: 'Settings', icon: Settings2, run: openSendSettings },
     {
@@ -159,6 +167,13 @@ export function useMailCommands({
       'shift+t': (event) => {
         if (!event.repeat) handOff()
       },
+      ...(openReview
+        ? {
+            t: (event: KeyboardEvent) => {
+              if (!event.repeat) openReview()
+            },
+          }
+        : {}),
       '?': () => {
         rememberFocus()
         setShortcutsOpen(true)
@@ -207,7 +222,8 @@ export function useMailCommands({
         accounts.slice(0, 9).map((a, i) => [`mod+${i + 1}`, () => selectAccount(a.id)]),
       ),
     },
-    !draft &&
+    !reviewOpen &&
+      !draft &&
       !paletteOpen &&
       !shortcutsOpen &&
       !agentOpen &&

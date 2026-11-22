@@ -36,6 +36,8 @@ export function commitCounts() {
     composer: commits.get('Composer') ?? 0,
     recipient: commits.get('RecipientField') ?? 0,
     footer: commits.get('footer') ?? 0,
+    reviewCard: commits.get('ReviewCard') ?? 0,
+    reviewProgress: commits.get('ReviewProgress') ?? 0,
     rows,
   }
 }

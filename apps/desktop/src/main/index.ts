@@ -22,6 +22,8 @@ import type {
 import {
   AdoptScreenedDestination,
   BucketInput,
+  BucketReviewInput,
+  MutationRequest,
   SenderAvatarResolve,
   SenderDecision,
   SenderListQuery,
@@ -348,6 +350,7 @@ function registerIpc() {
     requireEngine().request('/v1/senders/decisions', {
       method: 'POST',
       body: SenderDecision.parse(input),
+      signal: AbortSignal.timeout(10_000),
     }),
   )
   ipcMain.handle('amc:adoptScreenedDestination', (_event, input: unknown) =>
@@ -357,13 +360,52 @@ function registerIpc() {
     }),
   )
   ipcMain.handle('amc:ownerAction', (_event, id: string) =>
-    requireEngine().get(`/v1/owner-actions/${encodeURIComponent(id)}`),
+    requireEngine().get(`/v1/owner-actions/${encodeURIComponent(id)}`, {
+      signal: AbortSignal.timeout(10_000),
+    }),
   )
   ipcMain.handle('amc:undoOwnerAction', (_event, id: string) =>
-    requireEngine().request(`/v1/owner-actions/${encodeURIComponent(id)}/undo`, { method: 'POST' }),
+    requireEngine().request(`/v1/owner-actions/${encodeURIComponent(id)}/undo`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(10_000),
+    }),
   )
-  ipcMain.handle('amc:triageQueue', (_event, query: unknown) =>
-    requireEngine().get(`/v1/triage/queue?${queryString(TriageQueueQuery.parse(query))}`),
+  ipcMain.handle('amc:triageQueue', (_event, query: unknown) => {
+    return requireEngine().get(`/v1/triage/queue?${queryString(TriageQueueQuery.parse(query))}`, {
+      signal: AbortSignal.timeout(10_000),
+    })
+  })
+  ipcMain.handle('amc:reviewPairing', () => requireEngine().pairingScope)
+  ipcMain.handle('amc:reviewBucket', async (_event, input: unknown) => {
+    const loop = sync
+    const result = await requireEngine().request('/v1/bucket', {
+      method: 'PUT',
+      body: BucketReviewInput.parse(input),
+      signal: AbortSignal.timeout(10_000),
+    })
+    void loop?.pull().catch(() => {})
+    return result
+  })
+  ipcMain.handle('amc:reviewOrganiseStatus', (_event, id: string) => {
+    requireEngine()
+    return openReplica().organise.reviewStatus(id)
+  })
+  ipcMain.handle(
+    'amc:reviewOrganise',
+    (_event, input: unknown, id: unknown, messageId?: string) => {
+      if (!organise) throw new Error('Pair with the Engine first')
+      const parsed = MutationRequest.parse({ id, action: input })
+      const action = parsed.action
+      if (action.kind !== 'archive' && action.kind !== 'snooze' && action.kind !== 'undo')
+        throw new Error('Invalid triage Organise action')
+      const queued = organise.enqueue(action, (sync?.status ?? pausedStatus)?.snoozeEnabled, {
+        id: parsed.id,
+        messageId,
+      })
+      refreshMail()
+      if (sync) void organise.flush()
+      return queued
+    },
   )
   ipcMain.handle('amc:resolveSenderAvatars', (_event, input: unknown) =>
     requireEngine().request('/v1/sender-avatars/resolve', {

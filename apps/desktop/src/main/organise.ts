@@ -15,7 +15,7 @@ import {
   type ThreadMessage,
   type ThreadSummary,
 } from '@amc/protocol'
-import type { OrganiseNotice } from '../shared/api'
+import type { OrganiseNotice, ReviewOrganiseStatus } from '../shared/api'
 import { type EngineClient, EngineError } from './engine'
 import type { Replica } from './replica'
 
@@ -147,6 +147,11 @@ function patchesFor(
   return { patch, inverse }
 }
 
+interface ReviewMutation {
+  id: string
+  messageId?: string
+}
+
 export class LocalOrganise {
   readonly replica: Replica
 
@@ -165,7 +170,16 @@ export class LocalOrganise {
     return row && (JSON.parse(row.data) as AccountSummary)
   }
 
-  enqueue(action: OrganiseAction): string {
+  reviewStatus(id: string): ReviewOrganiseStatus | null {
+    const row = this.#db.prepare('SELECT status, error FROM organise_queue WHERE id = ?').get(id) as
+      | Pick<QueueRow, 'status' | 'error'>
+      | undefined
+    return row
+      ? { status: row.status === 'unsent' ? 'pending' : row.status, error: row.error }
+      : null
+  }
+
+  enqueue(action: OrganiseAction, review?: ReviewMutation): string {
     let threadId = action.threadId
     let patch: Patch = { labels: {} }
     let inverse: Patch = { labels: {} }
@@ -226,6 +240,16 @@ export class LocalOrganise {
     } else {
       const thread = this.replica.thread(action.threadId)
       if (!thread) throw new Error('Thread is no longer available')
+      if (
+        review &&
+        (!thread.thread.inInbox ||
+          !thread.messages.some(
+            (message) =>
+              message.id === review.messageId &&
+              message.labelIds.includes(`${thread.thread.accountId}:INBOX`),
+          ))
+      )
+        throw new Error('The reviewed message is no longer in the Inbox')
       if (thread.messages.length !== thread.thread.messageCount)
         throw new Error('Wait for this Thread to finish syncing')
       const account = this.#account(thread.thread.accountId)
@@ -241,7 +265,7 @@ export class LocalOrganise {
       patch = projected.patch
       inverse = projected.inverse
     }
-    const id = randomUUID()
+    const id = review?.id ?? randomUUID()
     const request: MutationRequest = { id, action }
     this.replica.transaction(() => {
       this.#db
@@ -478,7 +502,8 @@ export class OrganiseSync extends EventEmitter<{ changed: [] }> {
     this.#controller.abort()
   }
 
-  enqueue(input: unknown, snoozeEnabled = false): string {
+  enqueue(input: unknown, snoozeEnabled = false, review?: ReviewMutation): string {
+    if (review && this.#local.reviewStatus(review.id)) return review.id
     if (
       !snoozeEnabled &&
       input !== null &&
@@ -489,7 +514,7 @@ export class OrganiseSync extends EventEmitter<{ changed: [] }> {
       throw new Error('Snooze is disabled on this Engine')
     const action = OrganiseAction.parse(input)
     if (this.#refusal) throw new Error(this.#refusal)
-    return this.#local.enqueue(action)
+    return this.#local.enqueue(action, review)
   }
 
   async flush(): Promise<void> {

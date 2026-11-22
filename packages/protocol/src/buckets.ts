@@ -37,6 +37,7 @@ export const BucketReviewInput = BucketInput.extend({
   expectedRevision: z.number().int().nonnegative(),
   clientActionId: z.uuid(),
 })
+export type BucketReviewInput = z.infer<typeof BucketReviewInput>
 
 export const TriageBucketResult = z.object({
   inputRevision: z.number().int().nonnegative(),

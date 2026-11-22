@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { ApiError } from '@amc/protocol'
 
 export class EngineError extends Error {
@@ -14,11 +15,15 @@ export class EngineError extends Error {
 /** A thin client for the Engine's HTTP API, authenticated as this Mac. */
 export class EngineClient {
   readonly baseUrl: string
+  readonly pairingScope: string
   readonly #token: string
 
   constructor(baseUrl: string, token: string) {
     this.baseUrl = baseUrl
     this.#token = token
+    this.pairingScope = createHash('sha256')
+      .update(JSON.stringify(['desktop-review', baseUrl, token]))
+      .digest('hex')
   }
 
   async get<T>(path: string, init: { signal?: AbortSignal } = {}): Promise<T> {
