@@ -1,0 +1,92 @@
+import { ChevronDown, FileText, Paperclip } from 'lucide-react'
+import { useState } from 'react'
+import { Badge } from '@/components/ui/badge'
+import { getAmc } from '@/lib/amc'
+import { fileSize, fullDate, hueFor, initials, listDate, personName } from '@/lib/format'
+import { cn } from '@/lib/utils'
+import type { ReplicaThreadMessage } from '../../../../shared/api'
+import { MessageContent } from './message-content'
+
+export function Message({
+  message: m,
+  defaultOpen,
+}: {
+  message: ReplicaThreadMessage
+  defaultOpen: boolean
+}) {
+  const [{ open, visited }, setExpansion] = useState({ open: defaultOpen, visited: defaultOpen })
+  const isDraft = m.labelIds.some((label) => label.endsWith(':DRAFT'))
+  const files = m.attachments.filter((attachment) => !attachment.inline)
+  const hue = hueFor(m.from?.address ?? '')
+
+  return (
+    <div className={cn('rounded-lg border bg-card', isDraft && 'border-dashed border-primary/50')}>
+      <button
+        type="button"
+        className="flex w-full items-start gap-3 rounded-lg px-4 py-3.5 text-left hover:bg-muted/45"
+        aria-expanded={open}
+        onClick={() => setExpansion((current) => ({ open: !current.open, visited: true }))}
+      >
+        <div
+          className="flex size-8 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold mail-avatar"
+          style={{ '--avatar-hue': hue } as React.CSSProperties}
+        >
+          {initials(m.from)}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-baseline gap-2">
+            <span className="truncate text-sm font-semibold">{personName(m.from)}</span>
+            {isDraft && <Badge className="h-4 px-1.5 text-[10px]">Draft</Badge>}
+            <time
+              className="ml-auto shrink-0 text-xs text-muted-foreground tabular-nums"
+              dateTime={new Date(m.sentAt).toISOString()}
+              title={open ? undefined : fullDate(m.sentAt)}
+            >
+              {open ? fullDate(m.sentAt) : listDate(m.sentAt)}
+            </time>
+          </div>
+          {open ? (
+            <div className="truncate text-xs text-muted-foreground" title={m.from?.address}>
+              {m.from && <>{m.from.address} · </>}to{' '}
+              {[...m.to, ...m.cc].map((a) => personName(a)).join(', ') || 'undisclosed recipients'}
+            </div>
+          ) : (
+            <div className="truncate text-[13px] text-muted-foreground">{m.snippet}</div>
+          )}
+        </div>
+        <ChevronDown
+          aria-hidden
+          className={cn('mt-0.5 size-3.5 shrink-0 text-muted-foreground', open && 'rotate-180')}
+        />
+      </button>
+      <div hidden={!open} className="px-4 pt-2 pb-5 sm:pl-[3.75rem]">
+        {visited && <MessageContent message={m} />}
+        {open && m.bodySearchTruncated && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            Search indexes only the start of this message.
+          </p>
+        )}
+        {open && files.length > 0 && (
+          <div className="mt-4 flex flex-wrap gap-2">
+            {files.map((a) => (
+              <button
+                key={a.id}
+                type="button"
+                onClick={() => void getAmc().openAttachment(a.id, a.filename)}
+                className="flex max-w-64 items-center gap-2 rounded-md border bg-background px-2.5 py-1.5 text-left text-xs hover:bg-muted"
+              >
+                {a.mimeType.startsWith('image/') ? (
+                  <Paperclip className="size-3.5 shrink-0" />
+                ) : (
+                  <FileText className="size-3.5 shrink-0" />
+                )}
+                <span className="truncate">{a.filename || 'attachment'}</span>
+                <span className="shrink-0 text-muted-foreground">{fileSize(a.size)}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
