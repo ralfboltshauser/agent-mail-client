@@ -27,12 +27,13 @@ export class EngineClient {
 
   async request<T>(
     path: string,
-    init: { method: string; body?: unknown; signal?: AbortSignal },
+    init: { method: string; body?: unknown; signal?: AbortSignal; redirect?: RequestRedirect },
   ): Promise<T> {
     let res: Response
     try {
       res = await fetch(new URL(path, this.baseUrl), {
         method: init.method,
+        redirect: init.redirect,
         headers: {
           Authorization: `Bearer ${this.#token}`,
           ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
@@ -52,6 +53,14 @@ export class EngineClient {
       throw new EngineError(res.status, body.error ?? 'error', body.message ?? res.statusText)
     }
     return (await res.json()) as T
+  }
+
+  authenticatedGet(path: string, signal: AbortSignal): Promise<Response> {
+    return fetch(new URL(path, this.baseUrl), {
+      headers: { Authorization: `Bearer ${this.#token}` },
+      redirect: 'error',
+      signal,
+    })
   }
 
   async bytes(path: string): Promise<Buffer> {
