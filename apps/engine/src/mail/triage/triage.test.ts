@@ -282,8 +282,8 @@ it('keeps a superseding Bucket on a reimported Thread and removes the abandoned 
   }
 })
 
-it('marks only the exact still-current incoming message after a confirmed Reply', () => {
-  const { db, put, store } = setup()
+it('marks only the exact still-current incoming message after a confirmed Reply', async () => {
+  const { db, put, store, http, queries } = setup()
   try {
     const threadId = put('a', 'in', 'person@example.test', 10)
     db.exec(`UPDATE message SET rfc_message_id = '<incoming@example.test>' WHERE id = 'a:in';
@@ -306,6 +306,19 @@ it('marks only the exact still-current incoming message after a confirmed Reply'
       inReplyTo: 'incoming@example.test',
     }
     const receipt = { providerId: 'out', providerThreadId: 'in' }
+    const review = async (bucket: string) => {
+      const actionId = randomUUID()
+      const response = await http('/v1/bucket', 'PUT', {
+        intent: 'review',
+        threadId,
+        expectedRevision: threadInput(db, threadId)?.modseq,
+        bucket,
+        reason: 'Owner review',
+        clientActionId: actionId,
+      })
+      expect(response.status).toBe(200)
+      return actionId
+    }
     markConfirmedReply(store, reply, 'out@example.test', receipt)
     expect(threadInput(db, threadId)?.handled_id).toBeNull()
     db.exec("UPDATE outbox SET status = 'sent' WHERE id = 'outbox'")
@@ -314,8 +327,19 @@ it('marks only the exact still-current incoming message after a confirmed Reply'
       allRecipientsAccepted: false,
     })
     expect(threadInput(db, threadId)?.handled_id).toBeNull()
+    const first = await review('Later')
     markConfirmedReply(store, reply, 'out@example.test', receipt)
     expect(threadInput(db, threadId)?.handled_id).toBe('a:in')
+    const second = await review('Action')
+    const undo = async (id: string) => (await http(`/v1/owner-actions/${id}/undo`, 'POST')).json()
+    expect(await undo(second)).toMatchObject({ undo: { status: 'applied' } })
+    expect(queries.threadSummary(threadId)?.bucket?.bucket).toBe('Later')
+    expect(await undo(first)).toMatchObject({ undo: { status: 'applied' } })
+    expect(queries.threadSummary(threadId)?.bucket).toBeNull()
+    expect(correctionExamples(db, 'a')).toEqual([])
+    expect(
+      db.prepare('SELECT action_id FROM owner_handled WHERE thread_id = ?').get(threadId),
+    ).toMatchObject({ action_id: 'reply:outbox' })
     put('a', 'new', 'person@example.test', 30, 'in')
     markConfirmedReply(store, reply, 'out@example.test', receipt)
     expect(threadInput(db, threadId)).toMatchObject({ handled_id: 'a:in', input_id: 'a:new' })

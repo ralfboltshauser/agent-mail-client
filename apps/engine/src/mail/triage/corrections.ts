@@ -198,11 +198,11 @@ export function correctionActions(store: MailStore): Record<string, OwnerActionH
               .prepare('DELETE FROM owner_handled WHERE thread_id = ? AND action_id = ?')
               .run(row.thread_id, id)
             if (erased.changes && watermark) markHandled(db, row.thread_id, watermark)
-            if (watermark)
-              db.prepare(`
-              UPDATE triage_correction SET applied_revision = (SELECT bucket_revision FROM thread WHERE id = ?)
-              WHERE action_id = ? AND applied_revision = ? AND undo_status IS NULL
-            `).run(row.thread_id, watermark.action_id, revision)
+            // A verified Reply can replace the watermark without changing the Bucket.
+            db.prepare(`
+              UPDATE triage_correction SET applied_revision = (SELECT bucket_revision FROM thread WHERE id = ?1)
+              WHERE thread_id = ?1 AND applied_revision = ?2 AND undo_status IS NULL
+            `).run(row.thread_id, revision)
             store.recordChange('thread', row.thread_id, 'upsert')
           }
           return status(db, id)
