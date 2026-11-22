@@ -1,130 +1,14 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { ComposeDraft } from '@amc/protocol'
 import { expect, it, vi } from 'vitest'
 import type { EngineClient } from './engine'
 import { Handoff, type T3Launch, type T3Launcher, type T3Thread, t3NavigationLink } from './handoff'
-import { cliLauncher } from './t3-cli'
 
-function launcherFor(
-  launch: (request: T3Launch) => Promise<T3Thread>,
-  find: T3Launcher['find'] = async () => null,
-): T3Launcher {
-  return { key: 'fixture', projects: async () => [], launch, find }
+function launcherFor(launch: T3Launcher['launch']): T3Launcher {
+  return { key: 'fixture', projects: async () => [], launch }
 }
-
-it('launches the chosen T3 project with scoped context and retries confirmation without launching again', async () => {
-  const draft = { id: 'draft-1' } as ComposeDraft
-  const composerUrl = 'https://engine.example.test/compose/draft-1#token=synthetic'
-  const request = vi
-    .fn()
-    .mockResolvedValueOnce({ draftId: draft.id, composerUrl, agentToken: 'synthetic-grant' })
-    .mockRejectedValueOnce(new Error('lost confirmation response'))
-    .mockResolvedValueOnce({ saved: true })
-  const engine = {
-    baseUrl: 'https://engine.example.test',
-    request,
-    get: vi.fn().mockResolvedValue(draft),
-  } as unknown as EngineClient
-  const launch = vi.fn().mockResolvedValue({ threadId: 'new-t3-thread' })
-
-  using db = new DatabaseSync(':memory:')
-  const handoff = new Handoff(db)
-  await expect(
-    handoff.launch(engine, 'project-1', 'mail-thread', launcherFor(launch)),
-  ).rejects.toThrow('lost confirmation response')
-  await expect(
-    handoff.launch(engine, 'project-1', 'mail-thread', launcherFor(launch)),
-  ).resolves.toEqual({
-    draft,
-    thread: { threadId: 'new-t3-thread' },
-  })
-  const payload = launch.mock.calls[0]?.[0]
-  const engineId = request.mock.calls[0]?.[1].body.requestId
-  expect(payload.clientRequestId).not.toBe(engineId)
-  expect(launch).toHaveBeenCalledTimes(1)
-  expect(payload).toMatchObject({
-    projectId: 'project-1',
-    runtimeMode: 'approval-required',
-    workspaceStrategy: { type: 'root' },
-  })
-  expect(payload.message).toContain('mail-thread')
-  expect(payload.message).toContain('draft-1')
-  expect(payload.message).toContain('https://engine.example.test/mcp')
-  expect(payload.message).toContain(composerUrl)
-  expect(payload.message).toContain('Authorization: Bearer synthetic-grant')
-  expect(request).toHaveBeenCalledTimes(3)
-  expect(request).toHaveBeenLastCalledWith(`/v1/compose/handoff/${engineId}`, {
-    method: 'PUT',
-    body: { t3ThreadId: 'new-t3-thread' },
-  })
-})
-
-it.each([
-  ['the environment ID is missing', null],
-  ['the executable cannot start', { code: 'ENOENT' }],
-  ['thread start exits non-zero', { code: 1 }],
-  ['thread start times out', { killed: true, signal: 'SIGTERM' }],
-] as const)('revokes the pending handoff when %s', async (_failure, cliError) => {
-  const baseDir = mkdtempSync(join(tmpdir(), 'amc-handoff-cli-'))
-  try {
-    using db = new DatabaseSync(':memory:')
-    const response = {
-      draftId: 'draft-1',
-      composerUrl: 'https://engine.example.test/compose/draft-1#token=synthetic',
-      agentToken: 'synthetic-grant',
-    }
-    const request = vi
-      .fn()
-      .mockResolvedValueOnce(response)
-      .mockResolvedValueOnce({ cancelled: true })
-    const draft = { id: response.draftId } as ComposeDraft
-    const engine = {
-      baseUrl: 'https://engine.example.test',
-      request,
-      get: vi.fn().mockResolvedValue(draft),
-    } as unknown as EngineClient
-    const executable = join(baseDir, 'bin', 't3')
-    const run = vi.fn()
-    if (cliError) {
-      mkdirSync(join(baseDir, 'userdata'))
-      writeFileSync(join(baseDir, 'userdata', 'environment-id'), 'local-env')
-      run.mockRejectedValueOnce(Object.assign(new Error('t3 failed'), cliError))
-    }
-    run.mockResolvedValueOnce('[]')
-    const launcher = cliLauncher({ executable, baseDir }, run)
-    const handoff = new Handoff(db)
-
-    await expect(handoff.launch(engine, 'project-1', 'mail-thread', launcher)).rejects.toThrow(
-      'T3 could not confirm the launch.',
-    )
-
-    const id = request.mock.calls[0]?.[1].body.requestId
-    expect(run.mock.calls.map(([, args]) => args[1])).toEqual(
-      cliError ? ['start', 'list'] : ['list'],
-    )
-    expect(request.mock.calls.map(([, init]) => init.method)).toEqual(['POST', 'DELETE'])
-    expect(request).toHaveBeenLastCalledWith(
-      `/v1/compose/handoff/${id}?pending=1`,
-      expect.objectContaining({ method: 'DELETE' }),
-    )
-    expect(db.prepare('SELECT id FROM pending_handoff').all()).toEqual([])
-
-    const retryLaunch = vi.fn().mockResolvedValue({ threadId: 'new-t3-thread' })
-    request.mockResolvedValueOnce(response).mockResolvedValueOnce({ saved: true })
-    await expect(
-      handoff.launch(engine, 'project-1', 'mail-thread', launcherFor(retryLaunch)),
-    ).resolves.toEqual({
-      draft,
-      thread: { threadId: 'new-t3-thread' },
-    })
-    expect(retryLaunch.mock.calls[0]?.[0].clientRequestId).not.toBe(id)
-  } finally {
-    rmSync(baseDir, { recursive: true, force: true })
-  }
-})
 
 it('closes an unlaunched Engine request after restart', async () => {
   using db = new DatabaseSync(':memory:')
@@ -146,34 +30,36 @@ it('closes an unlaunched Engine request after restart', async () => {
 })
 
 it.each(['T3 launch reply', 'Engine confirmation'])(
-  'reconciles the accepted T3 launch after losing the %s and restarting',
+  'leaves the handoff available to end after losing the %s and retries with a fresh launch',
   async (lostReply) => {
     const dir = mkdtempSync(join(tmpdir(), 'amc-handoff-'))
     const path = join(dir, 'replica.db')
     const draft = { id: 'draft-1' }
-    const thread = { threadId: 't3-thread' }
+    const previousThread = { threadId: 'previous-t3-thread' }
+    const thread = { threadId: 'new-t3-thread' }
     const request = vi.fn().mockResolvedValueOnce({
       draftId: draft.id,
-      composerUrl: 'https://engine.example.test/compose/draft-1#token=synthetic',
-      agentToken: 'synthetic-grant',
+      composerUrl: 'https://engine.example.test/compose/draft-1#token=previous',
+      agentToken: 'previous-grant',
     })
-    if (lostReply === 'Engine confirmation')
+    const launch = vi.fn<(request: T3Launch) => Promise<T3Thread>>()
+    if (lostReply === 'T3 launch reply') {
+      launch.mockRejectedValueOnce(new Error('lost response'))
+    } else {
+      launch.mockResolvedValueOnce(previousThread)
       request.mockRejectedValueOnce(new Error('lost response'))
-    request.mockResolvedValueOnce({ saved: true })
+    }
+    const composerUrl = 'https://engine.example.test/compose/draft-1#token=synthetic'
+    request
+      .mockResolvedValueOnce({ draftId: draft.id, composerUrl, agentToken: 'synthetic-grant' })
+      .mockResolvedValueOnce({ saved: true })
+    launch.mockResolvedValueOnce(thread)
     const engine = {
       baseUrl: 'https://engine.example.test',
       request,
       get: vi.fn().mockResolvedValue(draft),
     } as unknown as EngineClient
-    const launch = vi.fn<(request: T3Launch) => Promise<T3Thread>>()
-    const find = vi.fn().mockResolvedValue(thread)
-    if (lostReply === 'T3 launch reply') {
-      launch.mockRejectedValueOnce(new Error('lost response'))
-      find.mockRejectedValueOnce(new Error('T3 unavailable'))
-    } else {
-      launch.mockResolvedValueOnce(thread)
-    }
-    const launcher = launcherFor(launch, find)
+    const launcher = launcherFor(launch)
 
     try {
       {
@@ -181,27 +67,54 @@ it.each(['T3 launch reply', 'Engine confirmation'])(
         await expect(
           new Handoff(db).launch(engine, 'project-1', 'mail-thread', launcher),
         ).rejects.toThrow('lost response')
-        const journal = JSON.stringify(db.prepare('SELECT * FROM pending_handoff').all())
-        expect(journal).not.toContain('synthetic')
+        const rows = db.prepare('SELECT launch FROM pending_handoff').all()
+        expect(rows).toEqual([{ launch: 'dispatched' }])
+        // A previous version could store a thread ID obtained from a title match.
+        db.prepare('UPDATE pending_handoff SET launch = ?').run(
+          JSON.stringify({
+            launchId: launch.mock.calls[0]?.[0].clientRequestId,
+            thread: previousThread,
+          }),
+        )
       }
+      const callsBeforeRetry = lostReply === 'T3 launch reply' ? ['POST'] : ['POST', 'PUT']
+      expect(request.mock.calls.map(([, init]) => init.method)).toEqual(callsBeforeRetry)
       {
         using db = new DatabaseSync(path)
         const restarted = new Handoff(db)
         await restarted.recover(engine)
+        expect(request).toHaveBeenCalledTimes(callsBeforeRetry.length)
         await expect(
           restarted.launch(engine, 'project-1', 'mail-thread', launcher),
         ).resolves.toEqual({ draft, thread })
         expect(db.prepare('SELECT id FROM pending_handoff').all()).toEqual([])
       }
-      expect(launch).toHaveBeenCalledTimes(1)
-      const engineId = request.mock.calls[0]?.[1].body.requestId
-      const launchId = launch.mock.calls[0]?.[0].clientRequestId
-      expect(launchId).not.toBe(engineId)
-      if (lostReply === 'T3 launch reply')
-        expect(find).toHaveBeenLastCalledWith('project-1', launchId)
-      expect(request.mock.calls.map(([, init]) => init.method)).toEqual(
-        lostReply === 'T3 launch reply' ? ['POST', 'PUT'] : ['POST', 'PUT', 'PUT'],
-      )
+
+      expect(launch).toHaveBeenCalledTimes(2)
+      const payload = launch.mock.calls[1]?.[0]
+      expect(payload).toMatchObject({
+        projectId: 'project-1',
+        title: 'Draft an AMC reply',
+        runtimeMode: 'approval-required',
+        workspaceStrategy: { type: 'root' },
+      })
+      expect(payload?.clientRequestId).not.toBe(launch.mock.calls[0]?.[0].clientRequestId)
+      for (const context of [
+        'mail-thread',
+        'draft-1',
+        'https://engine.example.test/mcp',
+        composerUrl,
+        'Authorization: Bearer synthetic-grant',
+      ]) {
+        expect(payload?.message).toContain(context)
+      }
+      const engineId = request.mock.calls[callsBeforeRetry.length]?.[1].body.requestId
+      expect(engineId).not.toBe(request.mock.calls[0]?.[1].body.requestId)
+      expect(request.mock.calls.map(([, init]) => init.method)).toEqual([
+        ...callsBeforeRetry,
+        'POST',
+        'PUT',
+      ])
       expect(request).toHaveBeenLastCalledWith(`/v1/compose/handoff/${engineId}`, {
         method: 'PUT',
         body: { t3ThreadId: thread.threadId },

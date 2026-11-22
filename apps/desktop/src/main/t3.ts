@@ -15,7 +15,7 @@ import type {
 } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { app, safeStorage, shell } from 'electron'
 import type { T3Project } from '../shared/api'
-import { handoffTitle, type T3Launch, type T3Launcher, type T3Thread } from './handoff'
+import type { T3Launch, T3Launcher, T3Thread } from './handoff'
 
 interface Credentials {
   url: string
@@ -221,29 +221,6 @@ export function mcpLauncher(address: string): T3Launcher {
   return {
     key: `mcp:${url}`,
     projects: () => t3Projects(address),
-    async find(projectId, launchId) {
-      const title = handoffTitle(launchId)
-      try {
-        const client = await t3Client(address)
-        let cursor: number | null = 0
-        while (cursor !== null) {
-          const response = await client.callTool({
-            name: 't3_thread_list',
-            arguments: { projectId, titleContains: title, cursor },
-          })
-          const page = response.structuredContent as
-            | { threads: (T3Thread & { title: string })[]; nextCursor: number | null }
-            | undefined
-          if (response.isError || !Array.isArray(page?.threads)) throw new Error('Invalid list')
-          const thread = page.threads.find((thread) => thread.title === title)
-          if (thread) return { threadId: thread.threadId, link: thread.link }
-          cursor = page.nextCursor ?? null
-        }
-        return null
-      } catch {
-        throw new Error('T3 could not check the earlier hand-off. Reconnect T3 and retry.')
-      }
-    },
     launch: (request) => launchInT3(address, request),
   }
 }

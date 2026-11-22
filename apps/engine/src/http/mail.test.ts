@@ -853,8 +853,9 @@ it('authenticates the Composer Link for exactly one editable draft and denies al
   }
 })
 
-it('mints a separate four-hour Agent grant per handoff and revokes the previous grant for that Thread', async () => {
-  const { db, app, agentToken, draftId, otherThread, threadId, start } = await setupHandoff()
+it('mints a four-hour Agent grant and revokes both credentials when replacing an unconfirmed handoff', async () => {
+  const { db, app, agentToken, draftId, otherThread, threadId, start, token, session } =
+    await setupHandoff()
   try {
     const grant = authenticate(db, agentToken)
     expect(grant).toMatchObject({
@@ -873,9 +874,12 @@ it('mints a separate four-hour Agent grant per handoff and revokes the previous 
 
     const other = await start(otherThread)
     expect(authenticate(db, agentToken)).not.toBeNull()
+    expect((await session(draftId, token)).status).toBe(204)
     const renewed = await start()
     expect(renewed.draftId).toBe(draftId)
     expect(renewed.agentToken).not.toBe(agentToken)
+    expect((await session(draftId, token)).status).toBe(403)
+    expect((await session(draftId, renewed.token)).status).toBe(204)
     expect(authenticate(db, agentToken)).toBeNull()
     expect(authenticate(db, other.agentToken)?.threadId).toBe(otherThread)
     expect(authenticate(db, renewed.agentToken)?.threadId).toBe(threadId)

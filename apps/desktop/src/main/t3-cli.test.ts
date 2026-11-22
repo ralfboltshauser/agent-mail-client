@@ -82,10 +82,7 @@ it.each([false, true])(
       'https://example.test/mcp',
       'synthetic-grant',
     )
-    const run = vi
-      .fn()
-      .mockResolvedValueOnce(JSON.stringify({ threadId: 'mcp:created' }))
-      .mockResolvedValue(JSON.stringify([{ threadId: 'mcp:created', title: request.title }]))
+    const run = vi.fn().mockResolvedValue(JSON.stringify({ threadId: 'mcp:created' }))
     const launcher = cliLauncher({ executable, baseDir, supportsRuntimeMode }, run)
 
     await expect(launcher.projects()).resolves.toEqual([
@@ -97,8 +94,6 @@ it.each([false, true])(
     ])
     const launched = { threadId: 'mcp:created', link: 't3code://threads/local-env/mcp%3Acreated' }
     await expect(launcher.launch(request)).resolves.toEqual(launched)
-    await expect(launcher.find('active', request.clientRequestId)).resolves.toEqual(launched)
-    await expect(launcher.find('active', 'another-id')).resolves.toBeNull()
 
     const runtime = supportsRuntimeMode ? ['--runtime-mode', 'approval-required'] : []
     expect(run.mock.calls).toEqual([
@@ -119,8 +114,6 @@ it.each([false, true])(
         ],
         request.message,
       ],
-      [executable, ['thread', 'list', '--base-dir', baseDir, '--json', '--project', 'active']],
-      [executable, ['thread', 'list', '--base-dir', baseDir, '--json', '--project', 'active']],
     ])
   },
 )

@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { T3Project, T3RuntimeMode } from '../shared/api'
-import { handoffTitle, type T3Launcher, type T3Thread } from './handoff'
+import type { T3Launcher, T3Thread } from './handoff'
 
 export interface T3Cli {
   executable: string
@@ -133,20 +133,6 @@ export function cliLauncher(
         }))
       } catch {
         throw new Error('AMC could not read local T3 projects. Open T3 Code and try again.')
-      }
-    },
-    async find(projectId, launchId) {
-      try {
-        const threads = JSON.parse(
-          await run(executable, ['thread', 'list', ...flags, '--project', projectId]),
-        ) as Array<T3Thread & { title: string }>
-        const title = handoffTitle(launchId)
-        const thread = threads.find((item) => item.title === title)
-        return thread
-          ? { threadId: thread.threadId, link: threadLink(environmentId(), thread.threadId) }
-          : null
-      } catch {
-        throw new Error('T3 could not check the earlier hand-off. Open T3 Code and retry.')
       }
     },
     async launch(request) {

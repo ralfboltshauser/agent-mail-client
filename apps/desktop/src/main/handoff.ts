@@ -35,17 +35,10 @@ export function t3NavigationLink(value: string): string | null {
   }
 }
 
-const HANDOFF_TITLE = 'Draft an AMC reply'
-
-export function handoffTitle(launchId: string): string {
-  return `${HANDOFF_TITLE} · ${launchId}`
-}
-
 export interface T3Launcher {
   key: string
   projects(): Promise<T3Project[]>
   launch(request: T3Launch): Promise<T3Thread>
-  find(projectId: string, launchId: string): Promise<T3Thread | null>
 }
 
 export function handoffRequest(
@@ -59,7 +52,7 @@ export function handoffRequest(
 ): T3Launch {
   return {
     projectId,
-    title: handoffTitle(requestId),
+    title: 'Draft an AMC reply',
     clientRequestId: requestId,
     runtimeMode: 'approval-required',
     workspaceStrategy: { type: 'root' },
@@ -72,18 +65,6 @@ export function handoffRequest(
       'Draft a reply using update_draft with the revision from read_draft. If it changed, reread and incorporate the owner’s edits.',
     ].join('\n'),
   }
-}
-
-interface JournalLaunch {
-  launchId: string
-  draftId: string
-  thread?: T3Thread
-}
-
-interface JournalRow {
-  id: string
-  target: string | null
-  launch: string | null
 }
 
 type LaunchResult = { draft: ComposeDraft; thread: T3Thread }
@@ -116,10 +97,10 @@ export class Handoff {
 
   async #recover(engine: EngineClient): Promise<void> {
     // Before T3 is contacted it is safe to close the Engine request, including legacy rows.
-    // Keep dispatched launches for reconciliation when the owner retries in the same T3 project.
+    // Leave dispatched handoffs available for the owner to end.
     const rows = this.#db
       .prepare('SELECT id, target FROM pending_handoff WHERE engine_url = ? AND launch IS NULL')
-      .all(engine.baseUrl) as Pick<JournalRow, 'id' | 'target'>[]
+      .all(engine.baseUrl) as { id: string; target: string | null }[]
     for (const { id, target } of rows) {
       if (target && this.#pending.has(target)) continue
       await this.#revokePending(engine, id)
@@ -174,14 +155,6 @@ export class Handoff {
     launcher: T3Launcher,
     target: string,
   ): Promise<LaunchResult> {
-    const pending = this.#journal(target)
-    if (pending?.launch) {
-      const launch = JSON.parse(pending.launch) as JournalLaunch
-      const thread = launch.thread ?? (await launcher.find(projectId, launch.launchId))
-      if (thread) return this.#confirm(engine, pending.id, launch, thread)
-      await this.#revokePending(engine, pending.id)
-    }
-
     const id = randomUUID()
     this.#db
       .prepare('INSERT INTO pending_handoff (id, engine_url, target) VALUES (?, ?, ?)')
@@ -191,44 +164,20 @@ export class Handoff {
       composerUrl: string
       agentToken: string
     }>('/v1/compose/handoff', { method: 'POST', body: { requestId: id, threadId } })
-    const launch = { launchId: randomUUID(), draftId }
-    this.#db
-      .prepare('UPDATE pending_handoff SET launch = ? WHERE id = ?')
-      .run(JSON.stringify(launch), id)
+    // The Engine has replaced the previous handoff and revoked both of its credentials.
+    this.#db.prepare('DELETE FROM pending_handoff WHERE target = ? AND id != ?').run(target, id)
     const request = handoffRequest(
       projectId,
-      launch.launchId,
+      randomUUID(),
       threadId,
       draftId,
       composerUrl,
       new URL('/mcp', engine.baseUrl).href,
       agentToken,
     )
-    let thread: T3Thread
-    try {
-      thread = await launcher.launch(request)
-    } catch (error) {
-      // A lost reply can still mean T3 accepted the launch. Leave the journal intact
-      // when T3 cannot tell us either way.
-      const existing = await launcher.find(projectId, launch.launchId).catch(() => undefined)
-      if (!existing) {
-        if (existing === null) await this.#revokePending(engine, id).catch(() => {})
-        throw error
-      }
-      thread = existing
-    }
-    return this.#confirm(engine, id, launch, thread)
-  }
-
-  async #confirm(
-    engine: EngineClient,
-    id: string,
-    launch: JournalLaunch,
-    thread: T3Thread,
-  ): Promise<LaunchResult> {
-    this.#db
-      .prepare('UPDATE pending_handoff SET launch = ? WHERE id = ?')
-      .run(JSON.stringify({ ...launch, thread }), id)
+    // A launch can succeed even if its reply is lost. Keep the journal entry on failure.
+    this.#db.prepare("UPDATE pending_handoff SET launch = 'dispatched' WHERE id = ?").run(id)
+    const thread = await launcher.launch(request)
     try {
       await engine.request(`/v1/compose/handoff/${id}`, {
         method: 'PUT',
@@ -238,15 +187,9 @@ export class Handoff {
       if (error instanceof EngineError && error.status === 404) this.#forget(id)
       throw error
     }
-    const draft = await engine.get<ComposeDraft>(composeDraftPath(launch.draftId))
     this.#forget(id)
+    const draft = await engine.get<ComposeDraft>(composeDraftPath(draftId))
     return { draft, thread }
-  }
-
-  #journal(target: string): JournalRow | undefined {
-    return this.#db
-      .prepare('SELECT id, target, launch FROM pending_handoff WHERE target = ?')
-      .get(target) as JournalRow | undefined
   }
 
   async cancel(
@@ -255,9 +198,10 @@ export class Handoff {
     threadId: string,
     launcher: T3Launcher,
   ): Promise<void> {
-    const attempt = this.#journal(
-      JSON.stringify([engine.baseUrl, launcher.key, projectId, threadId]),
-    )
+    const target = JSON.stringify([engine.baseUrl, launcher.key, projectId, threadId])
+    const attempt = this.#db
+      .prepare('SELECT id FROM pending_handoff WHERE target = ?')
+      .get(target) as { id: string } | undefined
     if (attempt) await this.end(engine, attempt.id)
   }
 }
