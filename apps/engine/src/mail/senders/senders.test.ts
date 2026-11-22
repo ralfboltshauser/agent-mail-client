@@ -223,15 +223,15 @@ it.each([
       const input = request('sender@example.com')
       if (!capability) {
         expect(() => decideSender(store, principal, input)).toThrow(/safe moves/)
+        db.exec(
+          "UPDATE account SET cursor = json_set(cursor, '$.imapMoves', json('true')) WHERE id = 'a'",
+        )
+        await expect(queue.verifyScreeningCapability('a', input.clientActionId)).rejects.toThrow(
+          /safe moves/,
+        )
         expect(db.prepare('SELECT 1 FROM sender_rule').get()).toBeUndefined()
         return
       }
-      imap.capabilities.delete(capability)
-      await expect(queue.verifyScreeningCapability('a', input.clientActionId)).rejects.toThrow(
-        /safe moves/,
-      )
-      expect(db.prepare('SELECT 1 FROM sender_rule').get()).toBeUndefined()
-      imap.capabilities.set(capability, true)
       await queue.verifyScreeningCapability('a', input.clientActionId)
       const { actionId } = decideSender(store, principal, input)
       await ticks(queue, 4)
