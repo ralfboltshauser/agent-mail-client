@@ -1,0 +1,50 @@
+[
+  {
+    "file": "apps/desktop/src/renderer/src/components/agent-activity.tsx",
+    "ruleId": "react-hooks/set-state-in-effect",
+    "source": "if (open) void load()",
+    "summary": "Error: Calling setState synchronously within an effect can trigger cascading renders"
+  },
+  {
+    "file": "apps/desktop/src/renderer/src/components/organise.tsx",
+    "ruleId": "react-hooks/set-state-in-effect",
+    "source": "if (!snoozeEnabled) setPicker((current) => (current?.kind === 'snooze' ? null : current))",
+    "summary": "Error: Calling setState synchronously within an effect can trigger cascading renders"
+  },
+  {
+    "file": "apps/desktop/src/renderer/src/components/sync-indicator.tsx",
+    "ruleId": "react-hooks/purity",
+    "source": "const [now, setNow] = useState(Date.now())",
+    "summary": "Error: Cannot call impure function during render"
+  },
+  {
+    "file": "apps/desktop/src/renderer/src/components/thread-list.tsx",
+    "ruleId": "react-hooks/incompatible-library",
+    "source": "const virtualizer = useVirtualizer({",
+    "summary": "Compilation Skipped: Use of incompatible library"
+  },
+  {
+    "file": "apps/desktop/src/renderer/src/components/ui/sidebar.tsx",
+    "ruleId": "react-hooks/purity",
+    "source": "return `${Math.floor(Math.random() * 40) + 50}%`",
+    "summary": "Error: Cannot call impure function during render"
+  },
+  {
+    "file": "apps/desktop/src/renderer/src/features/composer/editor.tsx",
+    "ruleId": "react-hooks/set-state-in-effect",
+    "source": "setUrl('')",
+    "summary": "Error: Calling setState synchronously within an effect can trigger cascading renders"
+  },
+  {
+    "file": "apps/desktop/src/renderer/src/hooks/use-amc.ts",
+    "ruleId": "react-hooks/exhaustive-deps",
+    "source": "[store, query?.key],",
+    "summary": "React Hook useMemo has a missing dependency: 'query'. Either include it or remove the dependency array."
+  },
+  {
+    "file": "apps/desktop/src/renderer/src/hooks/use-amc.ts",
+    "ruleId": "react-hooks/refs",
+    "source": "() => selectedSnapshot(read, select, equal, () => committed.current),",
+    "summary": "Error: Cannot access refs during render"
+  }
+]

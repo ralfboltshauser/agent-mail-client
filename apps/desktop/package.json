@@ -12,11 +12,14 @@
     "package:dir": "pnpm package --dir"
   },
   "devDependencies": {
+    "@babel/core": "^7.29.13",
+    "@rolldown/plugin-babel": "^0.3.1",
     "@tailwindcss/vite": "^4.3.5",
     "@types/dompurify": "^3.2.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.3.0",
+    "babel-plugin-react-compiler": "^1.0.0",
     "electron": "^45.4.1",
     "electron-builder": "^26.18.0",
     "electron-vite": "^6.0.0",

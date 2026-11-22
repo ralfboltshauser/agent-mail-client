@@ -112,11 +112,11 @@ Paths in this table are under `apps/desktop/src/renderer/src/` unless prefixed w
 
 ## Keep it that way
 
-**React Compiler.** Feasible in the existing build, with the integration still to prove. [`electron.vite.config.ts`](../apps/desktop/electron.vite.config.ts#L30) already splits renderer plugins from main and preload. The installed Vite plugin exports `reactCompilerPreset`; v6 removed the inline Babel option. Add `babel-plugin-react-compiler` and `@rolldown/plugin-babel` to the desktop package and add a renderer-only Babel pass using `reactCompilerPreset`. Pilot pure leaf components with annotation mode and verify `react/compiler-runtime` output and behavior from both Electron dev and a packaged build. Check compiler diagnostics around TanStack Virtual and Tiptap, and test imperative editor and Radix focus behavior. Keep those areas out of the initial pilot. Compilation can skip reusable work in pure components. The data subscription scope, failed-branch unmount and blocking draft staging still require their own changes. [React Compiler installation](https://react.dev/learn/react-compiler/installation)
+**React Compiler.** The renderer uses the Vite React plugin's Babel preset in annotation mode. `MailState` and `MailLoading` are the two opt-ins. Both call the bundled `react/compiler-runtime` in the production renderer. Before expanding the pilot into the virtual list, Tiptap, or Radix interactions, exercise native editor and focus behavior in Electron. [React Compiler installation](https://react.dev/learn/react-compiler/installation)
 
-**Lint.** Keep Biome for formatting and its existing recommended rules. Add a renderer-only report from `eslint-plugin-react-hooks` with the TypeScript parser and recommended rules. Gate new violations for `rules-of-hooks` and `exhaustive-deps`, and baseline compiler-related diagnostics before promoting them. Review render-time mutation through refs in `use-amc.ts` and `use-hotkeys.ts`, state repair effects in `app.tsx`, and dependency suppression. Prefer fixing ownership or effect contracts to blanket disables. Put compiler lint in CI even before introducing the transform. [React Hooks lint rules](https://react.dev/reference/eslint-plugin-react-hooks) [Biome React rules](https://biomejs.dev/linter/domains/#react)
+**Lint.** Biome still handles formatting and general lint. `pnpm lint:renderer` runs the React Hooks plugin's latest recommended rules with the TypeScript parser. Hook ordering, dependencies, and compiler diagnostics fail on new findings. The checked-in baseline matches each existing diagnostic by file, rule, message, and source text. Delete its entry when you resolve a finding. The one existing dependency finding is in `useQuerySource`, where the query key identifies the loader and its inputs. CI runs the lint through `pnpm check`. [React Hooks lint rules](https://react.dev/reference/eslint-plugin-react-hooks)
 
-**Regression harness.** Extend the existing Vitest setup with a scoped jsdom/Testing Library renderer suite. The current pattern only discovers `*.test.ts`, so explicitly include the new harness tests. Use a typed synthetic `AmcApi` adapter with cloned replies and deferred promises, fake timers for polling and autosave, and stable ResizeObserver/list geometry. Drive one event at a time with `act`, drain only that event's tasks, and reset the ledger after mount. Use React Profiler for subtree commits and row-level probes for affected rows. A parent Profiler can fire for a local child edit, so use per-component counters or explicit region boundaries for budgets. Add a small isolated Electron test for Chromium geometry, the editor, focus, and navigation. Assert final content, focus and node identity alongside counters so a missed update cannot pass. [React Profiler](https://react.dev/reference/react/Profiler)
+**Regression harness.** `pnpm exec vitest run --project renderer` runs the Strict Mode regression suite with a typed synthetic AMC API, fixed viewport geometry, staged replies, and commit probes. The tests assert visible content and check focus, selection, and DOM continuity where relevant. See the [renderer harness](../test/renderer/README.md) for current coverage. Measure Chromium layout, native editing, and frame timing in Electron.
 
 | Settled test | Target maximum |
 | --- | --- |
@@ -130,13 +130,4 @@ Paths in this table are under `apps/desktop/src/renderer/src/` unless prefixed w
 
 Treat these as post-refactor budgets. Establish current counts first and tighten each assertion when its PR lands. Make test variants for focus, selection, response order, resync, and error recovery. Commit counts are stable CI signals. Measure duration separately in Electron and report median and tail across repeated actions at representative list sizes.
 
-**Size guideline.** Review a handwritten renderer file at about 300 lines or a component at about 150 lines. Split when responsibilities or update rates differ, or a protocol can be owned behind an interface with a test. Keep small behaviors together and leave generated shadcn primitives on their existing path. The goal is a component API with a clear owner and implementation details that stay local.
-
-**PR checklist**
-
-- [ ] Name the source of truth and the component or store slice that owns new state.
-- [ ] Check what updates during a no-op sync, a single changed row, and typing if the diff touches these paths.
-- [ ] Verify stable domain keys, selection, focus, scroll, and mounted DOM during refresh and retry.
-- [ ] Exercise slow, failed and out-of-order responses. Show an empty state only for an accepted result.
-- [ ] Preserve draft durability, reviewed revisions and send/undo semantics for edits to composer or delivery.
-- [ ] Run the scoped tests and `pnpm check`. Use synthetic data for shared traces and screenshots.
+See [Desktop React rules](../AGENTS.md) for the component size guideline and PR checklist.
