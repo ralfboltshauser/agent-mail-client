@@ -23,6 +23,7 @@ import { getAmc } from '@/lib/amc'
 import { cn } from '@/lib/utils'
 
 const ROW = 74
+const LIST_PADDING = 6
 
 interface Props {
   ids: readonly string[]
@@ -136,6 +137,9 @@ export function ThreadList({
       entry?.borderBoxSize[0]?.blockSize ||
       element.offsetHeight ||
       estimateSize(Number(element.dataset.index)),
+    // Include the vertical inset in the coordinates used to calculate visibility.
+    paddingStart: LIST_PADDING,
+    paddingEnd: LIST_PADDING,
     overscan: 12,
   })
 
@@ -217,10 +221,11 @@ export function ThreadList({
   if (!sectioned && ids.length === 0) return empty
 
   const mounted = virtualizer.getVirtualItems()
+  const visible = virtualizer.range
   return (
     <div
       ref={scrollRef}
-      className="mail-list h-full overflow-y-auto overscroll-contain p-1.5"
+      className="mail-list h-full overflow-y-auto overscroll-contain px-1.5"
       data-thread-viewport=""
       onScroll={rememberAnchor}
       style={sectioned ? { overflowAnchor: 'none' } : undefined}
@@ -248,6 +253,9 @@ export function ThreadList({
             if (!entry || !('threadId' in entry)) return null
             const id = entry.threadId
             const selected = id === selectedId
+            // The mounted window also contains overscan and pinned focus/selection targets.
+            const avatarVisible =
+              visible !== null && item.index >= visible.startIndex && item.index <= visible.endIndex
             const sender = entry.kind === 'sender' ? entry.id.slice('sender:'.length) : undefined
             return (
               // biome-ignore lint/a11y/useFocusableInteractive: DOM focus stays on the listbox with aria-activedescendant.
@@ -275,7 +283,7 @@ export function ThreadList({
                 }}
               >
                 {sender ? (
-                  <InboxSenderCard id={sender} query={query} />
+                  <InboxSenderCard id={sender} query={query} avatarVisible={avatarVisible} />
                 ) : (
                   <SubscribedThreadRow
                     id={id}
@@ -284,6 +292,7 @@ export function ThreadList({
                       fallbackRows?.get(id) ?? (notification?.id === id ? notification : undefined)
                     }
                     self={self}
+                    avatarVisible={avatarVisible}
                     match={matchSnippets?.get(id)}
                   />
                 )}

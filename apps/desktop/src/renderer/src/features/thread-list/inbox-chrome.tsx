@@ -11,6 +11,7 @@ import {
   type InboxNavigation,
   UPDATES_PREVIEW,
 } from '@/features/mailbox/use-inbox-sections'
+import { SenderAvatar } from '@/features/sender-avatar/sender-avatar'
 import { useReplicaSelector } from '@/hooks/use-amc'
 import { getAmc } from '@/lib/amc'
 import { cn } from '@/lib/utils'
@@ -101,9 +102,11 @@ export const InboxSectionHeader = memo(function InboxSectionHeader({
 export const InboxSenderCard = memo(function InboxSenderCard({
   id,
   query,
+  avatarVisible,
 }: {
   id: string
   query: MailboxThreadQuery | null
+  avatarVisible: boolean
 }) {
   const card = useReplicaSelector(query, ({ data }) => data?.inbox?.cards.get(id))
   const account = useReplicaSelector(
@@ -111,22 +114,15 @@ export const InboxSenderCard = memo(function InboxSenderCard({
     ({ data }) => data?.find(({ id }) => id === card?.accountId)?.address,
   )
   if (!card) return null
-  const initials = card.name.includes('@')
-    ? Array.from(card.name)[0]
-    : card.name
-        .trim()
-        .split(/\s+/)
-        .slice(0, 2)
-        .map((name) => Array.from(name)[0])
-        .join('')
   return (
     <>
-      <span
-        aria-hidden
-        className="flex size-8 shrink-0 items-center justify-center self-center rounded-full bg-secondary text-xs font-semibold text-secondary-foreground"
-      >
-        {initials?.toLocaleUpperCase()}
-      </span>
+      <SenderAvatar
+        accountId={card.accountId}
+        messageId={avatarVisible ? card.messageId : undefined}
+        address={card.address}
+        name={card.name === card.address ? undefined : card.name}
+        className="self-center"
+      />
       <div className="grid min-w-0 flex-1 text-xs">
         <div className="flex items-center gap-2">
           <span className={cn('truncate text-[13px]', card.unread && 'font-semibold')}>

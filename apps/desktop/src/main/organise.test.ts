@@ -69,6 +69,30 @@ function seed(replica: Replica, kind: 'gmail' | 'imap' = 'gmail') {
 
 const inbox = { view: { kind: 'inbox' }, accountId: null } as const
 
+it('projects the latest sender from existing replica messages into list and search reads', () => {
+  const replica = new Replica(':memory:')
+  try {
+    seed(replica)
+    const from = { name: 'Mina Park', address: 'mina@example.test' }
+    replica.put('message', { ...message('3', []), sentAt: 2, from })
+    const latestSender = { messageId: 'account:3', from }
+    expect(replica.threads(inbox)).toEqual([{ ...THREAD, latestSender }])
+    expect(replica.filter('Synthetic', null)).toEqual([{ ...THREAD, latestSender }])
+    expect(replica.summaries([THREAD.id])).toEqual([{ ...THREAD, latestSender }])
+
+    replica.remove('message', 'account:3')
+    expect(replica.threads(inbox)[0]?.latestSender).toEqual({
+      messageId: 'account:2',
+      from: null,
+    })
+    replica.remove('message', 'account:2')
+    replica.remove('message', 'account:1')
+    expect(replica.threads(inbox)).toEqual([THREAD])
+  } finally {
+    replica.db.close()
+  }
+})
+
 it('updates Bucket lists and counts from Thread sync changes', () => {
   const replica = new Replica(':memory:')
   try {

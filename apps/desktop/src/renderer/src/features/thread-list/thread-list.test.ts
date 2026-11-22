@@ -112,7 +112,8 @@ it('keeps virtual rows and keyboard focus keyed by ID as replica replies reorder
     expect(option('thread-3')).toBe(selected)
     expect(option('thread-4')).toBe(sibling)
     expect(selected.getAttribute('aria-posinset')).toBe('61')
-    expect(selected.style.transform).toBe('translateY(4440px)')
+    // The virtual positions include the list's six-pixel top inset.
+    expect(selected.style.transform).toBe('translateY(4446px)')
     expect(scrollTo).not.toHaveBeenCalled()
     expect(document.getElementById(list.getAttribute('aria-activedescendant') ?? '')).toBe(selected)
     expect(document.activeElement).toBe(list)

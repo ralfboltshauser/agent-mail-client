@@ -1,16 +1,16 @@
-import type { SearchHit, ThreadSummary } from '@amc/protocol'
+import type { SearchHit } from '@amc/protocol'
 import type { ReplicaQuery } from '@/data/query-cache'
 import { shareReply } from '@/data/share-reply'
 import type { ThreadIndex } from '@/data/thread-queries'
 import { getAmc } from '@/lib/amc'
-import type { View } from '../../../../shared/api'
+import type { DesktopThreadSummary, View } from '../../../../shared/api'
 
-function indexRows(rows: ThreadSummary[], previous?: ThreadIndex): ThreadIndex {
+function indexRows(rows: DesktopThreadSummary[], previous?: ThreadIndex): ThreadIndex {
   const ids = shareReply(
     previous?.ids,
     rows.map(({ id }) => id),
   )
-  const summaries = new Map<string, ThreadSummary>()
+  const summaries = new Map<string, DesktopThreadSummary>()
   let sameSummaries = previous?.summaries.size === rows.length
   for (const row of rows) {
     const prior = previous?.summaries.get(row.id)
