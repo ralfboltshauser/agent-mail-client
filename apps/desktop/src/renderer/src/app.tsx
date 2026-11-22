@@ -101,23 +101,40 @@ type SearchState = {
   failed?: boolean
 } | null
 
-export function showQueuedSend(item: OutboxItem, requestedAt: number, onCancelled: () => void) {
+export function showQueuedSend(
+  item: OutboxItem,
+  requestElapsedMs: number,
+  onCancelled: () => void,
+) {
   if (item.originalDraftLeft) toast.warning(ORIGINAL_DRAFT_LEFT)
   if (item.status !== 'queued') {
     toast.info(item.status === 'sent' ? 'Message sent' : 'Check the Outbox for delivery status')
     return
   }
   const message = item.sendAt > item.undoUntil ? 'Send scheduled' : 'Message queued'
-  // Bound response transit by the full round trip using the local clock.
-  const deadline = requestedAt + (item.undoRemainingMs ?? 0)
-  const remaining = deadline - Date.now()
+  // The round trip minus measured Engine work bounds the response transit.
+  const transitBudget = Math.max(0, requestElapsedMs - (item.undoResponseElapsedMs ?? 0))
+  const remaining = Math.floor((item.undoRemainingMs ?? 0) - transitBudget) - 1
   if (remaining <= 0) {
     toast(message, { duration: 3000 })
     return
   }
 
-  // Sonner pauses its own timer while the toast is hovered or the window is hidden.
-  const stop = () => clearTimeout(expiry)
+  const deadline = performance.now() + remaining
+  const wallDeadline = Date.now() + remaining
+  const expired = () => performance.now() >= deadline || Date.now() >= wallDeadline
+  const expire = () => {
+    stop()
+    toast(message, { id, action: undefined, duration: 3000 })
+  }
+  const checkExpiry = () => {
+    if (expired()) expire()
+  }
+  const stop = () => {
+    clearTimeout(expiry)
+    window.removeEventListener('focus', checkExpiry)
+    document.removeEventListener('visibilitychange', checkExpiry)
+  }
   const id = toast(message, {
     duration: Infinity,
     onDismiss: stop,
@@ -125,7 +142,10 @@ export function showQueuedSend(item: OutboxItem, requestedAt: number, onCancelle
       label: 'Undo',
       onClick: () => {
         stop()
-        if (Date.now() >= deadline) return
+        if (expired()) {
+          toast.info('The Undo window has closed')
+          return
+        }
         void getAmc()
           .cancelSend(item.id)
           .then(() => {
@@ -136,7 +156,10 @@ export function showQueuedSend(item: OutboxItem, requestedAt: number, onCancelle
       },
     },
   })
-  const expiry = setTimeout(() => toast.dismiss(id), remaining)
+  // Sonner pauses its own timer while hovered or hidden.
+  const expiry = setTimeout(expire, remaining)
+  window.addEventListener('focus', checkExpiry)
+  document.addEventListener('visibilitychange', checkExpiry)
 }
 
 function MailApp({
@@ -418,9 +441,9 @@ function MailApp({
     }
   }
 
-  const queued = (item: OutboxItem, requestedAt: number) => {
+  const queued = (item: OutboxItem, requestElapsedMs: number) => {
     setDraft(null)
-    showQueuedSend(item, requestedAt, () => {
+    showQueuedSend(item, requestElapsedMs, () => {
       setMinimised({ id: item.draftId, subject: item.subject })
     })
   }

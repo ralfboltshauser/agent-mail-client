@@ -196,7 +196,10 @@ it('composes a threaded Gmail reply, merges Yjs updates, schedules, and publishe
   const item = (await queued.json()) as OutboxItem
   expect(item).toMatchObject({ sendAt: 80_000, undoUntil: 60_000, status: 'queued' })
   expect(gmail.drafts.size).toBe(0)
-  expect(await (await call('/outbox', 'POST', request)).json()).toEqual(item)
+  expect(await (await call('/outbox', 'POST', request)).json()).toEqual({
+    ...item,
+    undoResponseElapsedMs: expect.any(Number),
+  })
   expect((await call('/outbox', 'POST', { ...request, id: 'another-operation' })).status).toBe(409)
   advance(29_999)
   await outbox.runDue()
@@ -424,6 +427,30 @@ it.each(['unchanged', 'changed'] as const)(
   },
 )
 
+it('keeps a newer draft revision when the owner confirms discard of a stale selection', async () => {
+  const { account, call, drafts, db, gmail } = setup()
+  try {
+    const draft = await drafts.create({ accountId: account, body: 'Original' }, 'owner')
+    const shown = drafts.compose(draft.id) as ComposeDraft
+    const changed = drafts.saveCompose(draft.id, {
+      baseRevision: shown.revision,
+      update: edit(shown, 'Edited elsewhere'),
+    })
+    const remove = vi.spyOn(gmail, 'deleteDraft')
+    const response = await call(`/drafts/${draft.id}/discard`, 'POST', {
+      revision: shown.revision,
+    })
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({
+      message: 'Draft changed. Review it before discarding.',
+    })
+    expect(drafts.get(draft.id)?.revision).toBe(changed.revision)
+    expect(remove).not.toHaveBeenCalled()
+  } finally {
+    db.close()
+  }
+})
+
 it('reports a draft that disappeared after delivery', async () => {
   const { account, call, db, drafts, outbox, advance } = setup()
   try {
@@ -437,7 +464,11 @@ it('reports a draft that disappeared after delivery', async () => {
     advance(60_000)
     await outbox.runDue()
     expect(outbox.get('sent-discard')?.status).toBe('sent')
-    expect(await (await call(`/drafts/${draft.id}`, 'DELETE')).json()).toEqual({ absent: draft.id })
+    expect(
+      await (
+        await call(`/drafts/${draft.id}/discard`, 'POST', { revision: draft.revision })
+      ).json(),
+    ).toEqual({ absent: draft.id })
   } finally {
     db.close()
   }
@@ -730,14 +761,27 @@ it.each([-60_000, 60_000])(
     const { account, call, drafts, db, gmail, outbox, advance } = setup()
     const draft = await drafts.create({ accountId: account, to: reader, body: 'Test' }, 'owner')
     const shown = drafts.compose(draft.id) as ComposeDraft
-    const response = await call('/outbox', 'POST', {
-      id: 'clock-skew',
-      draftId: draft.id,
-      revision: shown.revision,
+    let monotonicOffset = 0
+    const performanceNow = performance.now.bind(performance)
+    const engineClock = vi
+      .spyOn(performance, 'now')
+      .mockImplementation(() => performanceNow() + monotonicOffset)
+    const getDraft = gmail.getDraft.bind(gmail)
+    vi.spyOn(gmail, 'getDraft').mockImplementationOnce((id) => {
+      monotonicOffset = 12_000
+      return getDraft(id)
     })
+    const response = await Promise.resolve(
+      call('/outbox', 'POST', {
+        id: 'clock-skew',
+        draftId: draft.id,
+        revision: shown.revision,
+      }),
+    ).finally(() => engineClock.mockRestore())
     const item = (await response.json()) as OutboxItem
     const desktopNow = 50_000 + skew
     expect(item.undoRemainingMs).toBe(10_000)
+    expect(item.undoResponseElapsedMs).toBeGreaterThanOrEqual(12_000)
     expect(item.undoUntil - desktopNow).not.toBe(item.undoRemainingMs)
     advance(5000)
     const { items } = (await (await call('/outbox')).json()) as { items: OutboxItem[] }
@@ -858,10 +902,15 @@ it('preserves verbatim plain text when only the subject of an imported IMAP draf
     },
   })
   await drafts.mirrorPending()
-  expect(folder.messages.has(originalUid)).toBe(false)
-  const mirrored = await simpleParser(fixture(fake.appended[0]).raw)
-  expect(mirrored.subject).toBe('Edited subject')
-  expect(mirrored.text?.replace(/\r\n/g, '\n').replace(/\n$/, '')).toBe(body.replace(/\r\n/g, '\n'))
+  await drafts.pullImap(account, provider)
+  expect(drafts.list()).toHaveLength(1)
+  expect(folder.messages.has(originalUid)).toBe(true)
+  expect(fake.appended).toHaveLength(0)
+  const edited = fixture(drafts.compose(original.id))
+  expect(edited.originalDraftLeft).toBe(true)
+  const frozen = drafts.freeze(edited.id, edited.revision)
+  expect(frozen.subject).toBe('Edited subject')
+  expect(frozen.text.replace(/\r\n/g, '\n')).toBe(body.replace(/\r\n/g, '\n'))
   db.close()
 })
 
@@ -908,13 +957,19 @@ it('keeps a CID-linked PDF as a file and an inline image inline after an IMAP su
     ],
   }
   await drafts.pullImap(account, provider)
-  await drafts.update(fixture(drafts.list()[0]).id, { subject: 'Edited subject' }, 'owner')
+  const edited = await drafts.update(
+    fixture(drafts.list()[0]).id,
+    { subject: 'Edited subject' },
+    'owner',
+  )
   await drafts.mirrorPending()
-  expect(folder.messages.has(uid)).toBe(false)
-  const mirrored = await simpleParser(fixture(fake.appended[0]).raw, { skipImageLinks: true })
-  expect(mirrored.html).toContain('href="cid:report@example.test"')
-  expect(mirrored.html).toContain('src="cid:logo@example.test"')
-  expect(mirrored.attachments).toEqual([
+  expect(folder.messages.has(uid)).toBe(true)
+  expect(fake.appended).toHaveLength(0)
+  const frozen = drafts.freeze(edited.id, edited.revision)
+  const mime = await simpleParser(await buildMessage(frozen), { skipImageLinks: true })
+  expect(mime.html).toContain('href="cid:report@example.test"')
+  expect(mime.html).toContain('src="cid:logo@example.test"')
+  expect(mime.attachments).toEqual([
     expect.objectContaining({
       filename: 'report.pdf',
       contentDisposition: 'attachment',
@@ -956,20 +1011,107 @@ it('keeps clean local and remote IMAP drafts separate when only Message-ID match
   }
 })
 
-it('keeps an IMAP draft when its full source changes at the same UID', async () => {
+it('replaces only the previous AMC-created mirror when editing an IMAP draft', async () => {
   const { account, addPlainDraft, db, drafts, fake, folder, provider } = imapDraftSetup()
-  const uid = addPlainDraft('Original content')
-  await drafts.pullImap(account, provider)
-  const original = fixture(drafts.list()[0])
+  try {
+    const external = addPlainDraft('External draft')
+    const original = await drafts.create({ accountId: account, body: 'AMC draft' }, 'owner')
+    const oldMirror = fixture([...folder.messages.keys()].find((uid) => uid !== external))
+    await drafts.update(original.id, { body: 'AMC edit' }, 'owner')
+    await drafts.mirrorPending()
+    await drafts.pullImap(account, provider)
+    expect(folder.messages.has(oldMirror)).toBe(false)
+    expect(folder.messages.has(external)).toBe(true)
+    expect(fake.appended).toHaveLength(2)
+    expect(
+      drafts
+        .list()
+        .map(({ body }) => body)
+        .sort(),
+    ).toEqual(['AMC edit', 'External draft'])
+  } finally {
+    db.close()
+  }
+})
+
+it('keeps an AMC-created IMAP mirror when its full source changes at the same UID', async () => {
+  const { account, db, drafts, fake, folder } = imapDraftSetup()
+  const original = await drafts.create({ accountId: account, body: 'Original content' }, 'owner')
+  const uid = fixture([...folder.messages.keys()][0])
   const message = fixture(folder.messages.get(uid))
   message.source = Buffer.concat([Buffer.from('X-Provider-Header: changed\r\n'), message.source])
 
   await drafts.update(original.id, { subject: 'Edited subject' }, 'owner')
   await drafts.mirrorPending()
   expect(folder.messages.has(uid)).toBe(true)
-  expect(fake.appended).toHaveLength(1)
+  expect(fake.appended).toHaveLength(2)
   expect(drafts.compose(original.id)?.originalDraftLeft).toBe(true)
   db.close()
+})
+
+it.each(['new UID', 'UIDVALIDITY reset'])(
+  'rebinds a byte-identical IMAP draft after a %s and leaves the replacement on send',
+  async (scenario) => {
+    const { account, db, drafts, fake, folder, outbox, provider } = imapDraftSetup()
+    try {
+      const original = await drafts.create(
+        { accountId: account, to: reader, body: 'Draft' },
+        'owner',
+      )
+      const uid = fixture([...folder.messages.keys()][0])
+      const raw = fixture(folder.messages.get(uid)).source
+      const before = drafts.freeze(original.id, original.revision)
+      fake.expunge('Drafts', uid)
+      if (scenario === 'UIDVALIDITY reset') {
+        folder.validity += 1n
+        folder.nextUid = uid
+      }
+      const replacement = fake.add('Drafts', 'Subject: Fixture', '', ['\\Draft'])
+      fixture(folder.messages.get(replacement)).source = raw
+
+      await drafts.pullImap(account, provider)
+      await drafts.pullImap(account, provider)
+      expect(drafts.list().map(({ id }) => id)).toEqual([original.id])
+      const rebound = fixture(drafts.compose(original.id))
+      expect(rebound).toMatchObject({ body: original.body, mirrorConflict: false })
+      expect(drafts.freeze(rebound.id, rebound.revision).providerDraftId).not.toBe(
+        before.providerDraftId,
+      )
+
+      const sent = await drafts.prepareSend(
+        { id: 'send-rebound', draftId: rebound.id, revision: rebound.revision },
+        draftOwner,
+        outbox,
+      )
+      await drafts.pullImap(account, provider)
+      expect(sent).toMatchObject({ status: 'queued', originalDraftLeft: true })
+      expect(drafts.list()).toHaveLength(1)
+      expect([...folder.messages.keys()]).toEqual([replacement])
+    } finally {
+      db.close()
+    }
+  },
+)
+
+it('keeps distinct IMAP draft UIDs when multiple new copies match the missing source', async () => {
+  const { account, addPlainDraft, db, drafts, fake, folder, provider } = imapDraftSetup()
+  try {
+    const uid = addPlainDraft('Draft')
+    const raw = fixture(folder.messages.get(uid)).source
+    await drafts.pullImap(account, provider)
+    const original = fixture(drafts.list()[0])
+    fake.expunge('Drafts', uid)
+    for (let i = 0; i < 2; i++) {
+      fixture(folder.messages.get(addPlainDraft('Draft'))).source = raw
+    }
+
+    await drafts.pullImap(account, provider)
+    expect(drafts.list()).toHaveLength(3)
+    expect(drafts.compose(original.id)?.mirrorConflict).toBe(true)
+    expect(folder.messages.size).toBe(2)
+  } finally {
+    db.close()
+  }
 })
 
 it('leaves unsupported MIME on IMAP and flags it on edit and send', async () => {

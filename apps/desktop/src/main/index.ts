@@ -14,10 +14,10 @@ import type {
   ComposePatch,
   ComposeStart,
   DiscardDraftResult,
-  Draft,
   OutboxItem,
   PairResponse,
   SendRequest,
+  VersionedDraft,
 } from '@amc/protocol'
 import { BucketInput } from '@amc/protocol'
 import {
@@ -440,16 +440,20 @@ function registerComposeIpc() {
   )
   ipcMain.handle(
     'amc:composeDrafts',
-    async () => (await requireEngine().get<{ drafts: Draft[] }>(`${compose}/drafts`)).drafts,
+    async () =>
+      (await requireEngine().get<{ drafts: VersionedDraft[] }>(`${compose}/drafts`)).drafts,
   )
   ipcMain.handle('amc:composeDraft', async (_e, id: string) => {
     await draftRecovery
     return requireEngine().get(draftPath(id))
   })
-  ipcMain.handle('amc:discardDraft', async (_e, id: string) => {
+  ipcMain.handle('amc:discardDraft', async (_e, id: string, revision: number) => {
     const client = requireEngine()
-    // Use the guarded delete endpoint, which older Engines do not expose.
-    const result = await client.request<DiscardDraftResult>(draftPath(id), { method: 'DELETE' })
+    // Older Engines reject this route instead of discarding without a revision check.
+    const result = await client.request<DiscardDraftResult>(`${draftPath(id)}/discard`, {
+      method: 'POST',
+      body: { revision },
+    })
     if (engine === client) {
       openReplica().draftUpdates.discard(id)
       void sync?.pull().catch(() => {}) // Normal sync retries if this pull fails.

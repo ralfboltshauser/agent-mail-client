@@ -117,7 +117,7 @@ it.each(['Drafts row', 'composer button', 'composer shortcut'])(
       expect(discardDraft).not.toHaveBeenCalled()
       await openConfirmation()
       await act(async () => button('Discard draft')?.click())
-      expect(discardDraft).toHaveBeenCalledExactlyOnceWith(draft.id)
+      expect(discardDraft).toHaveBeenCalledExactlyOnceWith(draft.id, draft.revision)
       expect(onDiscarded).toHaveBeenCalledOnce()
       if (absent) {
         expect(info).toHaveBeenCalledWith(

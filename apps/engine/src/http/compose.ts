@@ -127,6 +127,10 @@ export function composeRoutes(deps: MailDeps, outbox: Outbox, composerOrigin?: s
     return c.json(draft)
   })
   r.delete('/drafts/:id', async (c) => c.json(await deps.drafts.delete(c.req.param('id'))))
+  r.post('/drafts/:id/discard', async (c) => {
+    const { revision } = await body(c, z.object({ revision: z.number().int().nonnegative() }))
+    return c.json(await deps.drafts.delete(c.req.param('id'), revision))
+  })
   r.put('/drafts/:id', async (c) =>
     c.json(deps.drafts.saveCompose(c.req.param('id'), await body<ComposePatch>(c, patch))),
   )
@@ -150,8 +154,13 @@ export function composeRoutes(deps: MailDeps, outbox: Outbox, composerOrigin?: s
   })
   r.get('/outbox', (c) => c.json({ items: outbox.list(c.get('principal')) }))
   r.post('/outbox', async (c) => {
+    const startedAt = performance.now()
     const input = await body<SendRequest>(c, send)
-    return c.json(await deps.drafts.prepareSend(input, c.get('principal'), outbox), 202)
+    const item = await deps.drafts.prepareSend(input, c.get('principal'), outbox)
+    // Sample elapsed Engine work before measuring the remaining Undo window.
+    const undoResponseElapsedMs = Math.floor(performance.now() - startedAt)
+    const current = outbox.get(item.id) ?? { ...item, undoRemainingMs: 0 }
+    return c.json({ ...current, undoResponseElapsedMs }, 202)
   })
   r.post('/outbox/:id/cancel', (c) => {
     if (!outbox.cancel(c.get('principal'), c.req.param('id'))) {

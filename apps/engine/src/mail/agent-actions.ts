@@ -1,8 +1,14 @@
 import { randomUUID } from 'node:crypto'
-import { type AgentAction, type BucketInput, hasScope, type OrganiseAction } from '@amc/protocol'
+import {
+  type AgentAction,
+  type BucketInput,
+  hasScope,
+  type OrganiseAction,
+  type VersionedDraft,
+} from '@amc/protocol'
 import { agentGrantActive, type Principal, withinAccount } from '../auth/tokens.ts'
 import { type Db, transaction } from '../db/database.ts'
-import { DraftError, type VersionedDraft } from './drafts.ts'
+import { DraftError } from './drafts.ts'
 import { MutationError, type Mutations } from './mutations.ts'
 import type { MailStore } from './store.ts'
 
@@ -183,7 +189,7 @@ function agentDraftResult(db: Db, agent: Principal, draft: VersionedDraft) {
     : { id: draft.id, revision: draft.revision, status: 'applied' as const }
 }
 
-function actionResult(queue: Mutations, row: ActionRow, draftMirrorError = false): AgentAction {
+function actionResult(queue: Mutations, row: ActionRow): AgentAction {
   const mutations = queue.agentResults(row.id)
   const statuses = mutations.map(({ status }) => status)
   let status: AgentAction['status'] = row.status
@@ -199,11 +205,7 @@ function actionResult(queue: Mutations, row: ActionRow, draftMirrorError = false
     threads: JSON.parse(row.threads) as string[],
     createdAt: row.created_at,
     status,
-    error:
-      row.error ??
-      (draftMirrorError
-        ? 'Draft saved locally. Mirroring to the provider failed and will retry.'
-        : null),
+    error: row.error,
     draftId: row.draft_id,
     mutations,
   }
@@ -221,7 +223,12 @@ export function listAgentActions(db: Db, queue: Mutations, before?: number) {
   >
   const page = rows.slice(0, 50)
   return {
-    actions: page.map((row) => actionResult(queue, row, row.draft_mirror_error === 1)),
+    actions: page.map(
+      (row): AgentAction => ({
+        ...actionResult(queue, row),
+        ...(row.draft_mirror_error === 1 ? { currentDraftMirrorFailed: true } : {}),
+      }),
+    ),
     nextBefore: rows.length > 50 ? (page.at(-1)?.seq ?? null) : null,
   }
 }

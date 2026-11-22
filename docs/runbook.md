@@ -134,11 +134,15 @@ revokes its Composer Link. Review and send the reply from AMC desktop.
 
 ## IMAP Draft replacements
 
-If another client replaces a draft with a new UID, AMC can show the replacement
-as a separate draft and retain the previous AMC copy with a mirror conflict.
-Compare both drafts before sending, and keep the version you want in the
-composer. After a UIDVALIDITY reset, a reused UID can refer to a different
-draft and AMC imports it independently.
+AMC reconnects a clean draft to a new UID in the same Drafts folder when
+exactly one replacement has the same full message bytes. This also works
+after a UIDVALIDITY reset. When the bytes differ or several copies match,
+AMC imports the new copies separately and flags the previous draft so you
+can compare them.
+
+AMC keeps edits to imported IMAP drafts on the Host. The original stays in
+the Account's Drafts folder after editing, sending, or discarding from AMC.
+Remove that copy in the Account's other mail client when you are done with it.
 
 ## Rolling back
 
@@ -195,10 +199,14 @@ already landed will come back through sync. To save preview-only draft text and
 envelopes, export them from the copy and recreate those drafts manually:
 
 ```sh
-umask 077
-sqlite3 -readonly -json /path/to/preview-copy.db \
-  'SELECT account_id, thread_id, to_json, cc_json, bcc_json, subject, body_text FROM draft' \
-  > preview-drafts.json
+(
+  umask 077
+  export_dir=$(mktemp -d "./amc-preview.XXXXXXXX") || exit 1
+  sqlite3 -readonly -json /path/to/preview-copy.db \
+    'SELECT account_id, thread_id, to_json, cc_json, bcc_json, subject, body_text FROM draft' \
+    > "$export_dir/preview-drafts.json" &&
+    printf '%s\n' "$export_dir/preview-drafts.json"
+)
 ```
 
 Keep the original and the export private. Pending mutations and Engine-only
