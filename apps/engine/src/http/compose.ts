@@ -99,8 +99,7 @@ export function composeRoutes(deps: MailDeps, outbox: Outbox, composerOrigin?: s
     const active = deps.db
       .prepare(
         `SELECT h.id, t.expires_at AS expiresAt FROM handoff h JOIN token t ON t.id = h.agent_id
-       WHERE h.thread_id = ? AND h.t3_thread_id IS NOT NULL
-         AND t.revoked_at IS NULL AND t.expires_at > ?`,
+       WHERE h.thread_id = ? AND t.revoked_at IS NULL AND t.expires_at > ?`,
       )
       .get(threadId.data, Date.now())
     return c.json({ active: active ?? null })

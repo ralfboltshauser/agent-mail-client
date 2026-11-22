@@ -912,7 +912,7 @@ it('keeps confirmed handoffs across recovery and revokes both grants when the ow
     app.request(url, { method: 'DELETE', headers: { Authorization: `Bearer ${owner}` } })
   try {
     const { draftId, agentToken, token } = await start(threadId, id)
-    expect(await (await active()).json()).toEqual({ active: null })
+    expect(await (await active()).json()).toMatchObject({ active: { id } })
     const confirmed = await app.request(path, {
       method: 'PUT',
       headers: { Authorization: `Bearer ${owner}`, 'Content-Type': 'application/json' },
@@ -929,6 +929,27 @@ it('keeps confirmed handoffs across recovery and revokes both grants when the ow
     expect((await session(draftId, token)).status).toBe(403)
     expect(await (await active()).json()).toEqual({ active: null })
     expect(db.prepare('SELECT state FROM closed_handoff WHERE id = ?').get(id)?.state).toBe('ended')
+  } finally {
+    db.close()
+  }
+})
+
+it('lets the owner find and end an unconfirmed handoff', async () => {
+  const { db, app, call, owner, threadId, start, session } = await setupHandoff()
+  const id = randomUUID()
+  const active = () => call(`/v1/compose/handoff?threadId=${encodeURIComponent(threadId)}`, owner)
+  try {
+    const { draftId, agentToken, token } = await start(threadId, id)
+    const { active: pending } = await (await active()).json()
+    expect(pending.id).toBe(id)
+    const ended = await app.request(`/v1/compose/handoff/${pending.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${owner}` },
+    })
+    expect(ended.status).toBe(200)
+    expect(authenticate(db, agentToken)).toBeNull()
+    expect((await session(draftId, token)).status).toBe(403)
+    expect(await (await active()).json()).toEqual({ active: null })
   } finally {
     db.close()
   }

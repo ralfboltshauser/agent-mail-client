@@ -408,23 +408,27 @@ function registerComposeIpc() {
     'amc:handoff',
     async (_e, address: string | null, projectId: string, threadId: string) => {
       await draftRecovery
-      const { draft, thread } = await handoff.launch(
-        requireEngine(),
-        projectId,
-        threadId,
-        launcher(address),
-      )
-      const link = thread.link && t3NavigationLink(thread.link)
-      if (link) void shell.openExternal(link).catch(() => {})
-
-      broadcast('amc:changed')
-      return draft
+      try {
+        const { draft, thread } = await handoff.launch(
+          requireEngine(),
+          projectId,
+          threadId,
+          launcher(address),
+        )
+        const link = thread.link && t3NavigationLink(thread.link)
+        if (link) void shell.openExternal(link).catch(() => {})
+        return draft
+      } finally {
+        broadcast('amc:changed')
+      }
     },
   )
   ipcMain.handle(
     'amc:cancelHandoff',
-    (_e, address: string | null, projectId: string, threadId: string) =>
-      handoff.cancel(requireEngine(), projectId, threadId, launcher(address)),
+    async (_e, address: string | null, projectId: string, threadId: string) => {
+      await handoff.cancel(requireEngine(), projectId, threadId, launcher(address))
+      broadcast('amc:changed')
+    },
   )
   ipcMain.handle('amc:activeHandoff', (_e, threadId: string) =>
     handoff.active(requireEngine(), threadId),
