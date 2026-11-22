@@ -27,6 +27,7 @@ declare const AMC_REVISION: string
 export function registerFeedbackIpc(getWindow: () => BrowserWindow | null, openWindow: () => void) {
   let ready = false
   let pending = false
+  let captureAllowed = false
   let capture: { id: string; path: string; image: NativeImage; context: FeedbackContext } | null =
     null
   let busy = false
@@ -38,7 +39,16 @@ export function registerFeedbackIpc(getWindow: () => BrowserWindow | null, openW
   function flushOpen() {
     if (!ready || !pending) return
     pending = false
-    getWindow()?.webContents.send('amc:feedbackOpen')
+    const window = getWindow()
+    if (!window || capture) return
+    captureAllowed = true
+    window.webContents.send('amc:feedbackOpen')
+  }
+
+  async function localCliLauncher() {
+    const cli = await detectT3Cli()
+    if (!cli) throw new Error('No local T3 connection.')
+    return cliLauncher(cli)
   }
 
   function active(event: Pick<IpcMainEvent, 'sender' | 'senderFrame'>, id: string) {
@@ -53,7 +63,8 @@ export function registerFeedbackIpc(getWindow: () => BrowserWindow | null, openW
     flushOpen()
   })
   ipcMain.handle('amc:feedbackCapture', async (event, view: unknown, viewport: unknown) => {
-    if (!trusted(event) || busy) throw new Error('AMC feedback is unavailable.')
+    if (!trusted(event) || !captureAllowed || busy) throw new Error('AMC feedback is unavailable.')
+    captureAllowed = false
     const at = new Date()
     const image = await event.sender.capturePage().catch(() => null)
     if (!image || image.isEmpty() || !trusted(event))
@@ -101,10 +112,9 @@ export function registerFeedbackIpc(getWindow: () => BrowserWindow | null, openW
       const address = savedT3Url()
       const localMcp =
         address && ['localhost', '127.0.0.1', '[::1]'].includes(new URL(address).hostname)
-      const cli = localMcp ? null : await detectT3Cli()
-      if (!localMcp && !cli) throw new Error('No local T3 connection.')
-      const launcher = localMcp ? pairedFeedbackLauncher(address) : cli && cliLauncher(cli)
-      if (!launcher) throw new Error('No local T3 connection.')
+      const launcher = localMcp
+        ? pairedFeedbackLauncher(address, localCliLauncher)
+        : await localCliLauncher()
       const thread = await launchFeedback(
         launcher,
         feedbackProject,
@@ -114,7 +124,9 @@ export function registerFeedbackIpc(getWindow: () => BrowserWindow | null, openW
         current.path,
       )
       const link = thread.link && t3NavigationLink(thread.link)
-      const opened = await shell.openExternal(link || 't3code://').then(
+      const target =
+        link && /^t3code:\/\/threads\/[^/?#]+\/[^/?#]+$/.test(link) ? link : 't3code://'
+      const opened = await shell.openExternal(target).then(
         () => true,
         () =>
           shell.openExternal('t3code://').then(
@@ -143,6 +155,7 @@ export function registerFeedbackIpc(getWindow: () => BrowserWindow | null, openW
   return {
     reset() {
       ready = false
+      captureAllowed = false
       capture = null
     },
     open() {

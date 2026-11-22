@@ -139,6 +139,13 @@ export function cliLauncher(
       try {
         // Check we can construct a navigation link before handing off the prompt.
         const environment = environmentId()
+        if (
+          imagePath &&
+          !supportsRuntimeMode &&
+          projectRuntimeModes(state)(request.projectId) !== request.runtimeMode
+        ) {
+          throw new Error('The local T3 CLI cannot require approval for this project.')
+        }
         const runtime = supportsRuntimeMode ? ['--runtime-mode', request.runtimeMode] : []
         const thread = JSON.parse(
           await run(

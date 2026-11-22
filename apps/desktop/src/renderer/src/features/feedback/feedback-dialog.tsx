@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Button } from '@/components/ui/button'
 import { getAmc } from '@/lib/amc'
 import type {
@@ -48,16 +49,20 @@ export default function FeedbackDialog({
   }, [picking])
 
   useEffect(() => {
-    if (!picking) return
     function onKeyDown(event: KeyboardEvent) {
-      if (event.target === done.current && ['Enter', ' '].includes(event.key)) return
+      if (event.key !== 'Escape' && !picking) return
+      // Radix listens for Escape in document capture, before the native dialog's cancel event.
       event.preventDefault()
       event.stopImmediatePropagation()
-      if (event.key === 'Escape') onClose()
+      if (picking && ['Enter', ' '].includes(event.key) && !event.isComposing) setPicking(false)
+      if (event.key === 'Escape' && !event.isComposing && event.keyCode !== 229 && !busy) {
+        dialog.current?.close()
+        onClose()
+      }
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => window.removeEventListener('keydown', onKeyDown, true)
-  }, [picking, onClose])
+  }, [busy, picking, onClose])
 
   function close() {
     dialog.current?.close()
@@ -118,31 +123,34 @@ export default function FeedbackDialog({
 
   return (
     <>
-      {picking && (
-        <div
-          data-feedback-overlay
-          className="fixed inset-0 z-[100] pointer-events-auto [-webkit-app-region:no-drag]"
-        >
-          <button
-            type="button"
-            aria-label="Pick an element to annotate"
-            tabIndex={-1}
-            className="absolute inset-0 size-full cursor-crosshair"
-            onClick={pick}
-          />
-          <div className="absolute right-4 bottom-4 flex items-center gap-3 rounded-lg border bg-background p-3 text-sm shadow-lg">
-            <span>Click an element to annotate it.</span>
-            <Button ref={done} variant="outline" onClick={() => setPicking(false)}>
-              Done
-            </Button>
-          </div>
-        </div>
-      )}
+      {picking &&
+        createPortal(
+          <div
+            data-feedback-overlay
+            onPointerDown={(event) => event.stopPropagation()}
+            className="fixed inset-0 z-[100] pointer-events-auto [-webkit-app-region:no-drag]"
+          >
+            <button
+              type="button"
+              aria-label="Pick an element to annotate"
+              tabIndex={-1}
+              className="absolute inset-0 size-full cursor-crosshair"
+              onClick={pick}
+            />
+            <div className="absolute right-4 bottom-4 flex items-center gap-3 rounded-lg border bg-background p-3 text-sm shadow-lg">
+              <span>Click an element to annotate it.</span>
+              <Button ref={done} variant="outline" onClick={() => setPicking(false)}>
+                Done
+              </Button>
+            </div>
+          </div>,
+          document.body,
+        )}
       <dialog
         ref={dialog}
         data-feedback-overlay
         aria-labelledby={titleId}
-        className="fixed m-auto w-[min(28rem,calc(100%-2rem))] rounded-lg border bg-background p-5 text-foreground shadow-lg backdrop:bg-black/35"
+        className="pointer-events-auto fixed m-auto w-[min(28rem,calc(100%-2rem))] rounded-lg border bg-background p-5 text-foreground shadow-lg backdrop:bg-black/35"
         onCancel={(event) => {
           event.preventDefault()
           if (!busy) close()

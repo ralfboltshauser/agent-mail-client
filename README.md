@@ -43,4 +43,4 @@ Licensed under MIT.
 
 Press **⌘⇧F**, or choose **Send Feedback…** from Help or the tray. AMC captures its window. Add a note, optionally click **Annotate** to mark an element, and press **⌘Enter** to open a new thread in the AMC project in T3 Code. You can leave the note blank and add details in T3.
 
-The screenshot may include visible mail. AMC retains the last 20 captures in its private `feedback/` folder. A paired local T3 connection can attach the PNG. Older T3 versions and the local CLI use the screenshot’s local path. If T3 is unavailable, **Copy feedback** copies the prompt and reveals the PNG in Finder.
+The screenshot may include visible mail. AMC retains the last 20 captures in its private `feedback/` folder. A paired local T3 connection can attach the PNG. Older paired T3 versions use the screenshot’s local path. The local CLI also uses the path when it can run the thread with approval required. If T3 is unavailable, **Copy feedback** copies the prompt and reveals the PNG in Finder.
