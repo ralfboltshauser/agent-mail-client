@@ -49,6 +49,7 @@ export interface Session {
   ids: TriageCardId[]
   index: number
   cursor: string | null
+  nextBatch?: string
 }
 
 export const cardKey = (id: TriageCardId) =>

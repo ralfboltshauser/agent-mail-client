@@ -11,7 +11,14 @@ import {
   submit,
   undo,
 } from './journal'
-import { type Decision, type Preview, type ReviewAction, reviewError, sameTarget } from './model'
+import {
+  type Decision,
+  type Preview,
+  type ReviewAction,
+  reviewError,
+  type Session,
+  sameTarget,
+} from './model'
 import { loadPreview } from './preview'
 
 export class ReviewStore {
@@ -56,6 +63,10 @@ export class ReviewStore {
   get view() {
     return this.#view
   }
+  get busy() {
+    return this.#working || this.#view.busy
+  }
+
   get #session() {
     return this.#saved?.sessions[this.#account]
   }
@@ -127,29 +138,47 @@ export class ReviewStore {
       await this.restore()
       const smart = await this.#ownerApi()
       if (generation !== this.#read) return
-      if (!this.#session || newBatch) {
-        const accountId = JSON.parse(this.#account) as string | null
-        const cursor = newBatch ? this.#session?.cursor : undefined
-        const page = await smart.triageQueue({
-          accountId: accountId ?? undefined,
-          limit: 100,
-          ...(cursor ? { cursor, nextBatch: '1' } : {}),
-        })
-        if (generation !== this.#read || !this.#saved) return
-        if (!page.reviewLookup) throw new Error('Update the Engine to use desktop triage review.')
-        this.#retryBatch = false
-        this.#saved.sessions[this.#account] = {
-          batch: crypto.randomUUID(),
-          ids: page.cards.map(({ id }) => id),
-          index: 0,
-          cursor: page.cursor,
+      const previous = this.#session
+      if (!previous || newBatch) {
+        const next = previous?.nextBatch && this.#saved?.parked?.[previous.nextBatch]
+        if (next && next.accountKey === this.#account) {
+          this.#switchBatch(next.accountKey, next.session)
+        } else {
+          const accountId = JSON.parse(this.#account) as string | null
+          const cursor = previous?.cursor
+          const page = await smart.triageQueue({
+            accountId: accountId ?? undefined,
+            limit: 100,
+            ...(cursor ? { cursor, nextBatch: '1' } : {}),
+          })
+          if (generation !== this.#read || !this.#saved) return
+          if (!page.reviewLookup) throw new Error('Update the Engine to use desktop triage review.')
+          const batch = crypto.randomUUID()
+          if (previous) previous.nextBatch = batch
+          this.#switchBatch(this.#account, {
+            batch,
+            ids: page.cards.map(({ id }) => id),
+            index: 0,
+            cursor: page.cursor,
+          })
         }
-        this.#save()
+        this.#retryBatch = false
       }
       await this.#display(generation)
     } catch (error) {
       if (generation === this.#read) this.#publish({ busy: false, error: reviewError(error) })
     }
+  }
+
+  #switchBatch(accountKey: string, session: Session) {
+    if (!this.#saved) return
+    this.#saved.parked ??= {}
+    const parked = this.#saved.parked
+    const previous = this.#saved.sessions[accountKey]
+    if (previous && previous !== session) parked[previous.batch] = { accountKey, session: previous }
+    this.#saved.sessions[accountKey] = session
+    delete parked[session.batch]
+    this.#save()
   }
 
   async #display(generation: number, cached?: Preview) {
@@ -169,15 +198,17 @@ export class ReviewStore {
         )
       )
         continue
-      const preview =
-        cached ??
-        (await loadPreview(
+      let preview: Preview | null | undefined = index === session.index ? cached : undefined
+      if (!preview) {
+        if (!this.#view.busy) this.#publish({ busy: true })
+        preview = await loadPreview(
           this.#api,
           this.#smart,
           session.ids[index],
           this.#history,
           session.batch,
-        ))
+        )
+      }
       if (generation !== this.#read) return
       if (preview) {
         session.index = index
@@ -202,7 +233,7 @@ export class ReviewStore {
       card: null,
       progress: `${session.ids.length}/${session.ids.length}`,
       finished: true,
-      more: !!session.cursor,
+      more: !!(session.cursor || session.nextBatch),
       busy: false,
       error: null,
       notice,
@@ -248,7 +279,6 @@ export class ReviewStore {
         : undefined
     const generation = ++this.#read
     this.#next = null
-    if (!cached && session.ids[session.index]) this.#publish({ busy: true })
     try {
       await this.#display(generation, cached)
     } catch (error) {
@@ -256,21 +286,16 @@ export class ReviewStore {
     }
   }
 
-  #entry(card: Preview, id: string, decision: Decision, label: string): ReviewAction | null {
+  #position(card: Preview) {
     const session = this.#session
     if (!session || !this.#active || this.#view.card !== card) return null
     return {
-      id,
       batch: session.batch,
       index: session.index,
       card: card.id,
       accountId: card.accountId,
       threadId: card.threadId,
       messageId: card.messageId,
-      label,
-      decision,
-      status: 'unconfirmed',
-      error: null,
     }
   }
 
@@ -290,8 +315,16 @@ export class ReviewStore {
   }
 
   decide = async (card: Preview, id: string, decision: Decision, label: string) => {
-    const action = this.#entry(card, id, decision, label)
-    if (!action || this.#working || this.#view.busy || this.#view.error) return
+    const position = this.#position(card)
+    if (!position || this.busy || this.#view.error) return
+    const action: ReviewAction = {
+      ...position,
+      id,
+      decision,
+      label,
+      status: 'unconfirmed',
+      error: null,
+    }
     if (decision.kind === 'skip') {
       this.#update(action, { status: 'applied' })
       void this.#advance(action, false)
@@ -327,9 +360,9 @@ export class ReviewStore {
   }
 
   async #submit(action: ReviewAction) {
-    const smart = await this.#ownerApi()
     try {
       this.#update(action, { status: 'unconfirmed', error: null }, true)
+      const smart = await this.#ownerApi()
       const result = await submit(smart, action)
       const updated = this.#update(action, { status: result.status, error: result.error })
       this.#announce(updated, true)
@@ -394,26 +427,36 @@ export class ReviewStore {
       return
     }
     session.index = action.index
-    this.#save()
+    const parked = this.#saved?.parked?.[action.batch]
+    if (parked) this.#switchBatch(parked.accountKey, session)
+    else this.#save()
     if (this.#active && session === this.#session) void this.refresh(false)
   }
 
   #sessionFor(action: ReviewAction) {
-    return Object.values(this.#saved?.sessions ?? {}).find(
-      (session) => session.batch === action.batch,
+    return (
+      this.#saved?.parked?.[action.batch]?.session ??
+      Object.values(this.#saved?.sessions ?? {}).find((session) => session.batch === action.batch)
     )
   }
 
-  recordReply(
-    card: Preview,
-    id: string,
-    decision: Extract<Decision, { kind: 'reply' }>,
-    queued: boolean,
-  ) {
-    const action = this.#entry(card, id, decision, 'Reply')
-    if (!action) return
-    const updated = this.#update(action, { status: queued ? 'pending' : 'applied' })
-    void this.#advance(updated, card.id.kind === 'sender')
+  prepareReply(card: Preview) {
+    const position = this.#position(card)
+    if (!position) throw new Error('This card changed. Refresh it before replying.')
+    return (id: string, decision: Extract<Decision, { kind: 'reply' }>, queued: boolean) => {
+      const action = this.#update(
+        {
+          ...position,
+          id,
+          label: 'Reply',
+          decision,
+          status: queued ? 'pending' : 'applied',
+          error: null,
+        },
+        {},
+      )
+      void this.#advance(action, card.id.kind === 'sender')
+    }
   }
 
   replyCancelled(id: string) {

@@ -4,8 +4,6 @@ import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import type { Preview } from './model'
 import { ReviewAvatar } from './review-avatar'
-import type { ReviewStore } from './store'
-import { useReviewValue } from './use-review-value'
 
 export interface ReviewControls {
   accountAddress: string
@@ -13,8 +11,7 @@ export interface ReviewControls {
   unavailable: (key: string) => string | undefined
 }
 
-export function ReviewCard({ store, controls }: { store: ReviewStore; controls: ReviewControls }) {
-  const card = useReviewValue(store, (view) => view.card)
+export function ReviewCard({ card, controls }: { card: Preview | null; controls: ReviewControls }) {
   if (!card) return null
   return <CardPreview card={card} controls={controls} />
 }

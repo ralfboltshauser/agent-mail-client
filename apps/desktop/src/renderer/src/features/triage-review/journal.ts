@@ -5,6 +5,7 @@ const storageKey = 'amc-triage-review-v1'
 export interface SavedReview {
   scope: string
   sessions: Record<string, Session>
+  parked?: Record<string, { accountKey: string; session: Session }>
   history: ReviewAction[]
 }
 
@@ -104,6 +105,9 @@ export async function poll(
     if (action.status !== 'pending') return null
     const item = (await api.outbox()).find(({ id }) => id === action.id)
     if (!item || item.status === 'queued' || item.status === 'dispatching') return null
+    if (item.status === 'cancelled' && action.undo?.status === 'unconfirmed') {
+      return { undo: { ...action.undo, status: 'applied', error: null } }
+    }
     return {
       status: item.status === 'sent' ? ('applied' as const) : ('failed' as const),
       error: item.status === 'sent' ? null : 'Check the Outbox for delivery details.',

@@ -37,8 +37,10 @@ export function TriageReview({
   const [picker, setPicker] = useState<Preview | null>(null)
   const [block, setBlock] = useState<Preview | null>(null)
   const [message, setMessage] = useState('')
+  const openingReply = useRef(false)
   const heading = useRef<HTMLHeadingElement>(null)
-  const cardAccount = useReviewValue(store, (view) => view.card?.accountId)
+  const card = useReviewValue(store, (view) => view.card)
+  const cardAccount = card?.accountId
   const account = useReplicaSelector(
     accountsQuery(),
     (snapshot) => ({
@@ -51,10 +53,9 @@ export function TriageReview({
   const busy = useReviewValue(store, (view) => view.busy)
   const focus = () => heading.current?.focus()
   const unavailable = (key: string) => {
-    const card = store.view.card
     if (!card) return 'No card is selected.'
-    if (store.view.busy) return 'Wait for the current review operation.'
-    if (store.view.error) return 'Refresh the card before making a decision.'
+    if (busy) return 'Wait for the current review operation.'
+    if (errors) return 'Refresh the card before making a decision.'
     if ((key === 'a' || key === 'x') && !card.sender) return 'This message has no eligible Sender.'
     if (key === 'x' && account.account?.imapMoves === false)
       return 'This IMAP server does not support safe moves.'
@@ -94,26 +95,48 @@ export function TriageReview({
       (decision === 'accept' ? 'Accept ' : 'Block ') + card.sender.address,
     )
   }
+  const canActOn = (target: Preview | null) => {
+    if (store.view.card !== target) {
+      setMessage('The review card changed. Check the current card and try again.')
+      return false
+    }
+    if (store.busy || openingReply.current) {
+      setMessage('Wait for the current review operation.')
+      return false
+    }
+    if (store.view.error) {
+      setMessage('Refresh the card before making a decision.')
+      return false
+    }
+    return true
+  }
   const run = (key: string) => {
     setMessage('')
+    if (store.view.card !== card || openingReply.current) return
     if (key === 'u') {
       const action = store.latestUndo()
       if (action) void store.undoAction(action)
       else setMessage('No triage action to undo.')
       return
     }
+    if (!canActOn(card)) return
     const reason = unavailable(key)
     if (reason) {
       setMessage(reason)
       return
     }
-    const card = store.view.card
     if (!card) return
     if (key === 'a') senderDecision(card, 'accept')
     else if (key === 'x') setBlock(card)
     else if (key === 's') setPicker(card)
-    else if (key === 'r') void onReply(card).catch((error) => setMessage(reviewError(error)))
-    else {
+    else if (key === 'r') {
+      openingReply.current = true
+      void onReply(card)
+        .catch((error) => setMessage(reviewError(error)))
+        .finally(() => {
+          openingReply.current = false
+        })
+    } else {
       const id = crypto.randomUUID()
       const bucket = BUCKETS[Number(key) - 1]
       if (key === ' ') void store.decide(card, id, { kind: 'skip' }, 'Skip')
@@ -206,7 +229,7 @@ export function TriageReview({
                 </Button>
               </header>
               <ReviewCard
-                store={store}
+                card={card}
                 controls={{
                   accountAddress: account.account?.address ?? cardAccount ?? '',
                   run,
@@ -239,7 +262,7 @@ export function TriageReview({
           onClose={() => setPicker(null)}
           focusFallback={focus}
           run={async (input) => {
-            if (input.kind === 'snooze')
+            if (input.kind === 'snooze' && canActOn(picker))
               await store.decide(picker, crypto.randomUUID(), { kind: 'organise', input }, 'Snooze')
           }}
         />
@@ -251,7 +274,7 @@ export function TriageReview({
           onFocus={focus}
           onConfirm={() => {
             setBlock(null)
-            senderDecision(block, 'block')
+            if (canActOn(block)) senderDecision(block, 'block')
           }}
         />
       )}

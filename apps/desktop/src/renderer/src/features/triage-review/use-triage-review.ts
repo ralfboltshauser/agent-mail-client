@@ -1,14 +1,13 @@
 import type { OutboxItem } from '@amc/protocol'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { getAmc } from '@/lib/amc'
-import type { Preview } from './model'
 import { ReviewStore } from './store'
 
 export function useTriageReview(accountId: string | null) {
   const [store] = useState(() => new ReviewStore())
   const [open, setOpen] = useState(false)
   const initiator = useRef<HTMLElement | null>(null)
-  const reply = useRef<{ card: Preview; draftId: string } | null>(null)
+  const replies = useRef(new Map<string, ReturnType<ReviewStore['prepareReply']>>())
 
   useEffect(() => {
     if (!getAmc().smartInbox?.review) return
@@ -44,17 +43,16 @@ export function useTriageReview(accountId: string | null) {
     [store],
   )
 
-  const rememberReply = (card: Preview, draftId: string) => {
-    reply.current = { card, draftId }
+  const rememberReply = (record: ReturnType<ReviewStore['prepareReply']>, draftId: string) => {
+    replies.current.set(draftId, record)
   }
   const onQueued = (item: OutboxItem, elapsed: number) => {
-    const source = reply.current
-    if (source?.draftId !== item.draftId) return
-    reply.current = null
+    const record = replies.current.get(item.draftId)
+    if (!record) return
+    replies.current.delete(item.draftId)
     const transit = Math.max(0, elapsed - (item.undoResponseElapsedMs ?? 0))
     const remaining = Math.max(0, (item.undoRemainingMs ?? 0) - transit - 1)
-    store.recordReply(
-      source.card,
+    record(
       item.id,
       {
         kind: 'reply',

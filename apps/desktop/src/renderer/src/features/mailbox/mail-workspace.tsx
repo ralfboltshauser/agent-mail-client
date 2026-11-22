@@ -361,8 +361,9 @@ export function MailWorkspace({
           }}
           onReply={async (card) => {
             await review.store.validate(card)
+            const record = review.store.prepareReply(card)
             const draft = await compose.startCompose('reply', card.detail.thread)
-            if (draft) review.rememberReply(card, draft.id)
+            if (draft) review.rememberReply(record, draft.id)
           }}
         />
       )}

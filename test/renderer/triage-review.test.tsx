@@ -138,6 +138,10 @@ it('keeps one card, isolates cursor commits, and resumes through exit and restar
   expect(document.activeElement).toBe(
     within(review()).getByRole('heading', { name: 'Triage Inbox' }),
   )
+  initial.focus()
+  expect(review().contains(document.activeElement)).toBe(true)
+  expect(within(review()).queryByText('Loading triage queue…')).toBeNull()
+  expect(review().querySelector('[aria-live="polite"]')).toBeTruthy()
   await press(' ', within(review()).getByRole('button', { name: /^Archive/ }))
   expect(progress()).toBe('1/2')
   commits.clear()
@@ -263,7 +267,7 @@ it('retries a dropped decision acknowledgment with the same id and surfaces part
 })
 
 it('opens the real reply composer, leaves a draft, and returns to the same card', async () => {
-  const { adapter } = await fixture()
+  const { adapter, smart } = await fixture()
   await mount(adapter)
   await open()
   await press('r')
@@ -273,7 +277,14 @@ it('opens the real reply composer, leaves a draft, and returns to the same card'
     accountId: 'studio',
     threadId: 'thread-1',
   })
+  const subject = within(dialog).getByRole('textbox', { name: 'Subject' })
+  const editor = within(dialog).getByRole('textbox', { name: 'Message body' })
+  await press('t', subject)
+  await press('x', editor)
   await press('a', dialog)
+  expect(smart.decideSender).not.toHaveBeenCalled()
+  expect(screen.queryByRole('dialog', { name: /Block/ })).toBeNull()
+  expect(screen.queryByRole('dialog', { name: 'Triage Inbox' })).toBeNull()
   expect(adapter.api.startCompose).toHaveBeenCalledTimes(1)
   await click(within(dialog).getByRole('button', { name: /minimi[sz]e/i }))
   await tick()
@@ -386,28 +397,114 @@ it('accepts the shown Account-scoped Sender and skips its whole group', async ()
   expect(progress()).toBe('2/2')
 })
 
-it('advances a queued Reply and uses its exact Outbox ID for keyboard Undo', async () => {
+it.each([false, true])(
+  'undoes a queued Reply by exact Outbox ID (lost acknowledgement: %s)',
+  async (lostAck) => {
+    const { adapter } = await fixture()
+    const submit = adapter.api.sendDraft
+    const send = vi.spyOn(adapter.api, 'sendDraft').mockImplementation(async (request) => ({
+      ...(await submit(request)),
+      undoRemainingMs: 5000,
+    }))
+    const cancel = vi.spyOn(adapter.api, 'cancelSend')
+    if (lostAck) {
+      const outbox = adapter.api.outbox
+      cancel.mockImplementationOnce(async (id) => {
+        vi.spyOn(adapter.api, 'outbox').mockImplementation(async () =>
+          (await outbox()).map((item) =>
+            item.id === id ? { ...item, status: 'cancelled' } : item,
+          ),
+        )
+        throw new Error('Connection dropped after cancellation')
+      })
+    }
+    await mount(adapter)
+    await open()
+    await press(' ')
+    await press('r')
+    const composer = screen.getByRole('dialog', { name: 'Compose' })
+    expect(send).not.toHaveBeenCalled()
+    await click(within(composer).getByRole('button', { name: /^Send ⌘/ }))
+    await tick()
+    expect(within(review()).getByText('All clear')).toBeTruthy()
+    expect(send).toHaveBeenCalledOnce()
+    await press('u')
+    expect(cancel).toHaveBeenCalledExactlyOnceWith(send.mock.calls[0][0].id)
+    if (lostAck) await tick(2000)
+    expect(progress()).toBe('2/2')
+    expect(
+      within(review()).getByRole('heading', { name: 'Invoice for the spring issue' }),
+    ).toBeTruthy()
+  },
+)
+
+it('does not apply a second key to a card that has not rendered yet', async () => {
+  const { adapter, smart, low } = await fixture()
+  await mount(adapter)
+  await open()
+  const heading = within(review()).getByRole('heading', { name: 'Triage Inbox' })
+  await act(async () => {
+    fireEvent.keyDown(heading, { key: ' ' })
+    expect(within(review()).getByRole('heading', { name: firstSubject })).toBeTruthy()
+    fireEvent.keyDown(heading, { key: '2' })
+  })
+  expect(smart.reviewBucket).not.toHaveBeenCalled()
+  expect(progress()).toBe('2/2')
+  await press('2')
+  expect(smart.reviewBucket).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ threadId: low.threadId, bucket: 'Action' }),
+  )
+})
+
+it('records a queued Reply even when a notification closes triage during composition', async () => {
   const { adapter } = await fixture()
-  const submit = adapter.api.sendDraft
-  const send = vi.spyOn(adapter.api, 'sendDraft').mockImplementation(async (request) => ({
-    ...(await submit(request)),
-    undoRemainingMs: 5000,
-  }))
-  const cancel = vi.spyOn(adapter.api, 'cancelSend')
+  const target = (await adapter.api.thread('thread-3'))?.thread
+  if (!target) throw new Error('Expected notification Thread')
+  let notify: (() => void) | undefined
+  adapter.api.onOpenThread = (callback) => {
+    notify = () => callback(target)
+    return () => {
+      notify = undefined
+    }
+  }
+  await mount(adapter)
+  await open()
+  await press('r')
+  const composer = screen.getByRole('dialog', { name: 'Compose' })
+  await act(async () => notify?.())
+  await click(within(composer).getByRole('button', { name: /^Send ⌘/ }))
+  await tick()
+  await open()
+  await click(within(review()).getByText('Action history (1)'))
+  expect(within(review()).getByRole('button', { name: 'Open Outbox' })).toBeTruthy()
+  expect(within(review()).getByRole('heading', { name: 'Sunday at the studio' })).toBeTruthy()
+})
+
+it('restores a skipped card from the previous batch and preserves the next batch', async () => {
+  const { adapter, smart, low } = await fixture()
+  const queue = smart.triageQueue.getMockImplementation()
+  if (!queue) throw new Error('Expected synthetic queue')
+  smart.triageQueue.mockImplementation(async (input) => {
+    const page = await queue(input)
+    if (input.limit !== 100) return page
+    return input.cursor
+      ? { ...page, cards: [low] }
+      : { ...page, cards: page.cards.slice(0, 1), cursor: 'next-page' }
+  })
   await mount(adapter)
   await open()
   await press(' ')
-  await press('r')
-  const composer = screen.getByRole('dialog', { name: 'Compose' })
-  expect(send).not.toHaveBeenCalled()
-  await click(within(composer).getByRole('button', { name: /^Send ⌘/ }))
-  await tick()
-  expect(within(review()).getByText('All clear')).toBeTruthy()
-  expect(send).toHaveBeenCalledOnce()
-  await press('u')
-  expect(cancel).toHaveBeenCalledExactlyOnceWith(send.mock.calls[0][0].id)
-  expect(progress()).toBe('2/2')
+  await click(within(review()).getByRole('button', { name: 'Review next batch' }))
   expect(
     within(review()).getByRole('heading', { name: 'Invoice for the spring issue' }),
   ).toBeTruthy()
+  await press('u')
+  expect(within(review()).getByRole('heading', { name: firstSubject })).toBeTruthy()
+  expect(progress()).toBe('1/1')
+  await press(' ')
+  await click(within(review()).getByRole('button', { name: 'Review next batch' }))
+  expect(
+    within(review()).getByRole('heading', { name: 'Invoice for the spring issue' }),
+  ).toBeTruthy()
+  expect(smart.triageQueue.mock.calls.filter(([input]) => input.limit === 100)).toHaveLength(2)
 })
