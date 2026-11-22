@@ -1,3 +1,5 @@
+import { triageMigration } from '../mail/triage/migration.ts'
+
 export interface Migration {
   version: number
   name: string
@@ -773,4 +775,5 @@ export const MIGRATIONS: readonly Migration[] = [
       ) STRICT;
     `,
   },
+  triageMigration,
 ]

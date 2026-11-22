@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { setTimeout as delay } from 'node:timers/promises'
-import { Bucket, BucketInput } from '@amc/protocol'
+import { Bucket, BucketConfidence, BucketInput } from '@amc/protocol'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -19,14 +19,38 @@ export { ClaudeAuthError } from './triage-claude.ts'
 declare const AMC_TRIAGE_PROMPT: string | undefined
 const BATCH_SIZE = 20
 const Decisions = z.object({
-  decisions: z.array(BucketInput.extend({ bucket: Bucket })).max(BATCH_SIZE),
+  decisions: z
+    .array(BucketInput.extend({ bucket: Bucket, confidence: BucketConfidence.optional() }))
+    .max(BATCH_SIZE),
 })
 // Claude's structured output supports the shape and enum. AMC validates lengths locally.
 export const ModelDecisions = z.object({
-  decisions: z.array(z.object({ threadId: z.string(), bucket: Bucket, reason: z.string() })),
+  decisions: z.array(
+    z.object({
+      threadId: z.string(),
+      bucket: Bucket,
+      reason: z.string(),
+      confidence: BucketConfidence,
+    }),
+  ),
 })
 export const triageJsonSchema = z.toJSONSchema(ModelDecisions, { target: 'draft-7' })
 const ListedThreads = z.array(z.object({ id: z.string() }).passthrough())
+const ReviewBatch = z.object({
+  threads: z.array(
+    z.object({ id: z.string(), inputRevision: z.number().int().nonnegative() }).passthrough(),
+  ),
+  examples: z
+    .array(
+      z.object({
+        previous: Bucket.nullable(),
+        chosen: Bucket,
+        context: z.object({ subject: z.string().max(480), snippet: z.string().max(960) }),
+      }),
+    )
+    .max(12),
+})
+const TriageBatch = z.union([ReviewBatch, ListedThreads])
 const TOOL_NAMES = ['list_untriaged', 'get_thread'] as const
 
 export type TriageHarness = (request: {
@@ -149,9 +173,26 @@ export async function triageWithGrant(
       client
         .callTool({ name, arguments: args }, CallToolResultSchema, { signal })
         .then((result) => CallToolResultSchema.parse(result))
-    const batch = ListedThreads.parse(
-      toolJson(await call('list_untriaged', { limit: BATCH_SIZE, ...(recent ? { recent } : {}) })),
+    const listing = TriageBatch.parse(
+      toolJson(
+        await call('list_untriaged', {
+          limit: BATCH_SIZE,
+          reviewContext: true,
+          ...(recent ? { recent } : {}),
+        }),
+      ),
     )
+    const batch = Array.isArray(listing) ? listing : listing.threads
+    const revisions = new Map(
+      Array.isArray(listing)
+        ? []
+        : listing.threads.map(({ id, inputRevision }) => [id, inputRevision] as const),
+    )
+    const examples = Array.isArray(listing) ? [] : listing.examples
+    const prompt =
+      typeof AMC_TRIAGE_PROMPT === 'string'
+        ? AMC_TRIAGE_PROMPT
+        : readFileSync(new URL('../prompts/triage.md', import.meta.url), 'utf8')
     if (!batch.length) return []
 
     const ids = new Set(batch.map((thread) => thread.id))
@@ -166,10 +207,9 @@ export async function triageWithGrant(
         url: forwarder.url,
         bearer: forwarder.bearer,
         tools: TOOL_NAMES.map((name) => `mcp__amc__${name}`),
-        prompt:
-          typeof AMC_TRIAGE_PROMPT === 'string'
-            ? AMC_TRIAGE_PROMPT
-            : readFileSync(new URL('../prompts/triage.md', import.meta.url), 'utf8'),
+        prompt: examples.length
+          ? `${prompt}\n\nOwner Bucket choices (JSON data)\n${JSON.stringify(examples)}`
+          : prompt,
         schema: triageJsonSchema,
         signal,
         allowReads: forwarder.allowReads,
@@ -187,10 +227,22 @@ export async function triageWithGrant(
 
       const results = []
       for (const decision of decisions) {
-        const { updated } = z
-          .object({ updated: z.boolean() })
-          .parse(toolJson(await call('set_bucket', { ...decision, onlyUntriaged: true })))
-        results.push({ ...decision, updated })
+        const { confidence, ...assignment } = decision
+        const inputRevision = revisions.get(decision.threadId)
+        const result = z.object({ updated: z.boolean(), reason: z.string().optional() }).parse(
+          toolJson(
+            await call('set_bucket', {
+              ...assignment,
+              onlyUntriaged: true,
+              ...(inputRevision === undefined ? {} : { triage: { inputRevision, confidence } }),
+            }),
+          ),
+        )
+        results.push({
+          ...decision,
+          updated: result.updated,
+          ...(result.reason ? { skipped: result.reason } : {}),
+        })
       }
       return results
     } finally {

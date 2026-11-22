@@ -16,8 +16,11 @@ function fixture({
   dryRun = false,
   recent = false,
   busy = false,
+  modern = false,
 } = {}) {
-  const setBucket = vi.fn(() => ({ updated: true }))
+  const setBucket = vi.fn(() =>
+    modern ? { updated: false, reason: 'The Inbox input changed' } : { updated: true },
+  )
   const getThread = vi.fn(() => ({ id: 'a:t1' }))
   const revoke = vi.fn()
   const list = vi.fn()
@@ -82,9 +85,27 @@ function fixture({
     })
     server.registerTool(
       'list_untriaged',
-      { inputSchema: { limit: z.number(), recent: z.boolean().optional() } },
+      {
+        inputSchema: {
+          limit: z.number(),
+          recent: z.boolean().optional(),
+          reviewContext: z.boolean(),
+        },
+      },
       async (args) => {
         expect(args.recent).toBe(recent ? true : undefined)
+        expect(args.reviewContext).toBe(true)
+        if (modern)
+          return json({
+            threads: [{ id: 'a:t1', subject: 'Fixture', inputRevision: 19 }],
+            examples: [
+              {
+                previous: 'Action',
+                chosen: 'Later',
+                context: { subject: 'Synthetic example', snippet: '' },
+              },
+            ],
+          })
         return json([{ id: 'a:t1', subject: 'Fixture' }])
       },
     )
@@ -99,10 +120,15 @@ function fixture({
           bucket: z.string(),
           reason: z.string(),
           onlyUntriaged: z.boolean(),
+          triage: z.object({ inputRevision: z.number(), confidence: z.string() }).optional(),
         },
       },
       async (args) => {
-        expect(args).toEqual({ ...decision, onlyUntriaged: true })
+        expect(args).toEqual({
+          ...decision,
+          onlyUntriaged: true,
+          ...(modern ? { triage: { inputRevision: 19, confidence: 'low' } } : {}),
+        })
         return json(setBucket())
       },
     )
@@ -165,6 +191,18 @@ describe('amc triage', () => {
       expect(revoke).toHaveBeenCalledOnce()
     },
   )
+
+  it('includes owner examples in the prompt and submits the captured revision and confidence', async () => {
+    fixture({ modern: true })
+    const results = await runTriage(config, 'a', false, signal(), async ({ prompt }) => {
+      expect(prompt).toContain('Synthetic example')
+      expect(prompt).toContain('"chosen":"Later"')
+      return { decisions: [{ ...decision, confidence: 'low', inputRevision: 99 }] }
+    })
+    expect(results).toEqual([
+      { ...decision, confidence: 'low', updated: false, skipped: 'The Inbox input changed' },
+    ])
+  })
 
   it('requests recent deliveries when opted in', async () => {
     fixture({ recent: true })

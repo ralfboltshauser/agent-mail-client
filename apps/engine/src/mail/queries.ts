@@ -3,6 +3,7 @@ import type {
   Address,
   AttachmentSummary,
   Bucket,
+  BucketConfidence,
   InboxSender,
   Label,
   MessageDetail,
@@ -16,6 +17,7 @@ import type { BlobStore } from '../blobs.ts'
 import type { Db } from '../db/database.ts'
 import { type BodyParts, readBodyParts, readTextBody } from './body-blobs.ts'
 import { senderStatusSql } from './senders/index.ts'
+import { latestInboxMessageSql } from './triage/input.ts'
 
 interface ThreadRow {
   id: string
@@ -33,6 +35,7 @@ interface ThreadRow {
   snoozed_until: number | null
   muted: number
   bucket: Bucket | null
+  bucket_confidence: BucketConfidence | null
   bucket_reason: string
   bucket_set_by: string
   bucket_set_at: number
@@ -111,6 +114,7 @@ function toThread(row: ThreadRow): ThreadSummary {
           reason: row.bucket_reason,
           setBy: row.bucket_set_by,
           setAt: row.bucket_set_at,
+          ...(row.bucket_confidence ? { confidence: row.bucket_confidence } : {}),
         }
       : null,
   }
@@ -124,6 +128,7 @@ export interface ThreadQuery {
   inbox?: boolean
   unread?: boolean
   untriaged?: boolean
+  triageInput?: boolean
   deliveredSince?: number
   /** Return Threads whose last message is older than this (epoch ms), for paging. */
   before?: number
@@ -149,6 +154,9 @@ export class MailQueries {
       t.unread_count, t.starred, t.in_inbox, t.has_attachments, t.label_ids,
       t.last_message_at, ${snoozeEnabled ? 't.snoozed_until' : 'NULL'} AS snoozed_until, t.muted,
       t.bucket, t.bucket_reason, t.bucket_set_by, t.bucket_set_at,
+      CASE WHEN t.in_inbox = 1 AND t.bucket_confidence IS NOT NULL THEN
+        CASE WHEN t.bucket_input_message_id = ${latestInboxMessageSql} THEN t.bucket_confidence END
+      END AS bucket_confidence,
       (SELECT h.message_id FROM owner_handled h WHERE h.thread_id = t.id) AS owner_handled_message_id,
       CASE WHEN t.in_inbox = 1 THEN (
         SELECT json_object('accountId', i.account_id, 'address', i.address, 'messageId', m.id,
@@ -246,6 +254,12 @@ export class MailQueries {
       params.push(query.labelId)
     }
     if (query.untriaged) where.push('t.bucket IS NULL')
+    if (query.triageInput)
+      where.push(`
+      ${latestInboxMessageSql} IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM owner_handled h WHERE h.thread_id = t.id AND h.message_id = ${latestInboxMessageSql}
+      )
+    `)
     if (query.deliveredSince !== undefined) {
       where.push(`(
         SELECT MAX(m.delivered_at) FROM message m WHERE m.thread_id = t.id

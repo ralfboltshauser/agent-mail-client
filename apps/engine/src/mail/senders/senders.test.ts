@@ -359,8 +359,8 @@ it('upgrades a populated v20 fixture and rebuilds Account-scoped evidence withou
       VALUES ('a:out', 'a', 'a:t', 'out', '[{"address":"alice@example.com","name":null}]', 2, '["a:SENT"]')`)
     const original = db.prepare('SELECT * FROM message ORDER BY id').all()
     const backupDir = join(dir, 'backups')
-    expect(migrate(db, { backupDir })).toBe(21)
-    expect(migrate(db, { backupDir })).toBe(21)
+    expect(migrate(db, { backupDir })).toBe(MIGRATIONS.at(-1)?.version)
+    expect(migrate(db, { backupDir })).toBe(MIGRATIONS.at(-1)?.version)
     const backups = readdirSync(backupDir)
     expect(backups).toHaveLength(1)
     const [backupName] = backups
