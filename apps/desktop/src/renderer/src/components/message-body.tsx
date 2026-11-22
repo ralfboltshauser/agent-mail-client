@@ -1,8 +1,10 @@
 import DOMPurify from 'dompurify'
 import { ImageOff } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { getAmc } from '@/lib/amc'
+
+export const MIN_HTML_BODY_HEIGHT = 120
 
 const BASE_CSS = `
   :root { color-scheme: light; }
@@ -22,10 +24,10 @@ const BASE_CSS = `
  * Content-Security-Policy that blocks remote images (tracking pixels) until the owner allows
  * them. Links open in the default browser, never inside AMC.
  */
-export function HtmlBody({ html }: { html: string }) {
+export const HtmlBody = memo(function HtmlBody({ html }: { html: string }) {
   const [remote, setRemote] = useState(false)
   const frame = useRef<HTMLIFrameElement>(null)
-  const [height, setHeight] = useState(120)
+  const [height, setHeight] = useState(MIN_HTML_BODY_HEIGHT)
 
   const { doc, hasRemote } = useMemo(() => {
     const clean = DOMPurify.sanitize(html, {
@@ -53,18 +55,28 @@ export function HtmlBody({ html }: { html: string }) {
     return { doc, hasRemote }
   }, [html, remote])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = frame.current
     if (!el) return
-    let observer: ResizeObserver | null = null
+    let disconnect = () => {}
     const onLoad = () => {
-      const d = el.contentDocument
-      if (!d) return
-      const measure = () => setHeight(Math.max(60, d.documentElement.scrollHeight))
-      measure()
-      observer = new ResizeObserver(measure)
-      observer.observe(d.documentElement)
-      d.addEventListener('click', (event) => {
+      disconnect()
+      const document = el.contentDocument
+      const body = document?.body
+      if (document?.URL !== 'about:srcdoc' || !body) return
+
+      let observing = true
+      const measure = () => {
+        if (!observing || el.contentDocument !== document || el.closest('[hidden]')) return
+        // The root scrollHeight has the current iframe viewport as a floor, even after content
+        // shrinks. Measure the body so a previously tall version does not pin the height.
+        const contentHeight = Math.max(
+          body.scrollHeight,
+          Math.ceil(body.getBoundingClientRect().height),
+        )
+        setHeight(Math.max(MIN_HTML_BODY_HEIGHT, contentHeight + 2))
+      }
+      const onClick = (event: MouseEvent) => {
         const link = (event.target as Element | null)?.closest?.(
           'a[href]',
         ) as HTMLAnchorElement | null
@@ -72,14 +84,24 @@ export function HtmlBody({ html }: { html: string }) {
         event.preventDefault()
         const href = link.getAttribute('href') ?? ''
         if (/^(https?|mailto):/i.test(href)) void getAmc().openExternal(href)
-      })
+      }
+      measure()
+      const observer = new ResizeObserver(measure)
+      observer.observe(body, { box: 'border-box' })
+      document.addEventListener('click', onClick)
+      disconnect = () => {
+        observing = false
+        observer.disconnect()
+        document.removeEventListener('click', onClick)
+      }
     }
     el.addEventListener('load', onLoad)
+    if (el.srcdoc !== doc) el.srcdoc = doc
     return () => {
       el.removeEventListener('load', onLoad)
-      observer?.disconnect()
+      disconnect()
     }
-  }, [])
+  }, [doc])
 
   return (
     <div className="space-y-2">
@@ -101,16 +123,15 @@ export function HtmlBody({ html }: { html: string }) {
         ref={frame}
         title="Message"
         sandbox="allow-same-origin"
-        srcDoc={doc}
-        className="w-full rounded-md border border-border/70 bg-white"
+        className="block w-full rounded-md border border-border/70 bg-white"
         style={{ height }}
       />
     </div>
   )
-}
+})
 
 /** Plain-text bodies: keep line breaks, linkify URLs, fold quoted history. */
-export function TextBody({ text }: { text: string }) {
+export const TextBody = memo(function TextBody({ text }: { text: string }) {
   const [showQuoted, setShowQuoted] = useState(false)
   const lines = text.split('\n')
   const quoteStart = lines.findIndex(
@@ -134,7 +155,7 @@ export function TextBody({ text }: { text: string }) {
       )}
     </div>
   )
-}
+})
 
 function linkify(text: string): React.ReactNode[] {
   const parts = text.split(/(https?:\/\/[^\s<>"')\]]+)/g)
