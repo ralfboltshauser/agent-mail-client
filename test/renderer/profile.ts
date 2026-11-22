@@ -5,13 +5,12 @@ export const commits = new Map<string, number>()
 
 // A callback belongs to one evaluation of the component's return expression.
 // Descendant-only updates may call it again without evaluating that component.
-export function profile(id: string, children: ReactNode, key?: string) {
+export function profile(id: string, children: ReactNode) {
   let recorded = false
   return createElement(
     Profiler,
     {
       id,
-      key,
       onRender() {
         if (recorded) return
         recorded = true
@@ -29,7 +28,7 @@ export function commitCounts() {
   }
   return {
     app: commits.get('App') ?? 0,
-    workspace: commits.get('MailApp') ?? 0,
+    workspace: commits.get('MailWorkspace') ?? 0,
     sidebar: commits.get('AppSidebar') ?? 0,
     list: commits.get('ThreadList') ?? 0,
     reader: commits.get('ThreadView') ?? 0,
