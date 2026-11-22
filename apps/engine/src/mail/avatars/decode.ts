@@ -31,7 +31,7 @@ function readPng(bytes: Buffer): Pixels {
   const width = bytes.readUInt32BE(16)
   const height = bytes.readUInt32BE(20)
   dimensions(width, height)
-  // Validate the complete IDAT stream before pngjs allocates its pixel buffers.
+  // Validate the header and IDAT stream before pngjs allocates its pixel buffers.
   const idat: Buffer[] = []
   let ended = false
   for (let offset = 8; offset + 12 <= bytes.length; ) {
@@ -39,6 +39,7 @@ function readPng(bytes: Buffer): Pixels {
     const type = bytes.toString('ascii', offset + 4, offset + 8)
     const end = offset + length + 12
     if (end > bytes.length) throw new Error('Invalid PNG chunk')
+    if (type === 'IHDR' && (offset !== 8 || length !== 13)) throw new Error('Invalid PNG header')
     if (type === 'IDAT') idat.push(bytes.subarray(offset + 8, end - 4))
     if (['acTL', 'fcTL', 'fdAT'].includes(type)) throw new Error('Animated PNG')
     if (type === 'IEND') {

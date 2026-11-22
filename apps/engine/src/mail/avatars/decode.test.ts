@@ -38,6 +38,17 @@ it('re-encodes PNG, JPEG and ICO as bounded, fixed-size PNG', async () => {
   ).rejects.toThrow('dimensions')
 })
 
+it('rejects a second PNG header before decoding pixels', async () => {
+  const png = PNG.sync.write(new PNG({ width: 8, height: 16 }))
+  const headerEnd = 8 + 12 + 13
+  const duplicateHeader = Buffer.concat([
+    png.subarray(0, headerEnd),
+    png.subarray(8, headerEnd),
+    png.subarray(headerEnd),
+  ])
+  await expect(decodeAvatar(duplicateHeader, 'image/png')).rejects.toThrow('Invalid PNG header')
+})
+
 it('rasterizes static SVG in the image worker', async () => {
   const logo = svg('<rect width="16" height="16" fill="#ff0000"/>')
   const png = await rasterize(logo, 'image/svg+xml', AbortSignal.timeout(3500))
