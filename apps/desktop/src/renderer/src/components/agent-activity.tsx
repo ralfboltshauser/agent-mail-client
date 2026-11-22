@@ -95,6 +95,12 @@ export function AgentActivity({
                   </Badge>
                 </div>
                 {action.error && <div className="text-destructive">{action.error}</div>}
+                {action.currentDraftMirrorFailed && (
+                  <div className="text-muted-foreground">
+                    Current draft is saved in AMC. Sync to the Account’s Drafts failed and will
+                    retry.
+                  </div>
+                )}
                 {action.threads.map((thread) => {
                   const mutation = action.mutations.find((result) => result.threadId === thread)
                   const undoConflict = mutation?.undo?.superseded?.length

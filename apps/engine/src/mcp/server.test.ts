@@ -292,9 +292,8 @@ describe('MCP tools', () => {
     expect(JSON.stringify(actions)).not.toContain('Friday at 7?')
   })
 
-  it('shows a local draft save and clears its mirror error after a successful retry', async () => {
+  it('reports a later owner edit’s mirror failure as current draft status', async () => {
     const { client, db, drafts, gmail, mutations } = await connect(['draft'])
-    vi.spyOn(gmail, 'saveDraft').mockRejectedValueOnce(new Error('Provider unavailable'))
     try {
       const response = await client.callTool({
         name: 'create_draft',
@@ -303,16 +302,22 @@ describe('MCP tools', () => {
       expect(response.isError).toBeFalsy()
       const { id } = JSON.parse(text(response))
       const activity = () => listAgentActions(db, mutations).actions[0]
+      expect(gmail.drafts.size).toBe(1)
+      expect(activity()).not.toHaveProperty('currentDraftMirrorFailed')
+
+      vi.spyOn(gmail, 'saveDraft').mockRejectedValueOnce(new Error('Provider unavailable'))
+      await drafts.update(id, { body: 'Owner edit' }, 'owner')
       expect(activity()).toMatchObject({
+        tool: 'create_draft',
         draftId: id,
         status: 'applied',
-        error: 'Draft saved locally. Mirroring to the provider failed and will retry.',
+        error: null,
+        currentDraftMirrorFailed: true,
       })
-      expect(gmail.drafts.size).toBe(0)
 
       await drafts.mirrorPending()
       expect(gmail.drafts.size).toBe(1)
-      expect(activity()).toMatchObject({ draftId: id, status: 'applied', error: null })
+      expect(activity()).not.toHaveProperty('currentDraftMirrorFailed')
     } finally {
       await client.close()
       db.close()

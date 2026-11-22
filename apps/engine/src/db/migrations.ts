@@ -656,6 +656,14 @@ export const MIGRATIONS: readonly Migration[] = [
   },
   {
     version: 19,
+    name: 'Retire IMAP draft removals with unknown provenance',
+    sql: `
+      UPDATE draft_mirror_removal SET mirror_hash = NULL
+      WHERE account_id IN (SELECT id FROM account WHERE kind = 'imap');
+    `,
+  },
+  {
+    version: 20,
     name: 'Use Gmail provider IDs for existing AMC/Snoozed memberships',
     sql: `
       CREATE TEMP TABLE snoozed_label AS

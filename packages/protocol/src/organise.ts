@@ -162,5 +162,6 @@ export interface AgentAction {
   status: 'pending' | 'applied' | 'partial' | 'failed' | 'rejected'
   error: string | null
   draftId: string | null
+  currentDraftMirrorFailed?: boolean
   mutations: AgentMutationResult[]
 }
