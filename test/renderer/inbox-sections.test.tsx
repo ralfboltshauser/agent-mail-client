@@ -142,6 +142,41 @@ it('preserves Reply all on A for the selected New sender Thread', async () => {
   expect(smart.decideSender).not.toHaveBeenCalled()
 })
 
+it('moves focus from an inline sender action back to the list when stepping to the next row', async () => {
+  await mountSections(withNewSenders, senderControls())
+  const active = listbox()
+  const card = selected()
+  if (!card.parentElement) throw new Error('Expected the sender row wrapper')
+  const accept = within(card.parentElement).getByRole('button', { name: 'Accept' })
+
+  act(() => accept.focus())
+  await act(async () => fireEvent.keyDown(accept, { key: 'j' }))
+
+  expect(selected().dataset.threadId).toBe('thread-2')
+  expect(document.activeElement).toBe(active)
+})
+
+it('returns focus to the list when a refresh removes the last focused sender card', async () => {
+  let includeSender = true
+  const { emitChanged } = await mountSections(
+    (rows) =>
+      withNewSenders(rows).map((row, index) =>
+        includeSender && index === 0 ? row : { ...row, inboxSender: undefined },
+      ),
+    senderControls(),
+  )
+  const active = listbox()
+  const block = screen.getByRole('button', { name: 'Block' })
+
+  act(() => block.focus())
+  includeSender = false
+  await act(async () => emitChanged())
+
+  expect(screen.queryByRole('heading', { name: /^New senders/ })).toBeNull()
+  expect(listbox()).toBe(active)
+  expect(document.activeElement).toBe(active)
+})
+
 it('applies inline sender decisions and undoes the exact action without opening the card', async () => {
   const smart = senderControls()
   const accepted = deferred<Awaited<ReturnType<SmartInboxApi['decideSender']>>>()

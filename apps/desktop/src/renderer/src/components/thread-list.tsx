@@ -279,7 +279,9 @@ export function ThreadList({
             data-active-row-visible={selectedVisible || undefined}
             tabIndex={0}
             className="mail-list absolute inset-0"
-            onFocus={() => setFocused(null)}
+            onFocus={(event) => {
+              if (event.target === event.currentTarget) setFocused(null)
+            }}
             onKeyDown={(event) => {
               if (event.target !== event.currentTarget) return
               if (event.key === 'Enter' && !event.nativeEvent.isComposing && selectedIndex >= 0) {
