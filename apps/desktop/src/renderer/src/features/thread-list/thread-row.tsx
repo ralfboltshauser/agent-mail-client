@@ -101,9 +101,9 @@ export const ThreadRow = memo(function ThreadRow({
 }: RowProps) {
   return (
     <>
-      <div className="flex w-2 shrink-0 justify-center pt-1.5">
+      <div className="flex w-2 shrink-0 justify-center self-center">
         {unread && (
-          <span className="size-1.5 rounded-full bg-unread">
+          <span className="size-[7px] rounded-full bg-unread">
             <span className="sr-only">Unread</span>
           </span>
         )}
