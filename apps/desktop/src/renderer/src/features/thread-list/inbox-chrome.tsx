@@ -3,6 +3,8 @@ import { ChevronDown, ChevronRight } from 'lucide-react'
 import { memo, useRef } from 'react'
 import { runOrganise } from '@/components/organise'
 import { Button } from '@/components/ui/button'
+import { Kbd } from '@/components/ui/kbd'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { replicaStoreFor } from '@/data/replica-store'
 import type { InboxSection } from '@/data/thread-queries'
 import { accountsQuery, type MailboxThreadQuery } from '@/features/mailbox/mailbox-queries'
@@ -68,33 +70,58 @@ export const InboxSectionHeader = memo(function InboxSectionHeader({
     }
   }
   const Chevron = collapsed ? ChevronRight : ChevronDown
+  const newSenders = section === 'New senders'
+  const showHint = newSenders && !collapsed && !!getAmc().smartInbox
+  const markButton = (
+    <Button
+      variant="ghost"
+      size="sm"
+      aria-label={`Mark ${section} seen`}
+      aria-disabled={!canMark}
+      className="aria-disabled:opacity-50"
+      onClick={() => void markSeen()}
+    >
+      Mark seen
+    </Button>
+  )
   return (
-    <div className="flex min-h-10 items-center justify-between gap-1 border-b px-2">
-      <h3 className="min-w-0">
-        <Button
-          data-inbox-disclosure
-          variant="ghost"
-          size="sm"
-          aria-expanded={!collapsed}
-          aria-controls={controls}
-          onClick={() => onToggle(section)}
-          className="max-w-full font-semibold"
-        >
-          <Chevron aria-hidden />
-          <span className="truncate">{section}</span>
-          <span className="text-xs tabular-nums text-muted-foreground">{count}</span>
-        </Button>
-      </h3>
-      <Button
-        variant="ghost"
-        size="sm"
-        aria-label={`Mark ${section} seen`}
-        aria-disabled={!canMark}
-        className="aria-disabled:opacity-50"
-        onClick={() => void markSeen()}
-      >
-        Mark seen
-      </Button>
+    <div className="border-b">
+      <div className="flex min-h-10 items-center justify-between gap-1 px-2">
+        <h3 className="min-w-0">
+          <Button
+            data-inbox-disclosure
+            variant="ghost"
+            size="sm"
+            aria-expanded={!collapsed}
+            aria-controls={controls}
+            onClick={() => onToggle(section)}
+            className="max-w-full font-semibold"
+          >
+            <Chevron aria-hidden />
+            <span className="truncate">{section}</span>
+            <span className="text-xs tabular-nums text-muted-foreground">{count}</span>
+          </Button>
+        </h3>
+        {newSenders ? (
+          <Tooltip>
+            <TooltipTrigger asChild>{markButton}</TooltipTrigger>
+            <TooltipContent>Mark Threads as read without deciding</TooltipContent>
+          </Tooltip>
+        ) : (
+          markButton
+        )}
+      </div>
+      {showHint && (
+        <p className="px-5 pb-1 text-xs text-muted-foreground">
+          Accept or block each sender.
+          {getAmc().smartInbox?.review && (
+            <>
+              {' '}
+              Press <Kbd>T</Kbd> to review.
+            </>
+          )}
+        </p>
+      )}
     </div>
   )
 })
@@ -136,8 +163,12 @@ export const InboxSenderCard = memo(function InboxSenderCard({
         <span className="truncate text-muted-foreground" title={card.address}>
           {card.address}
         </span>
-        <span className="truncate text-muted-foreground">Account {account ?? card.accountId}</span>
-        <span className="truncate">{card.subject || '(no subject)'}</span>
+        <span className="truncate text-muted-foreground group-data-[sender-actions]:pr-28">
+          Account {account ?? card.accountId}
+        </span>
+        <span className="truncate group-data-[sender-actions]:pr-28">
+          {card.subject || '(no subject)'}
+        </span>
       </div>
     </>
   )

@@ -17,6 +17,7 @@ import type { MailboxThreadQuery } from '@/features/mailbox/mailbox-queries'
 import type { FilterAction } from '@/features/mailbox/use-filter-actions'
 import { type InboxNavigation, inboxHeaderId } from '@/features/mailbox/use-inbox-sections'
 import { InboxSenderCard, VirtualInboxChrome } from '@/features/thread-list/inbox-chrome'
+import { InboxSenderActions } from '@/features/thread-list/inbox-sender-actions'
 import { ThreadContextMenu } from '@/features/thread-list/thread-context-menu'
 import { SubscribedThreadRow } from '@/features/thread-list/thread-row'
 import { useInboxScrollAnchor } from '@/features/thread-list/use-inbox-scroll-anchor'
@@ -108,11 +109,18 @@ export function ThreadList({
   const getItemKey = useCallback((index: number) => items[index]?.id ?? index, [items])
   const estimateSize = useCallback(
     (index: number) => {
-      const kind = items[index]?.kind
-      if (kind === 'header' || kind === 'footer') return 40
-      return kind === 'sender' ? 88 : ROW
+      const entry = items[index]
+      if (entry?.kind === 'header') {
+        return entry.section === 'New senders' &&
+          !inbox?.collapsed[entry.section] &&
+          getAmc().smartInbox
+          ? 64
+          : 40
+      }
+      if (entry?.kind === 'footer') return 40
+      return entry?.kind === 'sender' ? 88 : ROW
     },
-    [items],
+    [items, inbox?.collapsed],
   )
   const rangeExtractor = useCallback(
     (range: Parameters<typeof defaultRangeExtractor>[0]) => {
@@ -206,6 +214,7 @@ export function ThreadList({
     virtualizer.scrollToIndex(selectedIndex, { align: 'auto' })
   }, [selectedId, selectedIndex, virtualizer])
 
+  const focusList = useCallback(() => listRef.current?.focus({ preventScroll: true }), [])
   const openSender = inbox?.openSender
   const selectRow = useCallback(
     (event: MouseEvent<HTMLDivElement>) => {
@@ -217,9 +226,9 @@ export function ThreadList({
         const card = replicaStoreFor(getAmc()).getQuery(query).data?.inbox?.cards.get(sender)
         if (card && card.threadIds.length > 1) openSender?.(sender)
       }
-      listRef.current?.focus({ preventScroll: true })
+      focusList()
     },
-    [onSelect, openSender, query],
+    [focusList, onSelect, openSender, query],
   )
 
   if (!sectioned && ids.length === 0) return empty
@@ -258,6 +267,7 @@ export function ThreadList({
             tabIndex={0}
             className="mail-list absolute inset-0"
             onKeyDown={(event) => {
+              if (event.target !== event.currentTarget) return
               if (event.key === 'Enter' && !event.nativeEvent.isComposing && selectedIndex >= 0) {
                 document.getElementById(`${listId}-${selectedId}`)?.click()
               }
@@ -277,7 +287,7 @@ export function ThreadList({
                 item.index >= visible.startIndex &&
                 item.index <= visible.endIndex
               const sender = entry.kind === 'sender' ? entry.id.slice('sender:'.length) : undefined
-              return (
+              const row = (
                 // biome-ignore lint/a11y/useFocusableInteractive: DOM focus stays on the listbox with aria-activedescendant.
                 // biome-ignore lint/a11y/useKeyWithClickEvents: Each option is selected by the listbox keyboard handler.
                 <div
@@ -318,6 +328,21 @@ export function ThreadList({
                     />
                   )}
                 </div>
+              )
+              return sender && query && getAmc().smartInbox ? (
+                <div key={item.key} className="group contents" data-sender-actions="">
+                  {row}
+                  <InboxSenderActions
+                    id={sender}
+                    query={query}
+                    selected={selected}
+                    start={item.start}
+                    onFocusChange={setFocused}
+                    returnFocus={focusList}
+                  />
+                </div>
+              ) : (
+                row
               )
             })}
           </div>
