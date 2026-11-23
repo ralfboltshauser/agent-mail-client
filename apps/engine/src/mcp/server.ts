@@ -1,3 +1,4 @@
+import type { EventFields } from '@amc/observability'
 import {
   BucketInput,
   hasScope,
@@ -35,6 +36,7 @@ import {
   submitPrediction,
 } from '../mail/triage/model.ts'
 import { VERSION } from '../version.ts'
+import { toolRegistration, withToolError } from './observability.ts'
 
 export interface McpDeps {
   db: Db
@@ -59,16 +61,19 @@ function json(value: unknown) {
 }
 
 function draftFailure(error: DraftError, read: boolean) {
-  if (!(error instanceof DraftRevisionConflict)) return failure(error.message)
-  return {
-    ...json({
-      error: 'conflict',
-      message: error.message,
-      revision: error.revision,
-      ...(read ? { body: error.body } : {}),
-    }),
-    isError: true,
-  }
+  if (!(error instanceof DraftRevisionConflict)) return withToolError(failure(error.message), error)
+  return withToolError(
+    {
+      ...json({
+        error: 'conflict',
+        message: error.message,
+        revision: error.revision,
+        ...(read ? { body: error.body } : {}),
+      }),
+      isError: true,
+    },
+    error,
+  )
 }
 
 function failure(message: string) {
@@ -92,6 +97,10 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
           'To reply, call create_draft with the thread_id; recipients, subject and threading are filled in.',
     },
   )
+  const registerTool = toolRegistration(
+    server,
+    principal.kind === 'agent' ? principal.name : undefined,
+  )
   const can = (scope: Scope) => hasScope(principal.scopes, scope)
   const { queries, drafts, db, mutations } = deps
   const agent = principal.kind === 'agent' ? principal : undefined
@@ -104,7 +113,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
     return server
   }
 
-  server.registerTool(
+  registerTool(
     'whoami',
     {
       description: 'Which AMC token this is and what it may do. Sending mail is not among them.',
@@ -121,7 +130,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
   )
 
   if (agent && can('read')) {
-    server.registerTool(
+    registerTool(
       'suggest_sender_rule',
       {
         description:
@@ -140,7 +149,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
   }
 
   if (agent && can('organize')) {
-    server.registerTool(
+    registerTool(
       'set_bucket',
       {
         description: 'Set an AMC Bucket and one-line reason. Set bucket to null to clear.',
@@ -174,7 +183,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
   }
 
   if (agent && can('organize') && hasTriageLease(db, agent, 'organize')) {
-    server.registerTool(
+    registerTool(
       'submit_triage_prediction',
       {
         description:
@@ -189,7 +198,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
   }
 
   if (can('read')) {
-    server.registerTool(
+    registerTool(
       'list_untriaged',
       {
         description: 'List Inbox Threads without a Bucket, newest first.',
@@ -240,7 +249,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
       },
     )
 
-    server.registerTool(
+    registerTool(
       'list_accounts',
       {
         description: 'List the mail Accounts and their sync state.',
@@ -254,7 +263,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
         ),
     )
 
-    server.registerTool(
+    registerTool(
       'list_threads',
       {
         description: 'List Threads, newest first. Defaults to the Inbox across all Accounts.',
@@ -287,7 +296,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
         ),
     )
 
-    server.registerTool(
+    registerTool(
       'get_thread',
       {
         description:
@@ -307,7 +316,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
       },
     )
 
-    server.registerTool(
+    registerTool(
       'get_message',
       {
         description: 'Read one message. Text beyond 20,000 characters is marked with […truncated].',
@@ -322,7 +331,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
       },
     )
 
-    server.registerTool(
+    registerTool(
       'search',
       {
         description:
@@ -344,7 +353,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
     )
 
     if (!accountId)
-      server.registerTool(
+      registerTool(
         'search_contacts',
         {
           description:
@@ -358,7 +367,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
         async (a) => json(searchContacts(db, a.query, a.limit)),
       )
 
-    server.registerTool(
+    registerTool(
       'list_labels',
       {
         description: 'List Labels (Gmail labels and system folders such as INBOX, SENT).',
@@ -368,7 +377,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
       async (a) => json(queries.labels(accountId ?? a.account_id)),
     )
 
-    server.registerTool(
+    registerTool(
       'list_drafts',
       {
         description: 'List AMC drafts, newest first, optionally for one Thread.',
@@ -379,7 +388,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
         json(drafts.list({ ...draftOptions, ...(a.thread_id ? { threadId: a.thread_id } : {}) })),
     )
 
-    server.registerTool(
+    registerTool(
       'read_draft',
       {
         description: 'Read one draft, including any edits the owner made by hand.',
@@ -397,7 +406,11 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
 
   if (agent && mutations && can('organize')) {
     type Action = Exclude<OrganiseAction, { kind: 'trash' | 'snooze' | 'undo' }>
-    const tools: [string, string, (threadId: string, labelId: string) => Action][] = [
+    const tools: [
+      EventFields<'mcp.tool.failed'>['tool'],
+      string,
+      (threadId: string, labelId: string) => Action,
+    ][] = [
       ['archive', 'Archive', (threadId) => ({ kind: 'archive', threadId })],
       ['mark_read', 'Mark as read', (threadId) => ({ kind: 'read', threadId, value: true })],
       ['mark_unread', 'Mark as unread', (threadId) => ({ kind: 'read', threadId, value: false })],
@@ -416,7 +429,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
       ['mute', 'Mute', (threadId) => ({ kind: 'mute', threadId, value: true })],
     ]
     for (const [tool, verb, action] of tools) {
-      server.registerTool(
+      registerTool(
         tool,
         {
           description: `${verb} the given Gmail Threads. Returns per-message status. Use organize_status to check pending writeback.`,
@@ -439,7 +452,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
         },
       )
     }
-    server.registerTool(
+    registerTool(
       'organize_status',
       {
         description: 'Check the writeback result of one of this token’s organize actions.',
@@ -454,7 +467,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
   }
 
   if (can('draft')) {
-    server.registerTool(
+    registerTool(
       'create_draft',
       {
         description:
@@ -503,13 +516,13 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
               : await write(),
           )
         } catch (error) {
-          if (error instanceof DraftError) return failure(error.message)
+          if (error instanceof DraftError) return withToolError(failure(error.message), error)
           throw error
         }
       },
     )
 
-    server.registerTool(
+    registerTool(
       'update_draft',
       {
         description: can('read')
@@ -581,7 +594,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
     )
 
     if (!agent)
-      server.registerTool(
+      registerTool(
         'delete_draft',
         {
           description:
@@ -601,8 +614,9 @@ function registerHandoffTools(
   principal: Principal,
   { db, queries, drafts }: McpDeps,
 ) {
+  const registerTool = toolRegistration(server)
   if (hasScope(principal.scopes, 'read')) {
-    server.registerTool(
+    registerTool(
       'get_thread',
       {
         description: 'Read the Thread selected for this handoff.',
@@ -615,7 +629,7 @@ function registerHandoffTools(
         return thread ? json(thread) : failure('Thread unavailable')
       },
     )
-    server.registerTool(
+    registerTool(
       'read_draft',
       {
         description: 'Read this handoff draft and its current revision.',
@@ -632,7 +646,7 @@ function registerHandoffTools(
     )
   }
   if (!hasScope(principal.scopes, 'draft')) return
-  server.registerTool(
+  registerTool(
     'update_draft',
     {
       description: 'Replace this draft body as plain text using the revision from read_draft.',

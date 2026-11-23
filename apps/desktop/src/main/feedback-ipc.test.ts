@@ -1,6 +1,7 @@
+import { createLogger, isCorrelationId } from '@amc/observability'
 import type { BrowserWindow } from 'electron'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { feedbackProject } from './feedback'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { feedbackCaptureLifetimeMs, feedbackProject } from './feedback'
 import { registerFeedbackIpc } from './feedback-ipc'
 
 const mocks = vi.hoisted(() => ({
@@ -11,6 +12,9 @@ const mocks = vi.hoisted(() => ({
   pairedLauncher: vi.fn(),
   savedUrl: vi.fn(),
   saveCapture: vi.fn(),
+  saveExcerpt: vi.fn(),
+  removeCapture: vi.fn(),
+  pruneCaptures: vi.fn(),
 }))
 
 vi.mock('electron', () => ({
@@ -22,6 +26,9 @@ vi.mock('electron', () => ({
 vi.mock('./feedback', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./feedback')>()),
   saveFeedbackCapture: mocks.saveCapture,
+  saveFeedbackExcerpt: mocks.saveExcerpt,
+  removeFeedbackCapture: mocks.removeCapture,
+  pruneFeedbackCaptures: mocks.pruneCaptures,
 }))
 vi.mock('./t3-cli', () => ({ localT3Launcher: mocks.localLauncher }))
 vi.mock('./t3', () => ({
@@ -30,6 +37,7 @@ vi.mock('./t3', () => ({
 }))
 
 const path = '/tmp/fixture/feedback/synthetic.png'
+const excerpt = '/tmp/fixture/feedback/synthetic.logs.json'
 const draft = { text: 'Synthetic note', markdown: 'Synthetic annotation' }
 const link = 't3code://threads/test-env/test-thread'
 
@@ -37,7 +45,10 @@ beforeEach(() => {
   vi.resetAllMocks()
   vi.stubGlobal('AMC_REVISION', 'test')
   mocks.saveCapture.mockReturnValue(path)
+  mocks.saveExcerpt.mockResolvedValue(excerpt)
 })
+
+afterEach(() => vi.useRealTimers())
 
 async function captureFeedback() {
   const sender = {
@@ -51,17 +62,25 @@ async function captureFeedback() {
   }
   const event = { sender, senderFrame: sender.mainFrame }
   const log = vi.fn()
+  const events: string[] = []
   const feedback = registerFeedbackIpc(
     () => ({ webContents: sender }) as unknown as BrowserWindow,
     vi.fn(),
     log,
+    createLogger({ component: 'main', sink: (line) => events.push(line) }),
   )
   mocks.on.mock.calls.find(([channel]) => channel === 'amc:feedbackReady')?.[1](event)
   feedback.open()
   const handler = (name: string) =>
     mocks.handle.mock.calls.find(([channel]) => channel === `amc:feedback${name}`)?.[1]
   const { id } = await handler('Capture')(event, 'setup')
-  return { log, send: () => handler('Send')(event, id, draft) }
+  return {
+    log,
+    events,
+    feedback,
+    send: (captureId: string = id) => handler('Send')(event, captureId, draft),
+    release: () => handler('Release')(event, id),
+  }
 }
 
 describe('feedback IPC', () => {
@@ -73,7 +92,11 @@ describe('feedback IPC', () => {
 
     await expect(send()).resolves.toEqual({ opened: true })
     expect(launch).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({ projectId: feedbackProject, workspaceStrategy: { type: 'root' } }),
+      expect.objectContaining({
+        projectId: feedbackProject,
+        workspaceStrategy: { type: 'root' },
+        message: expect.stringContaining(`Local log excerpt: ${excerpt}`),
+      }),
       path,
     )
     expect(launch.mock.calls[0][0]).not.toHaveProperty('runtimeMode')
@@ -98,7 +121,9 @@ describe('feedback IPC', () => {
 
     await expect(send()).resolves.toEqual({
       opened: false,
-      reason: 'AMC could not find a local T3 connection.',
+      reason: expect.stringContaining(
+        'AMC could not find a local T3 connection. Details: Error · run ',
+      ),
     })
     expect(log).toHaveBeenCalledExactlyOnceWith('LauncherUnavailable')
   })
@@ -107,14 +132,58 @@ describe('feedback IPC', () => {
     mocks.localLauncher.mockResolvedValue({
       launch: vi.fn().mockRejectedValue(new Error(draft.text)),
     })
-    const { log, send } = await captureFeedback()
+    const { log, events, send } = await captureFeedback()
 
     const result = await send()
     expect(result).toMatchObject({ opened: false, reason: expect.stringContaining('confirm') })
     expect(result.reason).not.toContain(draft.text)
     expect(log).toHaveBeenCalledExactlyOnceWith('LaunchFailed')
+    const [started, finished] = events.map((event) => JSON.parse(event))
+    expect(started).toMatchObject({ event: 'feedback.launch.started' })
+    expect(isCorrelationId(started.runId)).toBe(true)
+    expect(finished).toMatchObject({
+      event: 'feedback.launch.finished',
+      status: 'failed',
+      stage: 'LaunchFailed',
+      runId: started.runId,
+      err: { class: 'Error', message: '[redacted]' },
+    })
+    expect(events.join('')).not.toContain(draft.text)
+    expect(result.reason).toContain(started.runId)
     expect(mocks.pairedLauncher).not.toHaveBeenCalled()
     expect(mocks.openExternal).not.toHaveBeenCalled()
+  })
+
+  it('rejects stale IDs and cleans up expired captures', async () => {
+    vi.useFakeTimers()
+    const { send } = await captureFeedback()
+    expect(await send('stale')).toMatchObject({ opened: false })
+    expect(mocks.removeCapture).not.toHaveBeenCalled()
+    vi.setSystemTime(Date.now() + feedbackCaptureLifetimeMs)
+    expect(await send()).toMatchObject({ opened: false })
+    expect(mocks.removeCapture).toHaveBeenCalledExactlyOnceWith(path)
+    expect(mocks.localLauncher).not.toHaveBeenCalled()
+  })
+
+  it('prunes retained artifacts on startup and while the app is idle', async () => {
+    vi.useFakeTimers()
+    const { release, send } = await captureFeedback()
+    expect(mocks.pruneCaptures).toHaveBeenCalledExactlyOnceWith('/tmp/fixture')
+    mocks.localLauncher.mockResolvedValue({
+      launch: vi.fn().mockResolvedValue({ threadId: 'test' }),
+    })
+    await expect(send()).resolves.toEqual({ opened: true })
+    await release()
+    expect(mocks.removeCapture).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
+    expect(mocks.pruneCaptures).toHaveBeenCalledTimes(2)
+  })
+
+  it('cleans up a released capture which was never handed to T3', async () => {
+    const { send, release } = await captureFeedback()
+    await release()
+    expect(await send()).toMatchObject({ opened: false })
+    expect(mocks.removeCapture).toHaveBeenCalledExactlyOnceWith(path)
   })
 
   it('reports when the thread exists but the desktop app could not open', async () => {

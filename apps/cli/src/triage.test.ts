@@ -1,10 +1,14 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { SubmitTriagePrediction } from '@amc/protocol'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
+import { closeClientLogs } from './observability.ts'
 import { runTriage, type TriageHarness, withTriageGrant } from './triage.ts'
 
 const config = { engineUrl: 'http://engine.invalid', token: 'owner' }
@@ -222,7 +226,18 @@ const harness: TriageHarness = async ({ url, bearer, allowReads }) => {
   }
 }
 
-afterEach(() => vi.unstubAllGlobals())
+let logHome: string
+beforeEach(async () => {
+  logHome = await mkdtemp(join(tmpdir(), 'amc-triage-test-'))
+  vi.stubEnv('HOME', logHome)
+  vi.stubEnv('XDG_STATE_HOME', logHome)
+})
+afterEach(async () => {
+  await closeClientLogs()
+  vi.unstubAllGlobals()
+  vi.unstubAllEnvs()
+  await rm(logHome, { recursive: true, force: true })
+})
 
 describe('amc triage', () => {
   it('passes Claude a schema without the Draft 2020-12 meta-schema', async () => {

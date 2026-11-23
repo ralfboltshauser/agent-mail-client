@@ -5,6 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./local-reader": "./src/local-reader.ts",
+    "./mcp-client": "./src/mcp-client.ts",
     "./node": "./src/node.ts",
     "./hono": "./src/hono.ts"
   },

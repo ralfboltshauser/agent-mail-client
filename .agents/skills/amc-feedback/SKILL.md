@@ -13,6 +13,7 @@ A feedback thread contains some of:
 - **Owner text** — what's wrong or wanted. Authoritative.
 - **Screenshot** of the AMC window (attached image).
 - **Annotations** — Agentation-style list: element selector / React component name, the owner's note per element, optionally selected text.
+- **Local log excerpt** — path to a recent, sanitized extract on the Mac. Read it locally if present.
 - **Context block** — AMC version (git SHA), app view (route/folder/mode), window size, timestamp. No mail content.
 
 ## Privacy (non-negotiable)
@@ -25,6 +26,8 @@ Screenshots and annotations can show real mail: senders, subjects, bodies.
 ## Step 1 — Understand (2 min max)
 
 Restate the feedback as one sentence: **problem → desired behaviour**, plus the affected area (renderer feature folder / engine module / CLI / MCP). If the feedback holds several unrelated points, split it and handle each separately (one issue/PR per point).
+
+Read the file identified by `Local log excerpt` if the thread supplies a path. Match its warnings, errors and correlation IDs to the screenshot timestamp. If screenshot Details show a run ID, run `amc logs --run <id>` on the machine with those logs. For a request ID, run `amc logs --request <id>` on that machine. Include only the relevant event, error class and correlation ID in external reports. If the excerpt has expired, use the correlation ID from the screenshot or continue with the other evidence.
 
 Classify:
 | Kind | Example | Default path |

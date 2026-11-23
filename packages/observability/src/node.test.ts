@@ -1,6 +1,8 @@
+import { execFile } from 'node:child_process'
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { promisify } from 'node:util'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { rotatingFileSink, stackFilePaths, stdoutSink } from './node.ts'
 
@@ -83,4 +85,33 @@ it('registers the filesystem and URL forms used by Node stacks', () => {
       ['/synthetic/amc app/http.ts', 'http'],
     ]),
   )
+})
+
+it('serializes rotation and append across independent processes', async () => {
+  const module = new URL('./node.ts', import.meta.url).href
+  await Promise.all(
+    ['a', 'b', 'c'].map((prefix) =>
+      promisify(execFile)(process.execPath, [
+        '--input-type=module',
+        '--eval',
+        `import { rotatingFileSink } from ${JSON.stringify(module)};
+           const sink = rotatingFileSink(process.argv[1], { maxBytes: 32, coordinate: true });
+           for (let i = 0; i < 12; i++) sink(process.argv[2] + String(i).padStart(2, '0'));
+           await sink.close();`,
+        path,
+        prefix,
+      ]),
+    ),
+  )
+  const names = readdirSync(directory).filter((name) => !name.endsWith('.lock'))
+  const records = names.flatMap((name) =>
+    readFileSync(join(directory, name), 'utf8').trimEnd().split('\n'),
+  )
+  expect(names.length).toBe(5)
+  expect(records.sort()).toEqual(
+    ['a', 'b', 'c'].flatMap((prefix) =>
+      Array.from({ length: 12 }, (_, i) => prefix + String(i).padStart(2, '0')),
+    ),
+  )
+  expect(statSync(`${path}.lock`).mode & 0o777).toBe(0o600)
 })

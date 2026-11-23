@@ -675,12 +675,15 @@ it('has no SMTP submission dispatch through Agent tokens, HTTP, MCP or the CLI (
     }
 
     const entry = fileURLToPath(new URL('../../../cli/src/main.ts', import.meta.url))
+    const cliHome = tempDir()
     for (const command of [['send'], ['draft', 'send', 'draft-id']]) {
       const processResult = spawnSync(process.execPath, [entry, ...command], {
         encoding: 'utf8',
         env: {
           ...process.env,
-          XDG_CONFIG_HOME: tempDir(),
+          HOME: cliHome,
+          XDG_CONFIG_HOME: cliHome,
+          XDG_STATE_HOME: cliHome,
           AMC_ENGINE_URL: 'http://127.0.0.1:1',
           AMC_TOKEN: grant.secret,
         },
