@@ -43,6 +43,7 @@ import {
 } from '@/components/ui/sidebar'
 import { shareReply } from '@/data/share-reply'
 import { accountsQuery, countsQuery, labelsQuery } from '@/features/mailbox/mailbox-queries'
+import { avatarShapes, useAccountAvatarShape } from '@/features/sender-avatar/account-avatar-shape'
 import { useReplicaSelector } from '@/hooks/use-amc'
 import { mailShortcuts, shortcutLabel } from '@/lib/mail-shortcuts'
 import { cn } from '@/lib/utils'
@@ -105,11 +106,22 @@ interface Props {
   obscured?: boolean
 }
 
-function AccountBadge({ text, className }: { text: string; className?: string }) {
+function AccountBadge({
+  accountId,
+  text,
+  className,
+}: {
+  accountId: string
+  text: string
+  className?: string
+}) {
+  const shape = useAccountAvatarShape(accountId)
   return (
     <div
+      aria-hidden="true"
+      style={avatarShapes[shape].style}
       className={cn(
-        'flex size-7 shrink-0 items-center justify-center rounded-md bg-primary text-[11px] font-semibold text-primary-foreground',
+        'flex size-7 shrink-0 items-center justify-center bg-primary text-[11px] font-semibold text-primary-foreground',
         className,
       )}
     >
@@ -169,7 +181,7 @@ export function AppSidebar({
           <DropdownMenuTrigger asChild>
             <SidebarMenuButton size="lg" className="data-[state=open]:bg-sidebar-accent">
               {current ? (
-                <AccountBadge text={current.address} />
+                <AccountBadge accountId={current.id} text={current.address} />
               ) : (
                 <AllAccountsBadge className="size-7" />
               )}
@@ -198,7 +210,7 @@ export function AppSidebar({
             <DropdownMenuSeparator />
             {accounts.map((a, i) => (
               <DropdownMenuItem key={a.id} onSelect={() => onAccount(a.id)}>
-                <AccountBadge text={a.address} className="size-5 text-[10px]" />
+                <AccountBadge accountId={a.id} text={a.address} className="size-5 text-[10px]" />
                 <span className="truncate">{a.address}</span>
                 {i < 9 && <DropdownMenuShortcut>⌘{i + 1}</DropdownMenuShortcut>}
               </DropdownMenuItem>

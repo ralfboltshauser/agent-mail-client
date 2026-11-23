@@ -38,7 +38,7 @@ export function Message({
         aria-expanded={open}
         onClick={() => setExpansion((current) => ({ open: !current.open, visited: true }))}
       >
-        <SenderAvatar address={m.from?.address} name={m.from?.name} />
+        <SenderAvatar accountId={m.accountId} address={m.from?.address} name={m.from?.name} />
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline gap-2">
             <span className="truncate text-sm font-semibold">{personName(m.from)}</span>
