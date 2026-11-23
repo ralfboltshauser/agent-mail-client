@@ -10,11 +10,13 @@ import {
   Minimize2,
   Reply,
   ReplyAll,
+  SendToBack,
   Settings2,
   SquarePen,
   X,
 } from 'lucide-react'
 import { useHotkeys } from '@/hooks/use-hotkeys'
+import { mailShortcuts, shortcutLabel } from '@/lib/mail-shortcuts'
 import type { View } from '../../../../shared/api'
 import {
   copyThreadReference,
@@ -108,7 +110,7 @@ export function useMailCommands({
           {
             name: expanded ? 'Back to mailbox' : 'Focus reader',
             icon: expanded ? Minimize2 : Maximize2,
-            shortcut: 'O',
+            shortcut: shortcutLabel(mailShortcuts.focusReader),
             run: queueReaderToggle,
           },
         ]
@@ -116,22 +118,27 @@ export function useMailCommands({
     {
       name: minimised ? 'Resume draft' : 'Compose message',
       icon: SquarePen,
-      shortcut: 'C',
+      shortcut: shortcutLabel(mailShortcuts.compose),
       run: () => void startCompose('new'),
     },
     ...(activeThreadId && !ownView && !openingComposer
       ? [
-          { name: 'Reply', icon: Reply, shortcut: 'R', run: () => void startCompose('reply') },
+          {
+            name: 'Reply',
+            icon: Reply,
+            shortcut: shortcutLabel(mailShortcuts.reply),
+            run: () => void startCompose('reply'),
+          },
           {
             name: 'Reply all',
             icon: ReplyAll,
-            shortcut: 'A',
+            shortcut: shortcutLabel(mailShortcuts.replyAll),
             run: () => void startCompose('reply-all'),
           },
           {
             name: 'Forward',
             icon: Forward,
-            shortcut: 'F',
+            shortcut: shortcutLabel(mailShortcuts.forward),
             run: () => void startCompose('forward'),
           },
         ]
@@ -141,7 +148,7 @@ export function useMailCommands({
           {
             name: 'Choose a Bucket',
             icon: Layers,
-            shortcut: 'B',
+            shortcut: shortcutLabel(mailShortcuts.bucket),
             run: () => setBucketPickerId(selected.id),
           },
           ...BUCKETS.map((bucket, index) => ({
@@ -155,7 +162,16 @@ export function useMailCommands({
             : []),
         ]
       : []),
-    ...(canHandOff ? [{ name: 'Hand off', icon: Forward, shortcut: '⇧T', run: handOff }] : []),
+    ...(canHandOff
+      ? [
+          {
+            name: 'Hand off',
+            icon: SendToBack,
+            shortcut: shortcutLabel(mailShortcuts.handOff),
+            run: handOff,
+          },
+        ]
+      : []),
     ...(copyReference
       ? [
           {
@@ -193,14 +209,14 @@ export function useMailCommands({
           },
         ]),
       ),
-      c: () => void startCompose('new'),
-      r: () => {
+      [mailShortcuts.compose]: () => void startCompose('new'),
+      [mailShortcuts.reply]: () => {
         if (!ownView) void startCompose('reply')
       },
-      a: () => {
+      [mailShortcuts.replyAll]: () => {
         if (!ownView) void startCompose('reply-all')
       },
-      f: () => {
+      [mailShortcuts.forward]: () => {
         if (!ownView) void startCompose('forward')
       },
       ...Object.fromEntries(
@@ -217,11 +233,16 @@ export function useMailCommands({
             : [],
         ),
       ),
-      'shift+t': (event) => {
+      [mailShortcuts.handOff]: (event) => {
         if (!event.repeat) handOff()
       },
       ...(copyReference
-        ? { 'mod+shift+c': { run: copyReference, when: canCopyReferenceWithHotkey } }
+        ? {
+            [mailShortcuts.copyThreadReference]: {
+              run: copyReference,
+              when: canCopyReferenceWithHotkey,
+            },
+          }
         : {}),
       ...(openReview
         ? {
@@ -237,7 +258,7 @@ export function useMailCommands({
       'g o': () => goTo({ kind: 'outbox' }),
       ...(expanded || canExpand
         ? {
-            o: (event: KeyboardEvent) => {
+            [mailShortcuts.focusReader]: (event: KeyboardEvent) => {
               if (!event.repeat) {
                 const trigger = document.activeElement
                 toggle(trigger instanceof HTMLElement ? trigger : null)
@@ -245,7 +266,7 @@ export function useMailCommands({
             },
           }
         : {}),
-      b: (event) => {
+      [mailShortcuts.bucket]: (event) => {
         if (!event.repeat && selected && !ownView) setBucketPickerId(selected.id)
       },
       ...Object.fromEntries(
@@ -270,10 +291,10 @@ export function useMailCommands({
           top: readerScroll.current.clientHeight * 0.8,
           behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
         }),
-      '/': focusSearch,
-      'mod+f': focusSearch,
+      [mailShortcuts.filterMail]: focusSearch,
+      [mailShortcuts.searchMail]: focusSearch,
       'mod+k': openPalette,
-      escape: (event) => {
+      [mailShortcuts.escape]: (event) => {
         if (event.repeat) return
         if (expanded) exit()
         else clearSearch()

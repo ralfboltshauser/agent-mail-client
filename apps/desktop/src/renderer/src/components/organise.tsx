@@ -22,9 +22,9 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { getAmc } from '@/lib/amc'
 import { failureText, recordCaughtFailure } from '@/lib/failure'
+import { ToolbarButton } from './toolbar-button'
 
 type Picker = {
   kind: 'labels' | 'snooze'
@@ -35,7 +35,7 @@ type Picker = {
 type Control = {
   name: string
   key: string
-  shortcut: string
+  id: string
   icon: typeof Archive
   run: (trigger?: HTMLElement) => void
   pressed?: boolean
@@ -124,8 +124,8 @@ export function useOrganise(
     )
       controls.push({
         name: 'Archive',
+        id: 'archive',
         key: 'e',
-        shortcut: 'E',
         icon: Archive,
         run: () => void run({ kind: 'archive', threadId }, 'Archived'),
       })
@@ -137,16 +137,16 @@ export function useOrganise(
     )
       controls.push({
         name: 'Snooze',
+        id: 'snooze',
         key: 'h',
-        shortcut: 'H',
         icon: Clock3,
         run: (trigger) => openPicker('snooze', thread, trigger),
       })
     if (!imap || (canMove && has('TRASH') && (!trashed || has('INBOX')))) {
       controls.push({
         name: trashed ? 'Restore from Trash' : 'Move to Trash',
+        id: 'trash',
         key: '#',
-        shortcut: '#',
         icon: trashed ? RotateCcw : Trash2,
         run: () =>
           void run(
@@ -158,8 +158,8 @@ export function useOrganise(
     controls.push(
       {
         name: thread.starred ? 'Remove star' : 'Star',
+        id: 'star',
         key: 's',
-        shortcut: 'S',
         icon: Star,
         pressed: thread.starred,
         run: () =>
@@ -170,8 +170,8 @@ export function useOrganise(
       },
       {
         name: thread.unreadCount > 0 ? 'Mark as read' : 'Mark as unread',
+        id: 'read',
         key: thread.unreadCount > 0 ? 'u' : 'shift+u',
-        shortcut: thread.unreadCount > 0 ? 'U' : '⇧U',
         icon: thread.unreadCount > 0 ? MailOpen : Mail,
         run: () =>
           void run(
@@ -183,8 +183,8 @@ export function useOrganise(
         ? [
             {
               name: imap ? 'Move to folder' : 'Labels',
+              id: 'labels',
               key: 'l',
-              shortcut: 'L',
               icon: Tag,
               run: (trigger?: HTMLElement) => openPicker('labels', thread, trigger),
             },
@@ -192,8 +192,8 @@ export function useOrganise(
         : []),
       {
         name: thread.muted ? 'Unmute' : 'Mute',
+        id: 'mute',
         key: 'm',
-        shortcut: 'M',
         icon: BellOff,
         pressed: thread.muted ?? false,
         run: () =>
@@ -226,30 +226,18 @@ export function useOrganise(
 }
 
 export function OrganiseToolbar({ controls }: { controls: Control[] }) {
-  return (
-    <fieldset className="app-no-drag flex items-center gap-0.5">
-      <legend className="sr-only">Organise Thread</legend>
-      {controls.map(({ name, shortcut, icon: Icon, run, pressed }) => (
-        <Tooltip key={shortcut}>
-          <TooltipTrigger asChild>
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              aria-label={name}
-              aria-pressed={pressed}
-              onClick={(event) => run(event.currentTarget)}
-              className={pressed ? 'bg-accent text-accent-foreground' : 'text-muted-foreground'}
-            >
-              <Icon />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">
-            {name} <kbd className="ml-1 opacity-70">{shortcut}</kbd>
-          </TooltipContent>
-        </Tooltip>
-      ))}
-    </fieldset>
-  )
+  return controls.map(({ id, name, key, icon: Icon, run, pressed }) => (
+    <ToolbarButton
+      key={id}
+      label={name}
+      shortcuts={[key]}
+      aria-pressed={pressed}
+      onClick={(event) => run(event.currentTarget)}
+      className={pressed ? 'bg-accent text-accent-foreground' : undefined}
+    >
+      <Icon />
+    </ToolbarButton>
+  ))
 }
 
 interface PickerProps {
