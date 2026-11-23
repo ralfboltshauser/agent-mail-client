@@ -1,11 +1,5 @@
 [
   {
-    "file": "apps/desktop/src/renderer/src/components/agent-activity.tsx",
-    "ruleId": "react-hooks/set-state-in-effect",
-    "source": "if (open) void load()",
-    "summary": "Error: Calling setState synchronously within an effect can trigger cascading renders"
-  },
-  {
     "file": "apps/desktop/src/renderer/src/components/organise.tsx",
     "ruleId": "react-hooks/set-state-in-effect",
     "source": "if (!snoozeEnabled) setPicker((current) => (current?.kind === 'snooze' ? null : current))",

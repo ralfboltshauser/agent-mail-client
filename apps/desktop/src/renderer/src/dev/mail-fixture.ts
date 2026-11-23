@@ -9,6 +9,7 @@ import {
   type ThreadSummary,
 } from '@amc/protocol'
 import type { AmcApi, ReplicaThreadMessage, SyncStatus, TriageStatus } from '../../../shared/api'
+import { createActivityFixture } from './agent-activity-fixture'
 
 /** Synthetic data only. The fixture never calls the preload bridge. */
 export function createFixture(scenario: string): AmcApi {
@@ -17,6 +18,7 @@ export function createFixture(scenario: string): AmcApi {
 
 export function createMailFixture(scenario: string) {
   const now = Date.now()
+  const activity = scenario === 'activity' ? createActivityFixture(now) : null
   const account: AccountSummary = {
     id: 'studio',
     kind: 'gmail',
@@ -360,6 +362,7 @@ export function createMailFixture(scenario: string) {
       nextBefore: null,
     }),
     undoAgentAction: async () => {},
+    ...activity,
     contacts: async () => [],
     startCompose: async ({ mode, threadId }) => {
       if (discarded) draftNumber++
