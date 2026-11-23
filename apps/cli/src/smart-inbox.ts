@@ -286,6 +286,7 @@ export function registerSmartInboxCommands(
         await saveAvatar(pairing, avatar.digest, out)
       }
     })
+  return senders
 }
 
 async function saveAvatar(config: CliConfig, digest: string, out: string) {

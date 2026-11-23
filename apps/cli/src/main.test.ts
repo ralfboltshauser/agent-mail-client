@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { text } from 'node:stream/consumers'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { isCorrelationId, newRequestId, newRunId, REQUEST_ID_HEADER } from '@amc/observability'
@@ -445,6 +446,32 @@ async function cliFor(server: ReturnType<typeof createServer>, env: NodeJS.Proce
       },
     )
 }
+
+it('keeps token create --agent as the name of a new grant', async () => {
+  let request: unknown
+  const server = createServer(async (req, res) => {
+    request = [req.method, req.url, JSON.parse(await text(req))]
+    res.setHeader('Content-Type', 'application/json')
+    res.end(JSON.stringify({ id: 'fixture-grant', token: 'synthetic', scopes: ['read', 'draft'] }))
+  })
+  server.listen(0, '127.0.0.1')
+  try {
+    const run = await cliFor(server)
+    const { stdout } = await run('token', 'create', '--agent', 'shell-agent', '--expires', '1d')
+    expect(request).toEqual([
+      'POST',
+      '/v1/tokens',
+      {
+        name: 'shell-agent',
+        scopes: ['read', 'draft'],
+        expiresInDays: 1,
+      },
+    ])
+    expect(stdout).toContain('amc --as-agent')
+  } finally {
+    server.close()
+  }
+})
 
 it.each(['studio:19bc1234', "--studio:imap:it's%40example.test"])(
   'reads the exact Thread ID %j after the end-of-options marker',

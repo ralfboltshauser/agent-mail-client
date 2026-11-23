@@ -32,6 +32,7 @@ See [local verification](docs/runbook.md#local-verification) to enable the pre-p
 
 Run `pnpm cli:install` from the repository root. It builds the bundled CLI and installs
 `~/.local/bin/amc`. Use `pnpm cli:install --force` to replace an unmarked launcher.
+See the [CLI mail guide](docs/agents/cli.md) for drafting, replies, and scoped agent access.
 If the installer finds an unrelated payload at `~/.local/share/amc/amc.mjs`, move
 that file aside before retrying. The launcher prefers
 `/opt/homebrew/bin/node` and otherwise uses the Node on your `PATH`. Add `~/.local/bin`

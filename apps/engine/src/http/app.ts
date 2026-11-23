@@ -1,7 +1,7 @@
 import { existsSync, statfsSync } from 'node:fs'
 import { type RequestLogEnv, requestLogging } from '@amc/observability/hono'
 import type { Health, Me, PublicHealth, Scope } from '@amc/protocol'
-import { hasScope, PairRequest } from '@amc/protocol'
+import { hasScope, MCP_REQUIRE_AGENT_HEADER, PairRequest } from '@amc/protocol'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import { Hono, type MiddlewareHandler } from 'hono'
 import { HTTPException } from 'hono/http-exception'
@@ -251,8 +251,11 @@ export function createApp({
 
     // MCP over Streamable HTTP, stateless: one server per request, built from the token's scopes.
     app.all('/mcp', requireAuth(db), async (c) => {
-      if (c.get('principal').kind === 'composer') return c.json({ error: 'forbidden' }, 403)
-      const server = buildMcpServer(c.get('principal'), {
+      const principal = c.get('principal')
+      if (principal.kind === 'composer') return c.json({ error: 'forbidden' }, 403)
+      const requireAgent = c.req.header(MCP_REQUIRE_AGENT_HEADER) === '1'
+      if (requireAgent && principal.kind !== 'agent') return c.json({ error: 'forbidden' }, 403)
+      const server = buildMcpServer(principal, {
         db,
         store: mail.store,
         queries: mail.queries,
@@ -264,7 +267,11 @@ export function createApp({
         enableJsonResponse: true,
       })
       await server.connect(transport)
-      return transport.handleRequest(c.req.raw)
+      const response = await transport.handleRequest(c.req.raw)
+      if (!requireAgent) return response
+      const headers = new Headers(response.headers)
+      headers.set(MCP_REQUIRE_AGENT_HEADER, '1')
+      return new Response(response.body, { status: response.status, headers })
     })
   }
   app.route('/v1', v1)
