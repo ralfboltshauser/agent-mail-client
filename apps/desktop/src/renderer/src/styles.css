@@ -263,6 +263,7 @@
 }
 
 .mail-toast[data-sonner-toast] {
+  -webkit-app-region: no-drag;
   border-radius: var(--radius-lg);
   box-shadow: 0 2px 5px rgb(0 0 0 / 8%), 0 12px 32px rgb(0 0 0 / 12%);
 }
