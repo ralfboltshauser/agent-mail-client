@@ -178,21 +178,36 @@ export async function withTriageGrant<T>(
       body: { holder: name },
       signal: AbortSignal.timeout(releaseTimeout),
       redirect: 'error',
-    }).catch((error: unknown) => {
-      // The Engine expires a lease we could not release after ten minutes.
-      cliFailure('lease-release', error)
-    })
-  try {
-    const { granted } = z
-      .object({ granted: z.boolean() })
-      .parse(
-        await api('/v1/triage/lease', { ...options(), method: 'POST', body: { holder: name } }),
-      )
-    if (!granted) return null
-  } catch (error) {
-    // A lost response can leave our lease held. DELETE matches only this run's holder.
-    await release()
-    throw engineFailure(error, 'engine-prepare')
+    }).then(
+      () => true,
+      (error: unknown) => {
+        // The Engine expires a lease we could not release after ten minutes.
+        cliFailure('lease-release', error)
+        return false
+      },
+    )
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const { granted } = z
+        .object({ granted: z.boolean() })
+        .parse(
+          await api('/v1/triage/lease', { ...options(), method: 'POST', body: { holder: name } }),
+        )
+      if (!granted) return null
+      break
+    } catch (error) {
+      // A lost response can leave our lease held. DELETE matches only this run's holder.
+      const released = await release()
+      const failure = engineFailure(error, 'engine-prepare')
+      if (
+        attempt > 0 ||
+        !released ||
+        signal.aborted ||
+        (failure.reason !== 'engine-timeout' && failure.reason !== 'engine-offline')
+      ) {
+        throw failure
+      }
+    }
   }
 
   let mintAttempted = false
