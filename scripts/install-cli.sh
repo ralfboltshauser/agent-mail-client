@@ -49,6 +49,7 @@ launcher=$(mktemp "$bin_dir/.amc.XXXXXX")
 
 install -m 644 apps/cli/dist/amc.mjs "$bundle"
 printf '\n%s\n' "$payload_marker" >> "$bundle"
+node apps/cli/dist/amc.mjs skills install
 cat > "$launcher" <<'LAUNCHER'
 #!/bin/sh
 # Managed by the AMC CLI installer

@@ -61,3 +61,6 @@ if [ -n "$PREV" ]; then
 fi
 exit 1
 REMOTE
+
+# Install into the SSH user's agent directories, outside the privileged release step.
+ssh "$TARGET" /usr/local/bin/amc skills install
