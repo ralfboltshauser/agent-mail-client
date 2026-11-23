@@ -19,6 +19,7 @@ pnpm build        # builds all workspace packages
 ```
 
 See [development profiles](docs/runbook.md#development-profiles) to start an isolated Desktop or Engine.
+See [local verification](docs/runbook.md#local-verification) to enable the pre-push check on macOS.
 
 | Path | What |
 |---|---|
@@ -36,6 +37,17 @@ that file aside before retrying. The launcher prefers
 `/opt/homebrew/bin/node` and otherwise uses the Node on your `PATH`. Add `~/.local/bin`
 to your `PATH` if needed, then run `amc --version` to check the install. Run the same
 install command after updating the checkout.
+
+The CLI installer also installs `use-amc` for search and replies and `amc-triage`
+for Inbox review. It writes only to the invoking user's skill directories:
+`~/.agents/skills` for Codex and `~/.claude/skills` for Claude Code (or
+`$CLAUDE_CONFIG_DIR/skills` when configured). Run `amc skills install` to
+refresh them or set up another user of a shared CLI. Run it as that user.
+
+To teach agents how you handle mail, put your confirmed preferences in
+`${XDG_CONFIG_HOME:-$HOME/.config}/amc/mail-playbook.md`. Describe a condition,
+the action you want, and why. The installer leaves that file alone. Mail
+access still uses the existing CLI pairing or AMC MCP grants.
 
 For the Apple silicon desktop app, see the [Mac installation and update steps](docs/runbook.md#mac-desktop-app).
 

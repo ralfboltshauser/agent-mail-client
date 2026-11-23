@@ -10,6 +10,8 @@ import { requests, startReaderServer } from './html-reader-server.mjs'
 
 const profile = mkdtempSync(join(tmpdir(), 'amc-html-reader-'))
 app.setPath('userData', profile)
+// Let main finish cleaning up and return the test result after closing the window.
+app.on('window-all-closed', () => {})
 
 const waitFor = async (probe, description) => {
   const deadline = Date.now() + 5000
@@ -24,6 +26,7 @@ const waitFor = async (probe, description) => {
 async function main() {
   let server
   let win
+  let exitCode = 0
   try {
     server = await startReaderServer()
     await app.whenReady()
@@ -32,21 +35,18 @@ async function main() {
       show: false,
       width: 1360,
       height: 900,
-      webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
+      webPreferences: {
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+        // Exercise foreground reader behavior in a hidden test window.
+        backgroundThrottling: false,
+      },
     })
     const wc = win.webContents
     wc.debugger.attach('1.3')
     const run = (fn, ...args) =>
       wc.executeJavaScript(`(${fn})(${args.map((arg) => JSON.stringify(arg)).join(',')})`)
-    const press = async (key, windowsVirtualKeyCode) => {
-      const event = { key, code: key, windowsVirtualKeyCode }
-      await wc.debugger.sendCommand('Input.dispatchKeyEvent', {
-        type: 'keyDown',
-        text: key === 'Enter' ? '\r' : '',
-        ...event,
-      })
-      await wc.debugger.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', ...event })
-    }
     const origin = server.resolvedUrls.local[0]
     await win.loadURL(new URL('?fixture=html-reader', origin).href)
 
@@ -81,16 +81,14 @@ async function main() {
           const image = doc.getElementById('probe-cid')
           const oversized = doc.getElementById('probe-oversized')
           const targetRect = target.getBoundingClientRect()
-          const frameRect = frame.getBoundingClientRect()
           return {
             lines: new Set(
               [...range.getClientRects()].filter((rect) => rect.width > 0).map((rect) => rect.top),
             ).size,
             width: root.clientWidth,
             overflow: root.scrollWidth - root.clientWidth,
-            x: root.scrollLeft,
+            zoom: Number(getComputedStyle(root).zoom),
             height: frame.offsetHeight,
-            scrollbar: doc.defaultView.innerHeight - root.clientHeight,
             color:
               doc.getElementById('probe-first') &&
               getComputedStyle(doc.getElementById('probe-first')).color,
@@ -101,7 +99,9 @@ async function main() {
             oversized: oversized && [oversized.width, oversized.height],
             endWidth: target.closest('table')?.offsetWidth,
             targetVisible: targetRect.left >= -1 && targetRect.right <= root.clientWidth + 1,
-            wheelTarget: { x: Math.round(frameRect.left + 30), y: Math.round(frameRect.top + 30) },
+            hasHorizontalControl: frame.parentElement.textContent.includes(
+              'Scroll message horizontally',
+            ),
             finalLineVisible:
               (doc.getElementById('probe-last')?.getBoundingClientRect().bottom ?? 0) <=
               root.clientHeight,
@@ -192,55 +192,28 @@ async function main() {
       assert.ok((await measure('probe-prose')).lines > 1)
     }
 
-    let scrollbar = 0
-    for (const [thread, key, virtualKey, sign] of [
-      [3, 'ArrowRight', 39, 1],
-      [4, 'ArrowLeft', 37, -1],
-    ]) {
+    for (const thread of [3, 4]) {
       await selectThread(thread, 'probe-end')
-      const initial = await measure('probe-end', 320)
-      assert.equal(initial.endWidth, 780)
-      assert.ok(initial.overflow >= 460)
-      assert.equal((await measure('probe-code')).lines, 1)
-      await waitFor(
-        () =>
-          run(() => {
-            const button = [...document.querySelectorAll('button')].find(
-              (item) => item.textContent === 'Scroll message horizontally',
+      for (const width of [undefined, 623, 320, 900, 623]) {
+        if (width) await measure('probe-end', width)
+        const fitted = await waitFor(
+          async () => {
+            const frame = await measure('probe-end')
+            return (
+              (!width || frame.width === width) &&
+              frame.zoom < 1 === frame.width < 780 &&
+              frame.overflow === 0 &&
+              !frame.hasHorizontalControl &&
+              frame.finalLineVisible &&
+              frame
             )
-            button?.focus()
-            return button === document.activeElement
-          }),
-        'message scroll affordance',
-      )
-      await press('Enter', 13)
-      await waitFor(
-        () => run(() => document.activeElement?.localName === 'iframe'),
-        'keyboard activation focuses the message',
-      )
-      await press(key, virtualKey)
-      await waitFor(
-        async () => sign * (await measure('probe-end')).x > 0,
-        `native ${key} scrolling`,
-      )
-      await wc.debugger.sendCommand('Input.synthesizeScrollGesture', {
-        ...(await measure('probe-end')).wheelTarget,
-        xDistance: sign * -700,
-        gestureSourceType: 'mouse',
-      })
-      try {
-        await waitFor(
-          async () => (await measure('probe-end')).targetVisible,
-          'final column after horizontal wheel input',
+          },
+          `thread ${thread} to fit at ${width ? `${width}px` : 'the reading pane width'}`,
         )
-      } catch (error) {
-        throw new Error(`Thread ${thread}: ${JSON.stringify(await measure('probe-end'))}`, {
-          cause: error,
-        })
+        assert.equal(fitted.endWidth, 780, 'fixed-width table keeps its layout')
+        assert.ok(fitted.targetVisible, 'final column fits without scrolling')
+        assert.equal((await measure('probe-code')).lines, 1, 'preformatted text keeps its line')
       }
-      const final = await measure('probe-end')
-      scrollbar = final.scrollbar
-      assert.ok(final.finalLineVisible, 'horizontal scrollbar leaves the last line visible')
     }
 
     await selectThread(5, 'probe-feedback')
@@ -284,16 +257,71 @@ async function main() {
     )
 
     console.log(
-      `HTML reader verified in Chromium ${process.versions.chrome}, minimum-window iframe ${narrowReaderWidth}px, horizontal gutter ${scrollbar}px`,
+      `HTML reader verified in Chromium ${process.versions.chrome}, minimum-window iframe ${narrowReaderWidth}px`,
     )
+
+    const sidebarLayout = () =>
+      run(() => {
+        const sidebar = document.querySelector('[data-slot="sidebar-content"]')
+        const viewport = sidebar.querySelector('[data-radix-scroll-area-viewport]') ?? sidebar
+        const inbox = sidebar.querySelector('[aria-current="page"]')
+        return {
+          width: inbox.getBoundingClientRect().width,
+          overflow: viewport.scrollHeight - viewport.clientHeight,
+          overlay: !!sidebar.querySelector('[data-slot="scroll-area-thumb"]'),
+          focusPreserved: document.activeElement === inbox,
+        }
+      })
+    await waitFor(() => run(() => !!document.querySelector('[aria-current="page"]')), 'sidebar')
+    win.setContentSize(1360, 760)
+    await waitFor(() => run(() => innerHeight === 760), 'short window')
+    const closed = await sidebarLayout()
+    assert.equal(closed.overflow, 0, 'folders fit with Triage closed')
+    assert.equal(closed.overlay, false)
+    const collapsedHeaderGap = await run(() => {
+      const headers = [...document.querySelectorAll('[data-sidebar="group-label"]')]
+      const triage = headers.find((header) => header.textContent === 'Triage')
+      const labels = headers.find((header) => header.textContent === 'Labels')
+      return labels.getBoundingClientRect().top - triage.getBoundingClientRect().bottom
+    })
+    assert.equal(collapsedHeaderGap, 8, 'collapsed Triage and Labels have a compact gap')
+    await run(() => {
+      const sidebar = document.querySelector('[data-slot="sidebar-content"]')
+      sidebar.querySelector('[aria-current="page"]').focus()
+      const triage = [...sidebar.querySelectorAll('button')].find(
+        (button) => button.textContent.trim() === 'Triage',
+      )
+      triage.click()
+    })
+    await waitFor(async () => (await sidebarLayout()).overflow > 0, 'sidebar overflow')
+    const open = await sidebarLayout()
+    assert.equal(open.width, closed.width, 'overflow keeps the Inbox button the same width')
+    assert.ok(open.focusPreserved)
+    await waitFor(async () => (await sidebarLayout()).overlay, 'sidebar overlay thumb')
+    const wheelTarget = await run(() => {
+      const viewport = document.querySelector('[data-radix-scroll-area-viewport]')
+      const bounds = viewport.getBoundingClientRect()
+      return { x: Math.round(bounds.left + 40), y: Math.round(bounds.top + 40) }
+    })
+    await wc.debugger.sendCommand('Input.dispatchMouseEvent', {
+      type: 'mouseWheel',
+      ...wheelTarget,
+      deltaX: 0,
+      deltaY: 200,
+    })
+    await waitFor(
+      () => run(() => document.querySelector('[data-radix-scroll-area-viewport]').scrollTop > 0),
+      'native sidebar wheel scrolling',
+    )
+    console.log(`Sidebar row kept its ${open.width}px width when Triage overflowed`)
   } catch (error) {
     console.error(error)
-    process.exitCode = 1
+    exitCode = 1
   } finally {
     win?.destroy()
     await server?.close()
     await rm(profile, { recursive: true })
-    app.exit(process.exitCode ?? 0)
+    app.exit(exitCode)
   }
 }
 

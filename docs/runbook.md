@@ -90,6 +90,21 @@ and generate a local encryption key with `(umask 077; openssl rand 32 > /path/to
 Run `AMC_CONFIG=/absolute/path/to/dev-config.json pnpm --filter @amc/engine dev`.
 Use provider fakes for mail operations.
 
+## Local verification
+
+On the Mac, enable the checked-in hooks once per clone with
+`git config --local core.hooksPath .githooks`. Linked T3 worktrees share that
+setting and use the hooks from their checked-out branch. Bring older branches
+up to date to pick up the hook.
+
+Run focused checks while iterating. For the full pass, push from a clean Mac
+worktree with the outgoing commit checked out. The pre-push hook runs
+`pnpm verify` and blocks the push if a check fails. It installs from the frozen
+lockfile, runs the full check and build, then exercises both macOS scrollbar
+modes in Electron with synthetic mail. Run `pnpm verify` directly when you need
+the full suite outside a push. On other platforms, use `pnpm check` and
+`pnpm build` for feedback and use the Mac for the full gate.
+
 ## Layout
 
 | Path | What | Owner |
@@ -121,6 +136,14 @@ amc status
 systemctl status amc-engine
 journalctl -u amc-engine -f -o cat # local Engine service output
 ```
+
+After the Engine health check, `pnpm deploy:host` refreshes the AMC skills for
+the SSH login. Other users on Ubuntu can run `/usr/local/bin/amc skills install`
+in their own session. The shared CLI contains the skills, and installation
+requires neither an Engine connection nor pairing. If a skill was edited or
+another skill already uses either name, move it aside before retrying.
+If the skill install fails after deploy, the Engine release stays active.
+Retry just the skill install.
 
 
 For Desktop startup verification, find the latest live marker in the current local

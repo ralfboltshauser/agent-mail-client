@@ -61,3 +61,8 @@ if [ -n "$PREV" ]; then
 fi
 exit 1
 REMOTE
+
+# Install into the SSH user's agent directories, outside the privileged release step.
+if ! ssh "$TARGET" /usr/local/bin/amc skills install; then
+  printf 'Engine release %s is active. To retry skill setup, run /usr/local/bin/amc skills install as your login on %s.\n' "$SHA" "$TARGET" >&2
+fi

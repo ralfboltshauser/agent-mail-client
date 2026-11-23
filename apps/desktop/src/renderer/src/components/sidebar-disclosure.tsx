@@ -6,7 +6,7 @@ import { SidebarGroup, SidebarGroupLabel } from '@/components/ui/sidebar'
 export function SidebarDisclosure({ title, children }: { title: string; children: ReactNode }) {
   return (
     <Collapsible.Root asChild>
-      <SidebarGroup>
+      <SidebarGroup className="data-[state=closed]:pb-0">
         <h2>
           <SidebarGroupLabel asChild>
             <Collapsible.Trigger className="group/disclosure w-full justify-between hover:bg-sidebar-accent hover:text-sidebar-accent-foreground">

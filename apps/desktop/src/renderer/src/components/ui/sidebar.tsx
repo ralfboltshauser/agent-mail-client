@@ -1,9 +1,10 @@
 import { cva, type VariantProps } from 'class-variance-authority'
 import { PanelLeftIcon } from 'lucide-react'
-import { Slot } from 'radix-ui'
+import { ScrollArea, Slot } from 'radix-ui'
 import * as React from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { ScrollBar } from '@/components/ui/scroll-area'
 import { Separator } from '@/components/ui/separator'
 import {
   Sheet,
@@ -352,17 +353,28 @@ function SidebarSeparator({ className, ...props }: React.ComponentProps<typeof S
   )
 }
 
-function SidebarContent({ className, ...props }: React.ComponentProps<'div'>) {
+function SidebarContent({
+  children,
+  className,
+  ...props
+}: Omit<React.ComponentProps<typeof ScrollArea.Root>, 'asChild' | 'type'>) {
   return (
-    <div
+    <ScrollArea.Root
       data-slot="sidebar-content"
       data-sidebar="content"
-      className={cn(
-        'flex min-h-0 flex-1 flex-col gap-2 overflow-auto group-data-[collapsible=icon]:overflow-hidden',
-        className,
-      )}
+      type="auto"
+      className={cn('min-h-0 flex-1', className)}
       {...props}
-    />
+    >
+      <ScrollArea.Viewport
+        disableImplicitContentElement
+        className="size-full group-data-[collapsible=icon]:overflow-hidden!"
+      >
+        {/* Keep long folder labels within the viewport so they truncate. */}
+        <ScrollArea.Content style={{ display: 'block' }}>{children}</ScrollArea.Content>
+      </ScrollArea.Viewport>
+      <ScrollBar className="w-2 group-data-[collapsible=icon]:hidden [&_[data-slot=scroll-area-thumb]]:bg-input" />
+    </ScrollArea.Root>
   )
 }
 

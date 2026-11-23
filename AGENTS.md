@@ -38,4 +38,4 @@ Use the [AMC work skill](.agents/skills/amc-work/SKILL.md) when asked to fix a b
 
 - For a behavior bug, reproduce it at the lowest layer that owns it. Extend the existing case when possible, observe it fail before fixing it, and await the relevant write or event in async tests. For a visual change, capture the before and after using synthetic data.
 - Trace any changed behavior through the entry points that expose it. For Engine changes, check the affected Desktop, CLI, and MCP callers and the shared protocol. Include retry, undo, or account changes when they can alter the result.
-- Iterate with `pnpm exec vitest run <affected test files>` and `pnpm exec biome check <changed files>`. Use the [renderer harness](test/renderer/README.md) for App behavior with synthetic IPC. CI runs the full `pnpm check` and `pnpm build`.
+- Iterate with `pnpm exec vitest run <affected test files>` and `pnpm exec biome check <changed files>`. Use the [renderer harness](test/renderer/README.md) for App behavior with synthetic IPC. Run the [local verification gate](docs/runbook.md#local-verification) on the Mac before merging.
