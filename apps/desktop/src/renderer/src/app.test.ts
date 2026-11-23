@@ -92,6 +92,8 @@ async function openMailbox(api: Partial<AmcApi>) {
     onTriageStatus: () => () => {},
     triageCounts: async () => ({ recent: 0, older: 0 }),
     triageStatus: async () => ({ enabled: true, running: false, lastRun: null, notice: null }),
+    copyDiagnostics: async () => {},
+    onCopyDiagnostics: () => () => {},
     onOpenSettings: () => () => {},
     onOpenThread: (callback) => {
       openThread = callback

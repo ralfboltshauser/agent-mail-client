@@ -16,6 +16,7 @@ import {
   X,
 } from 'lucide-react'
 import { useHotkeys } from '@/hooks/use-hotkeys'
+import { copyDiagnostics } from '@/lib/diagnostics'
 import { mailShortcuts, shortcutLabel } from '@/lib/mail-shortcuts'
 import type { View } from '../../../../shared/api'
 import {
@@ -192,6 +193,7 @@ export function useMailCommands({
       : []),
     { name: 'Agent activity', icon: Activity, run: () => setAgentOpen(true) },
     { name: 'Settings', icon: Settings2, run: openSendSettings },
+    { name: 'Copy Diagnostics', icon: Copy, run: copyDiagnostics },
     {
       name: 'Keyboard shortcuts',
       icon: CircleHelp,
