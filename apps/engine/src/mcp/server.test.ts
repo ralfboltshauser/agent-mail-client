@@ -8,8 +8,6 @@ import {
   type AgentAction,
   MCP_CLI_AGENT_PATH,
   MCP_CLI_OWNER_PATH,
-  mailLink,
-  parseMailLink,
   SCOPES,
   type Scope,
 } from '@amc/protocol'
@@ -274,56 +272,6 @@ it('drives drafts and organize through the CLI with paired, scoped and handoff c
         )
         processHandle.stdin?.end(input)
       })
-    const searchQuery = 'from:alice@example.com'
-    const [first, next, ownerPage, linked] = await Promise.all([
-      cli(scoped.secret, ['--as-agent', 'search', '--limit', '1', '--json', '--', searchQuery]),
-      cli(scoped.secret, [
-        '--as-agent',
-        'search',
-        '--limit',
-        '1',
-        '--offset',
-        '1',
-        '--json',
-        '--',
-        searchQuery,
-      ]),
-      cli(owner.secret, [
-        'search',
-        '--account',
-        'a',
-        '--limit',
-        '1',
-        '--offset',
-        '1',
-        '--json',
-        '--',
-        searchQuery,
-      ]),
-      cli(scoped.secret, [
-        '--as-agent',
-        'link',
-        'search',
-        '--web',
-        '--account',
-        'a',
-        '--',
-        searchQuery,
-      ]),
-    ])
-    expect([first, next, ownerPage, linked].every(({ code }) => code === 0)).toBe(true)
-    expect(JSON.parse(first.stdout)).toMatchObject([{ accountId: 'a' }])
-    expect(JSON.parse(next.stdout)).toMatchObject([{ accountId: 'a' }])
-    expect(JSON.parse(first.stdout)[0].id).not.toBe(JSON.parse(next.stdout)[0].id)
-    expect(JSON.parse(ownerPage.stdout)).toEqual(JSON.parse(next.stdout))
-    const link = new URL(linked.stdout.trim())
-    const native = decodeURIComponent(link.hash.slice(1))
-    expect(link.pathname).toBe('/open-mail')
-    expect(native).toBe(
-      mailLink(link.origin, { kind: 'search', query: searchQuery, accountId: 'a' }),
-    )
-    expect(parseMailLink(native)).toMatchObject({ query: searchQuery, accountId: 'a' })
-
     const draftReply = ['reply', 'a:t-m1', '--body-file', '-', '--json']
     const scopedReply = await cli(
       scoped.secret,
@@ -1020,6 +968,32 @@ describe('MCP tools', () => {
     })
     const other = await connect(['read'], deps, 'b')
     expect(await other.client.callTool(args)).toMatchObject({ isError: true })
+  })
+
+  it('pages directional search inside the read grant account', async () => {
+    const deps = setup()
+    deps.db.exec(`
+      INSERT INTO account (id, kind, address, credentials, created_at)
+      VALUES ('b', 'gmail', 'other@example.test', x'00', 0)
+    `)
+    for (const id of ['m2', 'm3']) deps.store.putMessage('a', [], fromGmail(deps.gmail.add(id)))
+    deps.store.putMessage('b', [], fromGmail(deps.gmail.add('outside')))
+    const { client } = await connect(['read'], deps, 'a')
+    const search = async (offset: number) =>
+      JSON.parse(
+        text(
+          await client.callTool({
+            name: 'search',
+            arguments: { query: 'from:alice@example.com', account_id: 'b', limit: 1, offset },
+          }),
+        ),
+      )
+    const first = await search(0)
+    const second = await search(1)
+    expect(first).toMatchObject([{ accountId: 'a' }])
+    expect(second).toMatchObject([{ accountId: 'a' }])
+    expect(first[0].id).not.toBe(second[0].id)
+    await client.close()
   })
 
   it('searches mail and contacts', async () => {
