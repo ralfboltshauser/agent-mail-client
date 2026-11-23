@@ -16,6 +16,7 @@ import {
   Tag,
   Trash2,
 } from 'lucide-react'
+import amcMark from '@/assets/amc-mark.png'
 import { ActionHint } from '@/components/action-hint'
 import { Button } from '@/components/ui/button'
 import {
@@ -117,6 +118,16 @@ function AccountBadge({ text, className }: { text: string; className?: string })
   )
 }
 
+function AllAccountsBadge({ className }: { className: string }) {
+  return (
+    <span
+      aria-hidden="true"
+      className={cn('shrink-0 bg-foreground mask-contain mask-center mask-no-repeat', className)}
+      style={{ maskImage: `url("${amcMark}")` }}
+    />
+  )
+}
+
 export function AppSidebar({
   accountId,
   onAccount,
@@ -157,10 +168,11 @@ export function AppSidebar({
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <SidebarMenuButton size="lg" className="data-[state=open]:bg-sidebar-accent">
-              <AccountBadge
-                text={current?.address ?? 'All'}
-                className={current ? '' : 'bg-foreground text-background'}
-              />
+              {current ? (
+                <AccountBadge text={current.address} />
+              ) : (
+                <AllAccountsBadge className="size-7" />
+              )}
               <div className="grid flex-1 text-left leading-tight">
                 <span className="truncate text-sm font-medium">
                   {current ? current.address.split('@')[0] : 'All accounts'}
@@ -179,7 +191,7 @@ export function AppSidebar({
               Accounts
             </DropdownMenuLabel>
             <DropdownMenuItem onSelect={() => onAccount(null)}>
-              <AccountBadge text="A" className="size-5 bg-foreground text-[10px] text-background" />
+              <AllAccountsBadge className="size-5" />
               All accounts
               <DropdownMenuShortcut>⌘0</DropdownMenuShortcut>
             </DropdownMenuItem>
