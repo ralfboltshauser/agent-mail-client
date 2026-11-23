@@ -90,6 +90,20 @@ and generate a local encryption key with `(umask 077; openssl rand 32 > /path/to
 Run `AMC_CONFIG=/absolute/path/to/dev-config.json pnpm --filter @amc/engine dev`.
 Use provider fakes for mail operations.
 
+## Local verification
+
+On the Mac, enable the checked-in hooks once per clone with
+`git config --local core.hooksPath .githooks`. Linked T3 worktrees share that
+setting and use the hooks from their checked-out branch. Bring older branches
+up to date to pick up the hook.
+
+The pre-push hook runs `pnpm verify` and blocks the push if a check fails. Push
+from a clean worktree with the outgoing commit checked out. Run `pnpm verify`
+directly to repeat the same checks. It installs from the frozen lockfile, runs
+the full check and build, then exercises both macOS scrollbar modes in Electron
+with synthetic mail. For non-Mac development, run `pnpm check` and `pnpm build`
+for feedback and use the Mac for the full gate.
+
 ## Layout
 
 | Path | What | Owner |

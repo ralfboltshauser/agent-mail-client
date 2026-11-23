@@ -19,6 +19,7 @@ pnpm build        # builds all workspace packages
 ```
 
 See [development profiles](docs/runbook.md#development-profiles) to start an isolated Desktop or Engine.
+See [local verification](docs/runbook.md#local-verification) to enable the pre-push check on macOS.
 
 | Path | What |
 |---|---|

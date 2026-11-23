@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+head=$(git rev-parse HEAD)
+verify=false
+while read -r local_ref local_oid remote_ref remote_oid; do
+  [ "$local_ref" = "(delete)" ] && continue
+  if [ "$(git rev-parse --verify "$local_oid^{commit}")" != "$head" ]; then
+    printf '%s\n' "Check out the commit for $local_ref and push that ref from its worktree." >&2
+    exit 1
+  fi
+  verify=true
+done
+
+if [ "$verify" = true ]; then
+  if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
+    printf '%s\n' "Commit or stash local changes before pushing so AMC verifies the commit being pushed." >&2
+    exit 1
+  fi
+  exec pnpm verify
+fi
