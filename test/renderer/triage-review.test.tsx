@@ -746,8 +746,11 @@ it('opens private history only on request, handles a failed read, and forgets af
     .fn<NonNullable<SmartInboxApi['triageHistory']>>()
     .mockRejectedValueOnce(new Error('Synthetic read failure'))
     .mockReturnValueOnce(delayed.promise)
-    .mockResolvedValue({ events: [], before: null, legacy })
-  const forgetTriageDecision = vi.fn(async (_id: string) => {})
+    .mockResolvedValueOnce({ events: [], before: null, legacy, physicalPurge: 'pending' })
+    .mockResolvedValue({ events: [], before: null, legacy, physicalPurge: 'completed' })
+  const forgetTriageDecision = vi.fn<NonNullable<SmartInboxApi['forgetTriageDecision']>>(
+    async () => ({ physicalPurge: 'pending' }),
+  )
   const exportTriageHistory = vi.fn<NonNullable<SmartInboxApi['exportTriageHistory']>>(
     async () => true,
   )
@@ -778,7 +781,9 @@ it('opens private history only on request, handles a failed read, and forgets af
   await load()
   expect(settings.getByText('Working…')).toBeTruthy()
   expect(settings.queryByText(/No triage events/)).toBeNull()
-  await act(async () => delayed.resolve({ events: [event], before: null, legacy }))
+  await act(async () =>
+    delayed.resolve({ events: [event], before: null, legacy, physicalPurge: null }),
+  )
   expectBudget({ workspace: 0, list: 0, reader: 0, reviewCard: 0 })
   expect(settings.getByText(event.reason)).toBeTruthy()
 
@@ -788,5 +793,8 @@ it('opens private history only on request, handles a failed read, and forgets af
   expect(forgetTriageDecision).toHaveBeenCalledExactlyOnceWith(event.id)
   expect(settings.queryByText(event.reason)).toBeNull()
   expect(settings.getByText('No triage events on this page.')).toBeTruthy()
+  expect(settings.getByText(/Forget done. Physical purge pending/)).toBeTruthy()
+  await click(settings.getByRole('button', { name: 'Refresh history' }))
+  expect(settings.getByText('Forget done. Physical purge completed.')).toBeTruthy()
   expect(JSON.stringify(localStorage)).not.toContain(event.reason)
 })

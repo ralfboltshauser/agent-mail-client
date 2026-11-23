@@ -15,6 +15,7 @@ import {
 import { dirname, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { ERASURE_LEDGER_FILE, erasureLedgerId, openErasureLedger } from '../mail/triage/erasure.ts'
+import { pendingPurgeEpoch, purgeErasure } from '../mail/triage/physical-purge.ts'
 import { backupTo, type Db, migrate, openDatabase, schemaVersion } from './database.ts'
 import { MIGRATIONS } from './migrations.ts'
 
@@ -177,6 +178,9 @@ function publishSnapshot(source: string, target: string, beforeRestoreSwap?: () 
         if (expectedId || existsSync(ledgerPath) || schemaVersion(db) >= 24) {
           migrate(db)
           openErasureLedger(db, ledgerPath, expectedId)()
+          const epoch = pendingPurgeEpoch(db)
+          if (epoch && !purgeErasure(db, epoch))
+            throw new Error('Could not purge the staged backup')
         }
       } finally {
         db.close()

@@ -185,7 +185,7 @@ export interface SmartInboxApi {
     before?: number
     includeReasons?: '1'
   }): Promise<import('@amc/protocol').TriageHistoryPage>
-  forgetTriageDecision?(id: string): Promise<void>
+  forgetTriageDecision?(id: string): Promise<import('@amc/protocol').TriageForgetResult | null>
   exportTriageHistory?(input: import('@amc/protocol').TriageExportInput): Promise<boolean>
   triageQueue(query: TriageQueueRequest): Promise<TriageQueuePage>
   resolveSenderAvatars(

@@ -19,6 +19,7 @@ import { advanceMailboxGeneration, annotate, editOwnerReason } from './annotatio
 import { ERASURE_LEDGER_FILE, forgetDecision, openErasureLedger } from './erasure.ts'
 import { exportHistory, readHistory } from './history.ts'
 import { backfillLegacyBatch, bridgeStatus } from './legacy.ts'
+import { pendingPurgeEpoch, purgeErasure } from './physical-purge.ts'
 
 const CANARY = 'synthetic-private-history-00f35ca5'
 const LEGACY_CANARY = 'synthetic-copied-mail-124f3be0'
@@ -216,8 +217,11 @@ it('gates history, JSONL and forget on owner admin; removes shared reasons from 
   expect(events.map((event) => event.sequence)).toEqual([1, 2, 3])
   expect(await (await api('/export', 'POST', { includeReasons: true })).text()).toContain(CANARY)
   expect((await api('/export', 'POST', { includeReasons: CANARY })).status).toBe(400)
-  expect((await api(`/${second}`, 'DELETE')).status).toBe(204)
-  expect((await api(`/${second}`, 'DELETE')).status).toBe(204)
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = await api(`/${second}`, 'DELETE')
+    expect(result.status).toBe(200)
+    expect(await result.json()).toEqual({ physicalPurge: 'pending' })
+  }
   expect(await (await api('?includeReasons=1')).text()).not.toContain(CANARY)
   const after = await (await api('/export', 'POST', { includeReasons: true })).text()
   expect(after).toContain(first)
@@ -241,9 +245,7 @@ it('replays the durable erase ledger before publishing an older backup and purge
   const { second } = sharedDecision(db)
   backupTo(db, backup)
   expect(readFileSync(backup).includes(CANARY)).toBe(true)
-  forgetDecision(db, second)
-  expect(readFileSync(path).includes(CANARY)).toBe(false)
-  expect(readFileSync(`${path}-wal`).includes(CANARY)).toBe(false)
+  expect(forgetDecision(db, second)).toEqual({ physicalPurge: 'pending' })
   closeLedger()
   db.close()
   renameSync(ledger, `${ledger}.saved`)
@@ -301,4 +303,29 @@ it('rejects replay of a forgotten owner action after restoring a snapshot that p
   expect(exportHistory(db, { includeReasons: true })).not.toContain(CANARY)
   closeLedger()
   db.close()
+})
+
+it('keeps newer erasures pending when a purge started for an earlier epoch', () => {
+  const { dataDir } = testConfig()
+  const db = openDatabase(join(dataDir, 'amc.db'))
+  migrate(db)
+  const closeLedger = openErasureLedger(db, join(dataDir, ERASURE_LEDGER_FILE))
+  try {
+    const { first, second } = sharedDecision(db)
+    forgetDecision(db, first)
+    const firstEpoch = pendingPurgeEpoch(db)
+    if (!firstEpoch) throw new Error('Fixture purge missing')
+
+    forgetDecision(db, second)
+    expect(purgeErasure(db, firstEpoch)).toBe(false)
+    expect(forgetDecision(db, first)).toEqual({ physicalPurge: 'pending' })
+
+    const secondEpoch = pendingPurgeEpoch(db)
+    if (!secondEpoch) throw new Error('Fixture purge missing')
+    expect(purgeErasure(db, secondEpoch)).toBe(true)
+    expect(forgetDecision(db, second)).toEqual({ physicalPurge: 'completed' })
+  } finally {
+    closeLedger()
+    db.close()
+  }
 })

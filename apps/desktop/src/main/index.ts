@@ -447,7 +447,7 @@ function registerIpc() {
     requireEngine().request(`/v1/triage/events/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       redirect: 'error',
-      signal: AbortSignal.timeout(60_000),
+      signal: AbortSignal.timeout(10_000),
     }),
   )
   ipcMain.handle('amc:exportTriageHistory', async (_event, input: unknown) => {

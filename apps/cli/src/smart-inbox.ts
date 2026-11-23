@@ -9,6 +9,7 @@ import {
   SenderDecision,
   type SenderList,
   SenderListQuery,
+  type TriageForgetResult,
   type TriageHistoryPage,
   TriageHistoryQuery,
   type TriageQueuePage,
@@ -108,11 +109,17 @@ export function registerSmartInboxCommands(
     .argument('<event-id>')
     .requiredOption('--confirm', 'confirm erasure')
     .action(async (id: string) => {
-      await authed(config())(`/v1/triage/events/${encodeURIComponent(id)}`, {
-        method: 'DELETE',
-        redirect: 'error',
-      })
-      console.log('Decision forgotten. Older backups and existing exports can still contain it.')
+      const result = await authed(config())<TriageForgetResult | null>(
+        `/v1/triage/events/${encodeURIComponent(id)}`,
+        { method: 'DELETE', redirect: 'error' },
+      )
+      const status =
+        result?.physicalPurge === 'pending'
+          ? 'Forget done. Physical purge pending. Check amc triage history for updates.'
+          : result?.physicalPurge === 'completed'
+            ? 'Forget done. Physical purge completed.'
+            : 'Decision forgotten.'
+      console.log(`${status} Older backups and existing exports can still contain it.`)
     })
 
   triage

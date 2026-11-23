@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { closeSync, existsSync, lstatSync, openSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
+import type { TriageForgetResult, TriagePhysicalPurge } from '@amc/protocol'
 import { type Db, transaction } from '../../db/database.ts'
 import { SenderError } from '../senders/actions.ts'
 import { legacyDecisionId } from './legacy.ts'
@@ -9,7 +10,6 @@ interface Erasure {
   id: string
   action_id: string
   legacy_id: string
-  pending: number
 }
 
 export const ERASURE_LEDGER_FILE = 'owner-erasure.sqlite'
@@ -100,52 +100,50 @@ function applyErasure(db: Db, { id, action_id, legacy_id }: Erasure) {
   db.exec('DELETE FROM triage_lease')
 }
 
-function checkpoint(db: Db) {
-  if (db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get()?.busy !== 0)
-    throw new Error('SQLite could not purge the triage journal')
-}
-
-function replayErasure(db: Db, ledger: Db) {
-  const entries = ledger
-    .prepare('SELECT * FROM erasure ORDER BY rowid')
-    .all() as unknown as Erasure[]
-  const pending = entries.filter((entry) => entry.pending || !isForgotten(db, entry.id))
-  const needsPurge = db
-    .prepare('SELECT purge_pending FROM triage_privacy_store')
-    .get()?.purge_pending
-  if (!pending.length && !needsPurge) return
+function commitErasure(db: Db, entries: Erasure[]) {
   db.exec('PRAGMA secure_delete = ON')
   transaction(db, () => {
     db.prepare('UPDATE triage_privacy_store SET purge_pending = 1, receipt_epoch = ?').run(
       randomUUID(),
     )
-    for (const entry of pending) applyErasure(db, entry)
+    for (const entry of entries) applyErasure(db, entry)
   })
-  checkpoint(db)
-  db.exec('VACUUM')
-  checkpoint(db)
-  db.exec('UPDATE triage_privacy_store SET purge_pending = 0')
-  ledger.exec('UPDATE erasure SET pending = 0 WHERE pending = 1')
 }
 
-function isForgotten(db: Db, id: string) {
-  return db.prepare('SELECT 1 FROM triage_forgotten WHERE id = ?').get(id)
+function replayErasure(db: Db, ledger: Db) {
+  const entries = ledger
+    .prepare('SELECT id, action_id, legacy_id FROM erasure ORDER BY rowid')
+    .all() as unknown as Erasure[]
+  // Tombstones commit with the deletion and describe this copy of the database,
+  // even if the ledger has already been applied to a newer copy.
+  const forgotten = db.prepare('SELECT 1 FROM triage_forgotten WHERE id = ?')
+  const unapplied = entries.filter(({ id }) => !forgotten.get(id))
+  if (unapplied.length) commitErasure(db, unapplied)
 }
 
-export function forgetDecision(db: Db, id: string) {
+export function erasureStatus(db: Db): TriagePhysicalPurge | null {
+  const store = db.prepare('SELECT purge_pending, receipt_epoch FROM triage_privacy_store').get()
+  if (store?.purge_pending) return 'pending'
+  return store?.receipt_epoch ? 'completed' : null
+}
+
+export function forgetDecision(db: Db, id: string): TriageForgetResult {
   const ledger = ledgers.get(db)
   if (!ledger) throw new SenderError('Owner erasure storage unavailable', 503)
-  const event = db
-    .prepare(`
-    SELECT account_id, action_id FROM triage_event WHERE id = ? AND kind = 'decision'
-  `)
-    .get(id)
-  if (!event && !isForgotten(db, id)) throw new SenderError('Decision unavailable', 404)
-  if (event) {
-    const action = String(event.action_id)
-    ledger
-      .prepare('INSERT OR IGNORE INTO erasure VALUES (?, ?, ?, 1)')
-      .run(id, action, legacyDecisionId(String(event.account_id), action))
+  const forgotten = db.prepare('SELECT 1 FROM triage_forgotten WHERE id = ?').get(id)
+  if (!forgotten) {
+    const event = db
+      .prepare(`
+      SELECT account_id, action_id FROM triage_event WHERE id = ? AND kind = 'decision'
+    `)
+      .get(id)
+    if (!event) throw new SenderError('Decision unavailable', 404)
+    const actionId = String(event.action_id)
+    const legacyId = legacyDecisionId(String(event.account_id), actionId)
+    // The legacy pending column is retained for existing ledgers. Purge progress
+    // belongs to the database being scrubbed, so restore cannot clear live work.
+    ledger.prepare('INSERT OR IGNORE INTO erasure VALUES (?, ?, ?, 0)').run(id, actionId, legacyId)
+    commitErasure(db, [{ id, action_id: actionId, legacy_id: legacyId }])
   }
-  replayErasure(db, ledger)
+  return { physicalPurge: erasureStatus(db) ?? 'pending' }
 }

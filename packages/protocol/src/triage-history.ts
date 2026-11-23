@@ -34,7 +34,15 @@ export interface TriageHistoryEvent {
   reasonRevision?: string | null
 }
 
+export type TriagePhysicalPurge = 'pending' | 'completed'
+
+export interface TriageForgetResult {
+  physicalPurge: TriagePhysicalPurge
+}
+
 export interface TriageHistoryPage {
+  /** Status of Forget maintenance for the Engine's database, across all accounts. */
+  physicalPurge: TriagePhysicalPurge | null
   events: TriageHistoryEvent[]
   before: number | null
   legacy: { imported: number; skipped: number; complete: boolean }

@@ -29,8 +29,7 @@ export function triageHistoryRoutes(db: Db) {
     })
   })
   routes.delete('/:id', (c) => {
-    forgetDecision(db, c.req.param('id'))
-    return c.body(null, 204)
+    return c.json(forgetDecision(db, c.req.param('id')))
   })
   return routes
 }

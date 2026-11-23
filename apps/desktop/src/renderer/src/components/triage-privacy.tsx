@@ -1,4 +1,4 @@
-import type { TriageHistoryEvent, TriageHistoryPage } from '@amc/protocol'
+import type { TriageHistoryEvent, TriageHistoryPage, TriagePhysicalPurge } from '@amc/protocol'
 import { useState } from 'react'
 import { ReasonInput } from '@/features/triage-review/reason-input'
 import { getAmc } from '@/lib/amc'
@@ -63,6 +63,8 @@ export function TriagePrivacy() {
 
 function ActionHistory() {
   const [page, setPage] = useState<TriageHistoryPage>()
+  const [lastForget, setLastForget] = useState<TriagePhysicalPurge>()
+  const physicalPurge = page?.physicalPurge ?? lastForget
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [selection, setSelection] = useState<{ id: string; mode: 'edit' | 'forget' }>()
@@ -131,6 +133,13 @@ function ActionHistory() {
           </Button>
         )}
       </div>
+      {physicalPurge && (
+        <output className="text-sm">
+          {physicalPurge === 'pending'
+            ? 'Forget done. Physical purge pending. Refresh history to check again.'
+            : 'Forget done. Physical purge completed.'}
+        </output>
+      )}
       {page && (
         <>
           {(!page.legacy.complete || page.legacy.skipped > 0) && (
@@ -194,7 +203,8 @@ function ActionHistory() {
                         onClick={() =>
                           void update(async () => {
                             if (!api?.forgetTriageDecision) throw new Error('Erasure unavailable')
-                            await api.forgetTriageDecision(event.id)
+                            const result = await api.forgetTriageDecision(event.id)
+                            setLastForget(result?.physicalPurge)
                             setPage(undefined)
                             setSelection(undefined)
                             await load()

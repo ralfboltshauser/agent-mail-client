@@ -8,6 +8,7 @@ import type {
 import type { z } from 'zod'
 import type { Db } from '../../db/database.ts'
 import { privateReasonsEnabled, readOwnerReason } from './annotations.ts'
+import { erasureStatus } from './erasure.ts'
 import { bridgeStatus } from './legacy.ts'
 
 interface Event {
@@ -92,6 +93,7 @@ export function readHistory(db: Db, input: z.output<typeof TriageHistoryQuery>):
     ),
     before: events.length > input.limit ? (page.at(-1)?.seq ?? null) : null,
     legacy: bridgeStatus(db),
+    physicalPurge: erasureStatus(db),
   }
 }
 
@@ -160,6 +162,7 @@ export function exportHistory(db: Db, input: TriageExportInput) {
       taxonomyVersions: [...new Set(rows.map((row) => row.taxonomy_version))].sort((a, b) => a - b),
       scope: { account: ref('account', scope), allAccounts: scope === null },
       legacy: bridgeStatus(db),
+      physicalPurge: erasureStatus(db),
       reasons: reason ? 'included' : 'redacted',
     }),
   ]
