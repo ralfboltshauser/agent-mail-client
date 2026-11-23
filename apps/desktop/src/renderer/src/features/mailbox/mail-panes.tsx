@@ -64,7 +64,7 @@ export function MailPanes({
   getFilterActions: (thread: ThreadSummary) => FilterAction[]
   reader: ReactNode
 }) {
-  const { search, filterText, runSearch } = mailSearch
+  const { search, filter, runSearch } = mailSearch
   const { query, searchRows } = mailbox
   const inboxReady = useReplicaSelector(inbox ? query : null, ({ data }) => data !== undefined)
   const senderAddress = useReplicaSelector(inbox?.senderId ? query : null, ({ data }) =>
@@ -77,24 +77,38 @@ export function MailPanes({
     (left, right) => shareReply(left, right) === left,
   )
   const self = useMemo(() => new Set(addresses), [addresses])
+  const scope = useReplicaSelector(
+    accountId ? accountsQuery() : null,
+    ({ data }) => data?.find(({ id }) => id === accountId)?.address,
+  )
   return (
     <ResizablePanelGroup orientation="horizontal" className="h-full">
       <ResizablePanel defaultSize="40%" minSize="25%" maxSize="60%">
         <div
           ref={listRef}
           inert={expanded}
-          className={cn('flex h-full flex-col', expanded && 'invisible')}
+          className={cn('@container flex h-full flex-col', expanded && 'invisible')}
         >
-          <header className="app-drag app-toolbar gap-2 px-3.5">
+          <header className="app-drag app-toolbar relative gap-2 px-3.5 @max-[250px]:grid @max-[250px]:h-auto @max-[250px]:grid-cols-[minmax(0,1fr)_auto] @max-[250px]:gap-y-1.5 @max-[250px]:py-2">
             <h2
               data-mailbox-heading
               tabIndex={-1}
-              className="truncate text-[15px] font-semibold tracking-tight"
+              className="min-w-0 shrink truncate text-[15px] font-semibold tracking-tight"
             >
               {title}
             </h2>
             {!search && view.kind === 'inbox' && <InboxCount accountId={accountId} />}
-            <SearchInput mailSearch={mailSearch} move={move} />
+            <SearchInput
+              mailSearch={mailSearch}
+              mailboxTitle={title}
+              scope={scope ?? (accountId ? 'Selected account' : 'All accounts')}
+              focusResults={() => {
+                const results = listRef.current?.querySelector<HTMLElement>('[role="listbox"]')
+                if (!results) return
+                results.focus()
+                move(1)
+              }}
+            />
           </header>
           {search
             ? search.failed && (
@@ -135,7 +149,7 @@ export function MailPanes({
                   ) : (
                     <ThreadQueryError query={query} initial />
                   )
-                ) : search || filterText.trim() ? (
+                ) : search || filter ? (
                   <MailState icon={Search} title="No matching threads">
                     {search
                       ? 'Try a different search.'

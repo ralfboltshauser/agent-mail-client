@@ -18,6 +18,17 @@ export function useMailSearch(accountId: string | null) {
   const request = useRef(0)
   const input = useRef<HTMLInputElement>(null)
   const search = history?.accountId === accountId ? history : null
+  const text = search?.text ?? filterText
+  // Match the Engine's token boundaries, including quoted phrases and cc:.
+  const fields = (text.match(/(\w+:)?"[^"]*"|\S+/g) ?? [])
+    .map((token) => /^(?:from|to|cc|subject):(.*)$/i.exec(token)?.[1])
+    .filter((value) => value !== undefined)
+  const structured = fields.length > 0
+  const needsValue = fields.some(
+    (value) =>
+      !value || (value.startsWith('"') && (!value.endsWith('"') || !value.slice(1, -1).trim())),
+  )
+  const filter = structured ? '' : filterText.trim()
 
   useEffect(
     () => () => {
@@ -76,5 +87,16 @@ export function useMailSearch(accountId: string | null) {
     }
   }
 
-  return { filterText, search, input, resetSearch, changeFilter, clearSearch, runSearch }
+  return {
+    text,
+    filter,
+    structured,
+    needsValue,
+    search,
+    input,
+    resetSearch,
+    changeFilter,
+    clearSearch,
+    runSearch,
+  }
 }

@@ -150,7 +150,7 @@ function press(key: string, target: EventTarget = document.body, options?: Keybo
 }
 
 function searchInput() {
-  const input = document.querySelector<HTMLInputElement>('input[placeholder="Filter mail"]')
+  const input = document.querySelector<HTMLInputElement>('input[placeholder="Search mail"]')
   if (!input) throw new Error('Search input is missing')
   return input
 }
@@ -198,7 +198,7 @@ it('expands the search reader in place and restores the selected row on return',
   const detailReads = thread.mock.calls.length
   if (!list || !scroll) throw new Error('Expected a mounted list and reader')
 
-  list.focus()
+  act(() => list.focus())
   await press('o', list)
   expect(document.querySelector('[data-focus-reader]')?.contains(heading ?? null)).toBe(true)
   expect(list.closest('[inert]')).not.toBeNull()
@@ -237,13 +237,13 @@ it('expands the search reader in place and restores the selected row on return',
   expect(document.activeElement).toBe(searchInput())
   expect(selectedRow()?.textContent).toContain(second.subject)
 
-  list.focus()
+  act(() => list.focus())
   await press('o', list)
   await press('g')
   await press('o')
   expect(document.querySelector('[data-focus-reader]')).toBeNull()
   expect(document.body.textContent).toContain('Outbox')
-  expect(document.querySelector('input[placeholder="Filter mail"]')).toBeNull()
+  expect(document.querySelector('input[placeholder="Search mail"]')).toBeNull()
 })
 
 it.each(['resolves', 'rejects'] as const)(
