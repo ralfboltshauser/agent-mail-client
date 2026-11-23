@@ -27,6 +27,8 @@ export class ReviewStore {
   #saved: SavedReview | null = null
   #account = ''
   #active = false
+  #awaitingEntrySnapshot = false
+  #entrySkips = new Set<string>()
   #read = 0
   #replicaVersion = 0
   #working = false
@@ -109,6 +111,8 @@ export class ReviewStore {
     this.#queueVersion = -1
     this.#account = JSON.stringify(accountId)
     this.#active = true
+    this.#awaitingEntrySnapshot = true
+    this.#entrySkips.clear()
     this.#publish({
       card: null,
       error: null,
@@ -166,7 +170,8 @@ export class ReviewStore {
       await this.restore()
       if (generation !== this.#read) return
       const session = this.#session
-      if (target === 'skipped' || !session || session.index >= session.ids.length)
+      if (this.#awaitingEntrySnapshot) await this.#checkQueue(generation, 'start')
+      else if (target === 'skipped' || !session || session.index >= session.ids.length)
         await this.#checkQueue(generation, target === 'skipped' ? 'revisit' : 'finish')
       else {
         await this.#ownerApi()
@@ -180,22 +185,16 @@ export class ReviewStore {
   }
 
   #skips() {
-    const batches = new Set(
-      Object.entries(this.#saved?.parked ?? {})
-        .filter(([, entry]) => entry.accountKey === this.#account)
-        .map(([batch]) => batch),
-    )
-    if (this.#session) batches.add(this.#session.batch)
     return this.#history.filter(
-      (entry) =>
-        batches.has(entry.batch) &&
-        entry.status === 'applied' &&
-        entry.decision.kind === 'skip' &&
-        !entry.decision.revisited,
+      (entry) => this.#entrySkips.has(entry.id) && entry.status === 'applied',
     )
   }
 
-  async #checkQueue(generation: number, mode: 'append' | 'finish' | 'revisit', exhausted = false) {
+  async #checkQueue(
+    generation: number,
+    mode: 'start' | 'append' | 'finish' | 'revisit',
+    exhausted = false,
+  ) {
     const smart = await this.#ownerApi()
     const session = this.#session
     const accountId = JSON.parse(this.#account) as string | null
@@ -205,6 +204,21 @@ export class ReviewStore {
       if (generation !== this.#read || !this.#saved) return
       if (version !== this.#replicaVersion) continue
       this.#queueVersion = version
+
+      if (mode === 'start') {
+        this.#awaitingEntrySnapshot = false
+        if (cards.length || session?.ids.length) {
+          this.#switchBatch(this.#account, {
+            batch: crypto.randomUUID(),
+            ids: cards.map(({ id }) => id),
+            index: 0,
+          })
+        }
+        if (cards.length) {
+          await this.#display(generation, undefined, true)
+          return
+        }
+      }
 
       const skips = this.#skips()
       const { ready, skipped, pending } = partitionQueue(cards, skips, this.#history)
@@ -228,15 +242,9 @@ export class ReviewStore {
           throw new Error('The triage queue changed while loading cards. Retry to refresh.')
         if (revisiting) {
           const revisited = new Set(skipped.map(cardKey))
-          const actionIds = new Set(
-            skips.filter(({ card }) => revisited.has(cardKey(card))).map(({ id }) => id),
-          )
-          this.#saved.history = this.#history.map((entry) =>
-            actionIds.has(entry.id)
-              ? { ...entry, decision: { kind: 'skip', revisited: true } }
-              : entry,
-          )
-          this.#publish({ history: this.#history })
+          for (const { id, card } of skips) {
+            if (revisited.has(cardKey(card))) this.#entrySkips.delete(id)
+          }
         }
         const visited = new Set(session?.ids.map(cardKey))
         if (!session || revisiting || ids.some((id) => visited.has(cardKey(id)))) {
@@ -247,7 +255,7 @@ export class ReviewStore {
         await this.#display(generation, undefined, true)
         return
       }
-      const total = session?.ids.length ?? 0
+      const total = mode === 'start' ? 0 : (session?.ids.length ?? 0)
       this.#publish({
         card: null,
         progress: `${total}/${total}`,
@@ -266,7 +274,8 @@ export class ReviewStore {
     this.#saved.parked ??= {}
     const parked = this.#saved.parked
     const previous = this.#saved.sessions[accountKey]
-    if (previous && previous !== session) parked[previous.batch] = { accountKey, session: previous }
+    if (previous?.ids.length && previous !== session)
+      parked[previous.batch] = { accountKey, session: previous }
     this.#saved.sessions[accountKey] = session
     delete parked[session.batch]
     this.#save()
@@ -284,7 +293,7 @@ export class ReviewStore {
             entry.index === index &&
             (entry.status === 'pending' || entry.status === 'applied') &&
             (entry.decision.kind === 'skip'
-              ? !entry.decision.revisited
+              ? this.#entrySkips.has(entry.id)
               : entry.card.kind === 'thread' || entry.decision.kind === 'sender'),
         )
       )
@@ -413,15 +422,15 @@ export class ReviewStore {
       error: null,
     }
     if (decision.kind === 'skip') {
+      this.#entrySkips.add(action.id)
       this.#update(action, { status: 'applied' })
       void this.#advance(action, false)
       return
     }
     const unconfirmed = this.#history.find(
       (entry) =>
-        entry.batch === action.batch &&
-        entry.index === action.index &&
         entry.threadId === action.threadId &&
+        entry.messageId === action.messageId &&
         entry.status === 'unconfirmed',
     )
     if (unconfirmed && unconfirmed.id !== id) {

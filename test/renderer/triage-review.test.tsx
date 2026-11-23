@@ -188,7 +188,7 @@ it('keeps the same triage card and focus when Escape closes feedback', async () 
   expect(document.activeElement).toBe(focus)
 })
 
-it('keeps one card, isolates cursor commits, and resumes through exit and restart', async () => {
+it('keeps one card, isolates cursor commits, and clears skips on exit and restart', async () => {
   const { adapter } = await fixture()
   await mount(adapter)
   const initial = listbox()
@@ -228,7 +228,9 @@ it('keeps one card, isolates cursor commits, and resumes through exit and restar
   cleanup()
   await mount(adapter)
   await open()
-  expect(progress()).toBe('2/2')
+  expect(progress()).toBe('1/2')
+  expect(within(review()).getByRole('heading', { name: firstSubject })).toBeTruthy()
+  expect(within(review()).getByText('Action history (1)')).toBeTruthy()
   await press('u')
   expect(progress()).toBe('1/2')
 })
@@ -264,6 +266,68 @@ it('checks the live queue at the end and retries a failed refresh before showing
   setCards()
   await act(async () => adapter.emitChanged())
   expect(within(review()).getByText('All clear')).toBeTruthy()
+})
+
+it.each([false, true])(
+  'opens a fresh queue after a saved All clear (restart: %s)',
+  async (restart) => {
+    const { adapter, smart, first, low, setCards } = await fixture()
+    setCards(first)
+    await mount(adapter)
+    await open()
+    await press('a')
+    expect(within(review()).getByText('All clear')).toBeTruthy()
+    await press('Escape')
+    await tick()
+    if (restart) {
+      cleanup()
+      await mount(adapter)
+    }
+
+    // Neither the persisted review nor the replica has received a queue change event.
+    setCards(first, low)
+    const queue = smart.triageQueue.getMockImplementation()
+    if (!queue) throw new Error('Expected synthetic queue')
+    const live = await queue({ limit: 100 })
+    const pending = deferred<TriageQueuePage>()
+    smart.triageQueue.mockClear().mockImplementationOnce(() => pending.promise)
+    await open()
+    expect(smart.triageQueue).toHaveBeenCalledExactlyOnceWith({
+      accountId: undefined,
+      limit: 100,
+    })
+    expect(within(review()).queryByText('All clear')).toBeNull()
+    expect(within(review()).getByText('Loading triage queue…')).toBeTruthy()
+    await act(async () => pending.resolve(live))
+    expect(progress()).toBe('1/2')
+    expect(within(review()).getByRole('heading', { name: firstSubject })).toBeTruthy()
+    await press(' ')
+    expect(progress()).toBe('2/2')
+    expect(
+      within(review()).getByRole('heading', { name: 'Invoice for the spring issue' }),
+    ).toBeTruthy()
+  },
+)
+
+it('guards an unconfirmed decision when fresh entry gives its card a new position', async () => {
+  const { adapter, first, low, setCards, smart } = await fixture()
+  smart.decideSender.mockRejectedValueOnce(new Error('Connection dropped'))
+  await mount(adapter)
+  await open()
+  await press('a')
+  expect(smart.decideSender).toHaveBeenCalledTimes(1)
+  await press('Escape')
+  await tick()
+
+  setCards(low, first)
+  await open()
+  await press(' ')
+  expect(within(review()).getByRole('heading', { name: firstSubject })).toBeTruthy()
+  await press('a')
+  expect(smart.decideSender).toHaveBeenCalledTimes(1)
+  expect(
+    within(review()).getByText(/Retry the unconfirmed decision from action history/),
+  ).toBeTruthy()
 })
 
 it('opens new cards found at the end even without a replica event', async () => {
@@ -599,7 +663,7 @@ it('records a queued Reply even when a notification closes triage during composi
   await open()
   await click(within(review()).getByText('Action history (1)'))
   expect(within(review()).getByRole('button', { name: 'Open Outbox' })).toBeTruthy()
-  expect(within(review()).getByRole('heading', { name: 'Sunday at the studio' })).toBeTruthy()
+  expect(within(review()).getByRole('heading', { name: firstSubject })).toBeTruthy()
 })
 
 it('restarts invalidated pagination and revisits only skipped cards still in the queue', async () => {

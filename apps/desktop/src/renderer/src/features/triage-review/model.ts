@@ -18,7 +18,7 @@ export type Decision =
   | { kind: 'filter'; input: FilterReviewInput }
   | { kind: 'bucket'; input: BucketReviewInput }
   | { kind: 'organise'; input: Exclude<ReviewOrganiseAction, { kind: 'undo' }> }
-  | { kind: 'skip'; revisited?: true }
+  | { kind: 'skip' }
   | { kind: 'reply'; deadline: number; draftId: string }
 
 export type ActionStatus =

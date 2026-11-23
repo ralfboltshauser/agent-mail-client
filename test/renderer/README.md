@@ -100,8 +100,9 @@ to the commit budget.
 ## Desktop triage review
 
 The Engine owns queue eligibility, Thread revisions, and provider outcomes.
-The renderer review store owns the ordered card IDs, position, and skip and
-action journal, saved under the pairing and Account. It appends newly eligible
+The renderer review store owns the ordered card IDs, position, and action
+journal, saved under the pairing and Account for exact Undo. Every entry reads
+the live Engine queue and starts with no skips. The review appends newly eligible
 cards on replica changes and checks the Engine again at the end. Inbox and
 triage group New Senders by Account and address. Triage can also include Bucket
 and filter cards, and its progress counts cards in the current review. The card, progress, and history subscribe
@@ -112,7 +113,7 @@ to their own snapshots. Organise owns local Archive and Snooze writeback.
 | Space skips to a validated next card | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 |
 | Replica change appends a card to the queue | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 0 |
 
-The App harness covers focus return, exit and restart, Account switching
+The App harness covers focus return, fresh entry after All clear and restart, Account switching
 during an older read, notification-open, stale cards, retry and empty states,
 Handoff, representative Thread targeting, and exact Undo. It also exercises
 the real composer and checks that an explicit Send keeps the Outbox ID.
