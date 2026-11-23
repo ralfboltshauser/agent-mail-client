@@ -198,6 +198,75 @@ function effective(db: ReturnType<typeof openDatabase>, account: string) {
   }).map(({ labelId }) => labelId)
 }
 
+it('publishes accepted Sender state to existing replicas and reports the current revision on conflict', async () => {
+  const { db, put, http, queries } = setup(24)
+  try {
+    const address = 'person@example.test'
+    const threadId = put('a', 'first', address, 10)
+    const path = '/v1/senders/decisions'
+    const request = {
+      accountId: 'a',
+      address,
+      decision: 'accept',
+      expectedRevision: 0,
+      clientActionId: randomUUID(),
+    }
+    expect((await http(path, 'POST', request)).status).toBe(200)
+    const before = threadInput(db, threadId)?.modseq ?? -1
+    migrate(db)
+    expect(threadInput(db, threadId)?.modseq).toBeGreaterThan(before)
+    expect(queries.threadSummary(threadId)?.inboxSender).toMatchObject({
+      decision: 'accept',
+      revision: 1,
+    })
+    const block = { ...request, clientActionId: randomUUID(), decision: 'block' }
+    const stale = await http(path, 'POST', block)
+    expect(stale.status).toBe(409)
+    expect(await stale.json()).toMatchObject({
+      error: 'sender_revision_conflict',
+      currentRevision: 1,
+    })
+    const accepted = await http(path, 'POST', { ...block, retryRevision: 1 })
+    expect(accepted.status).toBe(202)
+    expect(await accepted.json()).toMatchObject({ actionId: block.clientActionId, revision: 2 })
+  } finally {
+    db.close()
+  }
+})
+
+it('applies a stale Bucket review only while the Inbox message and Bucket are unchanged', async () => {
+  const { db, store, put, http } = setup()
+  try {
+    const threadId = put('a', 'first', 'person@example.test', 10)
+    const shown = threadInput(db, threadId)
+    if (!shown?.input_id) throw new Error('Missing synthetic Inbox input')
+    const input = {
+      intent: 'review',
+      threadId,
+      expectedRevision: shown.modseq,
+      expectedBucketTarget: { messageId: shown.input_id, revision: shown.bucket_revision },
+      bucket: 'Reply',
+      reason: 'Owner review',
+      clientActionId: randomUUID(),
+    }
+    store.recordChange('thread', threadId, 'upsert')
+    expect(threadInput(db, threadId)?.modseq).toBeGreaterThan(shown.modseq)
+    expect((await http('/v1/bucket', 'PUT', input)).status).toBe(200)
+    const conflict = await http('/v1/bucket', 'PUT', {
+      ...input,
+      bucket: 'Later',
+      clientActionId: randomUUID(),
+    })
+    expect(conflict.status).toBe(409)
+    expect(await conflict.json()).toMatchObject({
+      message: expect.stringContaining('Bucket changed'),
+    })
+    expect(threadInput(db, threadId)?.bucket).toBe('Reply')
+  } finally {
+    db.close()
+  }
+})
+
 it('rejects raced model writes and restores an assignment and prompt eligibility durably on Undo', async () => {
   const { db, path, put, http, lease, queries } = setup()
   const agent = await lease()
@@ -314,7 +383,7 @@ it('upgrades v22 with existing Sender rules, corrections and working inverses', 
       FROM thread WHERE id = 'a:legacy';
       INSERT INTO owner_handled (thread_id, message_id, action_id) VALUES ('a:legacy', 'a:legacy', 'legacy-bucket');
     `)
-    expect(migrate(db)).toBe(24)
+    expect(migrate(db)).toBe(25)
     expect(queries.threadSummary('a:legacy')?.bucket?.bucket).toBe('Later')
     expect(senderActionStatus(db, 'legacy-sender')).toMatchObject({
       revision: 1,

@@ -28,6 +28,17 @@ export class SenderError extends Error {
   }
 }
 
+export class SenderRevisionConflict extends SenderError {
+  readonly currentRevision: number
+
+  constructor(currentRevision: number) {
+    super('The sender rule changed while saving the decision. Choose Accept or Block again.')
+    this.currentRevision = currentRevision
+  }
+}
+
+export class SenderBlockVerificationRequired extends Error {}
+
 export function liveOwner(db: Db, tokenId: string, scope: 'admin' | 'organize' = 'admin'): boolean {
   return !!db
     .prepare(`
@@ -70,6 +81,8 @@ interface DecisionRecord {
   previous: Rule | undefined
   revision: number
   source?: SenderDecision['source']
+  expectedRevision?: number
+  alreadyApplied?: true
 }
 
 function action(db: Db, id: string): Action | undefined {
@@ -117,6 +130,8 @@ export function senderActionStatus(db: Db, id: string): OwnerActionStatus {
   if (!row || !row.kind.startsWith('sender:'))
     throw new SenderError('Owner action unavailable', 404)
   const request = JSON.parse(row.request) as DecisionRecord
+  if (request.alreadyApplied)
+    return { ...workActionStatus(db, row, { revision: request.revision }), alreadyApplied: true }
   const current = rule(db, row.account_id, request.address)
   return workActionStatus(db, row, {
     revision: request.revision === undefined ? undefined : (current?.revision ?? request.revision),
@@ -217,7 +232,12 @@ export function workActionStatus(
   }
 }
 
-export function decideSender(store: MailStore, principal: Principal, input: SenderDecision) {
+export function decideSender(
+  store: MailStore,
+  principal: Principal,
+  input: SenderDecision,
+  requireImapVerification = false,
+) {
   const { db } = store
   return transaction(db, () => {
     assertOwner(db, principal)
@@ -233,7 +253,7 @@ export function decideSender(store: MailStore, principal: Principal, input: Send
         existing.kind !== 'sender:decision' ||
         request.address !== address ||
         request.decision !== decision ||
-        request.revision !== expectedRevision + 1 ||
+        (request.expectedRevision ?? request.revision - 1) !== expectedRevision ||
         request.source !== input.source
       )
         throw new SenderError('Client action ID is already in use')
@@ -244,16 +264,18 @@ export function decideSender(store: MailStore, principal: Principal, input: Send
     if (!account) throw new SenderError('Account unavailable', 404)
     if (decision !== 'clear' && isOwnerAddress(store, address))
       throw new SenderError('The owner’s addresses cannot be screened', 400)
-    if (
-      decision === 'block' &&
-      account.kind === 'imap' &&
-      !JSON.parse(String(account.cursor)).imapMoves
-    )
-      throw new SenderError('This IMAP Account does not support safe moves')
     const previous = rule(db, accountId, address)
-    if ((previous?.revision ?? 0) !== expectedRevision)
-      throw new SenderError('Sender rule changed. Refresh and retry.')
-    const revision = expectedRevision + 1
+    const currentRevision = previous?.revision ?? 0
+    const chosen = decision === 'clear' ? null : decision
+    const alreadyApplied = previous?.decision === chosen
+    if (!alreadyApplied && currentRevision !== (input.retryRevision ?? expectedRevision))
+      throw new SenderRevisionConflict(currentRevision)
+    if (!alreadyApplied && decision === 'block' && account.kind === 'imap') {
+      if (!JSON.parse(String(account.cursor)).imapMoves)
+        throw new SenderError('This IMAP Account does not support safe moves')
+      if (requireImapVerification) throw new SenderBlockVerificationRequired()
+    }
+    const revision = alreadyApplied ? currentRevision : currentRevision + 1
     db.prepare(
       'INSERT INTO owner_action (id, account_id, token_id, kind, request, created_at) VALUES (?, ?, ?, ?, ?, ?)',
     ).run(
@@ -266,10 +288,14 @@ export function decideSender(store: MailStore, principal: Principal, input: Send
         decision,
         previous,
         revision,
+        expectedRevision,
+        ...(alreadyApplied ? { alreadyApplied: true } : {}),
         source: input.source,
       }),
       Date.now(),
     )
+    ownerReasonRetry(db, clientActionId, input.reason)
+    if (alreadyApplied && !input.reason) return senderActionStatus(db, clientActionId)
     const sample = db
       .prepare(`
       SELECT m.id, m.thread_id FROM message m JOIN sender_index i ON i.message_id = m.id
@@ -277,7 +303,6 @@ export function decideSender(store: MailStore, principal: Principal, input: Send
       ORDER BY coalesce(m.delivered_at, m.sent_at) DESC, m.id DESC LIMIT 1
     `)
       .get(accountId, address)
-    ownerReasonRetry(db, clientActionId, input.reason)
     annotate(db, {
       axis: 'sender',
       actionId: clientActionId,
@@ -289,14 +314,7 @@ export function decideSender(store: MailStore, principal: Principal, input: Send
       source: input.source?.replace('-', '_') ?? 'sender_review',
       reason: input.reason,
     })
-    saveRule(
-      store,
-      accountId,
-      address,
-      decision === 'clear' ? null : decision,
-      revision,
-      clientActionId,
-    )
+    if (!alreadyApplied) saveRule(store, accountId, address, chosen, revision, clientActionId)
     return senderActionStatus(db, clientActionId)
   })
 }
@@ -309,7 +327,11 @@ export function undoSender(store: MailStore, principal: Principal, id: string) {
     if (!original || original.kind !== 'sender:decision')
       throw new SenderError('Owner action unavailable', 404)
     if (original.undo_requested_at !== null) return senderActionStatus(db, id)
-    const { address, decision, previous, revision } = JSON.parse(original.request) as DecisionRecord
+    const { address, decision, previous, revision, alreadyApplied } = JSON.parse(
+      original.request,
+    ) as DecisionRecord
+    if (alreadyApplied)
+      throw new SenderError('This decision left the existing sender rule in place')
     const current = rule(db, original.account_id, address)
     if (current?.action_id !== id && (decision !== 'block' || current?.decision === 'block'))
       throw new SenderError('Sender rule changed since this action')

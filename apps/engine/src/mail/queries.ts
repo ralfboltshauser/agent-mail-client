@@ -158,7 +158,7 @@ export class MailQueries {
       (SELECT h.message_id FROM owner_handled h WHERE h.thread_id = t.id) AS owner_handled_message_id,
       CASE WHEN t.in_inbox = 1 THEN (
         SELECT json_object('accountId', i.account_id, 'address', i.address, 'messageId', m.id,
-          'status', ${senderStatusSql}, 'revision', coalesce(r.revision, 0))
+          'status', ${senderStatusSql}, 'revision', coalesce(r.revision, 0), 'decision', r.decision)
         FROM message m JOIN sender_index i ON i.message_id = m.id
         LEFT JOIN sender_rule r ON r.account_id = i.account_id AND r.address = i.address
         WHERE m.thread_id = t.id AND i.in_inbox = 1

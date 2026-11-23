@@ -17,7 +17,7 @@ import type { Logger } from '../log.ts'
 import { DraftError } from '../mail/drafts.ts'
 import type { Mutations } from '../mail/mutations.ts'
 import type { Outbox } from '../mail/outbox.ts'
-import { assertOwner, SenderError } from '../mail/senders/actions.ts'
+import { assertOwner, SenderError, SenderRevisionConflict } from '../mail/senders/actions.ts'
 import { filterActions } from '../mail/triage/filtering.ts'
 import { buildMcpServer } from '../mcp/server.ts'
 import { VERSION } from '../version.ts'
@@ -70,6 +70,15 @@ export function createApp({
   const app = new Hono<AppEnv>()
 
   app.onError((error, c) => {
+    if (error instanceof SenderRevisionConflict)
+      return c.json(
+        {
+          error: 'sender_revision_conflict',
+          message: error.message,
+          currentRevision: error.currentRevision,
+        },
+        409,
+      )
     if (error instanceof SenderError)
       return c.json({ error: 'sender', message: error.message }, error.status)
     if (error instanceof DraftError)

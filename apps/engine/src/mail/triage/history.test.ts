@@ -81,8 +81,9 @@ it('reconciles v21 and v22 records across a durable cutoff, crash and rerun with
   ]
   const before = projections()
   backupTo(db, backup)
-  expect(migrate(db)).toBe(24)
-  expect(migrate(db)).toBe(24)
+  const throughHistory = MIGRATIONS.filter(({ version }) => version <= 24)
+  expect(migrate(db, { migrations: throughHistory })).toBe(24)
+  expect(migrate(db, { migrations: throughHistory })).toBe(24)
   expect(backfillLegacyBatch(db, 1)).toBe(true)
   expect(() =>
     transaction(db, () => {

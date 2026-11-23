@@ -1,12 +1,13 @@
-import { BUCKETS, imapActionError, type Label } from '@amc/protocol'
+import { BUCKETS, type InboxSender, imapActionError, type Label } from '@amc/protocol'
 import { Dialog } from 'radix-ui'
 import { type KeyboardEvent, useRef, useState } from 'react'
 import { OrganisePicker } from '@/components/organise'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
-import { useReplicaSelector } from '@/hooks/use-amc'
-import { accountsQuery, queryFailed } from '../mailbox/mailbox-queries'
-import { type Preview, reviewError } from './model'
+import { useReplicaSelector, useSyncField } from '@/hooks/use-amc'
+import { accountsQuery, queryFailed, selectedThreadQuery } from '../mailbox/mailbox-queries'
+import { inboxMessageIds, type Preview, reviewError } from './model'
+import { reviewSender } from './preview'
 import { ReasonInput } from './reason-input'
 import { ReviewCard } from './review-card'
 import { ReviewHistory } from './review-history'
@@ -46,6 +47,14 @@ export function TriageReview({
   const heading = useRef<HTMLHeadingElement>(null)
   const card = useReviewValue(store, (view) => view.card)
   const cardAccount = card?.accountId
+  const engineUrl = useSyncField((status) => status?.engineUrl ?? null)
+  const sender = useReplicaSelector(
+    selectedThreadQuery(engineUrl, card?.detail.thread),
+    ({ data }) =>
+      card && (data === undefined ? card.sender : reviewSender(card, data?.thread.inboxSender)),
+    sameSender,
+  )
+  const senderDecisionState = sender?.decision ?? (sender?.status === 'blocked' ? 'block' : null)
   const account = useReplicaSelector(
     accountsQuery(),
     (snapshot) => ({
@@ -62,7 +71,7 @@ export function TriageReview({
     if (!card) return 'No card is selected.'
     if (busy) return 'Wait for the current review operation.'
     if (errors) return 'Refresh the card before making a decision.'
-    if ((key === 'a' || key === 'x') && !card.sender) return 'This message has no eligible Sender.'
+    if ((key === 'a' || key === 'x') && !sender) return 'This message has no eligible Sender.'
     if ((key === 'x' || key === 'f') && account.account?.imapMoves === false)
       return 'This IMAP server does not support safe moves.'
     if (key === 'r' && !card.canReply) return 'This Thread has no reply target.'
@@ -88,7 +97,7 @@ export function TriageReview({
     reason?: string,
     id: string = crypto.randomUUID(),
   ) => {
-    if (!card.sender) return
+    if (!sender) return
     return store.decide(
       card,
       id,
@@ -96,15 +105,15 @@ export function TriageReview({
         kind: 'sender',
         input: {
           accountId: card.accountId,
-          address: card.sender.address,
+          address: sender.address,
           decision,
-          expectedRevision: card.sender.revision,
+          expectedRevision: sender.revision,
           clientActionId: id,
           source: 'triage-key',
           ...(reason ? { reason } : {}),
         },
       },
-      (decision === 'accept' ? 'Accept ' : 'Block ') + card.sender.address,
+      (decision === 'accept' ? 'Accept ' : 'Block ') + sender.address,
     )
   }
   const canActOn = (target: Preview | null) => {
@@ -156,7 +165,12 @@ export function TriageReview({
       const id = actionId
       const bucket = BUCKETS[Number(key) - 1]
       if (key === ' ') void store.decide(card, id, { kind: 'skip' }, 'Skip')
-      else if (key === 'f')
+      else if (key === 'f') {
+        const expectedInboxMessageIds = inboxMessageIds(card)
+        if (!expectedInboxMessageIds.length) {
+          setMessage('There are no eligible Inbox messages to filter.')
+          return
+        }
         return store.decide(
           card,
           id,
@@ -165,6 +179,7 @@ export function TriageReview({
             input: {
               threadId: card.threadId,
               decision: 'filter.filtered',
+              expectedInboxMessageIds,
               ...(card.predictionId ? { predictionId: card.predictionId } : {}),
               expectedRevision: card.threadRevision,
               clientActionId: id,
@@ -174,7 +189,7 @@ export function TriageReview({
           },
           'Filter out',
         )
-      else if (key === 'e')
+      } else if (key === 'e')
         void store.decide(
           card,
           id,
@@ -195,6 +210,9 @@ export function TriageReview({
               clientActionId: id,
               expectedRevision: card.threadRevision,
               reason: 'Owner triage review',
+              ...(card.bucketTarget?.messageId === card.messageId
+                ? { expectedBucketTarget: card.bucketTarget }
+                : {}),
             },
           },
           `Bucket · ${bucket}`,
@@ -286,6 +304,7 @@ export function TriageReview({
                 controls={{
                   accountAddress: account.account?.address ?? cardAccount ?? '',
                   run,
+                  senderDecision: senderDecisionState,
                   unavailable,
                   reasonInput: activeReason && (
                     <ReasonInput
@@ -350,5 +369,19 @@ export function ReviewProgress({ store }: { store: ReviewStore }) {
     <output aria-label="Triage progress" className="px-2 text-sm tabular-nums">
       {progress}
     </output>
+  )
+}
+
+function sameSender(left: InboxSender | null, right: InboxSender | null) {
+  return (
+    left === right ||
+    (left !== null &&
+      right !== null &&
+      left.accountId === right.accountId &&
+      left.address === right.address &&
+      left.messageId === right.messageId &&
+      left.revision === right.revision &&
+      left.status === right.status &&
+      left.decision === right.decision)
   )
 }

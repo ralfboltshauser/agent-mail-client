@@ -1,5 +1,7 @@
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
+import { type EngineClient, EngineError } from '../../apps/desktop/src/main/engine'
+import { submitSenderDecision } from '../../apps/desktop/src/main/sender-decision'
 import type { ReviewApi, SmartInboxApi } from '../../apps/desktop/src/shared/api'
 import { deferred, rendererAdapter } from './adapter'
 import { commits, expectBudget } from './profile'
@@ -34,6 +36,29 @@ async function fixture({ empty = false } = {}) {
     }
   })
   const [first, representative, low] = cards
+  const readThread = adapter.api.thread.getMockImplementation()
+  adapter.api.thread.mockImplementation(async (id) => {
+    const detail = await readThread?.(id)
+    const card = cards.find(({ threadId }) => threadId === id)
+    if (detail && card) {
+      for (const message of detail.messages) {
+        message.labelIds = [
+          ...message.labelIds,
+          `${card.accountId}:${message.id === card.messageId ? 'INBOX' : 'SENT'}`,
+        ]
+      }
+    }
+    if (detail && card?.id.kind === 'sender') {
+      detail.thread.inboxSender = {
+        accountId: card.accountId,
+        address: card.id.address,
+        messageId: card.messageId,
+        status: 'new',
+        revision: card.revision,
+      }
+    }
+    return detail ?? null
+  })
   let available = empty ? [] : cards
   let revision = 10
   const ledger = new Map<string, OwnerActionStatus>()
@@ -411,13 +436,140 @@ it('keeps a grouped sender at the same position after a representative Bucket co
   expect(representative.threadId).not.toBe(first.threadId)
 })
 
+it('updates the Sender row on an open low-confidence card after replica sync', async () => {
+  const { adapter, low, setCards } = await fixture()
+  const detail = await adapter.api.thread(low.threadId)
+  if (!detail) throw new Error('Missing synthetic Thread')
+  const readThread = adapter.api.thread.getMockImplementation()
+  detail.thread.inboxSender = {
+    accountId: low.accountId,
+    address: 'person@example.test',
+    messageId: low.messageId,
+    status: 'new',
+    revision: 1,
+  }
+  adapter.api.thread.mockImplementation(async (id) =>
+    id === low.threadId ? structuredClone(detail) : ((await readThread?.(id)) ?? null),
+  )
+  setCards(low)
+  await mount(adapter)
+  await open()
+  const card = within(review()).getByRole('article')
+  const heading = document.activeElement
+  expect(within(card).getByRole('button', { name: /^Accept sender/ })).toBeTruthy()
+  Object.assign(detail.thread.inboxSender, { decision: 'accept', status: 'known', revision: 2 })
+  await act(async () => adapter.emitChanged())
+  await tick()
+  expect(within(card).getByText('Accepted')).toBeTruthy()
+  expect(within(card).queryByRole('button', { name: /^Accept sender/ })).toBeNull()
+  expect(within(review()).getByRole('article')).toBe(card)
+  expect(document.activeElement).toBe(heading)
+})
+
+it.each(['stale Accept', 'stale Block', 'already applied', 'changed twice'] as const)(
+  'handles a low-confidence Sender decision when the rule is %s',
+  async (scenario) => {
+    const { adapter, low, setCards, smart, result } = await fixture()
+    const detail = await adapter.api.thread(low.threadId)
+    if (!detail) throw new Error('Missing synthetic Thread')
+    const readThread = adapter.api.thread.getMockImplementation()
+    detail.thread.inboxSender = {
+      accountId: low.accountId,
+      address: 'person@example.test',
+      messageId: low.messageId,
+      status: 'new',
+      revision: 2,
+    }
+    adapter.api.thread.mockImplementation(async (id) =>
+      id === low.threadId ? structuredClone(detail) : ((await readThread?.(id)) ?? null),
+    )
+    const request =
+      vi.fn<(...args: Parameters<EngineClient['request']>) => Promise<OwnerActionStatus>>()
+    const message =
+      'The sender rule changed while saving the decision. Choose Accept or Block again.'
+    if (scenario !== 'already applied')
+      request.mockRejectedValueOnce(new EngineError(409, 'sender_revision_conflict', message, 3))
+    if (scenario === 'changed twice')
+      request.mockRejectedValueOnce(new EngineError(409, 'sender_revision_conflict', message, 4))
+    smart.decideSender.mockImplementation(async (input) => {
+      request.mockResolvedValue({
+        ...result(input.clientActionId),
+        ...(scenario === 'already applied' ? { alreadyApplied: true } : {}),
+      })
+      try {
+        const receipt = await submitSenderDecision({ request }, input, () => true)
+        setCards()
+        return receipt
+      } catch (error) {
+        if (error instanceof EngineError) throw new Error(`Review rejected: ${error.message}`)
+        throw error
+      }
+    })
+    setCards(low)
+    await mount(adapter)
+    await open()
+    await press(scenario === 'stale Block' ? 'x' : 'a')
+    const input = smart.decideSender.mock.calls[0][0]
+    expect(input.expectedRevision).toBe(2)
+    expect(request.mock.calls.map(([, { body }]) => body)).toEqual(
+      scenario === 'already applied' ? [input] : [input, { ...input, retryRevision: 3 }],
+    )
+    if (scenario === 'changed twice') {
+      expect(
+        within(review()).getByText(`Accept person@example.test · Failed. ${message}`),
+      ).toBeTruthy()
+      expect(within(review()).getByText('Suggested: Filter out')).toBeTruthy()
+    } else {
+      expect(within(review()).getByText('All clear')).toBeTruthy()
+      if (scenario === 'already applied') {
+        await press('u')
+        expect(smart.undoOwnerAction).not.toHaveBeenCalled()
+      }
+    }
+  },
+)
+
+it.each(['f', '2', 'e'])(
+  'keeps the reviewed target usable after an unrelated Thread revision change (%s)',
+  async (key) => {
+    const { adapter, low, setCards, smart } = await fixture()
+    const card = { ...low, bucketTarget: { messageId: low.messageId, revision: 'bucket-1' } }
+    setCards(card)
+    await mount(adapter)
+    await open()
+    setCards({ ...card, threadRevision: card.threadRevision + 1 })
+    await press(key)
+    if (key === 'f') {
+      expect(smart.reviewFilter).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          expectedRevision: card.threadRevision,
+          expectedInboxMessageIds: [card.messageId],
+        }),
+      )
+    } else if (key === '2') {
+      expect(smart.reviewBucket).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          expectedRevision: card.threadRevision,
+          expectedBucketTarget: card.bucketTarget,
+        }),
+      )
+    } else {
+      expect(smart.reviewOrganise).toHaveBeenCalledExactlyOnceWith(
+        { kind: 'archive', threadId: card.threadId },
+        expect.any(String),
+        card.messageId,
+      )
+    }
+  },
+)
+
 it('keeps the old card on a stale write and refreshes to the next eligible card', async () => {
   const { adapter, removeSender, smart } = await fixture()
   await mount(adapter)
   await open()
   removeSender()
-  await press('a')
-  expect(smart.decideSender).not.toHaveBeenCalled()
+  await press('e')
+  expect(smart.reviewOrganise).not.toHaveBeenCalled()
   expect(within(review()).getByRole('alert').textContent).toContain('This card changed')
   expect(within(review()).getByRole('heading', { name: firstSubject })).toBeTruthy()
   await click(within(review()).getByRole('button', { name: 'Retry' }))
@@ -718,6 +870,7 @@ it('filters with F, records it in action history, and restores its position with
   expect(smart.reviewFilter).toHaveBeenCalledExactlyOnceWith({
     threadId: first.threadId,
     expectedRevision: first.threadRevision,
+    expectedInboxMessageIds: [first.messageId],
     decision: 'filter.filtered',
     clientActionId: expect.any(String),
     source: 'triage-key',

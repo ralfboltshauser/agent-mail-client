@@ -1,6 +1,7 @@
 import type {
   BucketReviewInput,
   FilterReviewInput,
+  InboxSender,
   SenderDecision,
   TriageCardId,
   TriageQueuePage,
@@ -10,7 +11,7 @@ import type { ReviewOrganiseAction, ThreadWithMessages } from '../../../../share
 export type Candidate = TriageQueuePage['cards'][number]
 export type Preview = Candidate & {
   detail: ThreadWithMessages
-  sender: { address: string; revision: number; name?: string | null } | null
+  sender: InboxSender | null
   canReply: boolean
 }
 export type Decision =
@@ -41,6 +42,7 @@ export interface ReviewAction {
   batch: string
   label: string
   ownerReason?: string | null
+  alreadyApplied?: true
   privateReasonDraft?: true
   decision: Decision
   status: ActionStatus
@@ -64,10 +66,39 @@ export function reviewError(cause: unknown) {
   )
 }
 
-export function sameTarget(a: Candidate, b: Candidate) {
+export function inboxMessageIds(card: Preview) {
+  const label = (name: string) => `${card.accountId}:${name}`
+  const excluded = ['SENT', 'DRAFT', 'SPAM', 'TRASH'].map(label)
+  return card.detail.messages
+    .filter(
+      ({ labelIds }) =>
+        labelIds.includes(label('INBOX')) && !excluded.some((id) => labelIds.includes(id)),
+    )
+    .map(({ id }) => id)
+    .sort()
+}
+
+export function sameTarget(a: Preview, b: Preview, decision?: Decision) {
+  if (a.threadId !== b.threadId || a.messageId !== b.messageId) return false
+  if (decision?.kind === 'filter' && decision.input.expectedInboxMessageIds) {
+    return (
+      a.predictionId === b.predictionId &&
+      JSON.stringify(decision.input.expectedInboxMessageIds) === JSON.stringify(inboxMessageIds(b))
+    )
+  }
+  if (decision?.kind === 'organise') {
+    const shown = inboxMessageIds(a)
+    return shown.length > 0 && JSON.stringify(shown) === JSON.stringify(inboxMessageIds(b))
+  }
+  if (decision?.kind === 'bucket' && decision.input.expectedBucketTarget) {
+    const target = decision.input.expectedBucketTarget
+    return (
+      target.messageId === b.bucketTarget?.messageId &&
+      target.revision === b.bucketTarget.revision &&
+      a.bucketPredictionId === b.bucketPredictionId
+    )
+  }
   return (
-    a.threadId === b.threadId &&
-    a.messageId === b.messageId &&
     a.threadRevision === b.threadRevision &&
     a.revision === b.revision &&
     a.predictionId === b.predictionId &&

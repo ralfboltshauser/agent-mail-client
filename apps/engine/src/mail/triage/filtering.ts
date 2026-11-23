@@ -123,7 +123,8 @@ export function reviewFilter(store: MailStore, principal: Principal, input: Filt
     }
     const thread = threadInput(db, input.threadId)
     if (!thread) throw new SenderError('Thread is no longer available', 404)
-    if (thread.modseq !== input.expectedRevision)
+    const exactInbox = input.decision === 'filter.filtered' && input.expectedInboxMessageIds
+    if (!exactInbox && thread.modseq !== input.expectedRevision)
       throw new SenderError('The Thread changed. Refresh and retry.')
     if (
       input.predictionId &&
@@ -135,9 +136,19 @@ export function reviewFilter(store: MailStore, principal: Principal, input: Filt
     `)
           .get(input.threadId, input.predictionId, thread.input_id))
     )
-      throw new SenderError('The displayed Filter suggestion changed. Refresh and retry.')
+      throw new SenderError(
+        'The Filter suggestion changed while saving. Review the current Thread before filtering.',
+      )
     const source = sourceLabel(db, thread.account_id, input.decision === 'filter.keep')
     const available = source ? matchingMessages(db, input.threadId, source) : []
+    const inboxIds = exactInbox ? new Set(exactInbox) : null
+    if (
+      inboxIds &&
+      (inboxIds.size !== available.length || available.some(({ id }) => !inboxIds.has(id)))
+    )
+      throw new SenderError(
+        'The Inbox messages changed while saving. Review the current Thread before filtering.',
+      )
     // Provider membership can change without a Thread revision when a pending move
     // masks a provider update in the replica's projected labels.
     if (
@@ -183,7 +194,7 @@ export function reviewFilter(store: MailStore, principal: Principal, input: Filt
         accountId: thread.account_id,
         threadId: input.threadId,
         mid: message.id,
-        revision: input.expectedRevision,
+        revision: thread.modseq,
         label: input.decision,
         source:
           input.decision === 'filter.keep'

@@ -89,14 +89,25 @@ export function correctBucket(store: MailStore, principal: Principal, input: Rev
 
     const thread = threadInput(db, input.threadId)
     if (!thread) throw new SenderError('Thread is no longer available', 404)
-    if (!thread.in_inbox || !thread.input_id || thread.modseq !== input.expectedRevision)
-      throw new SenderError('The Inbox input changed. Refresh the Thread and retry.')
+    const target = input.expectedBucketTarget
+    if (
+      !thread.in_inbox ||
+      !thread.input_id ||
+      (target
+        ? target.messageId !== thread.input_id || target.revision !== thread.bucket_revision
+        : thread.modseq !== input.expectedRevision)
+    )
+      throw new SenderError(
+        'The Inbox message or Bucket changed while saving. Review the current Thread before choosing a Bucket.',
+      )
     if (
       input.predictionId &&
       (thread.bucket_input_message_id !== thread.input_id ||
         thread.bucket_producer !== input.predictionId)
     )
-      throw new SenderError('The displayed Bucket prediction changed. Refresh and retry.')
+      throw new SenderError(
+        'The Bucket prediction changed while saving. Review the current Thread before choosing a Bucket.',
+      )
 
     const {
       account_id,

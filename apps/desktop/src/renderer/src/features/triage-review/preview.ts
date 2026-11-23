@@ -1,3 +1,4 @@
+import type { InboxSender } from '@amc/protocol'
 import type { AmcApi, SmartInboxApi } from '../../../../shared/api'
 import { type Candidate, cardKey, type Preview, type ReviewAction } from './model'
 
@@ -36,23 +37,24 @@ export async function loadPreview(
   if (!detail || detail.thread.accountId !== candidate.accountId || !message) {
     throw new Error('This review card is waiting for the local mail replica. Retry after sync.')
   }
-  const from = message.from
-  const indexed = detail.thread.inboxSender
-  const sender =
-    id.kind === 'sender'
-      ? { address: id.address, revision: candidate.revision, name: from?.name }
-      : indexed?.messageId === message.id &&
-          indexed.status !== 'unresolved' &&
-          indexed.status !== 'blocked'
-        ? { address: indexed.address, revision: indexed.revision, name: from?.name }
-        : null
   const latest = detail.messages
     .filter((item) => !item.labelIds.includes(`${candidate.accountId}:DRAFT`))
     .at(-1)
   return {
     ...candidate,
     detail,
-    sender,
+    sender: reviewSender(candidate, detail.thread.inboxSender),
     canReply: Boolean(latest?.from?.address || latest?.replyTo.length),
   } satisfies Preview
+}
+
+export function reviewSender(card: Candidate, sender: InboxSender | undefined) {
+  if (
+    sender?.accountId !== card.accountId ||
+    sender.messageId !== card.messageId ||
+    sender.status === 'unresolved' ||
+    (card.id.kind === 'sender' && sender.address !== card.id.address)
+  )
+    return null
+  return sender
 }

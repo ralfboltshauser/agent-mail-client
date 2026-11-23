@@ -8,7 +8,7 @@ export function ReviewAvatar({ card }: { card: Preview }) {
       accountId={card.accountId}
       messageId={card.messageId}
       address={card.sender?.address ?? from?.address}
-      name={card.sender?.name ?? from?.name}
+      name={from?.name}
       size={40}
     />
   )

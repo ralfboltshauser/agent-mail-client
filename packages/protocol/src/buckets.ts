@@ -58,6 +58,12 @@ export type BucketInput = z.infer<typeof BucketInput>
 export const BucketReviewInput = OwnerBucketInput.extend({
   intent: z.literal('review'),
   predictionId: z.string().min(1).max(512).optional(),
+  expectedBucketTarget: z
+    .object({
+      messageId: z.string().min(1).max(512),
+      revision: z.string().nullable(),
+    })
+    .optional(),
   bucket: Bucket,
   expectedRevision: z.number().int().nonnegative(),
   clientActionId: z.uuid(),

@@ -395,7 +395,7 @@ export class ReviewStore {
     }
   }
 
-  async validate(card: Preview) {
+  async validate(card: Preview, decision?: Decision) {
     const smart = await this.#ownerApi()
     const current = await loadPreview(
       this.#api,
@@ -404,8 +404,13 @@ export class ReviewStore {
       this.#history,
       this.#session?.batch ?? '',
     )
-    if (this.#view.card !== card || !this.#active || !current || !sameTarget(card, current)) {
-      throw new Error('This card changed. Refresh it before making a decision.')
+    if (
+      this.#view.card !== card ||
+      !this.#active ||
+      !current ||
+      !sameTarget(card, current, decision)
+    ) {
+      throw new Error('This card changed. Use Retry to review the current card.')
     }
     return current
   }
@@ -443,7 +448,8 @@ export class ReviewStore {
     this.#working = true
     this.#publish({ busy: true })
     try {
-      if (!unconfirmed) await this.validate(card)
+      // A Sender choice is scoped to the displayed address, even if its card left the queue.
+      if (!unconfirmed && decision.kind !== 'sender') await this.validate(card, decision)
       if (generation !== this.#read || this.#view.card !== card) return
       return await this.#submit(action)
     } catch (error) {
@@ -474,6 +480,7 @@ export class ReviewStore {
         privateReasonDraft: undefined,
         status: result.status,
         error: result.error,
+        ...('alreadyApplied' in result && result.alreadyApplied ? { alreadyApplied: true } : {}),
       })
       this.#announce(updated, true)
       if (result.status === 'applied' || result.status === 'pending') {
@@ -512,6 +519,7 @@ export class ReviewStore {
         const accepted = this.#update(action, {
           privateReasonDraft: undefined,
           status: receipt.status,
+          alreadyApplied: receipt.alreadyApplied,
           error: receipt.error,
         })
         this.#announce(accepted)

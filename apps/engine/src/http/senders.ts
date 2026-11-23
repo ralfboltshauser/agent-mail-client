@@ -12,6 +12,7 @@ import {
   assertOwner,
   decideSender,
   listSenders,
+  SenderBlockVerificationRequired,
   senderActionStatus,
   undoSender,
 } from '../mail/senders/actions.ts'
@@ -41,9 +42,15 @@ export function senderRoutes(store: MailStore, queue: Mutations) {
     if (!parsed.success)
       return c.json({ error: 'bad_request', message: 'Invalid Sender decision' }, 400)
     checkOwnerReason(parsed.data.reason)
-    if (parsed.data.decision === 'block')
+    const principal = c.get('principal')
+    let action: OwnerActionStatus
+    try {
+      action = decideSender(store, principal, parsed.data, true)
+    } catch (error) {
+      if (!(error instanceof SenderBlockVerificationRequired)) throw error
       await queue.verifyScreeningCapability(parsed.data.accountId, parsed.data.clientActionId)
-    const action = decideSender(store, c.get('principal'), parsed.data)
+      action = decideSender(store, principal, parsed.data)
+    }
     queue.kick()
     return c.json(action, action.status === 'pending' ? 202 : 200)
   })

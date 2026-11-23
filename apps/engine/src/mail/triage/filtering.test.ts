@@ -106,6 +106,37 @@ function fixture() {
 
 afterEach(() => vi.unstubAllEnvs())
 
+it.each([false, true])(
+  'applies a stale Filter out only for the reviewed Inbox messages (new arrival: %s)',
+  (newArrival) => {
+    const { db, store, principal, put } = fixture()
+    try {
+      const threadId = put('first', { threadId: 'target', labels: ['INBOX'] })
+      const { messageIds, revision } = inboxFilterTarget(db, threadId)
+      if (newArrival) put('second', { threadId: 'target', labels: ['INBOX'] })
+      else store.recordChange('thread', threadId, 'upsert')
+      expect(threadInput(db, threadId)?.modseq).toBeGreaterThan(revision)
+      const submit = () =>
+        reviewFilter(store, principal, {
+          threadId,
+          decision: 'filter.filtered',
+          expectedRevision: revision,
+          expectedInboxMessageIds: messageIds,
+          source: 'triage-key',
+          clientActionId: randomUUID(),
+        })
+      if (newArrival) {
+        expect(submit).toThrow(/Inbox messages changed/)
+        expect(db.prepare('SELECT 1 FROM screening_work').get()).toBeUndefined()
+      } else {
+        expect(submit()).toMatchObject({ status: 'pending', acceptedTargets: messageIds })
+      }
+    } finally {
+      db.close()
+    }
+  },
+)
+
 it('moves only exact Inbox messages, saves one private reason and appends per-message Undo', async () => {
   vi.stubEnv('AMC_PRIVATE_TRIAGE_REASONS', '1')
   const { db, store, queue, gmail, principal, put, handlers } = fixture()
