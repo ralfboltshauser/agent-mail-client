@@ -4,6 +4,7 @@ import { BlobStore } from '../blobs.ts'
 import { Sealer } from '../crypto.ts'
 import { MailStore } from '../mail/store.ts'
 import { FakeGmail } from '../providers/gmail/fake.ts'
+import { GmailHttpError } from '../providers/gmail/http.ts'
 import type { GmailPubSub } from '../providers/gmail/pubsub.ts'
 import type { GmailApi, GmailHistoryList } from '../providers/gmail/types.ts'
 import { silentLog, tempDir, testDb } from '../test-support.ts'
@@ -80,6 +81,55 @@ describe('Gmail Pub/Sub sync', () => {
     await fixture?.close()
     fixture = undefined
     vi.useRealTimers()
+  })
+
+  it.each([false, true])(
+    'checks all Gmail accounts immediately and coalesces bursts (push: %s)',
+    async (push) => {
+      fixture = setup(push)
+      const { sync, owner, other, store } = fixture
+      const ownerHistory = vi.spyOn(owner, 'history')
+      const otherHistory = vi.spyOn(other, 'history')
+      await fixture.start()
+      ownerHistory.mockClear()
+      otherHistory.mockClear()
+      owner.add('owner-new', { subject: 'New mail for owner' })
+      other.add('other-new', { subject: 'New mail for other account' })
+
+      const checking = sync.checkMail()
+      expect(sync.checkMail()).toBe(checking)
+      expect(await checking).toBe(true)
+      expect(store.hasMessage('owner', 'owner-new')).toBe(true)
+      expect(store.hasMessage('other', 'other-new')).toBe(true)
+      expect(ownerHistory).toHaveBeenCalledTimes(1)
+      expect(otherHistory).toHaveBeenCalledTimes(1)
+
+      await vi.advanceTimersByTimeAsync(4_999)
+      expect(sync.checkMail()).toBe(checking)
+      expect(ownerHistory).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(await sync.checkMail()).toBe(true)
+      expect(ownerHistory).toHaveBeenCalledTimes(2)
+      expect(otherHistory).toHaveBeenCalledTimes(2)
+    },
+  )
+
+  it('does not interrupt Gmail quota backoff with another manual check', async () => {
+    fixture = setup(false)
+    const { sync, owner } = fixture
+    await fixture.start()
+    const history = vi
+      .spyOn(owner, 'history')
+      .mockRejectedValueOnce(new GmailHttpError(429, 'rateLimitExceeded', 'quota'))
+
+    expect(await sync.checkMail()).toBe(false)
+    expect(history).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(await sync.checkMail()).toBe(false)
+    await vi.advanceTimersByTimeAsync(24_999)
+    expect(history).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(history).toHaveBeenCalledTimes(2)
   })
 
   it('starts a watch per Gmail account and renews both daily', async () => {

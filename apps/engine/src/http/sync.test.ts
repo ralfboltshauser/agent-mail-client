@@ -19,12 +19,13 @@ function setup() {
   const gmail = new FakeGmail()
   const queries = new MailQueries(db)
   const drafts = new Drafts(db, store, () => gmail)
+  const checkMail = vi.fn(async () => true)
   const app = createApp({
     db,
     config: testConfig(),
     log: silentLog,
     // Only the parts the sync routes use; the rest is unused here.
-    mail: { db, store, queries, drafts } as never,
+    mail: { db, store, queries, drafts, sync: { checkMail } } as never,
   })
   const token = issueToken(db, { kind: 'desktop', name: 'mac', scopes: ['read'] }).secret
   const get = async <T>(path: string) => {
@@ -33,10 +34,35 @@ function setup() {
   }
   const add = (id: string, date: number) =>
     store.putMessage('a', ['me@x.com'], fromGmail(gmail.add(id, { date })))
-  return { app, db, store, get, add, gmail }
+  return { app, db, store, get, add, gmail, checkMail }
 }
 
 describe('sync protocol', () => {
+  it('accepts an all-account mail check only from a paired owner with admin scope', async () => {
+    const { app, db, checkMail } = setup()
+    const post = (secret?: string) =>
+      app.request('/v1/sync/check-mail', {
+        method: 'POST',
+        headers: secret ? { Authorization: `Bearer ${secret}` } : undefined,
+      })
+    const reader = issueToken(db, { kind: 'desktop', name: 'read-only', scopes: ['read'] })
+    const agent = issueToken(db, {
+      kind: 'agent',
+      name: 'agent',
+      scopes: ['read'],
+      expiresAt: Date.now() + DAY_MS,
+    })
+    const owner = issueToken(db, { kind: 'desktop', name: 'owner', scopes: ['admin'] })
+    expect((await post()).status).toBe(401)
+    expect((await post(reader.secret)).status).toBe(403)
+    expect((await post(agent.secret)).status).toBe(403)
+    expect(checkMail).not.toHaveBeenCalled()
+    const response = await post(owner.secret)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ ok: true })
+    expect(checkMail).toHaveBeenCalledTimes(1)
+  })
+
   it('snapshots Threads newest first with keyset paging', async () => {
     const { get, add } = setup()
     for (let i = 1; i <= 5; i++) add(`m${i}`, i * 1000)

@@ -56,6 +56,7 @@ import { composeDraftPath } from './draft-updates'
 import { EngineClient, EngineError } from './engine'
 import { registerFeedbackIpc } from './feedback-ipc'
 import { Handoff, type T3Launcher, t3NavigationLink } from './handoff'
+import { handleMailRefreshKey, mailboxViewMenu } from './mail-menu'
 import { protectRemoteImageRequests } from './message-image-requests'
 import {
   DEFAULT_NOTIFICATION_SETTINGS,
@@ -92,6 +93,8 @@ let feedback: ReturnType<typeof registerFeedbackIpc>
 let handoff: Handoff
 let triage: AutoTriage
 const quittingTriage = new AbortController()
+const dev = import.meta.env.DEV && !app.isPackaged
+const checkMail = () => void sync?.checkMail()
 
 const UNPAIRED: SyncStatus = {
   phase: 'unpaired',
@@ -848,11 +851,14 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       spellcheck: true,
-      devTools: !app.isPackaged,
+      devTools: dev,
     },
   })
   const current = window
   threadNavigationReady = false
+  current.webContents.on('before-input-event', (event, input) => {
+    handleMailRefreshKey(event, input, checkMail)
+  })
   current.webContents.on('did-start-navigation', ({ isMainFrame, isSameDocument }) => {
     if (isMainFrame && !isSameDocument) {
       threadNavigationReady = false
@@ -941,15 +947,7 @@ function buildMenu() {
   const menu = Menu.buildFromTemplate([
     { role: 'appMenu', id: 'app-menu' },
     { role: 'editMenu' },
-    {
-      label: 'View',
-      submenu: [
-        { role: 'reload' },
-        ...(!app.isPackaged ? [{ role: 'toggleDevTools' as const }] : []),
-        { type: 'separator' },
-        { role: 'togglefullscreen' },
-      ],
-    },
+    mailboxViewMenu(dev, checkMail),
     { role: 'windowMenu' },
     {
       role: 'help',

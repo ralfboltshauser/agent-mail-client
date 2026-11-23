@@ -56,6 +56,24 @@ it('preserves the mailbox on a status-only timestamp change', async () => {
   expect(commitCounts().indicator).toBe(1)
 })
 
+it('commits only the indicator during a no-op Check for New Mail', async () => {
+  const adapter = await mount()
+  const before = mailboxNodes()
+  adapter.api.threads.mockClear()
+
+  await act(async () => adapter.emitStatus({ mailCheck: 'checking' }))
+  expect(screen.getByText('Checking for new mail…')).toBeTruthy()
+  expectContinuity(before)
+  expectBudget({ ...idleMailbox, indicator: 1 })
+
+  await act(async () => adapter.emitStatus({ mailCheck: undefined, lastSyncAt: Date.now() }))
+  expect(screen.getByText('Up to date · just now')).toBeTruthy()
+  expect(adapter.api.threads).not.toHaveBeenCalled()
+  expectContinuity(before)
+  expectBudget({ ...idleMailbox, indicator: 2 })
+  expect(commitCounts().indicator).toBe(2)
+})
+
 it.each(['immediate', 'staggered'] as const)(
   'preserves mailbox nodes on a cloned no-op sync event with %s replies',
   async (timing) => {
