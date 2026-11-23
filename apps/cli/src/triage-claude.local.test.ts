@@ -34,7 +34,9 @@ it.skipIf(process.env.CI || process.env.AMC_TEST_CLAUDE !== '1' || !existsSync(c
         authMethod: 'claude.ai',
         apiProvider: 'firstParty',
       })
-      const fixture = { decisions: [{ threadId: 'example', bucket: 'Update', reason: 'Fixture' }] }
+      const fixture = {
+        decisions: [{ threadId: 'example', bucket: null, filter: null, protection: 'routine' }],
+      }
       const { stdout } = await run(
         claude,
         [

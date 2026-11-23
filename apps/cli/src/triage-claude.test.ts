@@ -67,32 +67,32 @@ it.each([
   {
     stdout: '',
     code: 'ENOENT',
-    message: 'Claude Code not found at ~/.local/bin/claude',
+    message: 'Claude Code was not found at ~/.local/bin/claude',
   },
   {
     stdout: '{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}',
     code: 1,
-    message: 'Claude Code is not signed in: run `claude` and log in with Claude.ai',
+    message: 'Sign in to Claude Code with a Claude.ai subscription',
   },
   {
     stdout: '',
     code: 'EACCES',
-    message: 'Could not check Claude Code sign-in status',
+    message: 'Could not check Claude Code sign-in',
   },
   {
     stdout: '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}',
     code: 1,
-    message: 'Could not check Claude Code sign-in status',
+    message: 'Could not check Claude Code sign-in',
   },
   {
     stdout: 'invalid JSON',
     code: undefined,
-    message: 'Could not check Claude Code sign-in status',
+    message: 'Could not check Claude Code sign-in',
   },
   {
     stdout: '{"loggedIn":true,"authMethod":"apiKey","apiProvider":"firstParty"}',
     code: undefined,
-    message: 'Triage requires a Claude.ai subscription login',
+    message: 'Sign in to Claude Code with a Claude.ai subscription',
   },
 ])(
   'reports $message when Claude auth returns $code and $stdout',
@@ -121,25 +121,13 @@ function failedRun(events: object[], stderr: string) {
   })
 }
 
-it.each([
-  {
-    events: [],
-    stderr: 'Error: --json-schema is not a valid JSON Schema',
-    message: 'Error: --json-schema is not a valid JSON Schema',
-  },
-  {
-    events: [{ type: 'error', error: { message: 'Could not connect using fixture' } }],
-    stderr: '',
-    message: 'Could not connect using [redacted]',
-  },
-  {
-    events: [{ type: 'result', is_error: true, errors: ['Invalid configuration'] }],
-    stderr: '',
-    message: 'Invalid configuration',
-  },
-])('surfaces startup diagnostics from Claude Code', async ({ events, stderr, message }) => {
-  failedRun(events, stderr)
-  await expect(run()).rejects.toThrow(`Claude Code triage failed: ${message}`)
+it('classifies startup errors without echoing CLI diagnostics', async () => {
+  const canary = 'sensitive-value'
+  failedRun([{ type: 'error', error: { message: canary } }], canary)
+  await expect(run()).rejects.toMatchObject({
+    reason: 'agent-start',
+    message: expect.not.stringContaining(canary),
+  })
 })
 
 it('reports a known failure subtype without echoing model or tool data', async () => {
@@ -155,7 +143,5 @@ it('reports a known failure subtype without echoing model or tool data', async (
     ],
     '',
   )
-  await expect(run()).rejects.toThrow(
-    /^Claude Code triage failed: error_max_structured_output_retries$/,
-  )
+  await expect(run()).rejects.toMatchObject({ reason: 'agent-output' })
 })

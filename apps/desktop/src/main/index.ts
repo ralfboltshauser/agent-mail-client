@@ -993,6 +993,7 @@ if (!app.requestSingleInstanceLock()) {
       onLowBattery,
       accountForRun: (accountId, pending, recent) =>
         openReplica().triageAccount(accountId, pending, recent ? 'recent' : 'account'),
+      log: startupLog,
       saveLastRun: (run) => {
         try {
           const path = triageRunFile()

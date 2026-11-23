@@ -1,3 +1,4 @@
+import { describeTriageFailure, TriageFailure } from '@amc/cli/triage'
 import type { TriageResult, TriageStatus } from '../shared/api'
 
 const DEBOUNCE = 2 * 60_000
@@ -14,6 +15,7 @@ interface TriageOptions {
   ) => string | undefined
   saveLastRun: (lastRun: TriageStatus['lastRun']) => void
   changed: (status: TriageStatus) => void
+  log: (event: string) => void
 }
 
 type Run = (accountId: string, signal: AbortSignal, recent: boolean) => Promise<TriageResult | null>
@@ -165,17 +167,21 @@ export class AutoTriage {
             for (const [id, accountId] of pending) this.#pending.set(id, accountId)
           }
         } catch (error) {
+          const failures = error instanceof AggregateError ? error.errors : [error]
+          const diagnostics = failures.map(describeTriageFailure)
+          for (const { className, message } of diagnostics)
+            this.#options.log(`Triage failed (${className}): ${message}`)
           const message = signal.aborted
-            ? 'Triage was interrupted.'
-            : error instanceof TriageWorkerError
-              ? error.message
-              : 'Triage failed.'
+            ? new TriageFailure('interrupted').message
+            : (diagnostics[0]?.message ?? new TriageFailure('unexpected').message)
           this.#record({ at, result: null, error: message })
           if (signal.aborted && this.#run === run && this.#enabled) {
             for (const [id, accountId] of pending) this.#pending.set(id, accountId)
           }
         }
-      } catch {
+      } catch (error) {
+        const { className, message } = describeTriageFailure(error)
+        this.#options.log(`Could not prepare triage (${className}): ${message}`)
         this.#retryAt = Date.now() + COOLDOWN
         this.#skip('Could not prepare triage.')
       } finally {
@@ -199,5 +205,3 @@ export class AutoTriage {
     this.#publish()
   }
 }
-
-export class TriageWorkerError extends Error {}

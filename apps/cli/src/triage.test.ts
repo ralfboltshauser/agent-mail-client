@@ -5,7 +5,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
-import { runTriage, type TriageHarness } from './triage.ts'
+import { runTriage, type TriageHarness, withTriageGrant } from './triage.ts'
 
 const config = { engineUrl: 'http://engine.invalid', token: 'owner' }
 const decision = { threadId: 'a:t1', bucket: 'Reply', reason: 'The sender asked a question' }
@@ -282,7 +282,9 @@ describe('amc triage', () => {
         request.onModel?.('fixture-model')
         return { decisions: [{ threadId: 'a:t1', ...outputs }] }
       })
-      expect(result).toMatchObject([{ threadId: 'a:t1', ...outputs }])
+      expect(result).toMatchObject([
+        { threadId: 'a:t1', ...outputs, ...(dryRun ? {} : { updated: true }) },
+      ])
       expect(setBucket).not.toHaveBeenCalled()
       expect(submit).toHaveBeenCalledTimes(dryRun ? 0 : 1)
       if (!dryRun)
@@ -316,7 +318,7 @@ describe('amc triage', () => {
     const { list, revoke } = fixture({ lostMint: true })
     const model = vi.fn(harness)
     await expect(runTriage(config, 'a', false, signal(), model)).rejects.toThrow(
-      'Lost mint response',
+      'Could not reach the Engine',
     )
     expect(list).toHaveBeenCalledOnce()
     expect(revoke).toHaveBeenCalledOnce()
@@ -338,7 +340,7 @@ describe('amc triage', () => {
       runTriage(config, 'a', false, signal(), async () => ({
         decisions: [{ ...decision, threadId: 'outside' }],
       })),
-    ).rejects.toThrow('one decision for each Thread')
+    ).rejects.toThrow('returned invalid triage decisions')
     expect(setBucket).not.toHaveBeenCalled()
     expect(revoke).toHaveBeenCalledOnce()
   })
@@ -353,4 +355,57 @@ describe('amc triage', () => {
     expect(setBucket).not.toHaveBeenCalled()
     expect(revoke).toHaveBeenCalledOnce()
   })
+})
+
+it('releases its lease when the acquisition response is lost', async () => {
+  let holder: string | undefined
+  vi.stubGlobal('fetch', async (_url: URL, init: RequestInit) => {
+    const body = JSON.parse(String(init.body))
+    if (init.method === 'POST') {
+      holder = body.holder
+      throw new Error('Lost lease response')
+    }
+    expect(init.method).toBe('DELETE')
+    expect(body.holder).toBe(holder)
+    holder = undefined
+    return new Response(null, { status: 204 })
+  })
+  const model = vi.fn(harness)
+  await expect(runTriage(config, 'a', false, signal(), model)).rejects.toThrow(
+    'Could not reach the Engine',
+  )
+  expect(holder).toBeUndefined()
+  expect(model).not.toHaveBeenCalled()
+})
+
+it('reserves time to release the lease if grant revocation times out', async () => {
+  const release = vi.fn()
+  vi.stubGlobal('fetch', async (url: URL, init: RequestInit) => {
+    if (url.pathname === '/v1/triage/lease') {
+      if (init.method === 'POST') return Response.json({ granted: true })
+      release(init.signal?.aborted)
+      return new Response(null, { status: 204 })
+    }
+    if (init.method === 'POST') return Response.json({ id: 'test-token', token: 'agent' })
+    if (init.method === 'GET') {
+      // AbortSignal.timeout uses an unref'd timer. Keep the fixture alive until it fires.
+      await new Promise<void>((resolve) => {
+        const guard = setTimeout(resolve, 1_000)
+        init.signal?.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(guard)
+            resolve()
+          },
+          { once: true },
+        )
+      })
+      throw init.signal?.reason
+    }
+    throw new Error('Unexpected fixture operation')
+  })
+  await expect(
+    withTriageGrant(config, 'a', false, signal(), async () => [], 60),
+  ).rejects.toMatchObject({ reason: 'engine-cleanup' })
+  expect(release).toHaveBeenCalledExactlyOnceWith(false)
 })

@@ -65,7 +65,9 @@ it.each(['crash', 'timeout', 'quit'])('revokes the named grant after worker %s',
     new AbortController().signal,
     quit.signal,
   )
-  const stopped = expect(result).rejects.toThrow('stopped before returning a result')
+  const stopped = expect(result).rejects.toMatchObject({
+    reason: { crash: 'worker-exit', timeout: 'timeout', quit: 'interrupted' }[exit],
+  })
   await vi.advanceTimersByTimeAsync(0)
   await spawned
   expect(child.postMessage).toHaveBeenCalledWith({
@@ -106,4 +108,57 @@ it('defers triage on battery when pmset fails or returns no percentage', async (
   } finally {
     if (platform) Object.defineProperty(process, 'platform', platform)
   }
+})
+
+it('preserves a safe worker failure across the process boundary', async () => {
+  const child = Object.assign(new EventEmitter(), {
+    postMessage: vi.fn(),
+    kill: () => child.emit('exit', 0),
+  })
+  fork.mockImplementation(() => {
+    queueMicrotask(() => child.emit('spawn'))
+    return child
+  })
+  vi.stubGlobal('fetch', async (url: URL, init: RequestInit) => {
+    if (url.pathname === '/v1/triage/lease' && init.method === 'POST')
+      return Response.json({ granted: true })
+    if (url.pathname === '/v1/tokens' && init.method === 'POST')
+      return Response.json({ id: 'ours', token: 'scoped' })
+    if (url.pathname === '/v1/tokens' && init.method === 'GET') return Response.json({ tokens: [] })
+    return new Response(null, { status: 204 })
+  })
+  const spawned = once(child, 'spawn')
+  const signal = new AbortController().signal
+  const result = runTriageProcess(
+    { engineUrl: 'http://engine.invalid', token: 'owner' },
+    'account',
+    true,
+    signal,
+    signal,
+  )
+  await spawned
+  child.emit('message', { failure: { reason: 'agent-missing', className: 'ClaudeAuthError' } })
+  await expect(result).rejects.toMatchObject({
+    reason: 'agent-missing',
+    message: expect.stringContaining('Claude Code was not found'),
+    cause: { name: 'ClaudeAuthError' },
+  })
+})
+
+it('reports an Engine timeout even when fetch wraps it as a transport failure', async () => {
+  vi.stubGlobal('fetch', async (_url: URL, init: RequestInit) => {
+    if (init.method === 'POST') throw new DOMException('sensitive-value', 'TimeoutError')
+    return new Response(null, { status: 204 })
+  })
+  const signal = new AbortController().signal
+  await expect(
+    runTriageProcess(
+      { engineUrl: 'http://engine.invalid', token: 'owner' },
+      'account',
+      true,
+      signal,
+      signal,
+    ),
+  ).rejects.toMatchObject({ reason: 'engine-timeout' })
+  expect(fork).not.toHaveBeenCalled()
 })

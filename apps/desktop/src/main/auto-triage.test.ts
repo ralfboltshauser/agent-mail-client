@@ -1,3 +1,4 @@
+import { TriageFailure } from '@amc/cli/triage'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { AutoTriage } from './auto-triage'
 
@@ -8,6 +9,7 @@ function setup(
   run = vi.fn(async (_account: string, _signal: AbortSignal) => ({ assigned: 2, skipped: 1 })),
 ) {
   const onLowBattery = vi.fn(async () => false)
+  const log = vi.fn()
   const triage = new AutoTriage({
     enabled: true,
     lastRun: null,
@@ -16,10 +18,11 @@ function setup(
       account ?? (pending ? pending.values().next().value : 'one'),
     saveLastRun: vi.fn(),
     changed: vi.fn(),
+    log,
   })
   triage.connect(run)
   triage.setAvailable(true)
-  return { triage, run, onLowBattery }
+  return { triage, run, onLowBattery, log }
 }
 
 beforeEach(() => {
@@ -60,7 +63,7 @@ it('waits for an interrupted run to finish before allowing another run', async (
   })
   const run = vi.fn(async (_account: string, _signal: AbortSignal) => {
     await gate
-    throw new Error('Some private mail content')
+    throw new Error('sensitive-value')
   })
   const { triage } = setup(run)
   const firstRun = triage.now('one')
@@ -79,7 +82,9 @@ it('waits for an interrupted run to finish before allowing another run', async (
   expect(triage.status.lastRun?.error).toBe('Triage was interrupted.')
   await triage.now('two')
   expect(run).toHaveBeenCalledTimes(2)
-  expect(triage.status.lastRun?.error).toBe('Triage failed.')
+  expect(triage.status.lastRun?.error).toBe(
+    'An unexpected error stopped triage. Restart AMC and retry.',
+  )
 })
 
 it('keeps pending arrivals during Pause Sync and allows manual runs when auto-triage is off', async () => {
@@ -120,4 +125,16 @@ it('limits manual runs to recent mail unless the account-wide scope is requested
   await vi.advanceTimersByTimeAsync(10 * minute)
   await triage.now('one', false)
   expect(run).toHaveBeenLastCalledWith('one', expect.any(AbortSignal), false)
+})
+
+it('publishes a safe reason and logs its error class without the original message', async () => {
+  const cause = new TypeError('sensitive-value')
+  const run = vi.fn(async () => {
+    throw new TriageFailure('engine-offline', { cause })
+  })
+  const { triage, log } = setup(run)
+  await triage.now('one')
+  const message = 'Could not reach the Engine. Check the Engine connection and retry.'
+  expect(triage.status.lastRun?.error).toBe(message)
+  expect(log).toHaveBeenCalledExactlyOnceWith(`Triage failed (TypeError): ${message}`)
 })

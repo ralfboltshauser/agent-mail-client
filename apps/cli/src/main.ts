@@ -28,7 +28,7 @@ import { readConfig, writeConfig } from './config.ts'
 import { addImapAccount } from './imap-signin.ts'
 import { loopbackSignIn } from './signin.ts'
 import { printOwnerAction, registerSmartInboxCommands } from './smart-inbox.ts'
-import { runTriage } from './triage.ts'
+import { describeTriageFailure, runTriage } from './triage.ts'
 
 declare const AMC_VERSION: string | undefined
 const VERSION = typeof AMC_VERSION === 'string' ? AMC_VERSION : 'dev'
@@ -388,7 +388,17 @@ const triage = program
         controller.signal,
         undefined,
         opts.recent === true,
-      )
+      ).catch((error: unknown) => {
+        // The top-level debug reporter inspects nested Error causes.
+        const failures = error instanceof AggregateError ? error.errors : [error]
+        const message = failures
+          .map(describeTriageFailure)
+          .map(({ className, message }) =>
+            process.env.AMC_DEBUG === '1' ? `${className}: ${message}` : message,
+          )
+          .join('\n')
+        throw new Error(message)
+      })
       if (!results) console.log('Triage is already running.')
       else if (!results.length) console.log('No untriaged Inbox Threads.')
       else printJson(results)
