@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { DAY_MS, issueToken, listTokens, MAX_AGENT_DAYS, revokeToken } from '../auth/tokens.ts'
 import type { Db } from '../db/database.ts'
 import { type AppEnv, requireOwnerAdmin } from './app.ts'
+import { readJson } from './json.ts'
 
 const CreateAgentToken = z.object({
   name: z.string().min(1).max(60),
@@ -27,7 +28,7 @@ export function tokenRoutes(db: Db) {
   )
 
   r.post('/tokens', requireOwnerAdmin, async (c) => {
-    const parsed = CreateAgentToken.safeParse(await c.req.json().catch(() => null))
+    const parsed = CreateAgentToken.safeParse(await readJson(c.req))
     if (!parsed.success)
       return c.json({ error: 'bad_request', message: z.prettifyError(parsed.error) }, 400)
     const { expiresInDays, expiresInMinutes } = parsed.data

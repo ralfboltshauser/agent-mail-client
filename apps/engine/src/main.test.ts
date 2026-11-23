@@ -6,9 +6,8 @@ import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { DatabaseSync } from 'node:sqlite'
-import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
-import { Health, type TriageHistoryPage } from '@amc/protocol'
+import { Diagnostics, Health, type TriageHistoryPage } from '@amc/protocol'
 import { expect, it } from 'vitest'
 import { issueToken } from './auth/tokens.ts'
 import { databasePath } from './config.ts'
@@ -55,7 +54,9 @@ async function withEngine(
   const lines = createInterface({ input: child.stdout })
   const ready = async () => {
     for await (const line of lines) {
-      if (JSON.parse(line).msg === 'engine listening') return
+      const record = JSON.parse(line)
+      if (record.event === 'engine.stage.finished' && record.stage === 'listen' && !record.err)
+        return
     }
     await exited
     throw new Error(`Engine exited before listening:\n${output}`)
@@ -160,9 +161,17 @@ it('serves with an interrupted Forget and retries physical purge after a SQLite 
         }
         expect(await history()).toMatchObject({ events: [], physicalPurge: 'pending' })
         expect((await request('/v1/health')).status).toBe(200)
+        const diagnostics = async () =>
+          Diagnostics.parse(await (await request('/v1/diagnostics')).json())
+        expect(await diagnostics()).toMatchObject({
+          migrations: { successes: 1, lastSuccessAt: expect.any(String) },
+          queues: { purge: 1 },
+        })
 
         // Keep the reader open across a maintenance tick and confirm it still pins the old view.
-        await delay(2500)
+        await expect
+          .poll(async () => (await diagnostics()).purge.lastFailure?.errorClass, { timeout: 8000 })
+          .toBe('PurgeJobError')
         expect((await history()).physicalPurge).toBe('pending')
         expect(reader?.prepare('SELECT reason FROM triage_owner_reason').get()?.reason).toBe(canary)
         reader?.close()
@@ -171,6 +180,8 @@ it('serves with an interrupted Forget and retries physical purge after a SQLite 
         await expect
           .poll(async () => (await history()).physicalPurge, { timeout: 10_000 })
           .toBe('completed')
+        await expect.poll(async () => (await diagnostics()).purge.successes).toBe(1)
+        expect((await diagnostics()).queues.purge).toBe(0)
         expect(readFileSync(path).includes(canary)).toBe(false)
         expect(readFileSync(`${path}-wal`).includes(canary)).toBe(false)
         await stop()

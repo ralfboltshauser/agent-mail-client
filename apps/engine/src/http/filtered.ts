@@ -8,6 +8,7 @@ import { checkOwnerReason } from '../mail/triage/annotations.ts'
 import { inboxFilterTarget, listFiltered, reviewFilter } from '../mail/triage/filtering.ts'
 import { threadInput } from '../mail/triage/input.ts'
 import type { AppEnv } from './app.ts'
+import { readJson } from './json.ts'
 
 const ListQuery = z.object({
   accountId: z.string().min(1).max(512).optional(),
@@ -35,7 +36,7 @@ export function filteredRoutes(store: MailStore, queue: Mutations) {
     return c.json(inboxFilterTarget(store.db, input.data))
   })
   routes.post('/destination/adopt', async (c) => {
-    const input = AdoptScreenedDestination.safeParse(await c.req.json().catch(() => null))
+    const input = AdoptScreenedDestination.safeParse(await readJson(c.req))
     if (!input.success) return c.json({ error: 'bad_request', message: 'Invalid destination' }, 400)
     return c.json(
       await queue.adoptScreenedDestination(
@@ -47,7 +48,7 @@ export function filteredRoutes(store: MailStore, queue: Mutations) {
     )
   })
   routes.post('/decisions', async (c) => {
-    const input = FilterReviewInput.safeParse(await c.req.json().catch(() => null))
+    const input = FilterReviewInput.safeParse(await readJson(c.req))
     if (!input.success)
       return c.json({ error: 'bad_request', message: 'Invalid filter decision' }, 400)
     checkOwnerReason(input.data.reason)

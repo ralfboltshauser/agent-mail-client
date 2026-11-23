@@ -19,6 +19,7 @@ import {
 import type { MailStore } from '../mail/store.ts'
 import { checkOwnerReason, editOwnerReason } from '../mail/triage/annotations.ts'
 import type { AppEnv } from './app.ts'
+import { readJson } from './json.ts'
 
 export interface OwnerActionHandler {
   get(id: string): OwnerActionStatus | Promise<OwnerActionStatus>
@@ -38,7 +39,7 @@ export function senderRoutes(store: MailStore, queue: Mutations) {
     return c.json(listSenders(store.db, parsed.data))
   })
   routes.post('/decisions', async (c) => {
-    const parsed = SenderDecision.safeParse(await c.req.json().catch(() => null))
+    const parsed = SenderDecision.safeParse(await readJson(c.req))
     if (!parsed.success)
       return c.json({ error: 'bad_request', message: 'Invalid Sender decision' }, 400)
     checkOwnerReason(parsed.data.reason)
@@ -55,7 +56,7 @@ export function senderRoutes(store: MailStore, queue: Mutations) {
     return c.json(action, action.status === 'pending' ? 202 : 200)
   })
   routes.post('/destination/adopt', async (c) => {
-    const parsed = AdoptScreenedDestination.safeParse(await c.req.json().catch(() => null))
+    const parsed = AdoptScreenedDestination.safeParse(await readJson(c.req))
     if (!parsed.success)
       return c.json({ error: 'bad_request', message: 'Invalid destination' }, 400)
     if (parsed.data.destination)
@@ -103,7 +104,7 @@ export function ownerActionRoutes(
   })
   routes.put('/:id/reason', async (c) => {
     const id = c.req.param('id')
-    const input = OwnerActionReasonInput.safeParse(await c.req.json().catch(() => null))
+    const input = OwnerActionReasonInput.safeParse(await readJson(c.req))
     if (!input.success)
       return c.json(
         { error: 'bad_request', message: 'Use a single-line reason of at most 500 characters' },

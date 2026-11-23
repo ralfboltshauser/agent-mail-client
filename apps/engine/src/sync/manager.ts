@@ -1,4 +1,6 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { EventEmitter } from 'node:events'
+import { type EventFields, newRunId, type RequestId, type RunId } from '@amc/observability'
 import type { Health } from '@amc/protocol'
 import { ImapFlowErrorCode } from 'imapflow/lib/errors'
 import {
@@ -10,9 +12,10 @@ import {
 } from '../accounts.ts'
 import type { Sealer } from '../crypto.ts'
 import type { Db } from '../db/database.ts'
+import { EngineDiagnostics, OperationStatus } from '../db/diagnostics.ts'
 import type { Logger } from '../log.ts'
 import type { MailStore } from '../mail/store.ts'
-import { GmailHttpApi, GmailHttpError } from '../providers/gmail/http.ts'
+import { GmailHttpApi } from '../providers/gmail/http.ts'
 import {
   AccessTokens,
   type GmailCredentials,
@@ -74,6 +77,7 @@ export interface SyncManagerOptions {
   store: MailStore
   sealer: Sealer
   log: Logger
+  diagnostics?: EngineDiagnostics
   oauthClient: () => OAuthClient
   /** Overridable for tests. */
   gmailApi?: (tokens: AccessTokens) => GmailApi
@@ -89,7 +93,7 @@ type GmailPubSubHealth = NonNullable<Health['gmailPubSub']>
 
 interface Runner {
   stop: () => void
-  checkMail: () => Promise<boolean>
+  checkMail: (requestId?: RequestId) => Promise<boolean>
   done: Promise<void>
   api?: GmailApi
   gmailHealth?: () => GmailPushHealth
@@ -116,8 +120,17 @@ const sleep = (ms: number, signal: AbortSignal) =>
  * Emits `change` whenever the store may have changed, for live Clients.
  */
 export class SyncManager extends EventEmitter<{ change: [] }> {
-  readonly #o: Required<Omit<SyncManagerOptions, 'gmailApi' | 'imapClient' | 'gmailPubSub'>> &
+  readonly #o: Required<
+    Omit<SyncManagerOptions, 'gmailApi' | 'imapClient' | 'gmailPubSub' | 'diagnostics'>
+  > &
     Pick<SyncManagerOptions, 'gmailApi' | 'imapClient' | 'gmailPubSub'>
+  readonly #diagnostics: EngineDiagnostics
+  readonly #cycleLog = new AsyncLocalStorage<Logger>()
+  readonly #cycleRuns = new WeakMap<OperationStatus, { runId: RunId; requestId?: RequestId }>()
+  readonly #writebackStatus = new OperationStatus()
+  readonly #attachmentStatus = new OperationStatus()
+  readonly #pullStatus = new OperationStatus()
+  readonly #ackStatus = new OperationStatus()
   readonly #runners = new Map<string, Runner>()
   readonly #paused = new Map<string, Promise<void>>()
   #stopping = false
@@ -131,6 +144,7 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
 
   constructor(options: SyncManagerOptions) {
     super()
+    this.#diagnostics = options.diagnostics ?? new EngineDiagnostics()
     this.#o = {
       pollMs: 15_000,
       imapPollMs: 2 * 60_000,
@@ -152,12 +166,14 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
   }
 
   /** Coalesce owner requests across Clients through completion and a short cooldown. */
-  checkMail(): Promise<boolean> {
+  checkMail(requestId?: RequestId): Promise<boolean> {
     if (this.#stopping) return Promise.resolve(false)
     if (this.#manualCheck && Date.now() < this.#nextManualCheckAt) return this.#manualCheck
     this.#nextManualCheckAt = Infinity
     this.#manualCheck = Promise.all(
-      listAccountRows(this.#o.db).map(({ id }) => this.#runners.get(id)?.checkMail() ?? false),
+      listAccountRows(this.#o.db).map(
+        ({ id }) => this.#runners.get(id)?.checkMail(requestId) ?? false,
+      ),
     ).then((results) => {
       this.#nextManualCheckAt = Date.now() + MANUAL_POLL_COOLDOWN_MS
       return results.every(Boolean)
@@ -186,11 +202,24 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
   }
 
   async #pullGmailNotifications(pubSub: GmailPubSub, signal: AbortSignal): Promise<void> {
+    let runId = newRunId()
     while (!signal.aborted) {
-      let operation = 'pull'
+      const log = this.#o.log.with({ runId })
+      let started = performance.now()
+      let operation: 'pull' | 'acknowledge' = 'pull'
+      const success = (status: OperationStatus, count: number) => {
+        const { recovered } = status.success()
+        log.log(recovered ? 'info' : 'debug', 'sync.gmail.pubsub.succeeded', {
+          operation,
+          durationMs: performance.now() - started,
+          count,
+          recovered,
+        })
+      }
       try {
         const messages = await pubSub.pull(signal)
         if (signal.aborted) return
+        success(this.#pullStatus, messages.length)
         const receivedAt = Date.now()
         for (const { address } of messages) {
           if (!address) continue
@@ -202,12 +231,17 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
         // These are wake-up hints. The stored Gmail cursor and periodic poll recover missed work.
         if (messages.length) {
           operation = 'acknowledge'
+          started = performance.now()
           await pubSub.acknowledge(
             messages.map(({ ackId }) => ackId),
             signal,
           )
+          if (signal.aborted) return
+          success(this.#ackStatus, messages.length)
         }
+        this.#diagnostics.pubSub.success()
         this.#pullHealthy = true
+        runId = newRunId()
         if (!messages.length) await sleep(NOTIFICATION_DEBOUNCE_MS, signal)
       } catch (error) {
         if (signal.aborted) return
@@ -225,7 +259,15 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
                 : 'Request failed'
         this.#pullErrorCount++
         this.#lastPullError = { at: Date.now(), message: `${operation}: ${detail}` }
-        this.#o.log.warn({ operation, detail }, 'Gmail Pub/Sub pull failed')
+        this.#diagnostics.pubSub.failure(error)
+        const count = (operation === 'pull' ? this.#pullStatus : this.#ackStatus).failure(error)
+        if (count)
+          log.log('warn', 'sync.gmail.pubsub.failed', {
+            operation,
+            durationMs: performance.now() - started,
+            count,
+            err: error,
+          })
         await sleep(this.#o.pollMs, signal)
       }
     }
@@ -240,7 +282,32 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
     accountId: string,
     work: (sync: ImapAccountSync) => Promise<void>,
   ): Promise<boolean> {
-    return this.#runners.get(accountId)?.imap?.()?.queueOrganise(work) ?? Promise.resolve(false)
+    const active = this.#runners.get(accountId)?.imap?.()
+    if (!active) return Promise.resolve(false)
+    const log = this.#o.log.with({ accountId, runId: newRunId() })
+    return active.queueOrganise(async (sync) => {
+      const start = performance.now()
+      try {
+        await log.span('sync.imap.action', (workLog) =>
+          this.#cycleLog.run(workLog, () => work(sync)),
+        )
+        const { recovered, count } = this.#writebackStatus.success()
+        log.log(recovered ? 'info' : 'debug', 'sync.imap.writeback.succeeded', {
+          durationMs: performance.now() - start,
+          count: count || 1,
+          recovered,
+        })
+      } catch (err) {
+        const count = this.#writebackStatus.failure(err)
+        if (count)
+          log.log('warn', 'sync.imap.writeback.failed', {
+            durationMs: performance.now() - start,
+            count,
+            err,
+          })
+        throw err
+      }
+    })
   }
 
   imapProvider(accountId: string): ImapProvider | null {
@@ -252,7 +319,11 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
     )
   }
 
-  async withImapPaused<T>(address: string, run: () => Promise<T>): Promise<T> {
+  async withImapPaused<T>(
+    address: string,
+    run: () => Promise<T>,
+    requestId?: RequestId,
+  ): Promise<T> {
     const key = address.toLowerCase()
     const previous = this.#paused.get(key)
     let finish: () => void = () => {}
@@ -279,7 +350,7 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
       if (this.#paused.get(key) === ready) {
         this.#paused.delete(key)
         const current = account()
-        if (current && current.status !== 'auth_expired') this.startAccount(current.id)
+        if (current && current.status !== 'auth_expired') this.startAccount(current.id, requestId)
       }
     }
   }
@@ -308,6 +379,9 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
          WHERE message_id = ? AND account_id = ? ORDER BY path_key, validity, uid`,
       )
       const attempted = new Set<string>()
+      const log = this.#o.log.with({ accountId, runId: newRunId() })
+      const started = performance.now()
+      let failure: { err: unknown } | undefined
       const credentials = sealer.open<ImapCredentials>(current.credentials)
       let client: ReturnType<ImapClientFactory> | undefined
       try {
@@ -321,7 +395,18 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
           ).filter(
             ({ path_key, validity, uid }) => !attempted.has(`${path_key}:${validity}:${uid}`),
           )
-          if (!rows.length) return null
+          if (!rows.length) {
+            if (failure) {
+              const count = this.#attachmentStatus.failure(failure.err)
+              if (count)
+                log.log('warn', 'sync.imap.attachment.failed', {
+                  durationMs: performance.now() - started,
+                  count,
+                  err: failure.err,
+                })
+            }
+            return null
+          }
           for (const { path_key, validity, uid } of rows) {
             attempted.add(`${path_key}:${validity}:${uid}`)
             try {
@@ -343,9 +428,11 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
                 size,
                 attachmentId,
               )
+              this.#attachmentStatus.success()
               return hash
-            } catch {
-              // Folder and UID failures are local to this copy. Try the remaining locations.
+            } catch (err) {
+              // The terminal result reports once after the alternate locations are exhausted.
+              failure = { err }
             }
           }
         }
@@ -355,7 +442,57 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
     })
   }
 
-  startAccount(accountId: string): void {
+  async #cycle<T>(
+    accountId: string,
+    provider: 'gmail' | 'imap',
+    phase: EventFields<'sync.cycle.failed'>['phase'],
+    status: OperationStatus,
+    current: () => boolean,
+    work: () => Promise<T>,
+    requestId?: RequestId,
+  ): Promise<T> {
+    const retry = this.#cycleRuns.get(status)
+    const correlation = {
+      runId: retry?.runId ?? newRunId(),
+      requestId: retry?.requestId ?? requestId,
+    }
+    const log = this.#o.log.with({ accountId, ...correlation })
+    const account = this.#diagnostics.account(this.#diagnostics.sync, accountId)
+    const start = performance.now()
+    try {
+      const result = await this.#cycleLog.run(log, work)
+      this.#cycleRuns.delete(status)
+      if (current()) {
+        account.success()
+        const { recovered, count } = status.success()
+        log.log(recovered ? 'info' : 'debug', 'sync.cycle.succeeded', {
+          provider,
+          phase,
+          durationMs: performance.now() - start,
+          count: recovered ? count : typeof result === 'number' ? result : Number(result === true),
+          recovered,
+        })
+      }
+      return result
+    } catch (err) {
+      if (current()) {
+        this.#cycleRuns.set(status, correlation)
+        account.failure(err)
+        const count = status.failure(err)
+        if (count)
+          log.log('warn', 'sync.cycle.failed', {
+            provider,
+            phase,
+            durationMs: performance.now() - start,
+            count,
+            err,
+          })
+      }
+      throw err
+    }
+  }
+
+  startAccount(accountId: string, requestId?: RequestId): void {
     const row = getAccountRow(this.#o.db, accountId)
     if (
       !row ||
@@ -366,19 +503,42 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
     const previous = this.#runners.get(accountId)
     previous?.stop()
     if (row.kind === 'imap') {
-      this.#startImap(row, previous)
+      this.#startImap(row, previous, requestId)
       return
     }
     const { db, store, log } = this.#o
-    const tokens = new AccessTokens(
-      this.#o.oauthClient(),
-      this.#o.sealer.open<GmailCredentials>(row.credentials),
-    )
-    const api = this.#o.gmailApi
-      ? this.#o.gmailApi(tokens)
-      : new GmailHttpApi(tokens, fetch, {
-          onRetry: (info) => log.warn({ account: accountId, ...info }, 'gmail retry'),
-        })
+    let api: GmailApi
+    try {
+      const tokens = new AccessTokens(
+        this.#o.oauthClient(),
+        this.#o.sealer.open<GmailCredentials>(row.credentials),
+      )
+      api = this.#o.gmailApi
+        ? this.#o.gmailApi(tokens)
+        : new GmailHttpApi(tokens, fetch, {
+            onRetry: ({ status, attempt, delayMs }) =>
+              (this.#cycleLog.getStore() ?? log.with({ accountId })).log(
+                'debug',
+                'sync.gmail.request.retry',
+                { status, attempt, durationMs: delayMs },
+              ),
+          })
+    } catch (err) {
+      this.#diagnostics.account(this.#diagnostics.sync, accountId).failure(err)
+      log.log(
+        'error',
+        'sync.cycle.failed',
+        {
+          provider: 'gmail',
+          phase: 'startup',
+          durationMs: 0,
+          count: 1,
+          err,
+        },
+        { accountId, runId: newRunId(), requestId },
+      )
+      throw err
+    }
     const controller = new AbortController()
     const signal = controller.signal
     const manual = new ManualPoll(signal)
@@ -388,7 +548,7 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
       api,
       store,
       new DbAccountState(db, accountId, [row.address]),
-      log,
+      () => this.#cycleLog.getStore() ?? log.with({ accountId }),
       signal,
     )
     sync.onProgress = () => {
@@ -398,10 +558,6 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
     const fail = (error: unknown): boolean => {
       if (!isCurrent()) return true
       if (error instanceof OAuthError && error.needsReauth) {
-        log.warn(
-          { account: accountId },
-          'gmail sign-in expired; waiting for the owner to sign in again',
-        )
         setAccountStatus(
           db,
           store,
@@ -413,15 +569,24 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
         return true
       }
       const message = error instanceof Error ? error.message : String(error)
-      log.error({ account: accountId, err: message }, 'gmail sync error')
       setAccountStatus(db, store, accountId, 'error', message)
       return false
     }
 
+    const startupStatus = new OperationStatus()
+    const historyStatus = new OperationStatus()
+    const backfillStatus = new OperationStatus()
+    const watchStatus = new OperationStatus()
     const backfill = async () => {
       while (!signal.aborted) {
         try {
-          if (!(await sync.backfillStep()) || !isCurrent()) return
+          if (
+            !(await this.#cycle(accountId, 'gmail', 'backfill', backfillStatus, isCurrent, () =>
+              sync.backfillStep(),
+            )) ||
+            !isCurrent()
+          )
+            return
           setAccountStatus(db, store, accountId, 'backfilling')
           this.emit('change')
         } catch (error) {
@@ -460,7 +625,8 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
           }
           watchExpiresAt = expiration
           watchHealthy = true
-          log.info({ account: accountId, watchExpiresAt }, 'Gmail watch renewed')
+          log.log('info', 'sync.gmail.watch.finished', { ok: true }, { accountId })
+          watchStatus.success()
           await sleep(Math.min(WATCH_RENEW_MS, Math.max(1_000, remaining - 60_000)), signal)
         } catch (error) {
           if (signal.aborted) return
@@ -468,13 +634,16 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
             watchHealthy = false
             wake()
           }
-          log.warn(
-            {
-              account: accountId,
-              status: error instanceof GmailHttpError ? error.status : undefined,
-            },
-            'Gmail watch failed',
-          )
+          if (watchStatus.failure(error))
+            log.log(
+              'warn',
+              'sync.gmail.watch.finished',
+              {
+                ok: false,
+                err: error,
+              },
+              { accountId },
+            )
           await sleep(WATCH_RETRY_MS, signal)
         }
       }
@@ -487,12 +656,22 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
         notified = false
         const finishCheck = manual.take()
         try {
-          if (Date.now() - lastLabels > this.#o.labelsEveryMs) {
-            await sync.syncLabels()
-            if (!isCurrent()) return
-            lastLabels = Date.now()
-          }
-          const changes = await sync.incremental()
+          const changes = await this.#cycle(
+            accountId,
+            'gmail',
+            'history',
+            historyStatus,
+            isCurrent,
+            async () => {
+              if (Date.now() - lastLabels > this.#o.labelsEveryMs) {
+                await sync.syncLabels()
+                if (!isCurrent()) return 0
+                lastLabels = Date.now()
+              }
+              return sync.incremental()
+            },
+            finishCheck?.requestId,
+          )
           if (!isCurrent()) return
           touchAccountSync(db, accountId)
           if (sync.backfillDone) setAccountStatus(db, store, accountId, 'ready')
@@ -533,7 +712,15 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
         ]).finally(() => wait.abort()))
       while (isCurrent()) {
         try {
-          await sync.start()
+          await this.#cycle(
+            accountId,
+            'gmail',
+            'startup',
+            startupStatus,
+            isCurrent,
+            () => sync.start(),
+            requestId,
+          )
           if (!isCurrent()) return
           setAccountStatus(db, store, accountId, sync.backfillDone ? 'ready' : 'backfilling')
           this.emit('change')
@@ -555,7 +742,7 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
     this.#runners.set(accountId, {
       stop,
       done,
-      checkMail: () => manual.request(),
+      checkMail: (requestId) => manual.request(requestId),
       api,
       gmailHealth: () => ({
         watchExpiresAt,
@@ -574,28 +761,27 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
     })
   }
 
-  #startImap(row: NonNullable<ReturnType<typeof getAccountRow>>, previous?: Runner): void {
+  #startImap(
+    row: NonNullable<ReturnType<typeof getAccountRow>>,
+    previous?: Runner,
+    requestId?: RequestId,
+  ): void {
     const { db, store, log, sealer, imapPollMs } = this.#o
     const controller = new AbortController()
     const signal = controller.signal
     const manual = new ManualPoll(signal)
     let active: ImapAccountSync | undefined
     let useIdle = true
+    const idleStatus = this.#diagnostics.account(this.#diagnostics.idle, row.id)
+    const allStatus = new OperationStatus()
+    const inboxStatus = new OperationStatus()
+    const backfillStatus = new OperationStatus()
     const report = (failure: ImapSyncFailure, socketError?: Error) => {
       const details = imapErrorDetails(socketError ?? failure)
       const folder = failure.folder ? ` (${JSON.stringify(failure.folder).slice(1, -1)})` : ''
       const code = details.errorCode ? ` [${details.errorCode}]` : ''
       const message = `IMAP ${failure.phase}${folder}: ${failure.summary}${code}`
       const authExpired = failure.cause instanceof ImapAuthError
-      const context = {
-        account: row.id,
-        phase: failure.phase,
-        folder: failure.folder,
-        ...details,
-        errorMessage: failure.summary,
-      }
-      if (authExpired || failure instanceof ImapIdleFailure) log.warn(context, 'IMAP sync failed')
-      else log.error(context, 'IMAP sync failed')
       setAccountStatus(db, store, row.id, authExpired ? 'auth_expired' : 'error', message)
       this.emit('change')
       return authExpired
@@ -604,146 +790,193 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
     const done = (async () => {
       await previous?.done
       if (signal.aborted) return
-      log.info({ account: row.id, phase: 'start', folder: null }, 'IMAP runner started')
-      try {
-        let retryMs = 5_000
-        while (!signal.aborted) {
-          let phase = 'credentials'
-          let summary = 'Could not open stored IMAP credentials'
-          let socketError: Error | undefined
-          let folder: string | null = null
-          let finishCheck: ReturnType<ManualPoll['take']>
-          try {
-            const credentials = sealer.open<ImapCredentials>(row.credentials)
-            phase = 'connect'
-            summary = 'Could not connect to the IMAP server over TLS'
-            const client = (this.#o.imapClient ?? createImapClient)(credentials.imap)
-            let closed = false
-            const close = () => {
-              if (closed) return
-              closed = true
-              client.close()
-            }
-            signal.addEventListener('abort', close, { once: true })
-            try {
-              await connectImap(client, (error) => {
-                socketError ??= error
-              })
-              if (signal.aborted) return
-              phase = 'initialize'
-              summary = 'Could not load IMAP sync state'
-              const sync = new ImapAccountSync(client, store, row.id, row.address)
-              active = sync
-              let idleTime = 0
-              let nextPoll = 0
-              let backfilled = false
-              const wait = async (ms: number, wake?: AbortSignal) => {
-                try {
-                  if (useIdle) idleTime += await sync.waitForInbox(ms, signal, wake)
-                  else {
-                    const start = Date.now()
-                    await sleep(ms, wake ? AbortSignal.any([signal, wake]) : signal)
-                    idleTime += Date.now() - start
-                  }
-                  if (idleTime >= 60_000) retryMs = 5_000
-                } catch (error) {
-                  // A server that fails the IDLE handshake can still serve ordinary commands.
-                  // Retry on a fresh connection with polling for the rest of this runner.
-                  if (error instanceof ImapSyncFailure) {
-                    if (error instanceof ImapIdleFailure && client.usable) useIdle = false
-                    throw error
-                  }
-                  throw new ImapIdleFailure('Could not wait for Inbox changes', error)
-                }
-              }
-              const inboxWindow = async () => {
-                await wait(200)
-                if (signal.aborted || !client.usable) {
-                  throw new ImapSyncFailure(
-                    'idle',
-                    'INBOX',
-                    'Connection closed while waiting for Inbox changes',
-                  )
-                }
-                if (sync.inboxChanged) await sync.step('inbox')
-              }
-              try {
-                phase = 'idle'
-                folder = 'INBOX'
-                await wait(200)
-                while (client.usable && !signal.aborted) {
-                  phase = 'organise'
-                  folder = null
-                  summary = 'Could not process queued IMAP work'
-                  if (await sync.runQueuedOrganise()) nextPoll = 0
-                  if (signal.aborted || !client.usable) break
-                  finishCheck = manual.take()
-                  const mode =
-                    finishCheck || Date.now() >= nextPoll
-                      ? 'all'
-                      : sync.inboxChanged
-                        ? 'inbox'
-                        : 'backfill'
-                  if (mode !== 'backfill' || !backfilled) {
-                    phase = mode
-                    folder = mode === 'inbox' ? 'INBOX' : null
-                    summary = 'Could not finish the sync pass'
-                    backfilled = await sync.step(mode, useIdle ? inboxWindow : undefined)
-                    if (signal.aborted) return
-                    if (mode === 'all') nextPoll = Date.now() + imapPollMs
-                    touchAccountSync(db, row.id)
-                    setAccountStatus(db, store, row.id, backfilled ? 'ready' : 'backfilling')
-                    this.emit('change')
-                    finishCheck?.(true)
-                    finishCheck = undefined
-                  }
-                  const remaining = Math.max(0, nextPoll - Date.now())
-                  phase = useIdle ? 'idle' : 'poll'
-                  folder = useIdle ? 'INBOX' : null
-                  await manual.wait((wake) =>
-                    wait(Math.min(backfilled ? 60_000 : 200, remaining), wake),
-                  )
-                }
-                if (signal.aborted) return
-                throw new ImapSyncFailure(phase, folder, 'IMAP connection closed')
-              } finally {
-                active = undefined
-                sync.dispose()
-              }
-            } finally {
-              signal.removeEventListener('abort', close)
-              close()
-            }
-          } catch (error) {
-            if (signal.aborted) return
-            const failure =
-              error instanceof ImapSyncFailure
-                ? error
-                : new ImapSyncFailure(
-                    phase,
-                    folder,
-                    error instanceof ImapAuthError ? error.message : summary,
-                    error,
-                  )
-            const authExpired = report(failure, socketError)
-            const finish = finishCheck ?? manual.take()
-            finish?.(false)
-            if (authExpired) {
-              controller.abort()
-              return
-            }
-            await manual.backoff(() => sleep(retryMs, signal))
-            retryMs = Math.min(retryMs * 2, 5 * 60_000)
+      let retryMs = 5_000
+      let runId = newRunId()
+      while (!signal.aborted) {
+        const started = performance.now()
+        const connectionLog = log.with({ accountId: row.id, runId, requestId })
+        let connected = false
+        let phase = 'credentials'
+        let summary = 'Could not open stored IMAP credentials'
+        let socketError: Error | undefined
+        let folder: string | null = null
+        let finishCheck: ReturnType<ManualPoll['take']>
+        try {
+          const credentials = sealer.open<ImapCredentials>(row.credentials)
+          phase = 'connect'
+          summary = 'Could not connect to the IMAP server over TLS'
+          const client = (this.#o.imapClient ?? createImapClient)(credentials.imap)
+          let closed = false
+          const close = () => {
+            if (closed) return
+            closed = true
+            client.close()
           }
+          signal.addEventListener('abort', close, { once: true })
+          try {
+            await connectImap(client, (error) => {
+              socketError ??= error
+            })
+            if (signal.aborted) return
+            phase = 'initialize'
+            summary = 'Could not load IMAP sync state'
+            const sync = new ImapAccountSync(client, store, row.id, row.address)
+            active = sync
+            let idleTime = 0
+            let nextPoll = 0
+            let backfilled = false
+            const wait = async (ms: number, wake?: AbortSignal) => {
+              try {
+                if (useIdle) idleTime += await sync.waitForInbox(ms, signal, wake)
+                else {
+                  const start = Date.now()
+                  await sleep(ms, wake ? AbortSignal.any([signal, wake]) : signal)
+                  idleTime += Date.now() - start
+                }
+                if (idleTime >= 60_000) retryMs = 5_000
+              } catch (error) {
+                // A server that fails the IDLE handshake can still serve ordinary commands.
+                // Retry on a fresh connection with polling for the rest of this runner.
+                if (error instanceof ImapSyncFailure) {
+                  if (error instanceof ImapIdleFailure && client.usable) useIdle = false
+                  throw error
+                }
+                throw new ImapIdleFailure('Could not wait for Inbox changes', error)
+              }
+            }
+            const inboxWindow = async () => {
+              await wait(200)
+              if (signal.aborted || !client.usable) {
+                throw new ImapSyncFailure(
+                  'idle',
+                  'INBOX',
+                  'Connection closed while waiting for Inbox changes',
+                )
+              }
+              if (sync.inboxChanged) await sync.step('inbox')
+            }
+            try {
+              phase = 'idle'
+              folder = 'INBOX'
+              await wait(200)
+              if (!signal.aborted && client.usable) {
+                connected = true
+                const { recovered } = idleStatus.success()
+                connectionLog.log('info', 'sync.imap.idle.connected', {
+                  durationMs: performance.now() - started,
+                  count: 1,
+                  recovered,
+                  mode: useIdle ? 'idle' : 'poll',
+                })
+              }
+              while (client.usable && !signal.aborted) {
+                phase = 'organise'
+                folder = null
+                summary = 'Could not process queued IMAP work'
+                if (await sync.runQueuedOrganise()) nextPoll = 0
+                if (signal.aborted || !client.usable) break
+                finishCheck = manual.take()
+                const mode =
+                  finishCheck || Date.now() >= nextPoll
+                    ? 'all'
+                    : sync.inboxChanged
+                      ? 'inbox'
+                      : 'backfill'
+                if (mode !== 'backfill' || !backfilled) {
+                  phase = mode
+                  folder = mode === 'inbox' ? 'INBOX' : null
+                  summary = 'Could not finish the sync pass'
+                  const status =
+                    mode === 'all' ? allStatus : mode === 'inbox' ? inboxStatus : backfillStatus
+                  backfilled = await this.#cycle(
+                    row.id,
+                    'imap',
+                    mode,
+                    status,
+                    () => !signal.aborted,
+                    () => sync.step(mode, useIdle ? inboxWindow : undefined),
+                    finishCheck?.requestId,
+                  )
+
+                  if (signal.aborted) return
+                  if (mode === 'all') nextPoll = Date.now() + imapPollMs
+                  touchAccountSync(db, row.id)
+                  setAccountStatus(db, store, row.id, backfilled ? 'ready' : 'backfilling')
+                  this.emit('change')
+                  finishCheck?.(true)
+                  finishCheck = undefined
+                }
+                const remaining = Math.max(0, nextPoll - Date.now())
+                phase = useIdle ? 'idle' : 'poll'
+                folder = useIdle ? 'INBOX' : null
+                await manual.wait((wake) =>
+                  wait(Math.min(backfilled ? 60_000 : 200, remaining), wake),
+                )
+              }
+              if (signal.aborted) return
+              throw new ImapSyncFailure(phase, folder, 'IMAP connection closed')
+            } finally {
+              active = undefined
+              sync.dispose()
+            }
+          } finally {
+            signal.removeEventListener('abort', close)
+            close()
+          }
+        } catch (error) {
+          if (signal.aborted) return
+          const failure =
+            error instanceof ImapSyncFailure
+              ? error
+              : new ImapSyncFailure(
+                  phase,
+                  folder,
+                  error instanceof ImapAuthError ? error.message : summary,
+                  error,
+                )
+          const err =
+            failure instanceof ImapIdleFailure ? failure : (socketError ?? failure.cause ?? failure)
+          const count = idleStatus.failure(err)
+          if (count)
+            connectionLog.log('warn', 'sync.imap.idle.reconnect', {
+              durationMs: performance.now() - started,
+              count,
+              err,
+              retryMs: failure.cause instanceof ImapAuthError ? 0 : retryMs,
+              mode: useIdle ? 'idle' : 'poll',
+            })
+          if (!connected || phase === 'idle' || phase === 'poll') {
+            this.#diagnostics.account(this.#diagnostics.sync, row.id).failure(err)
+            if (count)
+              connectionLog.log('warn', 'sync.cycle.failed', {
+                provider: 'imap',
+                phase: 'startup',
+                durationMs: performance.now() - started,
+                count,
+                err,
+              })
+          }
+          const authExpired = report(failure, socketError)
+          const finish = finishCheck ?? manual.take()
+          finish?.(false)
+          if (authExpired) {
+            controller.abort()
+            return
+          }
+          if (connected) {
+            // A later connection incident gets its own run. Early failed attempts keep this one.
+            runId = newRunId()
+            requestId = undefined
+          }
+          await manual.backoff(() => sleep(retryMs, signal))
+          retryMs = Math.min(retryMs * 2, 5 * 60_000)
         }
-      } finally {
-        log.info({ account: row.id, phase: 'stop', folder: null }, 'IMAP runner stopped')
       }
     })()
     this.#runners.set(row.id, {
       stop: () => controller.abort(),
       done,
-      checkMail: () => manual.request(),
+      checkMail: (requestId) => manual.request(requestId),
       imap: () => active,
     })
   }

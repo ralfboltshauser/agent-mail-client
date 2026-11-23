@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { INLINE_IMAGE_TYPES } from '@amc/composer'
+import { newRunId } from '@amc/observability'
 import type {
   Address,
   ComposeAttachment,
@@ -17,6 +18,8 @@ import * as Y from 'yjs'
 import { newId } from '../auth/secrets.ts'
 import type { Principal } from '../auth/tokens.ts'
 import { type Db, transaction } from '../db/database.ts'
+import { OperationStatus } from '../db/diagnostics.ts'
+import type { Logger } from '../log.ts'
 import { fromGmail } from '../providers/gmail/mapping.ts'
 import type { GmailApi, GmailDraft } from '../providers/gmail/types.ts'
 import { parseMessage } from '../providers/imap/mapping.ts'
@@ -228,12 +231,20 @@ export class Drafts {
   readonly #db: Db
   readonly #store: MailStore
   readonly #api: (accountId: string) => DraftMirror | null
+  readonly #log: Logger | undefined
+  readonly #mirrorStatuses = { push: new OperationStatus(), remove: new OperationStatus() }
   readonly #mirror = new Map<string, Promise<unknown>>()
 
-  constructor(db: Db, store: MailStore, api: (accountId: string) => DraftMirror | null) {
+  constructor(
+    db: Db,
+    store: MailStore,
+    api: (accountId: string) => DraftMirror | null,
+    log?: Logger,
+  ) {
     this.#db = db
     this.#store = store
     this.#api = api
+    this.#log = log
   }
 
   get(id: string): VersionedDraft | null {
@@ -546,7 +557,11 @@ export class Drafts {
   }
 
   async #withMirror<T>(id: string, operation: () => Promise<T>): Promise<T> {
-    while (this.#mirror.has(id)) await this.#mirror.get(id)?.catch(() => {})
+    while (this.#mirror.has(id)) {
+      await this.#mirror.get(id)?.catch(() => {
+        // The original caller handles its result. A failed predecessor still releases the lock.
+      })
+    }
     const pending = operation().finally(() => this.#mirror.delete(id))
     this.#mirror.set(id, pending)
     return pending
@@ -701,6 +716,36 @@ export class Drafts {
     this.#store.recordChange('draft', row.id, 'delete')
   }
 
+  #mirrorOutcome(
+    accountId: string,
+    stage: 'push' | 'remove',
+    start: number,
+    failure?: { err: unknown },
+  ) {
+    if (!this.#log) return
+    const status = this.#mirrorStatuses[stage]
+    const durationMs = performance.now() - start
+    if (failure) {
+      const count = status.failure(failure.err)
+      if (count)
+        this.#log.log(
+          'warn',
+          'draft.mirror.failed',
+          { stage, count, durationMs, err: failure.err },
+          { accountId, runId: newRunId() },
+        )
+    } else {
+      const { recovered, count } = status.success()
+      if (recovered)
+        this.#log.log(
+          'info',
+          'draft.mirror.succeeded',
+          { stage, count, durationMs, recovered },
+          { accountId, runId: newRunId() },
+        )
+    }
+  }
+
   async mirrorPending(): Promise<void> {
     const pending = this.#db
       .prepare(
@@ -714,7 +759,19 @@ export class Drafts {
       .prepare('SELECT * FROM draft_mirror_removal LIMIT 20')
       .all() as unknown as MirrorRemoval[]
     await Promise.allSettled(
-      removals.map((row) => this.#withMirror(row.draft_id, () => this.#removeOldMirror(row))),
+      removals.map((row) =>
+        this.#withMirror(row.draft_id, async () => {
+          const start = performance.now()
+          try {
+            const result = await this.#removeOldMirror(row)
+            this.#mirrorOutcome(row.account_id, 'remove', start)
+            return result
+          } catch (err) {
+            this.#mirrorOutcome(row.account_id, 'remove', start, { err })
+            throw err
+          }
+        }),
+      ),
     )
   }
 
@@ -1376,12 +1433,17 @@ export class Drafts {
       if (row.mirror_left && !importedImapId) kept.add('IMAP')
       let providerRemoved: 'Gmail' | 'IMAP' | undefined
       let retry = false
+      const start = performance.now()
+      const leaveProviderCopy = (err: unknown) => {
+        this.#mirrorOutcome(row.account_id, 'remove', start, { err })
+        return false
+      }
       if (gmailDraftId && row.mirror_written_hash) {
         const removed = await this.#discardGmailMirror(
           row.account_id,
           gmailDraftId,
           row.mirror_written_hash,
-        ).catch(() => false)
+        ).catch(leaveProviderCopy)
         if (removed) providerRemoved = 'Gmail'
         else kept.add('Gmail')
       } else if (importedImapId) {
@@ -1389,7 +1451,7 @@ export class Drafts {
           this.#api(row.account_id),
           importedImapId,
           row.mirror_hash,
-        ).catch(() => false)
+        ).catch(leaveProviderCopy)
         if (removed) providerRemoved = 'IMAP'
         else kept.add('IMAP')
       } else if (removal) {
@@ -1397,13 +1459,15 @@ export class Drafts {
           const outcome = await this.#removeOldMirror(removal)
           if (outcome === 'removed' || outcome === 'absent') providerRemoved = provider
           else kept.add(provider)
-        } catch {
+        } catch (err) {
+          this.#mirrorOutcome(row.account_id, 'remove', start, { err })
           retry = true
         }
       } else if (row.provider_draft_id) {
         kept.add(provider)
       }
 
+      if (providerRemoved) this.#mirrorOutcome(row.account_id, 'remove', start)
       const warnings = [...kept].map((name) =>
         name === 'Gmail' ? 'Draft left in Gmail' : `A copy in ${name} was left untouched.`,
       )
@@ -1438,6 +1502,7 @@ export class Drafts {
   async #pushOnce(id: string): Promise<void> {
     const row = this.#row(id)
     if (!row || this.#hasActiveSend(id)) return
+    const start = performance.now()
     try {
       const api = this.#api(row.account_id)
       if (!api) throw new Error('Account is unavailable')
@@ -1496,7 +1561,9 @@ export class Drafts {
           this.#queueMirrorRemoval(row)
         }
       })
-    } catch {
+      this.#mirrorOutcome(row.account_id, 'push', start)
+    } catch (err) {
+      this.#mirrorOutcome(row.account_id, 'push', start, { err })
       this.#db
         .prepare('UPDATE draft SET mirror_error = 1 WHERE id = ? AND account_id = ?')
         .run(id, row.account_id)

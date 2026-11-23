@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { z } from 'zod'
 import type { Db } from '../db/database.ts'
 import { type AppEnv, requireOwnerAdmin } from './app.ts'
+import { readJson } from './json.ts'
 
 const Lease = z.object({ holder: z.string().min(1).max(60) })
 const TTL = 10 * 60_000
@@ -9,7 +10,7 @@ const TTL = 10 * 60_000
 export function triageLeaseRoutes(db: Db) {
   const routes = new Hono<AppEnv>()
   routes.post('/', requireOwnerAdmin, async (c) => {
-    const parsed = Lease.safeParse(await c.req.json().catch(() => null))
+    const parsed = Lease.safeParse(await readJson(c.req))
     if (!parsed.success) return c.json({ error: 'bad_request', message: 'Expected holder' }, 400)
 
     const now = Date.now()
@@ -24,7 +25,7 @@ export function triageLeaseRoutes(db: Db) {
   })
 
   routes.delete('/', requireOwnerAdmin, async (c) => {
-    const parsed = Lease.safeParse(await c.req.json().catch(() => null))
+    const parsed = Lease.safeParse(await readJson(c.req))
     if (!parsed.success) return c.json({ error: 'bad_request', message: 'Expected holder' }, 400)
 
     db.prepare('DELETE FROM triage_lease WHERE slot = 1 AND holder = ?').run(parsed.data.holder)

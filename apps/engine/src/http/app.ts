@@ -1,7 +1,5 @@
 import { existsSync, statfsSync } from 'node:fs'
-import { createLogger as createObservabilityLogger, resolveLogLevel } from '@amc/observability'
 import { type RequestLogEnv, requestLogging } from '@amc/observability/hono'
-import { stackFilePaths, stdoutSink } from '@amc/observability/node'
 import type { Health, Me, PublicHealth, Scope } from '@amc/protocol'
 import { hasScope, PairRequest } from '@amc/protocol'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
@@ -16,7 +14,8 @@ import {
 import { type Config, databasePath, listensOnLoopback } from '../config.ts'
 import { latestBackup } from '../db/backups.ts'
 import { type Db, fileSize, schemaVersion } from '../db/database.ts'
-import type { Logger } from '../log.ts'
+import { EngineDiagnostics } from '../db/diagnostics.ts'
+import { createLogger, type Logger } from '../log.ts'
 import { DraftError } from '../mail/drafts.ts'
 import type { Mutations } from '../mail/mutations.ts'
 import type { Outbox } from '../mail/outbox.ts'
@@ -28,7 +27,9 @@ import { agentActionRoutes } from './agent-actions.ts'
 import { bucketRoutes } from './buckets.ts'
 import { composeRoutes } from './compose.ts'
 import { composerLinkRoutes } from './composer-link.ts'
+import { diagnosticsRoutes } from './diagnostics.ts'
 import { filteredRoutes } from './filtered.ts'
+import { readJson } from './json.ts'
 import { type MailDeps, mailRoutes } from './mail.ts'
 import { mutationRoutes } from './mutations.ts'
 import { type OwnerActionHandler, ownerActionRoutes, senderRoutes } from './senders.ts'
@@ -44,7 +45,9 @@ export interface AppEnv {
 export interface AppDeps {
   db: Db
   config: Config
-  log: Logger
+  log?: Logger
+  logRoutes?: Set<string>
+  diagnostics?: EngineDiagnostics
   startedAt?: number
   shutdownSignal?: AbortSignal
   mail?: MailDeps
@@ -62,6 +65,8 @@ export function createApp({
   db,
   config,
   log,
+  logRoutes = new Set(),
+  diagnostics = new EngineDiagnostics(),
   startedAt = Date.now(),
   shutdownSignal,
   mail,
@@ -72,24 +77,14 @@ export function createApp({
 }: AppDeps) {
   const app = new Hono<AppEnv>()
 
-  const routes = new Set(['unmatched'])
+  const routes = logRoutes
+  routes.add('unmatched')
+  const requestLog = log ?? createLogger(config.logLevel, routes)
+  // The production logger uses this exact allowlist, populated after mounting.
   app.use(
     '*',
     requestLogging<AppEnv>(
-      createObservabilityLogger({
-        component: 'engine',
-        level: resolveLogLevel(process.env.AMC_LOG_LEVEL, config.logLevel),
-        sink: stdoutSink,
-        routes,
-        stackFiles: stackFilePaths([
-          [new URL(import.meta.url), 'engine'],
-          [new URL('./mail.ts', import.meta.url), 'http/mail'],
-          [new URL('./sync.ts', import.meta.url), 'http/sync'],
-          [new URL('../src/http/app.ts', import.meta.url), 'http/app'],
-          [new URL('../src/http/mail.ts', import.meta.url), 'http/mail'],
-          [new URL('../src/http/sync.ts', import.meta.url), 'http/sync'],
-        ]),
-      }),
+      requestLog,
       new Set(['/health', '/v1/health', '/v1/sync/state', '/v1/sync/changes']),
     ),
   )
@@ -119,22 +114,26 @@ export function createApp({
   app.get('/health', (c) => c.json({ ok: true, version: VERSION } satisfies PublicHealth))
 
   app.post('/v1/auth/pair', async (c) => {
-    const parsed = PairRequest.safeParse(await c.req.json().catch(() => null))
+    const parsed = PairRequest.safeParse(await readJson(c.req))
     if (!parsed.success)
       return c.json({ error: 'bad_request', message: 'Expected code and deviceName' }, 400)
     const issued = redeemPairingCode(db, parsed.data.code, parsed.data.deviceName)
     if (!issued) {
-      log.warn('pairing refused')
+      requestLog.log('warn', 'auth.pairing', { accepted: false }, { requestId: c.get('requestId') })
       return c.json(
         { error: 'invalid_code', message: 'Unknown, used or expired pairing code' },
         401,
       )
     }
-    log.info({ tokenId: issued.id, kind: issued.kind }, 'paired a device')
+    requestLog.log('info', 'auth.pairing', { accepted: true }, { requestId: c.get('requestId') })
     return c.json({ token: issued.secret, kind: issued.kind, scopes: issued.scopes })
   })
 
   const v1 = new Hono<AppEnv>()
+  v1.use('/diagnostics', async (c, next) => {
+    c.header('Cache-Control', 'no-store')
+    await next()
+  })
   v1.use('*', requireAuth(db))
   v1.use('*', async (c, next) => {
     const principal = c.get('principal')
@@ -202,6 +201,7 @@ export function createApp({
     return c.json(health)
   })
 
+  v1.route('/', diagnosticsRoutes(db, diagnostics))
   v1.route('/', tokenRoutes(db))
   v1.route('/triage/lease', triageLeaseRoutes(db))
   v1.route('/triage/events', triageHistoryRoutes(db))
@@ -247,7 +247,7 @@ export function createApp({
       )
     v1.route('/', mailRoutes(mail))
     v1.route('/', bucketRoutes(mail.store))
-    v1.route('/', syncRoutes(mail, mutations, shutdownSignal))
+    v1.route('/', syncRoutes(mail, mutations, shutdownSignal, requestLog))
 
     // MCP over Streamable HTTP, stateless: one server per request, built from the token's scopes.
     app.all('/mcp', requireAuth(db), async (c) => {
@@ -296,8 +296,8 @@ export function requireScope(scope: Scope): MiddlewareHandler<AppEnv> {
 }
 
 export const requireOwnerAdmin: MiddlewareHandler<AppEnv> = async (c, next) => {
-  const { kind, scopes } = c.get('principal')
-  if ((kind !== 'desktop' && kind !== 'cli') || !hasScope(scopes, 'admin'))
+  const { kind, scopes, accountId } = c.get('principal')
+  if (accountId || (kind !== 'desktop' && kind !== 'cli') || !hasScope(scopes, 'admin'))
     return c.json(
       { error: 'forbidden', message: 'This action requires a paired owner Client' },
       403,

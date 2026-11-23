@@ -327,6 +327,7 @@ export async function imapDestination(
       return ready(store, account, candidate, filtered)
     }
   } catch {
+    // The caller receives and persists the repair-required outcome for an unverified folder.
     return repair(
       store,
       account,

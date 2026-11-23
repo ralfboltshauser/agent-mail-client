@@ -79,6 +79,10 @@ sudo install -m 644 "$S/amc-engine.service" /etc/systemd/system/amc-engine.servi
 sudo install -m 644 "$S/amc-backup.service" "$S/amc-backup.timer" /etc/systemd/system/
 sudo install -m 755 "$S/amc-engine-wrapper.sh" /usr/local/bin/amc-engine
 sudo install -m 755 "$S/amc-cli-wrapper.sh" /usr/local/bin/amc
+sudo install -d -m 755 /etc/systemd/journald.conf.d
+sudo install -m 644 "$S/90-amc-journal.conf" /etc/systemd/journald.conf.d/
+sudo systemctl restart systemd-journald.service
+sudo journalctl --flush
 sudo systemctl daemon-reload
 sudo systemctl enable amc-engine.service >/dev/null 2>&1
 sudo systemctl enable --now amc-backup.timer

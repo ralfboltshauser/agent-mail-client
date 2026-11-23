@@ -304,3 +304,28 @@ Blobs are content-addressed and append-only and stay in `/srv/amc/blobs`. For a
 future offsite copy, rsync `/srv/amc` to protected storage and use a verified
 backup file for recovery. Keep a separate protected copy of the encryption key
 in `/etc/amc/key` so restored credentials can be decrypted.
+
+### Engine diagnostics and journal
+
+Use an owner Client to read `GET /v1/diagnostics`. The snapshot reports
+process-local outcomes and counters. A restart resets those observations.
+The migration check records its result during startup, and queue depths
+are read from SQLite. The journal retains outcomes across restarts. Repeating
+failures are coalesced in one-minute windows. The first failure and the
+recovery are recorded, and diagnostics counters include coalesced failures.
+
+On the dedicated Host, query the Engine, nightly backups and deploy migration
+records locally with `journalctl -u amc-engine.service -u amc-backup.service`
+and `journalctl -t amc-migration`. For JSON lines add `-o cat`. Filter the
+JSON records by `requestId` or `runId` from the Client Details. Interactive
+`amc-engine pair`, `restore`, `backup` and `migrate` commands write their
+results to your terminal. Keep pairing codes private.
+
+Provisioning installs `/etc/systemd/journald.conf.d/90-amc-journal.conf`.
+The journal is persistent with a 14-day retention limit, daily file rotation
+and a 250 MiB system journal limit. The size limit can shorten history.
+Expiry removes whole files. Inspect the effective settings using
+`systemd-analyze cat-config systemd/journald.conf`. Check that the forwarding
+settings are disabled and that only authorized local users have journal access
+through root, systemd-journal or distribution-specific ACLs. Check disk use
+with `journalctl --disk-usage`.

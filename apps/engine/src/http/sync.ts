@@ -10,6 +10,7 @@ import { Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import { agentGrantActive } from '../auth/tokens.ts'
 import type { Db } from '../db/database.ts'
+import type { Logger } from '../log.ts'
 import type { Drafts } from '../mail/drafts.ts'
 import type { Mutations } from '../mail/mutations.ts'
 import type { MailQueries } from '../mail/queries.ts'
@@ -52,7 +53,12 @@ export function syncState(db: Db): SyncState {
  * The replica sync protocol (plan §5): snapshot at a modseq, then changes since it, with a
  * Server-Sent Events stream that nudges Clients when something changed.
  */
-export function syncRoutes(deps: SyncDeps, queue?: Mutations, shutdownSignal?: AbortSignal) {
+export function syncRoutes(
+  deps: SyncDeps,
+  queue?: Mutations,
+  shutdownSignal?: AbortSignal,
+  log?: Logger,
+) {
   const { db } = deps
   const r = new Hono<AppEnv>()
 
@@ -66,7 +72,7 @@ export function syncRoutes(deps: SyncDeps, queue?: Mutations, shutdownSignal?: A
   })
 
   r.post('/sync/check-mail', requireOwnerAdmin, async (c) =>
-    c.json({ ok: await deps.sync.checkMail() }),
+    c.json({ ok: await deps.sync.checkMail(c.get('requestId')) }),
   )
 
   r.get('/sync/state', requireScope('read'), (c) => c.json(syncState(db)))
@@ -151,15 +157,33 @@ export function syncRoutes(deps: SyncDeps, queue?: Mutations, shutdownSignal?: A
 
   r.get('/sync/events', requireScope('read'), (c) => {
     const principal = c.get('principal')
+    const streamLog = log?.with({ requestId: c.get('requestId') })
+    const start = performance.now()
+    streamLog?.log('debug', 'http.stream.opened', { transport: 'sse' })
     const response = streamSSE(c, async (stream) => {
+      const end: { reason: 'client' | 'shutdown' | 'authorization' | 'failed' } = {
+        reason: 'client',
+      }
+      let err: unknown
+      const fail = (error: unknown) => {
+        end.reason = 'failed'
+        err = error
+        stream.abort()
+      }
       const authorized = () => {
-        if (
-          principal.kind === 'agent' &&
-          !agentGrantActive(db, principal.tokenId, 'read', Date.now())
-        ) {
+        if (stream.aborted) return false
+        try {
+          if (
+            principal.kind !== 'agent' ||
+            agentGrantActive(db, principal.tokenId, 'read', Date.now())
+          )
+            return true
+          end.reason = 'authorization'
           stream.abort()
+        } catch (error) {
+          fail(error)
         }
-        return !stream.aborted
+        return false
       }
       let pending: ReturnType<typeof setTimeout> | undefined
       const notify = () => {
@@ -167,27 +191,45 @@ export function syncRoutes(deps: SyncDeps, queue?: Mutations, shutdownSignal?: A
         pending = setTimeout(() => {
           pending = undefined
           if (authorized()) {
-            void stream.writeSSE({
-              event: 'change',
-              data: JSON.stringify({ modseq: syncState(db).modseq }),
-            })
+            try {
+              void stream
+                .writeSSE({
+                  event: 'change',
+                  data: JSON.stringify({ modseq: syncState(db).modseq }),
+                })
+                .catch(fail)
+            } catch (error) {
+              fail(error)
+            }
           }
         }, 150)
       }
       const done = new Promise<void>((resolve) => stream.onAbort(resolve))
-      const shutdown = () => stream.abort()
+      const shutdown = () => {
+        if (stream.aborted) return
+        end.reason = 'shutdown'
+        stream.abort()
+      }
       shutdownSignal?.addEventListener('abort', shutdown, { once: true })
       if (shutdownSignal?.aborted) shutdown()
       const grantTimer = principal.kind === 'agent' ? setInterval(authorized, 1000) : undefined
       const heartbeat = setInterval(() => {
-        if (authorized()) void stream.writeSSE({ event: 'ping', data: '' })
+        if (authorized()) void stream.writeSSE({ event: 'ping', data: '' }).catch(fail)
       }, 25_000)
       deps.store.on('change', notify)
       try {
         if (authorized())
           await stream.writeSSE({ event: 'hello', data: JSON.stringify(syncState(db)) })
         await done
+      } catch (error) {
+        fail(error)
       } finally {
+        streamLog?.log(end.reason === 'failed' ? 'warn' : 'debug', 'http.stream.closed', {
+          transport: 'sse',
+          reason: end.reason,
+          err,
+          durationMs: performance.now() - start,
+        })
         shutdownSignal?.removeEventListener('abort', shutdown)
         deps.store.off('change', notify)
         clearTimeout(pending)

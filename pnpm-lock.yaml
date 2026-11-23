@@ -255,9 +255,6 @@ importers:
       nodemailer:
         specifier: ^10.6.1
         version: 10.6.1
-      pino:
-        specifier: ^10.0.0
-        version: 10.4.0
       pngjs:
         specifier: ^7.0.0
         version: 7.0.0
@@ -304,6 +301,9 @@ importers:
 
   packages/protocol:
     dependencies:
+      '@amc/observability':
+        specifier: workspace:*
+        version: link:../observability
       zod:
         specifier: ^4.1.12
         version: 4.6.7
@@ -3945,10 +3945,6 @@ packages:
 
   pino@10.3.1:
     resolution: {integrity: sha512-r34yH/GlQpKZbU1BvFFqOjhISRo1MNx1tWYsYvmj6KIRHSPMT2+yHOEb1SG6NMvRoHRF0a07kCOox/9yakl1vg==}
-    hasBin: true
-
-  pino@10.4.0:
-    resolution: {integrity: sha512-bk1ZMTwG/Vymx+zPoa28MhNzucFvXJWp3csrSuxuHPSMeUettaCoQ5Jvg07mtC4JGNpcfTwz41oVCnNgBK9+vA==}
     hasBin: true
 
   pkce-challenge@5.0.1:
@@ -8531,20 +8527,6 @@ snapshots:
       process-warning: 5.1.1
       quick-format-unescaped: 4.0.4
       real-require: 0.2.0
-      safe-stable-stringify: 2.5.0
-      sonic-boom: 4.2.1
-      thread-stream: 4.2.1
-
-  pino@10.4.0:
-    dependencies:
-      '@pinojs/redact': 0.4.0
-      atomic-sleep: 1.0.0
-      on-exit-leak-free: 2.1.2
-      pino-abstract-transport: 3.0.0
-      pino-std-serializers: 7.1.0
-      process-warning: 5.1.1
-      quick-format-unescaped: 4.0.4
-      real-require: 1.0.0
       safe-stable-stringify: 2.5.0
       sonic-boom: 4.2.1
       thread-stream: 4.2.1

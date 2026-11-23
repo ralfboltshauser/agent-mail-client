@@ -7,6 +7,7 @@ import type { SenderAvatars } from '../mail/avatars/index.ts'
 import { avatarInitials } from '../mail/avatars/initials.ts'
 import { normalizeSender } from '../mail/senders/index.ts'
 import type { AppEnv } from './app.ts'
+import { readJson } from './json.ts'
 
 type Message = SenderAvatarResolve['messages'][number]
 type AlignedEvidence = (message: Message, normalizedDomain: string) => boolean
@@ -34,7 +35,7 @@ export function senderAvatarRoutes(
 
   routes.post('/resolve', bodyLimit({ maxSize: 128 * 1024 }), async (c) => {
     c.header('Cache-Control', 'no-store')
-    const input = SenderAvatarResolve.safeParse(await c.req.json().catch(() => null))
+    const input = SenderAvatarResolve.safeParse(await readJson(c.req))
     if (!input.success) return c.json({ error: 'invalid_avatar_request' }, 400)
     const rows: SenderAvatarResolution[] = []
     for (const message of input.data.messages) {
@@ -48,7 +49,7 @@ export function senderAvatarRoutes(
         try {
           asset = avatars.resolve(address, eligible)
         } catch {
-          /* Initials also cover a cache failure. */
+          // The safe fallback is initials. Avoid one log for every message in a batch.
         }
       }
       if (domain && asset?.source === 'bimi') {
@@ -90,6 +91,7 @@ export function senderAvatarRoutes(
     try {
       png = avatars.image(digest, bimiDomain)
     } catch {
+      // Request logging records the 404 for an unavailable cache entry.
       return c.notFound()
     }
     if (!png) return c.notFound()

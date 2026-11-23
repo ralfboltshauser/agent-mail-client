@@ -334,6 +334,7 @@ function parseUrl(value: string, base?: URL): URL {
   try {
     return new URL(value, base)
   } catch {
+    // Lookup reports the classified result. The rejected URL is untrusted.
     throw new AvatarLookupError('unsafe')
   }
 }

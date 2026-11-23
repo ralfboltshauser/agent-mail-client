@@ -42,6 +42,7 @@ function requestRecord(input: string): Record<string, unknown> {
     const parsed = JSON.parse(input)
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
   } catch {
+    // Malformed legacy application data has no usable fields to bridge.
     return {}
   }
 }

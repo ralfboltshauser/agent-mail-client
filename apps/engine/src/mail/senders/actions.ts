@@ -383,6 +383,7 @@ export function listSenders(db: Db, input: SenderListQuery): SenderList {
         throw new Error()
       boundary = parsed as [string, string]
     } catch {
+      // The route logs the classified 400 response for this invalid cursor.
       throw new SenderError('Invalid Sender page cursor', 400)
     }
   }

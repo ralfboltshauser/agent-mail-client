@@ -17,6 +17,7 @@ async function start() {
     (await fetch(`${location.pathname}/session`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}` },
+      // The page displays the unusable-link state for network and authorization failures.
     }).catch(() => null))
   if (!session || !session.ok || !token) {
     status.textContent = 'Open a valid Composer Link to edit this draft.'
