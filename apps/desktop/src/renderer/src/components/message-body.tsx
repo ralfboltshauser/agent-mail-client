@@ -82,7 +82,8 @@ export const HtmlBody = memo(function HtmlBody({
         title="Message"
         sandbox="allow-same-origin"
         className="block w-full rounded-md border border-border/70 bg-white focus-visible:outline-2 focus-visible:outline-ring"
-        style={{ height }}
+        // Chromium uses the embedding element's scheme for the message's media queries.
+        style={{ height, colorScheme: 'only light' }}
       />
     </div>
   )

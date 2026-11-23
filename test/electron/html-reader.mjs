@@ -4,7 +4,7 @@ import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { app, BrowserWindow, session } from 'electron'
+import { app, BrowserWindow, nativeTheme, session } from 'electron'
 import { protectRemoteImageRequests } from '../../apps/desktop/src/main/message-image-requests.ts'
 import { requests, startReaderServer } from './html-reader-server.mjs'
 
@@ -30,6 +30,7 @@ async function main() {
   try {
     server = await startReaderServer()
     await app.whenReady()
+    nativeTheme.themeSource = 'dark'
     protectRemoteImageRequests(session.defaultSession)
     win = new BrowserWindow({
       show: false,
@@ -111,6 +112,41 @@ async function main() {
         marker,
         width,
       )
+
+    await selectThread(7, 'probe-theme')
+    const messageColors = () =>
+      run(() => {
+        const doc = document.querySelector('iframe').contentDocument
+        const message = doc.getElementById('probe-theme')
+        const card = doc.getElementById('probe-dark-card')
+        return {
+          darkMedia: doc.defaultView.matchMedia('(prefers-color-scheme: dark)').matches,
+          foreground: getComputedStyle(message).color,
+          canvas: getComputedStyle(doc.documentElement).backgroundColor,
+          card: [getComputedStyle(card).color, getComputedStyle(card).backgroundColor],
+        }
+      })
+    const lightColors = {
+      darkMedia: false,
+      foreground: 'rgb(31, 31, 35)',
+      canvas: 'rgb(255, 255, 255)',
+      card: ['rgb(255, 255, 255)', 'rgb(34, 34, 34)'],
+    }
+    await waitFor(() => run(() => document.documentElement.classList.contains('dark')), 'dark UI')
+    assert.deepEqual(await messageColors(), lightColors, 'message colors in dark mode')
+    await run(() => {
+      document.querySelector('iframe').contentDocument.body.dataset.themeContinuity = 'original'
+    })
+    nativeTheme.themeSource = 'light'
+    await waitFor(() => run(() => !document.documentElement.classList.contains('dark')), 'light UI')
+    assert.deepEqual(await messageColors(), lightColors, 'message colors in light mode')
+    assert.equal(
+      await run(
+        () => document.querySelector('iframe').contentDocument.body.dataset.themeContinuity,
+      ),
+      'original',
+      'theme changes keep the message document',
+    )
 
     await selectThread(1, 'probe-status')
     const at623 = await measure('probe-status', 623)
@@ -278,6 +314,13 @@ async function main() {
     const closed = await sidebarLayout()
     assert.equal(closed.overflow, 0, 'folders fit with Triage closed')
     assert.equal(closed.overlay, false)
+    const collapsedHeaderGap = await run(() => {
+      const headers = [...document.querySelectorAll('[data-sidebar="group-label"]')]
+      const triage = headers.find((header) => header.textContent === 'Triage')
+      const labels = headers.find((header) => header.textContent === 'Labels')
+      return labels.getBoundingClientRect().top - triage.getBoundingClientRect().bottom
+    })
+    assert.equal(collapsedHeaderGap, 8, 'collapsed Triage and Labels have a compact gap')
     await run(() => {
       const sidebar = document.querySelector('[data-slot="sidebar-content"]')
       sidebar.querySelector('[aria-current="page"]').focus()

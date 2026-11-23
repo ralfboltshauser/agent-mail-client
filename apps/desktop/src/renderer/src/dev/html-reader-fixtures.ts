@@ -52,6 +52,12 @@ export function htmlReaderFixture(id: string): string | null {
       return `<p id="probe-images">Remote images</p>
         <img id="probe-remote" width="120" src="${location.origin}${imagePath}?source=message">
         <img id="probe-missing" src="${location.origin}${imagePath}?source=missing">`
+    case 'thread-7:latest':
+      return `<style>
+        @media (prefers-color-scheme: dark) { #probe-theme { color:#eee; } }
+      </style>
+      <p id="probe-theme">The workshop starts at 10.</p>
+      <p id="probe-dark-card" style="background:#222;color:#fff">Bring a notebook.</p>`
     default:
       return null
   }
