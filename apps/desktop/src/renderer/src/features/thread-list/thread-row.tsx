@@ -190,10 +190,7 @@ function MatchSnippet({ text }: { text: string }) {
     <>
       {parts.map(({ part, key }, i) =>
         i % 2 === 1 ? (
-          <mark
-            key={key}
-            className="rounded-sm bg-amber-200/70 px-0.5 text-foreground dark:bg-amber-500/30"
-          >
+          <mark key={key} className="rounded-sm bg-foreground/15 px-0.5 text-foreground">
             {part}
           </mark>
         ) : (

@@ -1,7 +1,7 @@
 import DOMPurify from 'dompurify'
 
 const BASE_CSS = `
-  :where(html) { background: #fff; color: #1f1f23;
+  :where(html) { background: #fff; color: #1f1f1f;
     font: 14px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
     overflow-wrap: break-word; }
   :where(html, body) { margin: 0; padding: 0; }
@@ -14,8 +14,10 @@ const BASE_CSS = `
     aspect-ratio: attr(width type(<number>)) / attr(height type(<number>));
     height: auto;
   }
-  :where(a) { color: #3b5bdb; }
-  :where(blockquote) { margin: 0 0 0 .6em; padding-left: .8em; border-left: 2px solid #d4d4d8; color: #52525b; }
+  :where(a) { color: inherit; text-decoration: underline; }
+  :where(a:focus-visible) { outline: 2px solid currentColor; outline-offset: 2px; }
+  ::selection { background: #333; color: #fff; }
+  :where(blockquote) { margin: 0 0 0 .6em; padding-left: .8em; border-left: 2px solid #d4d4d4; color: #525252; }
 `
 
 export function sanitizeMessageHtml(html: string) {

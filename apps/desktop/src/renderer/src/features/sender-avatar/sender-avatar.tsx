@@ -1,6 +1,6 @@
 import { type ComponentPropsWithRef, memo, useCallback, useSyncExternalStore } from 'react'
 import { type SenderAvatarCache, senderAvatarCache } from './cache'
-import { avatarInitials, normalizedAvatarAddress } from './initials'
+import { avatarInitials } from './initials'
 
 interface SenderAvatarProps extends Omit<ComponentPropsWithRef<'span'>, 'children'> {
   accountId?: string
@@ -34,7 +34,7 @@ export const SenderAvatar = memo(function SenderAvatar({
     [accountId, messageId, cache],
   )
   const image = useSyncExternalStore(subscribe, snapshot, emptyImage)
-  const fallback = avatarInitials(normalizedAvatarAddress(address), name)
+  const fallback = avatarInitials(address, name)
   return (
     <span
       {...props}

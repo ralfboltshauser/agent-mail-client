@@ -237,7 +237,7 @@ async function main() {
       })
     const lightColors = {
       darkMedia: false,
-      foreground: 'rgb(31, 31, 35)',
+      foreground: 'rgb(31, 31, 31)',
       canvas: 'rgb(255, 255, 255)',
       card: ['rgb(255, 255, 255)', 'rgb(34, 34, 34)'],
     }
