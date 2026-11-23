@@ -338,6 +338,7 @@ it('offers structured history search without filtering the inbox before submissi
 it('opens a new agent thread through Cmd+K with the selected account and exact question', async () => {
   const adapter = await mount()
   const ask = vi.spyOn(adapter.api, 'askAgent')
+  vi.spyOn(adapter.api, 'askAgentRuntime').mockResolvedValue('full-access')
   const [account] = await adapter.api.accounts()
   await act(async () => fireEvent.keyDown(listbox(), { key: '1', metaKey: true }))
   await act(async () => fireEvent.keyDown(listbox(), { key: 'k', metaKey: true }))
@@ -346,6 +347,7 @@ it('opens a new agent thread through Cmd+K with the selected account and exact q
   await act(async () => fireEvent.change(input, { target: { value: question } }))
   const action = screen.getByRole('option', { name: /Ask Agent in T3/ })
   expect(within(action).getByText(account.address)).toBeTruthy()
+  expect(within(action).getByText('T3 · Full Access')).toBeTruthy()
   await act(async () => fireEvent.click(action))
   expect(ask).toHaveBeenCalledExactlyOnceWith(question, account.id)
   expect(adapter.api.search).not.toHaveBeenCalled()
@@ -370,8 +372,12 @@ it('applies an account and search link together and ignores the previous search 
   await act(async () => fireEvent.keyDown(input, { key: 'Enter' }))
 
   const query = 'from:alice@example.test'
-  await act(async () => openSearch({ kind: 'search', query, accountId: account.id }))
-  expect(adapter.api.search).toHaveBeenLastCalledWith(query, account.id)
+  const engineOrigin = 'https://engine.example.test'
+  const arrivingAccount = `${account.id}-arriving`
+  await act(async () =>
+    openSearch({ kind: 'search', query, accountId: arrivingAccount, engineOrigin }),
+  )
+  expect(adapter.api.search).toHaveBeenLastCalledWith(query, arrivingAccount, 0, engineOrigin)
   expect(input.value).toBe(query)
   expect(screen.getByText('No matching threads')).toBeTruthy()
   await act(async () => stale.resolve([{ ...first, matchSnippet: 'stale reply' }]))

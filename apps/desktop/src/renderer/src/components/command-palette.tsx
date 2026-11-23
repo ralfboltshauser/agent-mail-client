@@ -12,7 +12,7 @@ import {
   Undo2,
   Users,
 } from 'lucide-react'
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import {
   CommandDialog,
@@ -24,10 +24,18 @@ import {
   CommandShortcut,
 } from '@/components/ui/command'
 import { getAmc } from '@/lib/amc'
-import { failureText } from '@/lib/failure'
-import type { View } from '../../../shared/api'
+import { failureText, recordCaughtFailure } from '@/lib/failure'
+import type { AskAgentRuntime, View } from '../../../shared/api'
 import { navigableLabels, systemViews } from './app-sidebar'
 import { Kbd } from './ui/kbd'
+
+const runtimeDescription: Record<AskAgentRuntime, string> = {
+  'approval-required': 'T3 · Approval Required',
+  'auto-accept-edits': 'T3 · Auto-Accept Edits',
+  auto: 'T3 · Auto',
+  'full-access': 'T3 · Full Access',
+  unknown: 'Uses local T3 permissions',
+}
 
 interface CommandAction {
   name: string
@@ -75,9 +83,24 @@ export function CommandPalette({
   undo,
 }: Props) {
   const [query, setQuery] = useState('')
+  const [runtime, setRuntime] = useState<AskAgentRuntime>('unknown')
+  useEffect(() => {
+    if (!open) return
+    let current = true
+    void getAmc()
+      .askAgentRuntime()
+      .then((mode) => {
+        if (current) setRuntime(mode)
+      })
+      .catch(recordCaughtFailure)
+    return () => {
+      current = false
+    }
+  }, [open])
   const run = (fn: () => void) => () => {
     onOpenChange(false)
     setQuery('')
+    setRuntime('unknown')
     fn()
   }
   const asking = useRef(false)
@@ -86,6 +109,7 @@ export function CommandPalette({
     asking.current = true
     onOpenChange(false)
     setQuery('')
+    setRuntime('unknown')
     const id = toast.loading('Opening Ask Agent in T3 Code…')
     try {
       const result = await getAmc().askAgent(query.trim(), accountId)
@@ -108,7 +132,10 @@ export function CommandPalette({
     <CommandDialog
       open={open}
       onOpenChange={(next) => {
-        if (!next) setQuery('')
+        if (!next) {
+          setQuery('')
+          setRuntime('unknown')
+        }
         onOpenChange(next)
       }}
       onCloseAutoFocus={onCloseAutoFocus}
@@ -222,7 +249,12 @@ export function CommandPalette({
             </CommandItem>
             <CommandItem value="ask-agent-fallback" onSelect={() => void ask()}>
               <MessageCircleQuestionMark />
-              Ask Agent in T3
+              <span className="min-w-0">
+                <span className="block">Ask Agent in T3</span>
+                <span className="block truncate text-xs text-muted-foreground">
+                  {runtimeDescription[runtime]}
+                </span>
+              </span>
               <CommandShortcut className="truncate tracking-normal">
                 {accounts.find((account) => account.id === accountId)?.address ?? 'All accounts'}
               </CommandShortcut>

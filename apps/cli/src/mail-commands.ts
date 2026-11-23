@@ -75,9 +75,10 @@ export function registerMailCommands(
 ) {
   const links = program.command('link').description('Generate links that open in AMC Desktop')
   const printLink = (target: MailLink, web?: boolean) => {
-    const native = mailLink(target)
+    const { engineUrl } = config()
+    const native = mailLink(engineUrl, target)
     if (!parseMailLink(native)) throw new Error('Invalid mail link target.')
-    console.log(web ? mailWebLink(config().engineUrl, target) : native)
+    console.log(web ? mailWebLink(engineUrl, target) : native)
   }
   links
     .command('thread')

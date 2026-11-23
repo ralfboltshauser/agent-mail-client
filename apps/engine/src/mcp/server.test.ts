@@ -319,7 +319,9 @@ it('drives drafts and organize through the CLI with paired, scoped and handoff c
     const link = new URL(linked.stdout.trim())
     const native = decodeURIComponent(link.hash.slice(1))
     expect(link.pathname).toBe('/open-mail')
-    expect(native).toBe(mailLink({ kind: 'search', query: searchQuery, accountId: 'a' }))
+    expect(native).toBe(
+      mailLink(link.origin, { kind: 'search', query: searchQuery, accountId: 'a' }),
+    )
     expect(parseMailLink(native)).toMatchObject({ query: searchQuery, accountId: 'a' })
 
     const draftReply = ['reply', 'a:t-m1', '--body-file', '-', '--json']

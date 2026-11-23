@@ -6,6 +6,7 @@ import { failureText, recordCaughtFailure } from '@/lib/failure'
 interface HistorySearch {
   accountId: string | null
   text: string
+  engineOrigin?: string
   hits: SearchHit[] | null
   hasMore: boolean
   offset: number
@@ -55,15 +56,16 @@ export function useMailSearch(accountId: string | null) {
     input.current?.blur()
   }
 
-  const runSearch = async (text: string, scope = accountId, offset = 0) => {
+  const runSearch = async (text: string, scope = accountId, offset = 0, engineOrigin?: string) => {
     text = text.trim()
     if (!text) return
     const generation = ++request.current
     const matches = (current: HistorySearch | null): current is HistorySearch =>
-      current?.accountId === scope && current.text === text
+      current?.accountId === scope && current.text === text && current.engineOrigin === engineOrigin
     setHistory((current) => ({
       accountId: scope,
       text,
+      engineOrigin,
       offset,
       hasMore: matches(current) && current.hasMore,
       hits: matches(current) ? current.hits : null,
@@ -72,9 +74,11 @@ export function useMailSearch(accountId: string | null) {
       failure: matches(current) ? current.failure : undefined,
     }))
     try {
-      const hits = offset
-        ? await getAmc().search(text, scope, offset)
-        : await getAmc().search(text, scope)
+      const hits = engineOrigin
+        ? await getAmc().search(text, scope, offset, engineOrigin)
+        : offset
+          ? await getAmc().search(text, scope, offset)
+          : await getAmc().search(text, scope)
       if (generation === request.current) {
         setHistory((current) => {
           const previous = offset && matches(current) ? (current.hits ?? []) : []
@@ -82,6 +86,7 @@ export function useMailSearch(accountId: string | null) {
           return {
             accountId: scope,
             text,
+            engineOrigin,
             hits: combined,
             offset: offset + hits.length,
             hasMore: hits.length === MAIL_SEARCH_PAGE_SIZE && combined.length > previous.length,
@@ -96,6 +101,7 @@ export function useMailSearch(accountId: string | null) {
         setHistory((current) => ({
           accountId: scope,
           text,
+          engineOrigin,
           offset,
           hasMore: matches(current) && current.hasMore,
           hits: matches(current) ? current.hits : null,
@@ -118,8 +124,11 @@ export function useMailSearch(accountId: string | null) {
     changeFilter,
     clearSearch,
     runSearch,
-    retrySearch: () => search && runSearch(search.text, accountId, search.offset),
+    retrySearch: () =>
+      search && runSearch(search.text, accountId, search.offset, search.engineOrigin),
     loadMore: () =>
-      search?.hasMore && !search.loading && runSearch(search.text, accountId, search.offset),
+      search?.hasMore &&
+      !search.loading &&
+      runSearch(search.text, accountId, search.offset, search.engineOrigin),
   }
 }

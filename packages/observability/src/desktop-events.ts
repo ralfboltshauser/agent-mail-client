@@ -120,6 +120,7 @@ const ipcChannels = [
   'amc:saveSignature',
   'amc:search',
   'amc:askAgent',
+  'amc:askAgentRuntime',
   'amc:sendDraft',
   'amc:sendSettings',
   'amc:setAutoTriage',

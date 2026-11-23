@@ -3,7 +3,7 @@ import { constants } from 'node:fs'
 import { access, chmod, lstat, mkdir, readdir, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
-import type { AskAgentResult } from '../shared/api'
+import type { AskAgentResult, AskAgentRuntime, T3Project } from '../shared/api'
 import type { EngineClient } from './engine'
 import { feedbackProject } from './feedback'
 import { t3NavigationLink } from './handoff'
@@ -31,6 +31,20 @@ export async function pruneAgentSearches(profile: string) {
   )
 }
 
+function askAgentProject(projects: T3Project[]) {
+  const named = projects.filter((project) => project.title === 'AMC')
+  return (
+    projects.find((project) => project.id === feedbackProject) ??
+    (named.length === 1 ? named[0] : undefined)
+  )
+}
+
+export async function askAgentRuntime(): Promise<AskAgentRuntime> {
+  const launcher = await localT3Launcher()
+  const project = launcher && askAgentProject(await launcher.projects())
+  return project ? (project.localDefaultMode ?? 'approval-required') : 'unknown'
+}
+
 export async function askAgent(
   engine: EngineClient,
   profile: string,
@@ -53,11 +67,7 @@ export async function askAgent(
     await pruneAgentSearches(profile)
     const launcher = await localT3Launcher()
     if (!launcher) return fail('Install or open local T3 Code to ask about mail.')
-    const projects = await launcher.projects()
-    const named = projects.filter((project) => project.title === 'AMC')
-    const project =
-      projects.find((project) => project.id === feedbackProject) ??
-      (named.length === 1 ? named[0] : undefined)
+    const project = askAgentProject(await launcher.projects())
     const root = project?.workspaceRoot
     if (!project || !root || !isAbsolute(root))
       return fail('Open an AMC checkout as the AMC project in local T3 Code.')

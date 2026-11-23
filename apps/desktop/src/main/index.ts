@@ -33,7 +33,7 @@ import {
   FilterReviewInput,
   InboxFilterTarget,
   MAIL_SEARCH_PAGE_SIZE,
-  type MailLink,
+  type MailLinkDestination,
   MIRROR_CHANGED,
   MutationRequest,
   OwnerActionReasonInput,
@@ -41,6 +41,7 @@ import {
   SenderAvatarResolve,
   SenderDecision,
   SenderListQuery,
+  sameMailEngine,
   THREAD_DRAFT_UNAVAILABLE,
   TriageExportInput,
   TriageHistoryQuery,
@@ -64,7 +65,7 @@ import type { AskAgentResult, SyncStatus, ThreadQuery, TriageStatus } from '../s
 import { failureDetails, formatFailure, validFailure } from '../shared/failure'
 import { feedbackAccelerator } from '../shared/feedback'
 import { projectActionFailures } from './action-failures'
-import { askAgent, pruneAgentSearches } from './ask-agent'
+import { askAgent, askAgentRuntime, pruneAgentSearches } from './ask-agent'
 import { clearPairing, loadPairing, savePairing } from './auth'
 import { AutoTriage } from './auto-triage'
 import { desktopDiagnostics, installedCliVersion } from './diagnostics'
@@ -115,8 +116,8 @@ let notificationSettings = DEFAULT_NOTIFICATION_SETTINGS
 let notifications: NewMailNotifications | null = null
 let threadNavigationReady = false
 let pendingThreadId: string | null = null
-let pendingMailLink: MailLink | null = null
-let resolvingMailLink: MailLink | null = null
+let pendingMailLink: MailLinkDestination | null = null
+let resolvingMailLink: MailLinkDestination | null = null
 let askingAgent = false
 let pendingSettings = false
 let diagnosticsReady = false
@@ -913,15 +914,22 @@ function registerReadIpc() {
   handle('amc:filter', (_e, text: string, accountId: string | null) =>
     openReplica().filter(text, accountId),
   )
-  handle('amc:search', async (_e, text: string, accountId: string | null, offset = 0) => {
-    const params = new URLSearchParams({
-      q: text,
-      limit: String(MAIL_SEARCH_PAGE_SIZE),
-      ...(offset ? { offset: String(offset) } : {}),
-      ...(accountId ? { accountId } : {}),
-    })
-    return (await requireEngine().get<{ hits: unknown[] }>(`/v1/search?${params}`)).hits
-  })
+  handle(
+    'amc:search',
+    async (_e, text: string, accountId: string | null, offset = 0, engineOrigin?: string) => {
+      const client = requireEngine()
+      if (engineOrigin !== undefined && !sameMailEngine({ engineOrigin }, client.baseUrl))
+        throw new Error('The search link points to a different Engine.')
+      const params = new URLSearchParams({
+        q: text,
+        limit: String(MAIL_SEARCH_PAGE_SIZE),
+        ...(offset ? { offset: String(offset) } : {}),
+        ...(accountId ? { accountId } : {}),
+      })
+      return (await client.get<{ hits: unknown[] }>(`/v1/search?${params}`)).hits
+    },
+  )
+  handle('amc:askAgentRuntime', () => askAgentRuntime())
   handle(
     'amc:askAgent',
     async (_e, input: unknown, accountId: unknown): Promise<AskAgentResult> => {
@@ -1016,7 +1024,7 @@ function openPendingThread() {
   if (thread) broadcast('amc:openThread', thread)
 }
 
-function receiveMailLink(link: MailLink) {
+function receiveMailLink(link: MailLinkDestination) {
   pendingThreadId = null
   pendingMailLink = link
   if (app.isReady() && feedback) {
@@ -1029,33 +1037,39 @@ function openPendingMailLink() {
   const target = pendingMailLink
   const client = engine
   if (!target || !client || !threadNavigationReady || resolvingMailLink === target) return
-  if (target.kind === 'search') {
-    if (
-      target.accountId &&
-      !openReplica()
-        .accounts()
-        .some(({ id }) => id === target.accountId)
-    ) {
-      if (sync?.status.phase === 'connecting' || sync?.status.phase === 'bootstrapping') return
-      pendingMailLink = null
-      if (window)
-        void dialog
-          .showMessageBox(window, {
-            message: 'This search’s account is unavailable in AMC.',
-            detail: 'Check that AMC is connected to the same Engine and has synced the account.',
-          })
-          .catch((error) => operationFailure('mail-link', error))
-      return
+  const finish = () => {
+    if (target.kind === 'search') {
+      if (
+        target.accountId &&
+        !openReplica()
+          .accounts()
+          .some(({ id }) => id === target.accountId)
+      )
+        return false
+      broadcast('amc:openMailSearch', target)
+      return true
     }
+    const [thread] = openReplica().summaries([target.threadId])
+    if (!thread) return false
+    broadcast('amc:openThread', thread)
+    return true
+  }
+  const unavailable = (message: string, detail: string) => {
     pendingMailLink = null
-    broadcast('amc:openMailSearch', target)
+    if (window)
+      void dialog
+        .showMessageBox(window, { message, detail })
+        .catch((error) => operationFailure('mail-link', error))
+  }
+  if (!sameMailEngine(target, client.baseUrl)) {
+    unavailable(
+      'This link points to a different AMC Engine.',
+      'Open links from the Engine paired with this Desktop.',
+    )
     return
   }
-
-  const [cached] = openReplica().summaries([target.threadId])
-  if (cached) {
+  if (finish()) {
     pendingMailLink = null
-    broadcast('amc:openThread', cached)
     return
   }
   const loop = sync
@@ -1070,15 +1084,14 @@ function openPendingMailLink() {
       if (resolvingMailLink === target) resolvingMailLink = null
     }
     if (target !== pendingMailLink || client !== engine || !threadNavigationReady) return
-    pendingMailLink = null
-    const [thread] = openReplica().summaries([target.threadId])
-    if (thread) broadcast('amc:openThread', thread)
-    else if (window) {
-      await dialog.showMessageBox(window, {
-        message: 'This thread is unavailable in AMC.',
-        detail: 'Check that AMC is connected to the same Engine and has synced the thread.',
-      })
-    }
+    if (finish()) pendingMailLink = null
+    else
+      unavailable(
+        target.kind === 'search'
+          ? 'This search’s account is unavailable in AMC.'
+          : 'This thread is unavailable in AMC.',
+        'Check that AMC is connected to the same Engine and has synced this mail.',
+      )
   })().catch((error) => operationFailure('mail-link', error))
 }
 
@@ -1255,7 +1268,7 @@ if (!app.requestSingleInstanceLock()) {
   handle('amc:logSettings', settings.read)
   handle('amc:setDebugLogging', (_event, enabled: unknown) => settings.write(enabled))
   const linkFromArgs = (args: string[]) =>
-    args.map(parseMailLink).find((target): target is MailLink => target !== null)
+    args.map(parseMailLink).find((target): target is MailLinkDestination => target !== null)
   pendingMailLink = linkFromArgs(process.argv) ?? null
   app.on('open-url', (event, value) => {
     const target = parseMailLink(value)

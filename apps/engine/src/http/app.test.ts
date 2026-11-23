@@ -49,7 +49,7 @@ describe('HTTP API', () => {
       })
       return open
     }
-    expect(render(url.hash)).toEqual({ hidden: false, href: mailLink(target) })
+    expect(render(url.hash)).toEqual({ hidden: false, href: mailLink(url.origin, target) })
     expect(render(`#${encodeURIComponent('javascript:alert(1)')}`)).toEqual({
       hidden: true,
       href: '',
@@ -112,6 +112,27 @@ describe('HTTP API', () => {
       mutationQueueDepth: 1,
       disks: expect.arrayContaining([expect.objectContaining({ path: config.backupDir })]),
     })
+  })
+
+  it('reserves Engine-wide health data from account-scoped grants', async () => {
+    const { db, app } = setup()
+    db.exec(`
+      INSERT INTO account (id, kind, address, credentials, created_at)
+      VALUES ('a', 'gmail', 'one@example.test', X'00', 0),
+             ('b', 'gmail', 'two@example.test', X'00', 0)
+    `)
+    const { secret } = issueToken(db, {
+      kind: 'agent',
+      name: 'Ask Agent',
+      scopes: ['read'],
+      accountId: 'a',
+      expiresAt: Date.now() + 60 * 60_000,
+    })
+    const response = await app.request('/v1/health', {
+      headers: { Authorization: `Bearer ${secret}` },
+    })
+    expect(response.status).toBe(403)
+    expect(await response.text()).not.toContain('two@example.test')
   })
 
   it('enforces scopes', async () => {

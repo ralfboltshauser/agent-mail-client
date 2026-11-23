@@ -62,13 +62,19 @@ export function MailWorkspace({
     (left, right) => shareReply(left, right) === left,
   )
   const accounts = accountData ?? NO_ACCOUNTS
-  if (accountId !== null && accountData && !accountData.some(({ id }) => id === accountId)) {
-    setAccountId(null)
-  }
   const labels = useReplicaSelector(labelsQuery(accountId), ({ data }) => data ?? NO_LABELS)
 
   const mailSearch = useMailSearch(accountId)
   const { filter, search, input: searchInput, resetSearch, clearSearch, runSearch } = mailSearch
+  // A link may resolve against fresher replica data than the renderer's account list.
+  if (
+    !search?.engineOrigin &&
+    accountId !== null &&
+    accountData &&
+    !accountData.some(({ id }) => id === accountId)
+  ) {
+    setAccountId(null)
+  }
   const key = mailboxKey(accountId, view, filter, search?.text)
   const mailbox = useMailboxRows({
     engineUrl,
@@ -160,19 +166,21 @@ export function MailWorkspace({
     select(target ?? null, mailboxKey(accountId, next, ''))
   }
 
-  const openMailSearch = useEffectEvent(({ query, accountId: target }: MailLinkSearch) => {
-    collapse()
-    closeReview(false)
-    resetSearch(true)
-    openSender(null)
-    setBucketPickerId(null)
-    setNotification(null)
-    setAccountId(target)
-    const next = { kind: 'all' } as const
-    setView(next)
-    setSelection({ key: mailboxKey(target, next, '', query.trim()), id: null })
-    void runSearch(query, target)
-  })
+  const openMailSearch = useEffectEvent(
+    ({ query, accountId: target, engineOrigin }: MailLinkSearch) => {
+      collapse()
+      closeReview(false)
+      resetSearch(true)
+      openSender(null)
+      setBucketPickerId(null)
+      setNotification(null)
+      setAccountId(target)
+      const next = { kind: 'all' } as const
+      setView(next)
+      setSelection({ key: mailboxKey(target, next, '', query.trim()), id: null })
+      void runSearch(query, target, 0, engineOrigin)
+    },
+  )
 
   // Install the search listener before onOpenThread announces navigation readiness.
   // Notification targets can be opened before they have arrived in the list query.

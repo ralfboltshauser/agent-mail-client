@@ -106,6 +106,7 @@ const api: AmcApi = {
     ipcRenderer.on('amc:openSettings', handler)
     return () => ipcRenderer.off('amc:openSettings', handler)
   },
+  askAgentRuntime: invoke('askAgentRuntime') as AmcApi['askAgentRuntime'],
   askAgent: invoke('askAgent') as AmcApi['askAgent'],
   onOpenMailSearch(listener) {
     const handler = (_e: unknown, target: Parameters<typeof listener>[0]) => listener(target)

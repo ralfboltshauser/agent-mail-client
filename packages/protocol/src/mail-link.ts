@@ -2,6 +2,8 @@ export type MailLink =
   | { kind: 'thread'; threadId: string }
   | { kind: 'search'; query: string; accountId: string | null }
 
+export type MailLinkDestination = MailLink & { engineOrigin: string }
+
 export const MAIL_LINK_BRIDGE = '/open-mail'
 export const MAIL_SEARCH_PAGE_SIZE = 50
 
@@ -12,32 +14,42 @@ const validId = (value: string) =>
 const validQuery = (value: string) =>
   value.trim().length > 0 && value.length <= 2000 && !value.includes('\0')
 
-export function mailLink(target: MailLink): string {
-  if (target.kind === 'thread') return `amc://thread/${encodeURIComponent(target.threadId)}`
-  const params = new URLSearchParams({ q: target.query })
+export function mailLink(engineUrl: string, target: MailLink): string {
+  const params = new URLSearchParams({ engine: new URL(engineUrl).origin })
+  if (target.kind === 'thread')
+    return `amc://thread/${encodeURIComponent(target.threadId)}?${params}`
+  params.set('q', target.query)
   if (target.accountId !== null) params.set('accountId', target.accountId)
   return `amc://search?${params}`
 }
 
-export function parseMailLink(value: string): MailLink | null {
+export function parseMailLink(value: string): MailLinkDestination | null {
   if (!/^amc:\/\/(?:thread\/|search\?)/.test(value) || value.length > 25_000) return null
   try {
     const url = new URL(value)
     if (url.hash || url.username || url.password || url.port) return null
-    if (url.hostname === 'thread' && !url.search && /^\/[^/]+$/.test(url.pathname)) {
+    const params = url.searchParams
+    const engineOrigin = params.get('engine') ?? ''
+    const engine = new URL(engineOrigin)
+    if (
+      params.getAll('engine').length !== 1 ||
+      !['http:', 'https:'].includes(engine.protocol) ||
+      engine.origin !== engineOrigin
+    )
+      return null
+    if (url.hostname === 'thread' && params.size === 1 && /^\/[^/]+$/.test(url.pathname)) {
       const threadId = decodeURIComponent(url.pathname.slice(1))
       return validId(threadId) && threadId !== '.' && threadId !== '..'
-        ? { kind: 'thread', threadId }
+        ? { kind: 'thread', threadId, engineOrigin }
         : null
     }
     if (url.hostname !== 'search' || url.pathname) return null
-    const params = url.searchParams
-    if ([...params.keys()].some((key) => key !== 'q' && key !== 'accountId')) return null
+    if ([...params.keys()].some((key) => !['engine', 'q', 'accountId'].includes(key))) return null
     if (params.getAll('q').length !== 1 || params.getAll('accountId').length > 1) return null
     const query = params.get('q') ?? ''
     const accountId = params.get('accountId')
     return validQuery(query) && (accountId === null || validId(accountId))
-      ? { kind: 'search', query, accountId }
+      ? { kind: 'search', query, accountId, engineOrigin }
       : null
   } catch {
     return null
@@ -46,6 +58,13 @@ export function parseMailLink(value: string): MailLink | null {
 
 export function mailWebLink(engineUrl: string, target: MailLink): string {
   const url = new URL(MAIL_LINK_BRIDGE, engineUrl)
-  url.hash = encodeURIComponent(mailLink(target))
+  url.hash = encodeURIComponent(mailLink(engineUrl, target))
   return url.href
+}
+
+export function sameMailEngine(
+  target: Pick<MailLinkDestination, 'engineOrigin'>,
+  engineUrl: string,
+): boolean {
+  return target.engineOrigin === new URL(engineUrl).origin
 }

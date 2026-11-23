@@ -95,6 +95,7 @@ async function openMailbox(api: Partial<AmcApi>) {
     copyDiagnostics: async () => {},
     onCopyDiagnostics: () => () => {},
     onOpenSettings: () => () => {},
+    askAgentRuntime: async () => 'approval-required',
     askAgent: async () => ({ opened: true }),
     onOpenMailSearch: () => () => {},
     onOpenThread: (callback) => {

@@ -156,6 +156,11 @@ export function createApp({
   })
 
   v1.get('/health', requireScope('read'), (c) => {
+    if (c.get('principal').accountId)
+      return c.json(
+        { error: 'forbidden', message: 'This token cannot view Engine-wide health' },
+        403,
+      )
     const dbPath = databasePath(config)
     const now = Date.now()
     const accounts = db

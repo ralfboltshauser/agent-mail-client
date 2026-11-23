@@ -23,8 +23,10 @@ workspace contains the AMC skill. T3 reads the skill from that checkout. Desktop
 creates an expiring executable in the private AMC profile. The initial T3 prompt
 contains the executable path. The executable supplies a dedicated Engine read
 grant to `amc --as-agent`. The Engine checks the grant and expiry on every call.
+Account-scoped grants cannot read Engine-wide operational health data.
 When T3 supports an explicit runtime mode, AMC requests approval-required. The
-installed local CLI can inherit the project's runtime mode. This is scoped access
+installed local CLI can inherit the project's runtime mode. The palette displays
+the effective mode when it can read the setting. This is scoped access
 to AMC through the provided executable. T3 retains its configured access to the
 local machine and model provider.
 
@@ -36,12 +38,15 @@ per thread before paging. Existing array shapes support offset pagination.
 As the mailbox changes between pages, the ordering can change.
 
 The protocol package owns `amc://thread/<encoded-id>` and
-`amc://search?q=<query>&accountId=<optional-id>`. The CLI emits these links or
+`amc://search?q=<query>&accountId=<optional-id>`. Both require an `engine`
+query parameter identifying the paired Engine origin. The CLI emits these links or
 an HTTPS variant on the paired Engine. Desktop Main validates native links and
 holds them until mailbox navigation is ready. It uses the notification route to
 select a thread in the local replica, fetching sync changes when a live replica
-is missing it. A search link sets the account and query together. Search URLs
-carry the literal query, and both URL forms carry no grant.
+is missing the thread or a linked account. Desktop checks the Engine origin
+before dispatching an intent and again before executing a linked search. A search
+link sets the account and query together. Search URLs carry the literal query.
+Both URL forms leave credentials in the app.
 
 The installed T3 chat strips unknown schemes from Markdown and its Electron
 shell separately validates allowed destinations. The HTTPS variant reaches a
