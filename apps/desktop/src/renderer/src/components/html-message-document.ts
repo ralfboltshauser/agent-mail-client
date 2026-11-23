@@ -1,17 +1,21 @@
 import DOMPurify from 'dompurify'
 
 const BASE_CSS = `
-  :root { color-scheme: light; }
-  html, body { margin: 0; padding: 0; background: #fff; color: #1f1f23;
+  :where(html) { color-scheme: light; background: #fff; color: #1f1f23;
     font: 14px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-    overflow-wrap: anywhere; }
-  body { padding: 16px 20px; }
-  img, video { max-width: 100%; height: auto; }
-  img[width][height] { aspect-ratio: auto attr(width type(<number>)) / attr(height type(<number>)); }
-  table { max-width: 100%; }
-  pre { white-space: pre-wrap; }
-  a { color: #3b5bdb; }
-  blockquote { margin: 0 0 0 .6em; padding-left: .8em; border-left: 2px solid #d4d4d8; color: #52525b; }
+    overflow-wrap: break-word; }
+  :where(html, body) { margin: 0; padding: 0; }
+  :where(body) { padding: 16px clamp(8px, 3.2vw, 20px); }
+  /* Data values can contain long identifiers. Preserve intrinsic sizing for headings and
+     for layout cells that contain nested tables. */
+  :where(table:has(> thead) > tbody > tr > td:not(:has(table))) { overflow-wrap: anywhere; }
+  :where(img, video) { max-inline-size: 100%; }
+  :where(img[width][height], video[width][height]) {
+    aspect-ratio: attr(width type(<number>)) / attr(height type(<number>));
+    height: auto;
+  }
+  :where(a) { color: #3b5bdb; }
+  :where(blockquote) { margin: 0 0 0 .6em; padding-left: .8em; border-left: 2px solid #d4d4d8; color: #52525b; }
 `
 
 export function sanitizeMessageHtml(html: string) {
@@ -53,11 +57,28 @@ export function sanitizeMessageHtml(html: string) {
       }) ||
       (element.localName === 'style' && remoteCss.test(element.textContent ?? '')),
   )
-  return { clean: clean.outerHTML, hasRemote }
+  return { clean, hasRemote }
 }
 
-export function messageDocument(clean: string, remote: boolean) {
+export function messageDocument(clean: HTMLHtmlElement, remote: boolean) {
+  const root = clean.cloneNode(true) as HTMLHtmlElement
+  const doc = root.ownerDocument
+  const head = root.querySelector('head') ?? doc.createElement('head')
+  if (!head.parentNode) root.prepend(head)
   const imgSrc = remote ? 'data: cid: https: http:' : 'data: cid:'
   const csp = `default-src 'none'; img-src ${imgSrc}; style-src 'unsafe-inline'; font-src data:; media-src 'none'; form-action 'none'`
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>${BASE_CSS}</style></head><body>${clean}</body></html>`
+  const charset = doc.createElement('meta')
+  charset.setAttribute('charset', 'utf-8')
+  const policy = doc.createElement('meta')
+  policy.httpEquiv = 'Content-Security-Policy'
+  policy.content = csp
+  const styles = doc.createElement('style')
+  styles.textContent = BASE_CSS
+  head.prepend(charset, policy, styles)
+
+  // The reader owns scrolling at the viewport. A sender can still size and clip its
+  // inner layout, but root/body overflow must not hide the rest of the message.
+  root.style.setProperty('overflow', 'auto hidden', 'important')
+  root.querySelector('body')?.style.setProperty('overflow', 'visible', 'important')
+  return `<!doctype html>${root.outerHTML}`
 }

@@ -1,0 +1,300 @@
+import assert from 'node:assert/strict'
+import { mkdtempSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
+import { app, BrowserWindow, session } from 'electron'
+import { protectRemoteImageRequests } from '../../apps/desktop/src/main/message-image-requests.ts'
+import { requests, startReaderServer } from './html-reader-server.mjs'
+
+const profile = mkdtempSync(join(tmpdir(), 'amc-html-reader-'))
+app.setPath('userData', profile)
+
+const waitFor = async (probe, description) => {
+  const deadline = Date.now() + 5000
+  while (Date.now() < deadline) {
+    const result = await probe()
+    if (result) return result
+    await delay(25)
+  }
+  throw new Error(`Timed out waiting for ${description}`)
+}
+
+async function main() {
+  let server
+  let win
+  try {
+    server = await startReaderServer()
+    await app.whenReady()
+    protectRemoteImageRequests(session.defaultSession)
+    win = new BrowserWindow({
+      show: false,
+      width: 1360,
+      height: 900,
+      webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
+    })
+    const wc = win.webContents
+    wc.debugger.attach('1.3')
+    const run = (fn, ...args) =>
+      wc.executeJavaScript(`(${fn})(${args.map((arg) => JSON.stringify(arg)).join(',')})`)
+    const press = async (key, windowsVirtualKeyCode) => {
+      const event = { key, code: key, windowsVirtualKeyCode }
+      await wc.debugger.sendCommand('Input.dispatchKeyEvent', {
+        type: 'keyDown',
+        text: key === 'Enter' ? '\r' : '',
+        ...event,
+      })
+      await wc.debugger.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', ...event })
+    }
+    const origin = server.resolvedUrls.local[0]
+    await win.loadURL(new URL('?fixture=html-reader', origin).href)
+
+    const selectThread = async (number, marker) => {
+      const selector = `[data-thread-id="thread-${number}"]`
+      await waitFor(() => run((value) => !!document.querySelector(value), selector), selector)
+      await run((value) => document.querySelector(value).click(), selector)
+      await waitFor(
+        () =>
+          run(
+            (value) =>
+              [...document.querySelectorAll('iframe')].some((frame) =>
+                frame.contentDocument?.getElementById(value),
+              ),
+            marker,
+          ),
+        marker,
+      )
+    }
+    const measure = (marker, width) =>
+      run(
+        (id, requestedWidth) => {
+          const frame = [...document.querySelectorAll('iframe')].find((candidate) =>
+            candidate.contentDocument?.getElementById(id),
+          )
+          if (requestedWidth) frame.style.width = `${requestedWidth + 2}px`
+          const doc = frame.contentDocument
+          const root = doc.documentElement
+          const target = doc.getElementById(id)
+          const range = doc.createRange()
+          range.selectNodeContents(target)
+          const image = doc.getElementById('probe-cid')
+          const oversized = doc.getElementById('probe-oversized')
+          const targetRect = target.getBoundingClientRect()
+          const frameRect = frame.getBoundingClientRect()
+          return {
+            lines: new Set(
+              [...range.getClientRects()].filter((rect) => rect.width > 0).map((rect) => rect.top),
+            ).size,
+            width: root.clientWidth,
+            overflow: root.scrollWidth - root.clientWidth,
+            x: root.scrollLeft,
+            height: frame.offsetHeight,
+            scrollbar: doc.defaultView.innerHeight - root.clientHeight,
+            color:
+              doc.getElementById('probe-first') &&
+              getComputedStyle(doc.getElementById('probe-first')).color,
+            responsive:
+              doc.getElementById('probe-responsive') &&
+              getComputedStyle(doc.getElementById('probe-responsive')).display,
+            image: image && [image.naturalWidth, image.naturalHeight, image.width, image.height],
+            oversized: oversized && [oversized.width, oversized.height],
+            endWidth: target.closest('table')?.offsetWidth,
+            targetVisible: targetRect.left >= -1 && targetRect.right <= root.clientWidth + 1,
+            wheelTarget: { x: Math.round(frameRect.left + 30), y: Math.round(frameRect.top + 30) },
+            finalLineVisible:
+              (doc.getElementById('probe-last')?.getBoundingClientRect().bottom ?? 0) <=
+              root.clientHeight,
+            nativeVertical: getComputedStyle(root).overflowY,
+          }
+        },
+        marker,
+        width,
+      )
+
+    await selectThread(1, 'probe-status')
+    const at623 = await measure('probe-status', 623)
+    const at320 = await measure('probe-status', 320)
+    assert.deepEqual(
+      [at623.lines, at320.lines, at623.color, at623.responsive, at320.responsive],
+      [1, 1, 'rgb(12, 34, 56)', 'inline-block', 'block'],
+      'short table headings and sender head styles at both widths',
+    )
+    await waitFor(async () => (await measure('probe-status')).image?.[0] === 2, 'CID image')
+    const images = await measure('probe-status')
+    assert.deepEqual(images.image, [2, 1, 120, 120])
+    assert.ok(images.oversized[0] < images.width)
+    assert.ok(Math.abs(images.oversized[0] / 2 - images.oversized[1]) <= 1)
+    assert.equal(
+      await run(() =>
+        [...document.querySelectorAll('button')].some(
+          (button) => button.textContent === 'Scroll message horizontally',
+        ),
+      ),
+      false,
+      'fitting mail adds no scroll control',
+    )
+    await run(() =>
+      [...document.querySelectorAll('button')]
+        .find((button) => button.textContent.includes('Sending over the updated layout.'))
+        .click(),
+    )
+    await waitFor(
+      () =>
+        run(() =>
+          [...document.querySelectorAll('iframe')].some((frame) =>
+            frame.contentDocument?.getElementById('probe-older'),
+          ),
+        ),
+      'older HTML message in the same thread',
+    )
+
+    await run(() => {
+      const frame = [...document.querySelectorAll('iframe')].find((item) =>
+        item.contentDocument?.getElementById('probe-status'),
+      )
+      frame.style.removeProperty('width')
+      frame.contentDocument.body.dataset.continuity = 'original'
+      frame.focus()
+      frame.contentDocument
+        .getSelection()
+        .selectAllChildren(frame.contentDocument.getElementById('probe-first'))
+    })
+    await run(async () => (await import('/src/lib/amc.ts')).getAmc().syncNow())
+    win.setContentSize(900, 780)
+    await delay(100)
+    assert.equal(
+      await run(() =>
+        [...document.querySelectorAll('iframe')].some(
+          (frame) =>
+            frame.contentDocument?.body.dataset.continuity === 'original' &&
+            document.activeElement === frame &&
+            frame.contentDocument.getSelection().toString() === 'First line',
+        ),
+      ),
+      true,
+      'refresh and resize keep the iframe document, focus, and text selection',
+    )
+    const narrow = await measure('probe-status')
+    const narrowReaderWidth = narrow.width
+    assert.ok(
+      narrowReaderWidth > 0 && narrowReaderWidth < 623,
+      `narrow reader: ${narrowReaderWidth}px`,
+    )
+    assert.equal(narrow.lines, 1)
+    win.setContentSize(1360, 900)
+
+    await selectThread(2, 'probe-job')
+    for (const width of [320, 623]) {
+      const table = await measure('probe-job', width)
+      assert.equal(table.overflow, 0, `long table token fits at ${width}px`)
+      assert.ok(table.lines > 1)
+      assert.ok((await measure('probe-prose')).lines > 1)
+    }
+
+    let scrollbar = 0
+    for (const [thread, key, virtualKey, sign] of [
+      [3, 'ArrowRight', 39, 1],
+      [4, 'ArrowLeft', 37, -1],
+    ]) {
+      await selectThread(thread, 'probe-end')
+      const initial = await measure('probe-end', 320)
+      assert.equal(initial.endWidth, 780)
+      assert.ok(initial.overflow >= 460)
+      assert.equal((await measure('probe-code')).lines, 1)
+      await waitFor(
+        () =>
+          run(() => {
+            const button = [...document.querySelectorAll('button')].find(
+              (item) => item.textContent === 'Scroll message horizontally',
+            )
+            button?.focus()
+            return button === document.activeElement
+          }),
+        'message scroll affordance',
+      )
+      await press('Enter', 13)
+      await waitFor(
+        () => run(() => document.activeElement?.localName === 'iframe'),
+        'keyboard activation focuses the message',
+      )
+      await press(key, virtualKey)
+      await waitFor(
+        async () => sign * (await measure('probe-end')).x > 0,
+        `native ${key} scrolling`,
+      )
+      await wc.debugger.sendCommand('Input.synthesizeScrollGesture', {
+        ...(await measure('probe-end')).wheelTarget,
+        xDistance: sign * -700,
+        gestureSourceType: 'mouse',
+      })
+      try {
+        await waitFor(
+          async () => (await measure('probe-end')).targetVisible,
+          'final column after horizontal wheel input',
+        )
+      } catch (error) {
+        throw new Error(`Thread ${thread}: ${JSON.stringify(await measure('probe-end'))}`, {
+          cause: error,
+        })
+      }
+      const final = await measure('probe-end')
+      scrollbar = final.scrollbar
+      assert.ok(final.finalLineVisible, 'horizontal scrollbar leaves the last line visible')
+    }
+
+    await selectThread(5, 'probe-feedback')
+    const settled = await waitFor(async () => {
+      const frame = await measure('probe-feedback')
+      return frame.nativeVertical === 'auto' && frame.height
+    }, 'bounded viewport for height feedback')
+    await delay(200)
+    assert.equal((await measure('probe-feedback')).height, settled, 'height feedback stops')
+
+    await selectThread(6, 'probe-images')
+    assert.deepEqual(requests, { message: 0, parent: 0, missing: 0 })
+    await run(() => {
+      const image = new Image()
+      image.src = '/__amc_fixture_image?source=parent'
+      document.body.append(image)
+    })
+    const beforeConsent = (await measure('probe-images')).height
+    await run(() =>
+      [...document.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Load images')
+        .click(),
+    )
+    await waitFor(
+      () =>
+        run(() =>
+          [...document.querySelectorAll('iframe')].some((frame) => {
+            const doc = frame.contentDocument
+            return (
+              doc?.getElementById('probe-remote')?.naturalWidth > 0 &&
+              doc.getElementById('probe-missing')?.complete
+            )
+          }),
+        ),
+      'allowed image load and failed image settle',
+    )
+    assert.deepEqual(requests, { message: 1, parent: 0, missing: 1 })
+    await waitFor(
+      async () => (await measure('probe-images')).height > beforeConsent,
+      'iframe grows after delayed image load',
+    )
+
+    console.log(
+      `HTML reader verified in Chromium ${process.versions.chrome}, minimum-window iframe ${narrowReaderWidth}px, horizontal gutter ${scrollbar}px`,
+    )
+  } catch (error) {
+    console.error(error)
+    process.exitCode = 1
+  } finally {
+    win?.destroy()
+    await server?.close()
+    await rm(profile, { recursive: true })
+    app.exit(process.exitCode ?? 0)
+  }
+}
+
+void main()

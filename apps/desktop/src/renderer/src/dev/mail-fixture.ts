@@ -9,6 +9,7 @@ import {
   type ThreadSummary,
 } from '@amc/protocol'
 import type { AmcApi, ReplicaThreadMessage, SyncStatus, TriageStatus } from '../../../shared/api'
+import { htmlReaderFixture, readerImage, readerImageAttachment } from './html-reader-fixtures'
 
 /** Synthetic data only. The fixture never calls the preload bridge. */
 export function createFixture(scenario: string): AmcApi {
@@ -16,6 +17,7 @@ export function createFixture(scenario: string): AmcApi {
 }
 
 export function createMailFixture(scenario: string) {
+  const htmlReader = scenario === 'html-reader'
   const now = Date.now()
   const account: AccountSummary = {
     id: 'studio',
@@ -151,7 +153,7 @@ export function createMailFixture(scenario: string) {
       : thread.id === 'thread-1'
         ? 'Hi Jules,\n\nThe printer sent the first proof for Field Notes. The photographs came through beautifully, and the new captions sit much better on the page.\n\nCould you approve the warm grey before Thursday? I’ve attached the proof so you can compare it with the sample we looked at on Monday.\n\nThanks,\nMina'
         : thread.snippet,
-    hasHtml: false,
+    hasHtml: htmlReader && htmlReaderFixture(`${thread.id}:${older ? 'older' : 'latest'}`) !== null,
     sentAt: thread.lastMessageAt - (older ? 3_600_000 : 0),
     unread: !older && thread.unreadCount > 0,
     starred: thread.starred,
@@ -159,18 +161,20 @@ export function createMailFixture(scenario: string) {
     listUnsubscribe: null,
     bodyRevision: '1',
     attachments:
-      !older && thread.hasAttachments
-        ? [
-            {
-              id: 'proof',
-              filename: 'Print proof.pdf',
-              mimeType: 'application/pdf',
-              size: 124_200,
-              inline: false,
-              contentId: null,
-            },
-          ]
-        : [],
+      htmlReader && !older && thread.id === 'thread-1'
+        ? [readerImageAttachment]
+        : !older && thread.hasAttachments
+          ? [
+              {
+                id: 'proof',
+                filename: 'Print proof.pdf',
+                mimeType: 'application/pdf',
+                size: 124_200,
+                inline: false,
+                contentId: null,
+              },
+            ]
+          : [],
   })
   const filter = (query: string) =>
     threads.filter((thread) =>
@@ -222,7 +226,9 @@ export function createMailFixture(scenario: string) {
     },
     retrySavedPairing: async () => {},
     unpair: async () => {},
-    syncNow: async () => {},
+    syncNow: async () => {
+      if (htmlReader) notify()
+    },
     accounts: async () => [account],
     labels: async () => [
       {
@@ -435,8 +441,9 @@ export function createMailFixture(scenario: string) {
       return { undoSendSeconds }
     },
     messageText: async () => null,
-    messageHtml: async () => null,
-    inlineAttachment: async () => '',
+    messageHtml: async (id) => (htmlReader ? htmlReaderFixture(id) : null),
+    inlineAttachment: async (id) =>
+      htmlReader && id === readerImageAttachment.id ? readerImage : '',
     openAttachment: async () => {},
     openExternal: async () => {},
     t3Setup: async () => ({ kind: 'mcp', address: '' }),
