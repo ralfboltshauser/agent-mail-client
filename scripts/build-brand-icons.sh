@@ -3,40 +3,54 @@ set -eu
 
 cd "$(dirname "$0")/.."
 build=apps/desktop/build
-mark=docs/brand/assets/mark.svg
-iconset_root=$(mktemp -d "${TMPDIR:-/tmp}/amc-icon.XXXXXX")
-trap 'find "$iconset_root" -depth -delete' EXIT
-iconset="$iconset_root/amc.iconset"
+assets=docs/brand/assets
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/amc-icon.XXXXXX")
+trap 'find "$scratch" -depth -delete' EXIT
+iconset="$scratch/amc.iconset"
 mkdir "$iconset"
 
-{
-  printf '%s\n' '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">'
-  printf '%s\n' '  <rect x="80" y="80" width="864" height="864" rx="194" fill="#151515"/>'
-  printf '%s\n' '  <g transform="translate(248 292) scale(22)">'
-  sed -n 's/^  <path fill="#151515"/    <path fill="#F8F7F3"/p' "$mark"
-  printf '%s\n' '  </g>' '</svg>'
-} > "$build/icon.svg"
+# Remove the near-white backdrop and keep the edges and proportions of the approved image.
+mask="$scratch/mark.png"
+magick "$assets/coarse-stencil.png" -colorspace gray -negate -level 5%,95% \
+  -trim +repage -strip "$mask"
+
+color_mask() {
+  magick "$1" \( +clone -fill "$2" -colorize 100 \) +swap \
+    -compose CopyOpacity -composite -strip "PNG32:$3"
+}
+
+color_mask "$mask" '#000000' "$assets/mark.png"
+color_mask "$mask" '#F8F7F3' "$assets/mark-paper.png"
+magick -background none -density 768 "$assets/wordmark.svg" -trim +repage "$scratch/wordmark.png"
+
+make_lockup() {
+  magick -size 840x240 xc:none \
+    \( "$1" -resize x192 \) -geometry +12+24 -composite \
+    \( "$scratch/wordmark.png" -channel RGB -fill "$2" -colorize 100 +channel -resize x158 \) \
+    -geometry +332+41 -composite -strip "PNG32:$3"
+}
+
+make_lockup "$assets/mark.png" '#000000' "$assets/lockup-ink.png"
+make_lockup "$assets/mark-paper.png" '#F8F7F3' "$assets/lockup-paper.png"
+
+magick -size 1024x1024 xc:none -fill '#FFFFFF' \
+  -draw 'roundrectangle 80,80 943,943 194,194' \
+  \( "$assets/mark.png" -resize 560x560 \) -gravity center -composite -strip "PNG32:$build/icon.png"
 
 for size in 16 32 128 256 512; do
   for scale in 1 2; do
     suffix=
     [ "$scale" = 1 ] || suffix=@2x
     px=$((size * scale))
-    magick -background none -density 384 "$build/icon.svg" -resize "${px}x${px}" -strip \
+    magick "$build/icon.png" -resize "${px}x${px}" -strip \
       "PNG32:$iconset/icon_${size}x${size}$suffix.png"
   done
 done
 iconutil --convert icns --output "$build/icon.icns" "$iconset"
 
-{
-  printf '%s\n' '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 18">'
-  printf '%s\n' '  <g transform="translate(1.5 2.75) scale(.625)">'
-  sed -n 's/^  <path fill="#151515"/    <path fill="#000000"/p' "$mark"
-  printf '%s\n' '  </g>' '</svg>'
-} > "$build/trayTemplate.svg"
-
-magick -background none -density 384 "$build/trayTemplate.svg" -resize 18x18 -strip "PNG32:$build/trayTemplate.png"
-magick -background none -density 384 "$build/trayTemplate.svg" -resize 36x36 -strip "PNG32:$build/trayTemplate@2x.png"
-
-magick -background none -density 768 "$mark" -resize 108x108 -gravity center -extent 128x128 \
+magick "$assets/mark.png" -resize 15x15 -background none -gravity center -extent 18x18 \
+  -strip "PNG32:$build/trayTemplate.png"
+magick "$assets/mark.png" -resize 30x30 -background none -gravity center -extent 36x36 \
+  -strip "PNG32:$build/trayTemplate@2x.png"
+magick "$assets/mark.png" -resize 108x108 -background none -gravity center -extent 128x128 \
   -strip PNG32:apps/desktop/src/renderer/src/assets/amc-mark.png

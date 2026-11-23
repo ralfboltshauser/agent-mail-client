@@ -1,6 +1,6 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/assets/lockup-paper.svg">
-  <img src="docs/brand/assets/lockup-ink.svg" alt="AMC" width="168" height="48">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/assets/lockup-paper.png">
+  <img src="docs/brand/assets/lockup-ink.png" alt="AMC" width="168" height="48">
 </picture>
 
 # Agent Mail Client (AMC)

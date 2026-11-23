@@ -43,7 +43,9 @@
   a { color: inherit; text-underline-offset: .17em; }
   a:focus-visible, input:focus-visible { outline: 2px solid Highlight; outline-offset: 4px; }
   img { display: block; max-width: 100%; }
-  .intro { padding-block: clamp(28px, 6vw, 64px) 25px; }
+  .intro { display: grid; grid-template-columns: 1fr 1fr; gap: clamp(18px, 5vw, 58px); align-items: center; padding-block: 24px; }
+  .intro figure { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .intro img { width: 100%; height: auto; }
   .intro p { margin-top: 13px; max-width: 56ch; color: var(--muted); }
   .plate { background: var(--surface); color: var(--on-surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
   .light { --surface: var(--paper); --on-surface: var(--ink); }
@@ -78,6 +80,7 @@
   .mail b::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 7px; vertical-align: .1em; border-radius: 50%; background: var(--cue); }
   .assets { display: flex; flex-wrap: wrap; gap: 6px 16px; }
   @media (max-width: 520px) {
+    .intro { grid-template-columns: 1fr; }
     .logo-rules { grid-template-columns: 1fr; }
     .semantics { grid-template-columns: repeat(2, minmax(0,1fr)); }
     .small-marks { margin-left: 0; }
@@ -97,17 +100,20 @@
   </header>
 
   <div class="intro">
-    <h1>Brand guide</h1>
-    <p>Agent Mail Client is keyboard-first mail you can work through with an agent. The Coarse Stencil mark turns the folds of a letter into a bold pixel M. Wide seams keep the three pieces legible on small surfaces.</p>
+    <div>
+      <h1>Brand guide</h1>
+      <p>Agent Mail Client is keyboard-first mail you can work through with an agent. Coarse Stencil is the primary mark.</p>
+    </div>
+    <figure><img src="assets/coarse-stencil.png" width="1254" height="1254" alt="Original Coarse Stencil mark, a black pixel M with three separated shapes"></figure>
   </div>
 
   <div class="grid">
     <figure class="plate light">
-      <div class="lockup"><img src="assets/lockup-ink.svg" alt="AMC logo in ink"></div>
+      <div class="lockup"><img src="assets/lockup-ink.png" alt="AMC logo in ink"></div>
       <figcaption>Light · Ink on paper</figcaption>
     </figure>
     <figure class="plate dark">
-      <div class="lockup"><img src="assets/lockup-paper.svg" alt="AMC logo in paper"></div>
+      <div class="lockup"><img src="assets/lockup-paper.png" alt="AMC logo in paper"></div>
       <figcaption>Dark · Paper on ink</figcaption>
     </figure>
   </div>
@@ -119,15 +125,15 @@
       <div><h3>Symbol on its own</h3><p>Use the symbol for compact placements. Keep the three shapes upright and their seams open. Use the paper mark on dark backgrounds and the ink mark on light backgrounds.</p></div>
     </div>
     <div class="dock" aria-label="Packaged Dock artwork at sample sizes and menu bar glyph">
-      <figure><img src="../../apps/desktop/build/icon.svg" width="16" height="16" alt=""><figcaption>16 px</figcaption></figure>
-      <figure><img src="../../apps/desktop/build/icon.svg" width="32" height="32" alt=""><figcaption>32 px</figcaption></figure>
-      <figure><img src="../../apps/desktop/build/icon.svg" width="64" height="64" alt=""><figcaption>64 px</figcaption></figure>
+      <figure><img src="../../apps/desktop/build/icon.png" width="16" height="16" alt=""><figcaption>16 px</figcaption></figure>
+      <figure><img src="../../apps/desktop/build/icon.png" width="32" height="32" alt=""><figcaption>32 px</figcaption></figure>
+      <figure><img src="../../apps/desktop/build/icon.png" width="64" height="64" alt=""><figcaption>64 px</figcaption></figure>
       <div class="small-marks">
         <span><img src="../../apps/desktop/build/trayTemplate.png" width="18" height="18" alt="">Menu bar</span>
         <span><img src="../../apps/desktop/src/renderer/src/assets/amc-mark.png" width="28" height="28" alt="">All Accounts</span>
       </div>
     </div>
-    <p class="asset">The Dock uses a paper mark on an ink tile. The menu bar and All Accounts mark take their color from their surroundings.</p>
+    <p class="asset">The Dock uses the black mark on a white tile. The menu bar and All Accounts mark take their color from their surroundings.</p>
   </section>
 
   <section aria-labelledby="type-heading">
@@ -135,7 +141,7 @@
     <div class="grid">
       <div class="specimen">
         <div class="display-sample">Agent Mail Client</div>
-        <p><strong>Space Grotesk 700</strong> for the wordmark and display headings. The lockups contain outlines and render without the font installed.</p>
+        <p><strong>Space Grotesk 700</strong> for the wordmark and display headings. The lockups use the approved mark with the outlined wordmark and render without the font installed.</p>
       </div>
       <div class="specimen">
         <div class="ui-sample">Draft ready to review</div>
@@ -173,11 +179,12 @@
   <section aria-labelledby="assets-heading">
     <h2 id="assets-heading">Assets</h2>
     <div class="assets">
-      <a href="assets/lockup-ink.svg">Ink lockup</a>
-      <a href="assets/lockup-paper.svg">Paper lockup</a>
-      <a href="assets/mark.svg">Ink mark</a>
-      <a href="assets/mark-paper.svg">Paper mark</a>
-      <a href="../../apps/desktop/build/icon.svg">Dock artwork</a>
+      <a href="assets/coarse-stencil.png">Original artwork</a>
+      <a href="assets/lockup-ink.png">Ink lockup</a>
+      <a href="assets/lockup-paper.png">Paper lockup</a>
+      <a href="assets/mark.png">Ink mark</a>
+      <a href="assets/mark-paper.png">Paper mark</a>
+      <a href="../../apps/desktop/build/icon.png">Dock artwork</a>
       <a href="assets/OFL.txt">Font license</a>
     </div>
   </section>
