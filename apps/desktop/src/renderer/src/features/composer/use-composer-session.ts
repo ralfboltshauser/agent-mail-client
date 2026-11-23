@@ -314,6 +314,7 @@ export function useComposerSession(draft: ComposeDraft, onDiscarded: (dirty: boo
     error,
     conflict,
     reportError,
+    showValidationError: setError,
     reviewDiscard,
     closeDiscard,
     discard,

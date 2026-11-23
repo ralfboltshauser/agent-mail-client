@@ -78,7 +78,7 @@ it('copies the exact loaded Thread from the toolbar, shortcut and command palett
   expect(within(shortcuts).getByText(label).nextElementSibling?.textContent).toBe('⌘⇧C')
 })
 
-it('leaves ordinary copy, editable controls, selection and composer shortcuts alone', async () => {
+it('preserves ordinary copy and routes the shared chord to Cc in the composer', async () => {
   const writeText = mockClipboard()
   await mount()
   const heading = reader()
@@ -97,7 +97,10 @@ it('leaves ordinary copy, editable controls, selection and composer shortcuts al
 
   await act(async () => fireEvent.click(screen.getByRole('button', { name: /^Compose/ })))
   const composer = within(screen.getByRole('dialog', { name: 'Compose' }))
-  expect(await pressCopy(composer.getByRole('textbox', { name: 'Message body' }))).toBe(false)
+  const body = composer.getByRole('textbox', { name: 'Message body' })
+  expect(await pressCopy(body, false)).toBe(false)
+  expect(await pressCopy(body)).toBe(true)
+  expect(document.activeElement).toBe(composer.getByRole('combobox', { name: 'Cc' }))
   expect(writeText).not.toHaveBeenCalled()
 })
 

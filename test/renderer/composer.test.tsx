@@ -10,7 +10,7 @@ import {
 
 import { deferred, rendererAdapter } from './adapter'
 import { commits, expectBudget } from './profile'
-import { mount } from './workspace'
+import { listbox, mount } from './workspace'
 
 async function openComposer() {
   const adapter = await mount()
@@ -69,6 +69,76 @@ it('retries opening the exact draft from the thread without losing the draft car
       }),
     }),
   )
+})
+
+it.each([
+  ['c', 'new', 'To'],
+  ['f', 'forward', 'To'],
+  ['r', 'reply', 'Message body'],
+  ['a', 'reply-all', 'Message body'],
+] as const)('opens %s in the %s composer with focus on %s', async (key, mode, field) => {
+  const adapter = await mount()
+  await act(async () => fireEvent.keyDown(listbox(), { key }))
+  expect(adapter.api.startCompose).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ mode }),
+  )
+  const dialog = within(screen.getByRole('dialog', { name: 'Compose' }))
+  expect(document.activeElement).toBe(
+    dialog.getByRole(field === 'To' ? 'combobox' : 'textbox', { name: field }),
+  )
+})
+
+it('focuses the message body when resuming a draft addressed only with Cc', async () => {
+  const { adapter, dialog } = await openComposer()
+  await act(async () =>
+    fireEvent.click(dialog.getByRole('button', { name: 'Minimise and save draft' })),
+  )
+  const draft = await adapter.api.composeDraft('draft-1')
+  adapter.api.composeDraft.mockResolvedValueOnce({
+    ...draft,
+    cc: [{ address: 'cc@example.test', name: null }],
+  })
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Resume draft' })))
+  const resumed = within(screen.getByRole('dialog', { name: 'Compose' }))
+  expect(document.activeElement).toBe(resumed.getByRole('textbox', { name: 'Message body' }))
+  expect(resumed.getByRole('button', { name: 'Remove cc@example.test' })).toBeTruthy()
+})
+
+it('keeps a partial address after moving to another field and pressing Escape', async () => {
+  const { adapter, dialog, recipient, subject } = await openComposer()
+  await act(async () => {
+    fireEvent.change(recipient, { target: { value: 'unfinished' } })
+    fireEvent.keyDown(recipient, { key: 'S', metaKey: true, shiftKey: true })
+  })
+  expect(document.activeElement).toBe(subject)
+  await act(async () => fireEvent.keyDown(subject, { key: 'Escape' }))
+  expect(document.activeElement).toBe(recipient)
+  expect((recipient as HTMLInputElement).value).toBe('unfinished')
+  expect(dialog.getByRole('alert').textContent).toContain('Finish adding the address')
+  expect(adapter.api.saveCompose).not.toHaveBeenCalled()
+})
+
+it('keeps a highlighted contact uncommitted when using a field shortcut', async () => {
+  const { adapter, dialog, recipient, subject } = await openComposer()
+  vi.spyOn(adapter.api, 'contacts').mockResolvedValueOnce([
+    {
+      address: 'alex@example.test',
+      name: 'Alex',
+      lastSeenAt: 0,
+      receivedCount: 1,
+      sentCount: 0,
+    },
+  ])
+  await act(async () => fireEvent.change(recipient, { target: { value: 'Alex' } }))
+  await act(async () => vi.advanceTimersByTimeAsync(140))
+  await act(async () => fireEvent.keyDown(recipient, { key: 'ArrowDown' }))
+  expect(dialog.getByRole('option', { name: /Alex/, selected: true })).toBeTruthy()
+  await act(async () => {
+    fireEvent.keyDown(recipient, { key: 'S', metaKey: true, shiftKey: true })
+  })
+  expect(document.activeElement).toBe(subject)
+  expect(dialog.queryByRole('button', { name: 'Remove alex@example.test' })).toBeNull()
+  expect((recipient as HTMLInputElement).value).toBe('Alex')
 })
 
 it('applies one subject character without replacing the composer fields', async () => {

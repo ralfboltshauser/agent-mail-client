@@ -6,10 +6,17 @@ import { DRAFT_DISCARDED_ELSEWHERE } from '@/features/composer/draft-availabilit
 import { DraftDetails, DraftStatus, SignatureEditor } from '@/features/composer/draft-details'
 import { ComposerEditor, ComposerToolbar, useComposerEditor } from '@/features/composer/editor'
 import { ComposerFooter } from '@/features/composer/footer'
-import { ComposerRecipients, FromField, SubjectField } from '@/features/composer/header-fields'
+import {
+  ComposerRecipients,
+  FromField,
+  type RecipientFocus,
+  SubjectField,
+} from '@/features/composer/header-fields'
 import { useComposerSession } from '@/features/composer/use-composer-session'
 import { getAmc } from '@/lib/amc'
+import { composeFieldShortcuts } from '@/lib/mail-shortcuts'
 import { DiscardDraftDialog } from './discard-draft-dialog'
+import { parseRecipientInput } from './recipient-field'
 import { Button } from './ui/button'
 import { Dialog, DialogContent, DialogTitle } from './ui/dialog'
 
@@ -29,11 +36,11 @@ export function Composer({
   onKept: (draft: ComposeDraft) => void
 }) {
   const surface = useRef<HTMLDivElement>(null)
+  const recipients = useRef<RecipientFocus>(null)
   const [discardedElsewhere, setDiscardedElsewhere] = useState(false)
-  const pendingRecipient = () =>
-    Array.from(
-      surface.current?.querySelectorAll<HTMLInputElement>('[data-recipient-input]') ?? [],
-    ).find((input) => input.value.trim())
+  const recipientInputs = () =>
+    Array.from(surface.current?.querySelectorAll<HTMLInputElement>('[data-recipient-input]') ?? [])
+  const pendingRecipient = () => recipientInputs().find((input) => input.value.trim())
   const {
     session,
     busy,
@@ -43,6 +50,7 @@ export function Composer({
     error,
     conflict,
     reportError,
+    showValidationError,
     reviewDiscard,
     closeDiscard,
     discard,
@@ -107,6 +115,14 @@ export function Composer({
   )
 
   const minimiseDraft = () => {
+    const invalid = recipientInputs().find(
+      (input) => input.value.trim() && !parseRecipientInput(input.value),
+    )
+    if (invalid) {
+      showValidationError('Finish adding the address or clear the field before saving.')
+      invalid.focus()
+      return
+    }
     const focused = document.activeElement
     if (
       focused instanceof HTMLInputElement &&
@@ -122,7 +138,7 @@ export function Composer({
   const recoverDraft = () => {
     const input = pendingRecipient()
     if (input) {
-      reportError(new Error('Finish adding the address or clear the field before saving.'))
+      showValidationError('Finish adding the address or clear the field before saving.')
       input.focus()
       return
     }
@@ -141,8 +157,31 @@ export function Composer({
         showCloseButton={false}
         aria-describedby={undefined}
         className="flex max-h-[90dvh] max-w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl"
+        onOpenAutoFocus={(event) => {
+          event.preventDefault()
+          if ((draft.to.length || draft.cc.length || draft.bcc.length) && editor)
+            editor.view.focus()
+          else recipients.current?.focus('to')
+        }}
         onPointerDownOutside={(event) => event.preventDefault()}
         onKeyDownCapture={(event) => {
+          if (event.nativeEvent.isComposing) return
+          if (event.metaKey && event.shiftKey && !event.ctrlKey && !event.altKey) {
+            const binding = `mod+shift+${event.key.toLowerCase()}`
+            const field = (
+              Object.keys(composeFieldShortcuts) as (keyof typeof composeFieldShortcuts)[]
+            ).find((name) => composeFieldShortcuts[name] === binding)
+            if (field) {
+              event.preventDefault()
+              event.stopPropagation()
+              if (locked || confirmDiscard) return
+              if (field === 'body') editor?.view.focus()
+              else if (field === 'from' || field === 'subject') {
+                surface.current?.querySelector<HTMLElement>(`[name="${field}"]`)?.focus()
+              } else recipients.current?.focus(field)
+              return
+            }
+          }
           const target = event.target
           if (target instanceof Element) {
             const editingHost = target.closest('[contenteditable]')
@@ -153,7 +192,6 @@ export function Composer({
               return
           }
           if (
-            !event.nativeEvent.isComposing &&
             event.metaKey &&
             !event.ctrlKey &&
             !event.altKey &&
@@ -204,10 +242,10 @@ export function Composer({
         >
           <fieldset disabled={locked} className="min-w-0">
             <FromField session={session} accounts={accounts} onAccountChange={changeAccount} />
-            <ComposerRecipients session={session} />
+            <ComposerRecipients ref={recipients} session={session} />
             <SubjectField session={session} />
-            <ComposerToolbar editor={editor} />
             <ComposerEditor editor={editor} locked={locked} />
+            <ComposerToolbar editor={editor} />
             <DraftDetails session={session} onRemove={remove} />
             {signature !== null && (
               <SignatureEditor initialSignature={signature} onSave={saveSignature} />
