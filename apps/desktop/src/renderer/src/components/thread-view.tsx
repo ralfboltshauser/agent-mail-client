@@ -22,19 +22,28 @@ interface Props {
 
 const HIDDEN_LABELS = /:(INBOX|UNREAD|STARRED|IMPORTANT|SENT|DRAFT|CATEGORY_\w+)$/
 const STRUCTURED_REASON = /^Context: ([^|\r\n]+)(?: \| Action: ([^|\r\n]+))?$/
+const NEXT_STEP_LABEL: Record<Bucket, string | null> = {
+  Reply: 'Action',
+  Action: 'Action',
+  'Follow-up': 'Next step',
+  Update: null,
+  Later: null,
+  'When I have time': null,
+}
 
 function BucketCard({ bucket, reason }: { bucket: Bucket; reason: string }) {
   const match = STRUCTURED_REASON.exec(reason)
   const context = match?.[1]?.trim()
   const action = match?.[2]?.trim()
   const structured = context && (match?.[2] === undefined || action)
+  const nextStepLabel = NEXT_STEP_LABEL[bucket]
 
   return (
     <div className="mb-5 space-y-3 rounded-md bg-muted/65 px-4 py-3">
       <Badge variant="secondary" className="text-accent-foreground">
         {bucket}
       </Badge>
-      {structured ? (
+      {structured && nextStepLabel ? (
         <dl className="space-y-3 select-text wrap-anywhere text-sm leading-relaxed">
           <div>
             <dt className="text-xs font-semibold text-muted-foreground">Context</dt>
@@ -42,13 +51,15 @@ function BucketCard({ bucket, reason }: { bucket: Bucket; reason: string }) {
           </div>
           {action ? (
             <div>
-              <dt className="text-xs font-semibold text-muted-foreground">Action</dt>
+              <dt className="text-xs font-semibold text-muted-foreground">{nextStepLabel}</dt>
               <dd className="mt-0.5 font-medium">{action}</dd>
             </div>
           ) : null}
         </dl>
       ) : (
-        <p className="select-text wrap-anywhere text-sm leading-relaxed">{reason}</p>
+        <p className="select-text wrap-anywhere text-sm leading-relaxed">
+          {structured ? context : reason}
+        </p>
       )}
     </div>
   )
