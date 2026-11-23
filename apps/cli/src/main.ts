@@ -30,6 +30,7 @@ import { registerDiagnosticsCommands } from './diagnostics.ts'
 import { addImapAccount } from './imap-signin.ts'
 import { cliContext, cliFailure, closeClientLogs, retainFailureSource } from './observability.ts'
 import { loopbackSignIn } from './signin.ts'
+import { registerSkillCommands } from './skills.ts'
 import { printOwnerAction, registerSmartInboxCommands } from './smart-inbox.ts'
 import { describeTriageFailure, runTriage, TriageFailure } from './triage.ts'
 
@@ -58,6 +59,7 @@ const program = new Command()
   })
 
 registerDiagnosticsCommands(program, readConfig)
+registerSkillCommands(program)
 
 program
   .command('pair')
