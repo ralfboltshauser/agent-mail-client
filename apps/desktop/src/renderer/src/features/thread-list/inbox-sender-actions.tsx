@@ -42,17 +42,19 @@ export const InboxSenderActions = memo(function InboxSenderActions({
   const run = async (decision: Decision) => {
     if (inFlight.current || (decision === 'block' && !canBlock)) return
     const previous = retry.current
-    const input: SenderDecision = {
-      accountId: sender.accountId,
-      address: sender.address,
-      expectedRevision: sender.revision,
-      clientActionId:
-        previous?.decision === decision && previous.expectedRevision === sender.revision
-          ? previous.clientActionId
-          : crypto.randomUUID(),
-      decision,
-      source: 'thread-action',
-    }
+    const input: SenderDecision =
+      previous?.decision === decision &&
+      previous.accountId === sender.accountId &&
+      previous.address === sender.address
+        ? previous
+        : {
+            accountId: sender.accountId,
+            address: sender.address,
+            expectedRevision: sender.revision,
+            clientActionId: crypto.randomUUID(),
+            decision,
+            source: 'thread-action',
+          }
     inFlight.current = true
     retry.current = input
     returnFocus()
@@ -64,28 +66,33 @@ export const InboxSenderActions = memo(function InboxSenderActions({
       const applied = decision === 'accept' ? 'Sender accepted' : 'Sender blocked'
       const failed = `Could not ${decision} sender`
       let undoing = false
-      const report = ({ status, error }: OwnerActionStatus) => {
+      const report = ({ status, error, alreadyApplied }: OwnerActionStatus) => {
         if (status !== 'pending' && status !== 'applied') {
           toast.error(error ?? failed, { id: actionId })
           return
         }
         toast(status === 'pending' ? `${decisions[decision]} sender queued` : applied, {
           id: actionId,
-          action: {
-            label: 'Undo',
-            onClick: () => {
-              undoing = true
-              void smart.undoOwnerAction(actionId).then(
-                ({ undo }) => {
-                  if (undo?.status === 'applied') toast('Sender decision undone', { id: actionId })
-                  else if (undo?.status === 'pending') toast('Undo queued', { id: actionId })
-                  else
-                    toast.error(undo?.error ?? 'Could not undo sender decision', { id: actionId })
+          action: alreadyApplied
+            ? undefined
+            : {
+                label: 'Undo',
+                onClick: () => {
+                  undoing = true
+                  void smart.undoOwnerAction(actionId).then(
+                    ({ undo }) => {
+                      if (undo?.status === 'applied')
+                        toast('Sender decision undone', { id: actionId })
+                      else if (undo?.status === 'pending') toast('Undo queued', { id: actionId })
+                      else
+                        toast.error(undo?.error ?? 'Could not undo sender decision', {
+                          id: actionId,
+                        })
+                    },
+                    () => toast.error('Could not confirm Undo', { id: actionId }),
+                  )
                 },
-                () => toast.error('Could not confirm Undo', { id: actionId }),
-              )
-            },
-          },
+              },
         })
       }
       report(result)
@@ -101,7 +108,12 @@ export const InboxSenderActions = memo(function InboxSenderActions({
         }
       }
     } catch (error) {
-      toast.error('Could not confirm sender decision', { description: reviewError(error) })
+      const message = reviewError(error)
+      const rejected = message.startsWith('Review rejected: ')
+      if (rejected) retry.current = null
+      toast.error(rejected ? `Could not ${decision} sender` : 'Could not confirm sender decision', {
+        description: message.replace(/^Review rejected: /, ''),
+      })
     } finally {
       inFlight.current = false
       setBusy(false)

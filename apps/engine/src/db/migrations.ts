@@ -780,4 +780,23 @@ export const MIGRATIONS: readonly Migration[] = [
   triageMigration,
   filteringMigration,
   historyMigration,
+  {
+    version: 25,
+    name: 'Refresh replica projections for accepted Senders',
+    sql: `
+      CREATE TEMP TABLE accepted_sender_thread (id TEXT PRIMARY KEY);
+      INSERT INTO accepted_sender_thread SELECT DISTINCT m.thread_id
+      FROM sender_rule r
+      JOIN sender_index i USING (account_id, address)
+      JOIN message m ON m.id = i.message_id
+      WHERE r.decision = 'accept' AND i.in_inbox = 1;
+
+      INSERT INTO change_log (entity, entity_id, op, at)
+        SELECT 'thread', id, 'upsert', unixepoch() * 1000 FROM accepted_sender_thread;
+      UPDATE thread SET modseq = (
+        SELECT max(modseq) FROM change_log WHERE entity = 'thread' AND entity_id = thread.id
+      ) WHERE id IN (SELECT id FROM accepted_sender_thread);
+      DROP TABLE accepted_sender_thread;
+    `,
+  },
 ]

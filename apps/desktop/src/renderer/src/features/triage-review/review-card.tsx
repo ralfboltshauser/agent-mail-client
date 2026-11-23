@@ -9,6 +9,7 @@ export interface ReviewControls {
   accountAddress: string
   run: (key: string) => void
   reasonInput?: React.ReactNode
+  senderDecision: 'accept' | 'block' | null
   unavailable: (key: string) => string | undefined
 }
 
@@ -85,9 +86,15 @@ function CardPreview({ card, controls }: { card: Preview; controls: ReviewContro
       </section>
       <fieldset className="grid gap-2">
         <legend className="mb-2 text-sm font-medium">Sender</legend>
-        <div className="flex flex-wrap gap-2">
-          {choice('a', 'Accept sender · Keep in Inbox')}
-          {choice('x', 'Block sender · Move to Screened out')}
+        <div className="flex flex-wrap items-center gap-2">
+          {controls.senderDecision && (
+            <span className="text-sm font-medium">
+              {controls.senderDecision === 'accept' ? 'Accepted' : 'Blocked'}
+            </span>
+          )}
+          {controls.senderDecision !== 'accept' && choice('a', 'Accept sender · Keep in Inbox')}
+          {controls.senderDecision !== 'block' &&
+            choice('x', 'Block sender · Move to Screened out')}
         </div>
       </fieldset>
       <fieldset className="grid gap-2">

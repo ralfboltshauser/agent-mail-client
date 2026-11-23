@@ -352,6 +352,22 @@ describe('Gmail Organise writeback', () => {
     expect(thread()?.inInbox).toBe(false)
   })
 
+  it.each(['archive', 'snooze'] as const)(
+    'keeps an unreviewed Gmail reply in Inbox during Triage %s',
+    async (kind) => {
+      const { gmail, queue, submit, lookup, now } = await setup()
+      const target = { threadId: THREAD, reviewedInboxMessageIds: ['a:m1'] }
+      const mutation = submit(
+        kind === 'archive' ? { kind, ...target } : { kind, ...target, until: now() + 1000 },
+      )
+      gmail.add('m3', { threadId: 'thread', labels: ['INBOX', 'Label_work'] })
+      await queue.tick()
+      expect(lookup(mutation.id)?.status).toBe('applied')
+      expect(await gmail.getMessageLabels('m1')).toEqual(['UNREAD'])
+      expect(await gmail.getMessageLabels('m3')).toEqual(['INBOX', 'Label_work'])
+    },
+  )
+
   it('archives a Gmail reply absent from the replica and can undo just the changed labels', async () => {
     const { gmail, queue, submit, lookup, sync, thread } = await setup()
     const archive = submit({ kind: 'archive', threadId: THREAD })

@@ -55,6 +55,7 @@ export function statusLabel(status: ActionStatus) {
 }
 
 export function canUndo(action: ReviewAction) {
+  if (action.alreadyApplied) return false
   if (action.undo && action.undo.status !== 'unconfirmed' && action.undo.status !== 'failed')
     return false
   if (action.decision.kind === 'reply' && Date.now() >= action.decision.deadline) return false
@@ -139,6 +140,7 @@ export async function poll(
   return {
     status: status.status,
     error: status.error,
+    alreadyApplied: status.alreadyApplied,
     ...(status.undo ? { undo: { id: action.undo?.id ?? action.id, ...status.undo } } : {}),
   }
 }

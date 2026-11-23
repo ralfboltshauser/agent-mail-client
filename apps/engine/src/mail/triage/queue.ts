@@ -26,6 +26,8 @@ interface QueueRow {
   suggestFilter: number
   predictionId: string | null
   bucketPredictionId: string | null
+  latest: string | null
+  bucketRevision: string | null
 }
 
 export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
@@ -59,7 +61,7 @@ export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
       .prepare(`
       WITH inbox AS MATERIALIZED (
         SELECT t.id, t.account_id, t.modseq, t.last_message_at, t.bucket_confidence,
-          t.bucket_input_message_id, t.bucket_reason,
+          t.bucket_input_message_id, t.bucket_reason, t.bucket_revision,
           (SELECT id FROM triage_event p WHERE p.id = t.bucket_producer) AS bucket_prediction_id,
           t.filter_suggestion_message_id, t.filter_suggestion_event_id, t.bucket, ${latestInboxMessageSql} AS latest,
           (SELECT json_object('id', m.id, 'address', i.address, 'revision', coalesce(r.revision, 0),
@@ -83,13 +85,15 @@ export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
           sender ->> 'id' AS messageId, sender ->> 'address' AS address,
           sender ->> 'revision' AS ruleRevision, 'New sender' AS reason, last_message_at AS at,
           (filter_suggestion_message_id IS latest AND latest IS NOT NULL
-            AND NOT EXISTS (SELECT 1 FROM owner_handled h WHERE h.thread_id = id AND h.message_id = latest)) AS suggestFilter, filter_suggestion_event_id AS predictionId, NULL AS bucketPredictionId
+            AND NOT EXISTS (SELECT 1 FROM owner_handled h WHERE h.thread_id = id AND h.message_id = latest)) AS suggestFilter, filter_suggestion_event_id AS predictionId, NULL AS bucketPredictionId,
+          latest, bucket_revision AS bucketRevision
         FROM new_senders WHERE sender_rank = 1
         UNION ALL
         SELECT 1, t.id, t.modseq, t.account_id, t.latest, null, 0,
           coalesce(t.bucket_reason, ''), t.last_message_at,
           (t.filter_suggestion_message_id IS t.latest), t.filter_suggestion_event_id,
-          CASE WHEN t.bucket_input_message_id IS t.latest THEN t.bucket_prediction_id END
+          CASE WHEN t.bucket_input_message_id IS t.latest THEN t.bucket_prediction_id END,
+          t.latest, t.bucket_revision
         FROM inbox t LEFT JOIN owner_handled h ON h.thread_id = t.id
         WHERE ?7 IS NULL AND (t.sender ->> 'status' IS NOT 'new' OR (t.filter_suggestion_message_id = t.latest
             AND NOT EXISTS (SELECT 1 FROM new_senders n WHERE n.id = t.id AND n.sender_rank = 1)))
@@ -128,6 +132,8 @@ export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
           suggestFilter,
           predictionId,
           bucketPredictionId,
+          latest,
+          bucketRevision,
         }) => ({
           id: address ? { kind: 'sender', accountId, address } : { kind: 'thread', threadId },
           accountId,
@@ -140,6 +146,9 @@ export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
             ? { suggestFilter: true as const, ...(predictionId ? { predictionId } : {}) }
             : {}),
           ...(bucketPredictionId && !suggestFilter ? { bucketPredictionId } : {}),
+          ...(latest && (input.threadId || input.senderAddress)
+            ? { bucketTarget: { messageId: latest, revision: bucketRevision } }
+            : {}),
           ...(input.senderAddress && address
             ? { suggestions: senderSuggestions(db, accountId, address) }
             : {}),

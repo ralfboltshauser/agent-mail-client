@@ -11,6 +11,7 @@ export const InboxSender = z.object({
   address: z.string(),
   messageId: z.string(),
   status: SenderStatus,
+  decision: z.enum(['accept', 'block']).nullable().optional(),
   revision: z.number().int().nonnegative(),
 })
 export type InboxSender = z.infer<typeof InboxSender>
@@ -41,6 +42,7 @@ export const FilterReviewInput = z.object({
   predictionId: id.optional(),
   expectedRevision: z.number().int().nonnegative(),
   expectedInboxTarget: inboxTargetDigest.optional(),
+  expectedInboxMessageIds: z.array(id).min(1).optional(),
   clientActionId: z.uuid(),
   reason: OwnerReason.optional(),
   source: z.enum(['triage-key', 'thread-action', 'cli']).optional(),
@@ -107,6 +109,7 @@ export interface OwnerActionStatus {
   ownerReason?: string | null
   reasonRevision?: string | null
   acceptedTargets?: string[]
+  alreadyApplied?: true
   error: string | null
   mutationIds: string[]
   undo: { status: OwnerActionState; error: string | null; mutationIds: string[] } | null
@@ -169,6 +172,7 @@ export interface TriageQueuePage {
     suggestFilter?: true
     predictionId?: string
     bucketPredictionId?: string
+    bucketTarget?: { messageId: string; revision: string | null }
     suggestions?: SenderSuggestion[]
   }[]
   cursor: string | null

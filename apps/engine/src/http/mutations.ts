@@ -1,5 +1,5 @@
 import { hasScope, MutationBatch, MutationLookup, type MutationResponse } from '@amc/protocol'
-import { Hono, type MiddlewareHandler } from 'hono'
+import { type Handler, Hono, type MiddlewareHandler } from 'hono'
 import { z } from 'zod'
 import {
   MutationError,
@@ -22,7 +22,7 @@ const MutationKinds = z.object({
 
 export function mutationRoutes(queue: Mutations) {
   const routes = new Hono<AppEnv>()
-  routes.post('/mutations', requireScope('organize'), requireOrganiseClient, async (c) => {
+  const submit: Handler<AppEnv> = async (c) => {
     const body: unknown = await c.req.json().catch(() => null)
     if (!queue.snoozeEnabled) {
       const batch = MutationKinds.safeParse(body)
@@ -47,7 +47,9 @@ export function mutationRoutes(queue: Mutations) {
       if (!(error instanceof MutationError)) throw error
       return c.json({ error: 'mutation_rejected', message: error.message }, 409)
     }
-  })
+  }
+  routes.post('/mutations', requireScope('organize'), requireOrganiseClient, submit)
+  routes.post('/mutations/review', requireScope('organize'), requireOrganiseClient, submit)
   routes.post('/mutations/status', requireScope('organize'), requireOrganiseClient, async (c) => {
     const parsed = MutationLookup.safeParse(await c.req.json().catch(() => null))
     if (!parsed.success)

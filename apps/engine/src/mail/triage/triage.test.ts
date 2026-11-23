@@ -16,7 +16,7 @@ import { silentLog, tempDir, testConfig } from '../../test-support.ts'
 import { Drafts } from '../drafts.ts'
 import { Mutations } from '../mutations.ts'
 import { MailQueries } from '../queries.ts'
-import { senderActionStatus, undoSender } from '../senders/actions.ts'
+import { decideSender, senderActionStatus, undoSender } from '../senders/actions.ts'
 import { MailStore } from '../store.ts'
 import { messageFeatures } from './annotations.ts'
 import { correctionActions, markConfirmedReply } from './corrections.ts'
@@ -198,6 +198,76 @@ function effective(db: ReturnType<typeof openDatabase>, account: string) {
   }).map(({ labelId }) => labelId)
 }
 
+it('publishes accepted Sender state and requires a fresh revision for an opposite choice', async () => {
+  const { db, put, http, queries } = setup(24)
+  try {
+    const address = 'person@example.test'
+    const threadId = put('a', 'first', address, 10)
+    const path = '/v1/senders/decisions'
+    const request = {
+      accountId: 'a',
+      address,
+      decision: 'accept',
+      expectedRevision: 0,
+      clientActionId: randomUUID(),
+    }
+    expect((await http(path, 'POST', request)).status).toBe(200)
+    const before = threadInput(db, threadId)?.modseq ?? -1
+    migrate(db)
+    expect(threadInput(db, threadId)?.modseq).toBeGreaterThan(before)
+    expect(queries.threadSummary(threadId)?.inboxSender).toMatchObject({
+      decision: 'accept',
+      revision: 1,
+    })
+    const block = { ...request, clientActionId: randomUUID(), decision: 'block' }
+    const stale = await http(path, 'POST', block)
+    expect(stale.status).toBe(409)
+    expect(await stale.json()).toMatchObject({
+      error: 'sender',
+      message: 'The sender rule changed while saving the decision. Choose Accept or Block again.',
+    })
+    expect((await http(path, 'POST', { ...block, retryRevision: 1 })).status).toBe(409)
+    const accepted = await http(path, 'POST', { ...block, expectedRevision: 1 })
+    expect(accepted.status).toBe(202)
+    expect(await accepted.json()).toMatchObject({ actionId: block.clientActionId, revision: 2 })
+  } finally {
+    db.close()
+  }
+})
+
+it('applies a stale Bucket review only while the Inbox message and Bucket are unchanged', async () => {
+  const { db, store, put, http } = setup()
+  try {
+    const threadId = put('a', 'first', 'person@example.test', 10)
+    const shown = threadInput(db, threadId)
+    if (!shown?.input_id) throw new Error('Missing synthetic Inbox input')
+    const input = {
+      intent: 'review',
+      threadId,
+      expectedRevision: shown.modseq,
+      expectedBucketTarget: { messageId: shown.input_id, revision: shown.bucket_revision },
+      bucket: 'Reply',
+      reason: 'Owner review',
+      clientActionId: randomUUID(),
+    }
+    store.recordChange('thread', threadId, 'upsert')
+    expect(threadInput(db, threadId)?.modseq).toBeGreaterThan(shown.modseq)
+    expect((await http('/v1/bucket', 'PUT', input)).status).toBe(200)
+    const conflict = await http('/v1/bucket', 'PUT', {
+      ...input,
+      bucket: 'Later',
+      clientActionId: randomUUID(),
+    })
+    expect(conflict.status).toBe(409)
+    expect(await conflict.json()).toMatchObject({
+      message: expect.stringContaining('Bucket changed'),
+    })
+    expect(threadInput(db, threadId)?.bucket).toBe('Reply')
+  } finally {
+    db.close()
+  }
+})
+
 it('rejects raced model writes and restores an assignment and prompt eligibility durably on Undo', async () => {
   const { db, path, put, http, lease, queries } = setup()
   const agent = await lease()
@@ -283,6 +353,48 @@ it('upgrades populated pre-confidence databases and keeps existing Buckets outsi
   }
 })
 
+it('republishes accepted Sender threads once when upgrading an existing v24 database', () => {
+  const { db, put, store, queries } = setup(24)
+  try {
+    const address = 'accepted@example.test'
+    const accepted = put('a', 'accepted-1', address, 10, 'accepted-thread')
+    put('a', 'accepted-2', address, 20, 'accepted-thread')
+    const other = put('b', 'other-account', address, 30)
+    const principal = authenticate(
+      db,
+      issueToken(db, { kind: 'cli', scopes: ['admin'], name: 'Fixture owner' }).secret,
+    )
+    if (!principal) throw new Error('Missing fixture credentials')
+    decideSender(store, principal, {
+      accountId: 'a',
+      address,
+      expectedRevision: 0,
+      decision: 'accept',
+      clientActionId: randomUUID(),
+    })
+    const rules = db.prepare('SELECT * FROM sender_rule').all()
+    const actions = db.prepare('SELECT * FROM owner_action').all()
+    const history = db.prepare('SELECT * FROM triage_event').all()
+    const mail = db.prepare('SELECT * FROM message').all()
+    const existingModseq = db.prepare('SELECT max(modseq) AS seq FROM change_log').get()?.seq
+    const changes = db.prepare('SELECT entity, entity_id, op FROM change_log WHERE modseq > ?')
+    expect(migrate(db)).toBe(25)
+    expect(migrate(db)).toBe(25)
+    expect(changes.all(existingModseq ?? 0)).toEqual([
+      { entity: 'thread', entity_id: accepted, op: 'upsert' },
+    ])
+    expect(queries.threadSummary(accepted)?.inboxSender?.decision).toBe('accept')
+    expect(queries.threadSummary(other)?.inboxSender?.decision).toBeNull()
+    expect(db.prepare('SELECT * FROM sender_rule').all()).toEqual(rules)
+    expect(db.prepare('SELECT * FROM owner_action').all()).toEqual(actions)
+    expect(db.prepare('SELECT * FROM triage_event').all()).toEqual(history)
+    expect(db.prepare('SELECT * FROM message').all()).toEqual(mail)
+    expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([])
+  } finally {
+    db.close()
+  }
+})
+
 it('upgrades v22 with existing Sender rules, corrections and working inverses', async () => {
   const { db, http, store, queries } = setup(22)
   try {
@@ -314,7 +426,7 @@ it('upgrades v22 with existing Sender rules, corrections and working inverses', 
       FROM thread WHERE id = 'a:legacy';
       INSERT INTO owner_handled (thread_id, message_id, action_id) VALUES ('a:legacy', 'a:legacy', 'legacy-bucket');
     `)
-    expect(migrate(db)).toBe(24)
+    expect(migrate(db)).toBe(25)
     expect(queries.threadSummary('a:legacy')?.bucket?.bucket).toBe('Later')
     expect(senderActionStatus(db, 'legacy-sender')).toMatchObject({
       revision: 1,

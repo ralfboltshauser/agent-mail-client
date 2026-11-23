@@ -65,6 +65,57 @@ async function gmailFixture() {
   return { db, store, gmail, sync, principal: owner(db), queries: new MailQueries(db) }
 }
 
+it('acknowledges an already accepted sender under the new action ID', async () => {
+  const { db, store, principal } = await gmailFixture()
+  try {
+    const original = { ...request(), decision: 'accept' as const }
+    expect(decideSender(store, principal, original).revision).toBe(1)
+    const stale = { ...original, clientActionId: randomUUID() }
+    const receipt = decideSender(store, principal, stale)
+    expect(receipt).toMatchObject({
+      actionId: stale.clientActionId,
+      status: 'applied',
+      revision: 1,
+      alreadyApplied: true,
+    })
+    expect(decideSender(store, principal, stale)).toEqual(receipt)
+    expect(senderActionStatus(db, stale.clientActionId)).toEqual(receipt)
+    expect(senderActionStatus(db, original.clientActionId).status).toBe('applied')
+    expect(
+      db
+        .prepare("SELECT count(*) AS n FROM triage_event WHERE kind = 'decision' AND action_id = ?")
+        .get(stale.clientActionId),
+    ).toEqual({ n: 1 })
+  } finally {
+    db.close()
+  }
+})
+
+it('rejects a delayed opposite choice after another owner has changed the rule', async () => {
+  const { db, store, principal } = await gmailFixture()
+  try {
+    const other = owner(db)
+    const first = decideSender(store, principal, { ...request(), decision: 'accept' })
+    const delayed = { ...request(), expectedRevision: 1, decision: 'block' as const }
+    decideSender(store, other, { ...request(), expectedRevision: 1, decision: 'clear' })
+    expect(() => decideSender(store, principal, delayed)).toThrow(
+      'The sender rule changed while saving the decision. Choose Accept or Block again.',
+    )
+    expect(
+      db.prepare('SELECT revision, decision FROM sender_rule WHERE address = ?').get(sender),
+    ).toEqual({ revision: 2, decision: null })
+    expect(() => senderActionStatus(db, delayed.clientActionId)).toThrow('unavailable')
+    expect(
+      db
+        .prepare('SELECT count(*) AS n FROM triage_event WHERE action_id = ?')
+        .get(delayed.clientActionId),
+    ).toEqual({ n: 0 })
+    expect(senderActionStatus(db, first.actionId).status).toBe('superseded')
+  } finally {
+    db.close()
+  }
+})
+
 it('screens exact Gmail arrivals across queue restarts and honors an external return to Inbox', async () => {
   const { db, store, gmail, sync, principal, queries } = await gmailFixture()
   try {
@@ -73,9 +124,9 @@ it('screens exact Gmail arrivals across queue restarts and honors an external re
     expect(decideSender(store, principal, input).status).toBe('pending')
     expect(decideSender(store, principal, input).revision).toBe(1)
     expect(queries.message('a:first')?.screeningDisposition).toBe('pending')
-    expect(() =>
+    expect(
       decideSender(store, principal, { ...input, clientActionId: randomUUID() }),
-    ).toThrow(/changed/)
+    ).toMatchObject({ status: 'applied', alreadyApplied: true })
     const writes = vi.spyOn(gmail, 'modifyMessage')
     await ticks(new Mutations(store, () => gmail, silentLog))
     const destination = gmail.labelList.find(({ name }) => name === SCREENED_OUT_LABEL)?.id

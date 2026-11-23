@@ -46,6 +46,12 @@ const INTERNAL = 'engine'
 const IMAP_SNOOZE_INBOX = 'Snooze is only available for IMAP threads in the Inbox'
 const CLEAR_SNOOZE = { snoozedUntil: null, noReply: false, startedAt: null, snoozeIntent: null }
 
+function reviewedInboxScope(action: OrganiseAction) {
+  return 'reviewedInboxMessageIds' in action && action.reviewedInboxMessageIds
+    ? new Set(action.reviewedInboxMessageIds)
+    : null
+}
+
 interface ThreadState {
   muted: boolean
   snoozedUntil: number | null
@@ -602,9 +608,11 @@ export class Mutations {
     if (action.kind === 'snooze' && action.until <= this.#now())
       throw new MutationError('Choose a time in the future')
     const { patch, statePatch } = this.#actionPatch(action, thread.account_id, request.id)
-    return this.#insert(request.id, principal, body, thread, statePatch, (_, labels) =>
-      thread.kind === 'imap' ? imapActionLabels(action, thread.account_id, labels) : patch,
-    )
+    const reviewed = reviewedInboxScope(action)
+    return this.#insert(request.id, principal, body, thread, statePatch, (id, labels) => {
+      if (reviewed && !reviewed.has(id)) return {}
+      return thread.kind === 'imap' ? imapActionLabels(action, thread.account_id, labels) : patch
+    })
   }
 
   #actionPatch(
@@ -842,6 +850,7 @@ export class Mutations {
     const account = row.account_id
     const inbox = labelId(account, 'INBOX')
     const action = JSON.parse(row.request) as Exclude<OrganiseAction, { kind: 'undo' }>
+    const reviewed = reviewedInboxScope(action)
     const startsIntent = action.kind === 'mute' && action.value
     // Take the action's checkpoint before its first read. Acknowledgements later
     // identify our exact changes without hiding an intervening edit on a sibling.
@@ -891,7 +900,7 @@ export class Mutations {
         const { startedAt } = JSON.parse(row.state_patch) as Partial<ThreadState>
         const planned = this.#actionPatch(action, account, row.id, startedAt ?? undefined)
         statePatch = planned.statePatch
-        patchFor = () => planned.patch
+        patchFor = (id) => (!reviewed || reviewed.has(id) ? planned.patch : {})
       }
       const stateBefore = Object.fromEntries(
         Object.keys(statePatch).map((key) => [key, state[key as keyof ThreadState]]),
@@ -917,7 +926,7 @@ export class Mutations {
               key in (undo.get(id)?.after ?? {}) || present !== labels.includes(key),
           ),
         )
-        if (Object.keys(patch).length || retainBaseline) {
+        if (Object.keys(patch).length || (retainBaseline && (!reviewed || reviewed.has(id)))) {
           const baseline = { ...patch }
           if (retainBaseline) baseline[inbox] ??= false
           const expected = undo.get(id)?.before ?? {}
@@ -2281,7 +2290,9 @@ export class Mutations {
     }
     const applied = new Map(entry.applied.map((change) => [change.message_id, change]))
     const changes: Change[] = []
-    const scope = entry.archiveScope && new Set(entry.archiveScope)
+    const scope = entry.archiveScope
+      ? new Set(entry.archiveScope)
+      : reviewedInboxScope(JSON.parse(row.request))
     for (const [id, labels] of live) {
       if (scope && !scope.has(id)) continue
       const original = baseline.get(id)
@@ -2315,7 +2326,7 @@ export class Mutations {
           entry.superseded = combine([...entry.superseded, { ...change, after }])
       }
     }
-    entry.archiveScope ??= [...live.keys()]
+    entry.archiveScope ??= [...(scope ?? live.keys())]
     return changes
   }
 
