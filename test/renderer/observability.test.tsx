@@ -1,7 +1,13 @@
 import { render, screen } from '@testing-library/react'
-import { afterEach, expect, it, vi } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { ErrorBoundary } from '../../apps/desktop/src/renderer/src/components/error-boundary'
+import {
+  loadReview,
+  saveReview,
+} from '../../apps/desktop/src/renderer/src/features/triage-review/journal'
 import { installRendererReporting } from '../../apps/desktop/src/renderer/src/lib/failure'
+
+import './dom'
 
 const secret = [
   'Synthetic Canary Subject',
@@ -13,8 +19,6 @@ const secret = [
   'canary-fixture-token',
   'https://canary.example.invalid/private',
 ].join(' ')
-
-afterEach(() => vi.unstubAllGlobals())
 
 it('forwards only metadata for React, window error, and rejected promises', () => {
   const reportFailure = vi.fn()
@@ -56,5 +60,41 @@ it('forwards only metadata for React, window error, and rejected promises', () =
     }
   } finally {
     view.unmount()
+  }
+})
+
+it('keeps private error text from older triage history out of restored action details', () => {
+  const key = 'amc-triage-review-v1'
+  const scope = 'synthetic-pairing'
+  const detail = 'EngineError · Request 17927277-3fff-49c2-af62-7595000dd7d4'
+  localStorage.setItem(
+    key,
+    JSON.stringify({
+      scope,
+      sessions: {},
+      history: [
+        {
+          error: secret,
+          decision: { kind: 'organise' },
+          undo: { error: secret },
+        },
+      ],
+    }),
+  )
+
+  try {
+    const restored = loadReview(scope)
+    expect(restored.history[0]).toMatchObject({
+      error: 'The previous action reported a failure.',
+      undo: { error: 'The previous Undo reported a failure.' },
+    })
+    const action = restored.history[0]
+    if (!action) throw new Error('Missing fixture action')
+    action.error = detail
+    saveReview(restored)
+    expect(loadReview(scope).history[0]?.error).toBe(detail)
+    expect(localStorage.getItem(key)).not.toContain(secret)
+  } finally {
+    localStorage.removeItem(key)
   }
 })

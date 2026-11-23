@@ -472,7 +472,9 @@ export class LocalOrganise {
       const accountId = row.thread_id?.split(':')[0]
       const imap = accountId && this.#account(accountId)?.kind === 'imap'
       const verb = action.kind === 'archive' ? 'Archived' : 'Changed'
-      let message = 'Some changes could not be applied'
+      let message = outcomes.some((item) => trash && item.uncertainLabels?.includes(trash))
+        ? 'A change to Trash may have been applied'
+        : 'Some changes could not be applied'
       if (trash && total) {
         const detail = failed && !uncertain && !imap ? `${failed} couldn't be changed` : message
         message = `${verb} ${applied} of ${total}. ${detail}`

@@ -194,7 +194,7 @@ export class SyncLoop extends EventEmitter<{
       })
       if (signal.aborted || refresh !== this.#healthRefresh) return
       this.#set({
-        healthWarnings: doctorWarnings(health),
+        healthWarnings: doctorWarnings(health, Date.now(), 'private'),
         healthRefreshFailed: false,
         healthFailure: undefined,
       })

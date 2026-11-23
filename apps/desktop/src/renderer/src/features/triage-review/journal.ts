@@ -2,18 +2,32 @@ import { recordCaughtFailure } from '@/lib/failure'
 import type { AmcApi, ReviewApi, SmartInboxApi } from '../../../../shared/api'
 import type { ActionStatus, ReviewAction, Session } from './model'
 
+const errorFormatVersion = 1
 const storageKey = 'amc-triage-review-v1'
 export interface SavedReview {
   scope: string
   sessions: Record<string, Session>
   parked?: Record<string, { accountKey: string; session: Session }>
   history: ReviewAction[]
+  errorFormatVersion?: number
 }
 
 export function loadReview(scope: string): SavedReview {
   try {
     const saved = JSON.parse(localStorage.getItem(storageKey) ?? 'null') as SavedReview | null
-    if (saved?.scope === scope && saved.sessions && Array.isArray(saved.history)) return saved
+    if (saved?.scope === scope && saved.sessions && Array.isArray(saved.history)) {
+      if (saved.errorFormatVersion !== errorFormatVersion) {
+        for (const action of saved.history) {
+          if (action.error) {
+            action.error = /adopt|already in use/i.test(action.error)
+              ? 'A destination is already in use. Choose Adopt to continue.'
+              : 'The previous action reported a failure.'
+          }
+          if (action.undo?.error) action.undo.error = 'The previous Undo reported a failure.'
+        }
+      }
+      return saved
+    }
     localStorage.removeItem(storageKey)
   } catch (error) {
     recordCaughtFailure(error)
@@ -34,7 +48,7 @@ export function saveReview(saved: SavedReview) {
       ...(reason && action.status === 'unconfirmed' ? { privateReasonDraft: true } : {}),
     }
   })
-  localStorage.setItem(storageKey, JSON.stringify({ ...saved, history }))
+  localStorage.setItem(storageKey, JSON.stringify({ ...saved, errorFormatVersion, history }))
 }
 
 export function statusLabel(status: ActionStatus) {

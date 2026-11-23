@@ -499,7 +499,7 @@ it('describes Trash that succeeded for both messages even when one marker cleanu
   }
 })
 
-it('reports an uncertain Trash without an Undo or a Changed elsewhere notice', () => {
+it.each(['failed', 'partial'] as const)('reports an uncertain Trash on a %s move', (status) => {
   const replica = new Replica(':memory:')
   try {
     seed(replica)
@@ -510,7 +510,7 @@ it('reports an uncertain Trash without an Undo or a Changed elsewhere notice', (
           {
             id,
             threadId: THREAD.id,
-            status: 'failed',
+            status,
             modseq: 10,
             error: 'A change to Trash may have been applied. Gmail refused the change (HTTP 403)',
             superseded: [],
@@ -525,20 +525,27 @@ it('reports an uncertain Trash without an Undo or a Changed elsewhere notice', (
               },
               {
                 messageId: 'account:2',
-                status: 'failed',
-                appliedLabels: [],
+                status: status === 'partial' ? 'applied' : 'failed',
+                appliedLabels: status === 'partial' ? ['account:TRASH'] : [],
                 supersededLabels: [],
-                failedLabels: ['account:TRASH'],
+                failedLabels: status === 'partial' ? [] : ['account:TRASH'],
               },
             ],
           },
         ],
       }).mutations,
     )
+    replica.modseq = 10
     expect(replica.organise.errors()).toEqual([
       {
         id,
-        message: 'A change to Trash may have been applied',
+        message:
+          status === 'partial'
+            ? 'Changed 1 of 2. A change to Trash may have been applied'
+            : 'A change to Trash may have been applied',
+        ...(status === 'partial' && {
+          undo: { kind: 'undo', threadId: THREAD.id, mutationId: id },
+        }),
         description: expect.stringMatching(/^EngineError · Run /),
       },
     ])

@@ -105,7 +105,7 @@ export function SyncIndicator() {
     status.healthFailure,
     ...Object.values(status.accountFailures ?? {}),
   ].flatMap((failure) => (failure ? [formatFailure(failure)] : []))
-  const tooltip = warnings.length > 0 ? 'The Engine reported an operational warning.' : status.error
+  const tooltip = [...new Set([...warnings, status.error].filter(Boolean))].join('\n')
 
   return (
     <Tooltip>
