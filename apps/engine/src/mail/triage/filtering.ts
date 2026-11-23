@@ -28,6 +28,14 @@ function matchingMessages(db: Db, threadId: string, source: string) {
     .all(threadId, source) as { id: string }[]
 }
 
+export function inboxFilterTarget(db: Db, threadId: string) {
+  const thread = threadInput(db, threadId)
+  if (!thread?.in_inbox) throw new SenderError('The Thread is no longer in Inbox', 404)
+  const messages = matchingMessages(db, threadId, labelId(thread.account_id, 'INBOX'))
+  if (!messages.length) throw new SenderError('There are no eligible Inbox messages to filter', 409)
+  return { revision: thread.modseq, messageIds: messages.map(({ id }) => id).sort() }
+}
+
 function filterAction(db: Db, id: string) {
   return db
     .prepare(`

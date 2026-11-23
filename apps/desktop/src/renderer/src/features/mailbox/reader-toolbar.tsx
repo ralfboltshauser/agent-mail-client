@@ -3,6 +3,7 @@ import { Forward, Reply, ReplyAll } from 'lucide-react'
 import { BucketPicker } from '@/components/bucket-picker'
 import { OrganiseToolbar } from '@/components/organise'
 import { Button } from '@/components/ui/button'
+import type { FilterAction } from './use-filter-actions'
 import type { useMailCompose } from './use-mail-compose'
 import type { useThreadActions } from './use-thread-actions'
 
@@ -11,11 +12,13 @@ export function ReaderToolbar({
   activeThread,
   actions,
   compose,
+  filterActions,
 }: {
   selected: ThreadSummary | undefined
   activeThread: ThreadSummary | null
   actions: ReturnType<typeof useThreadActions>
   compose: ReturnType<typeof useMailCompose>
+  filterActions: FilterAction[]
 }) {
   const {
     organise,
@@ -31,6 +34,18 @@ export function ReaderToolbar({
   return (
     <div className="app-drag app-toolbar gap-0.5 overflow-x-auto px-3">
       {organise.controls.length > 0 && <OrganiseToolbar controls={organise.controls} />}
+      {filterActions.map(({ name, shortcut, disabled, run }) => (
+        <Button
+          key={name}
+          size="sm"
+          variant="ghost"
+          title={shortcut ? `${name} (${shortcut})` : undefined}
+          disabled={disabled}
+          onClick={run}
+        >
+          {name}
+        </Button>
+      ))}
       {activeThread && organiseAccount?.kind === 'imap' && organiseAccount.imapMoves === false && (
         <span className="text-muted-foreground text-xs">
           This IMAP server does not support safe moves

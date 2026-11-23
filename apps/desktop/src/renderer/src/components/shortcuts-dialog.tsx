@@ -69,6 +69,7 @@ export function ShortcutsDialog({
       title: 'Organise',
       keys: [
         ['Archive', 'E'],
+        ['Filter out this Thread', '! (Shift+1)'],
         ...(snoozeEnabled ? [['Snooze', 'H']] : []),
         ['Trash', '#'],
         ['Toggle star', 'S'],

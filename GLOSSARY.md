@@ -110,7 +110,7 @@ The recoverable AMC Label for incoming mail omitted from Inbox by an owner choic
 
 **Filter out**:
 
-The choice to place incoming mail in Filtered.
+The choice to place incoming mail in Filtered. Press **!** (Shift+1) in the desktop Thread list or reader, or **F** in Triage. **F** opens Forward in the Thread list and reader.
 
 **Section**
 

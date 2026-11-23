@@ -14,8 +14,10 @@ import {
 import { replicaStoreFor } from '@/data/replica-store'
 import { INBOX_SECTIONS } from '@/data/thread-queries'
 import type { MailboxThreadQuery } from '@/features/mailbox/mailbox-queries'
+import type { FilterAction } from '@/features/mailbox/use-filter-actions'
 import { type InboxNavigation, inboxHeaderId } from '@/features/mailbox/use-inbox-sections'
 import { InboxSenderCard, VirtualInboxChrome } from '@/features/thread-list/inbox-chrome'
+import { ThreadContextMenu } from '@/features/thread-list/thread-context-menu'
 import { SubscribedThreadRow } from '@/features/thread-list/thread-row'
 import { useInboxScrollAnchor } from '@/features/thread-list/use-inbox-scroll-anchor'
 import { useReplicaSelector } from '@/hooks/use-amc'
@@ -35,6 +37,7 @@ interface Props {
   self: Set<string>
   empty: React.ReactNode
   onMove: (delta: number) => void
+  getFilterActions?: (thread: ThreadSummary) => FilterAction[]
   inbox?: InboxNavigation
   /** Search hits carry a highlighted match line. */
   matchSnippets?: Map<string, string>
@@ -52,6 +55,7 @@ export function ThreadList({
   onMove,
   inbox,
   matchSnippets,
+  getFilterActions,
 }: Props) {
   const listId = useId()
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -231,75 +235,93 @@ export function ThreadList({
       style={sectioned ? { overflowAnchor: 'none' } : undefined}
     >
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
-        <div
-          ref={listRef}
-          id={listId}
-          role="listbox"
-          aria-label="Threads"
-          aria-activedescendant={selectedIndex >= 0 ? `${listId}-${selectedId}` : undefined}
-          tabIndex={0}
-          className="mail-list absolute inset-0"
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.nativeEvent.isComposing && selectedIndex >= 0) {
-              document.getElementById(`${listId}-${selectedId}`)?.click()
-            }
-            if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
-            event.preventDefault()
-            onMove(event.key === 'ArrowDown' ? 1 : -1)
+        <ThreadContextMenu
+          listRef={listRef}
+          selectedId={selectedId}
+          getActions={(id) => {
+            const indexed = query
+              ? replicaStoreFor(getAmc()).getQuery(query).data?.summaries.get(id)
+              : undefined
+            const thread =
+              indexed ??
+              fallbackRows?.get(id) ??
+              (notification?.id === id ? notification : undefined)
+            return thread && getFilterActions ? getFilterActions(thread) : []
           }}
         >
-          {mounted.map((item) => {
-            const entry = items[item.index]
-            if (!entry || !('threadId' in entry)) return null
-            const id = entry.threadId
-            const selected = id === selectedId
-            // The mounted window also contains overscan and pinned focus/selection targets.
-            const avatarVisible =
-              visible !== null && item.index >= visible.startIndex && item.index <= visible.endIndex
-            const sender = entry.kind === 'sender' ? entry.id.slice('sender:'.length) : undefined
-            return (
-              // biome-ignore lint/a11y/useFocusableInteractive: DOM focus stays on the listbox with aria-activedescendant.
-              // biome-ignore lint/a11y/useKeyWithClickEvents: Each option is selected by the listbox keyboard handler.
-              <div
-                key={item.key}
-                role="option"
-                id={`${listId}-${id}`}
-                data-thread-id={id}
-                data-sender={sender}
-                data-index={item.index}
-                ref={sender ? virtualizer.measureElement : undefined}
-                aria-posinset={rowOrder.get(id)}
-                aria-setsize={ids.length}
-                aria-selected={selected}
-                onClick={selectRow}
-                className={cn(
-                  'mail-row absolute inset-x-0 flex cursor-default gap-2.5 rounded-md border-b border-border/60 px-3 py-2',
-                  selected ? 'bg-accent' : 'hover:bg-muted/70',
-                  sender && 'min-h-[88px]',
-                )}
-                style={{
-                  height: sender ? undefined : item.size,
-                  transform: `translateY(${item.start}px)`,
-                }}
-              >
-                {sender ? (
-                  <InboxSenderCard id={sender} query={query} avatarVisible={avatarVisible} />
-                ) : (
-                  <SubscribedThreadRow
-                    id={id}
-                    query={query}
-                    fallback={
-                      fallbackRows?.get(id) ?? (notification?.id === id ? notification : undefined)
-                    }
-                    self={self}
-                    avatarVisible={avatarVisible}
-                    match={matchSnippets?.get(id)}
-                  />
-                )}
-              </div>
-            )
-          })}
-        </div>
+          <div
+            ref={listRef}
+            id={listId}
+            role="listbox"
+            aria-label="Threads"
+            aria-activedescendant={selectedIndex >= 0 ? `${listId}-${selectedId}` : undefined}
+            tabIndex={0}
+            className="mail-list absolute inset-0"
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.nativeEvent.isComposing && selectedIndex >= 0) {
+                document.getElementById(`${listId}-${selectedId}`)?.click()
+              }
+              if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+              event.preventDefault()
+              onMove(event.key === 'ArrowDown' ? 1 : -1)
+            }}
+          >
+            {mounted.map((item) => {
+              const entry = items[item.index]
+              if (!entry || !('threadId' in entry)) return null
+              const id = entry.threadId
+              const selected = id === selectedId
+              // The mounted window also contains overscan and pinned focus/selection targets.
+              const avatarVisible =
+                visible !== null &&
+                item.index >= visible.startIndex &&
+                item.index <= visible.endIndex
+              const sender = entry.kind === 'sender' ? entry.id.slice('sender:'.length) : undefined
+              return (
+                // biome-ignore lint/a11y/useFocusableInteractive: DOM focus stays on the listbox with aria-activedescendant.
+                // biome-ignore lint/a11y/useKeyWithClickEvents: Each option is selected by the listbox keyboard handler.
+                <div
+                  key={item.key}
+                  role="option"
+                  id={`${listId}-${id}`}
+                  data-thread-id={id}
+                  data-sender={sender}
+                  data-index={item.index}
+                  ref={sender ? virtualizer.measureElement : undefined}
+                  aria-posinset={rowOrder.get(id)}
+                  aria-setsize={ids.length}
+                  aria-selected={selected}
+                  onClick={selectRow}
+                  className={cn(
+                    'mail-row absolute inset-x-0 flex cursor-default gap-2.5 rounded-md border-b border-border/60 px-3 py-2',
+                    selected ? 'bg-accent' : 'hover:bg-muted/70',
+                    sender && 'min-h-[88px]',
+                  )}
+                  style={{
+                    height: sender ? undefined : item.size,
+                    transform: `translateY(${item.start}px)`,
+                  }}
+                >
+                  {sender ? (
+                    <InboxSenderCard id={sender} query={query} avatarVisible={avatarVisible} />
+                  ) : (
+                    <SubscribedThreadRow
+                      id={id}
+                      query={query}
+                      fallback={
+                        fallbackRows?.get(id) ??
+                        (notification?.id === id ? notification : undefined)
+                      }
+                      self={self}
+                      avatarVisible={avatarVisible}
+                      match={matchSnippets?.get(id)}
+                    />
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </ThreadContextMenu>
         {inbox &&
           mounted.map((item) => {
             const entry = items[item.index]

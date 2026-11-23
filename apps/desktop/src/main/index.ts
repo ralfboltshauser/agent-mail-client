@@ -382,6 +382,30 @@ function registerIpc() {
       })
       .catch(reportReviewRejection)
   ipcMain.handle('amc:reviewFilter', (_event, input: unknown) => submitFilter(input))
+  ipcMain.handle('amc:filterThread', async (_event, threadId: string, clientActionId: string) => {
+    const engine = requireEngine()
+    const localIds = openReplica().inboxFilterMessageIds(threadId)
+    if (!localIds.length) throw new Error('There are no eligible Inbox messages to filter')
+    const target = await engine.get<{ revision: number; messageIds: string[] }>(
+      `/v1/filtered/inbox-target?${queryString({ threadId })}`,
+      { signal: AbortSignal.timeout(10_000) },
+    )
+    if (requireEngine() !== engine) throw new Error('The Engine pairing changed')
+    if (
+      target.messageIds.length !== localIds.length ||
+      localIds.some((id, index) => id !== target.messageIds[index])
+    ) {
+      void sync?.pull().catch(() => {})
+      throw new Error('The Inbox messages changed. Refresh the Thread and try again.')
+    }
+    return submitFilter({
+      threadId,
+      clientActionId,
+      expectedRevision: target.revision,
+      decision: 'filter.filtered',
+      source: 'thread-action',
+    })
+  })
   ipcMain.handle(
     'amc:restoreFiltered',
     async (_event, threadId: string, clientActionId: string) => {

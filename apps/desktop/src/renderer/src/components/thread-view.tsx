@@ -1,7 +1,6 @@
 import { SNOOZED_LABEL } from '@amc/protocol'
 import { CircleAlert, MailOpen, Star } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
-import { RestoreFiltered } from '@/features/thread-reader/restore-filtered'
 import { ThreadMessages } from '@/features/thread-reader/thread-messages'
 import { fullDate } from '@/lib/format'
 import type { ThreadWithMessages } from '../../../shared/api'
@@ -16,7 +15,6 @@ interface Props {
   onRetry?: () => void
   snoozeEnabled: boolean
   labelNames: Map<string, string>
-  filtered?: boolean
   scrollRef: React.RefObject<HTMLDivElement | null>
 }
 
@@ -29,7 +27,6 @@ export function ThreadView({
   onRetry,
   snoozeEnabled,
   labelNames,
-  filtered,
   scrollRef,
 }: Props) {
   if (!data && unavailable) {
@@ -78,7 +75,6 @@ export function ThreadView({
             ))}
           </div>
         )}
-        {filtered && <RestoreFiltered key={thread.id} threadId={thread.id} />}
         {thread.bucket && (
           <div className="mb-5 flex items-start gap-2.5 rounded-md bg-muted/65 px-3 py-2.5">
             <Badge variant="secondary" className="shrink-0 text-accent-foreground">

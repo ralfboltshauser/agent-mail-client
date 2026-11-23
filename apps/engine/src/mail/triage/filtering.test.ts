@@ -658,3 +658,83 @@ it.each([
     }
   },
 )
+
+it('previews the exact Inbox Filter targets and rejects a write after a new arrival', async () => {
+  const { db, store, queue, principal, put } = fixture()
+  try {
+    const threadId = put('one', { threadId: 'thread', labels: ['INBOX'] })
+    const app = new Hono<AppEnv>()
+    app.use('*', async (c, next) => {
+      c.set('principal', principal)
+      await next()
+    })
+    app.route('/v1/filtered', filteredRoutes(store, queue))
+    const response = await app.request(
+      `/v1/filtered/inbox-target?${new URLSearchParams({ threadId })}`,
+    )
+    expect(response.status).toBe(200)
+    const target = await response.json()
+    expect(target).toEqual({ revision: threadInput(db, threadId)?.modseq, messageIds: ['a:one'] })
+    put('two', { threadId: 'thread', labels: ['INBOX'] })
+    expect(() =>
+      reviewFilter(store, principal, {
+        threadId,
+        expectedRevision: target.revision,
+        clientActionId: randomUUID(),
+        decision: 'filter.filtered',
+        source: 'thread-action',
+      }),
+    ).toThrow('The Thread changed. Refresh and retry.')
+    expect(db.prepare('SELECT id FROM owner_action').all()).toEqual([])
+  } finally {
+    db.close()
+  }
+})
+
+it('keeps a fresh paired-sender IMAP arrival in Inbox without a new-sender Triage card', async () => {
+  const db = testDb()
+  const store = new MailStore(db, new BlobStore(tempDir()))
+  const sealer = new Sealer(randomBytes(32))
+  const imap = new FakeImap()
+  const paired = imap.add('INBOX', 'Message-ID: <paired@example.test>\r\nSubject: Paired fixture')
+  const message = imap.folder('INBOX').messages.get(paired)
+  if (!message) throw new Error('Missing paired fixture')
+  message.source = Buffer.from(
+    message.source.toString().replace('sender@example.com', 'owner-b@example.test'),
+  )
+  imap.add('INBOX', 'Message-ID: <third-party@example.test>\r\nSubject: Third-party fixture')
+  db.prepare(
+    "INSERT INTO account (id, kind, address, credentials, created_at) VALUES ('a', 'imap', ?, ?, 0)",
+  ).run('owner-a@example.test', sealer.seal({}))
+  db.exec(`
+    INSERT INTO account (id, kind, address, credentials, created_at)
+    VALUES ('b', 'gmail', 'owner-b@example.test', X'00', 0);
+    INSERT INTO sender_scan (account_id, ready) VALUES ('a', 1);
+  `)
+  const sync = new SyncManager({
+    db,
+    store,
+    sealer,
+    log: silentLog,
+    imapClient: () => imap.client,
+    imapPollMs: 60_000,
+    oauthClient: () => ({ clientId: '', clientSecret: '' }),
+  })
+  sync.startAccount('a')
+  try {
+    const inbox = () => new MailQueries(db).threads({ accountId: 'a', inbox: true }).threads
+    await vi.waitFor(() => expect(inbox()).toHaveLength(2))
+    const queue = triageQueue(db, { accountId: 'a', limit: 10 })
+    expect(queue.cards.map(({ id }) => id)).toEqual([
+      { kind: 'sender', accountId: 'a', address: 'sender@example.com' },
+    ])
+    const own = inbox().find(({ participants }) =>
+      participants.some(({ address }) => address === 'owner-b@example.test'),
+    )
+    expect(own).toBeDefined()
+    expect(queue.cards.some(({ threadId }) => threadId === own?.id)).toBe(false)
+  } finally {
+    await sync.stop()
+    db.close()
+  }
+})
