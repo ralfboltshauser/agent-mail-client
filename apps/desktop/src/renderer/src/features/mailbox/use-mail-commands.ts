@@ -5,6 +5,8 @@ import {
   Forward,
   Layers,
   ListChecks,
+  Maximize2,
+  Minimize2,
   Reply,
   ReplyAll,
   Settings2,
@@ -17,6 +19,7 @@ import type { FilterAction } from './use-filter-actions'
 import type { InboxNavigation } from './use-inbox-sections'
 import type { useMailCompose } from './use-mail-compose'
 import type { useMailDialogs } from './use-mail-dialogs'
+import type { useReaderFocus } from './use-reader-focus'
 import type { useThreadActions } from './use-thread-actions'
 
 export function useMailCommands({
@@ -33,8 +36,9 @@ export function useMailCommands({
   selectAccount,
   move,
   jumpSection,
-  searchInput,
-  readerScroll,
+  focusSearch,
+  readerFocus,
+  queueReaderToggle,
   clearSearch,
   reviewOpen,
   openReview,
@@ -52,8 +56,9 @@ export function useMailCommands({
   selectAccount: (id: string | null) => void
   move: (delta: number) => void
   jumpSection?: InboxNavigation['focus']
-  searchInput: React.RefObject<HTMLInputElement | null>
-  readerScroll: React.RefObject<HTMLDivElement | null>
+  focusSearch: () => void
+  readerFocus: ReturnType<typeof useReaderFocus>
+  queueReaderToggle: () => void
   clearSearch: () => void
   reviewOpen: boolean
   openReview?: () => void
@@ -82,11 +87,22 @@ export function useMailCommands({
     setShortcutsOpen,
     openSendSettings,
   } = dialogs
+  const { expanded, canExpand, reader, scroll: readerScroll, toggle, exit } = readerFocus
   const canHandOff = !ownView && !draft && !openingComposer && !!selected && hasThread
   const handOff = () => {
     if (canHandOff && selected) setHandoffThread(selected.id)
   }
   const commandActions = [
+    ...(expanded || canExpand
+      ? [
+          {
+            name: expanded ? 'Back to mailbox' : 'Focus reader',
+            icon: expanded ? Minimize2 : Maximize2,
+            shortcut: 'O',
+            run: queueReaderToggle,
+          },
+        ]
+      : []),
     {
       name: minimised ? 'Resume draft' : 'Compose message',
       icon: SquarePen,
@@ -196,6 +212,16 @@ export function useMailCommands({
         setShortcutsOpen(true)
       },
       'g o': () => goTo({ kind: 'outbox' }),
+      ...(expanded || canExpand
+        ? {
+            o: (event: KeyboardEvent) => {
+              if (!event.repeat) {
+                const trigger = document.activeElement
+                toggle(trigger instanceof HTMLElement ? trigger : null)
+              }
+            },
+          }
+        : {}),
       b: (event) => {
         if (!event.repeat && selected && !ownView) setBucketPickerId(selected.id)
       },
@@ -208,24 +234,27 @@ export function useMailCommands({
         ]),
       ),
       j: () => move(1),
-      arrowdown: () => move(1),
       k: () => move(-1),
+      ...(!expanded ? { arrowdown: () => move(1), arrowup: () => move(-1) } : {}),
       ...(jumpSection
         ? {
             'shift+j': () => jumpSection.current?.jump(1),
             'shift+k': () => jumpSection.current?.jump(-1),
           }
         : {}),
-      arrowup: () => move(-1),
       space: () =>
         readerScroll.current?.scrollBy({
           top: readerScroll.current.clientHeight * 0.8,
           behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
         }),
-      '/': () => searchInput.current?.focus(),
-      'mod+f': () => searchInput.current?.focus(),
+      '/': focusSearch,
+      'mod+f': focusSearch,
       'mod+k': openPalette,
-      escape: () => clearSearch(),
+      escape: (event) => {
+        if (event.repeat) return
+        if (expanded) exit()
+        else clearSearch()
+      },
       'g i': () => goTo({ kind: 'inbox' }),
       'g u': () => goTo({ kind: 'unread' }),
       'g s': () => goTo({ kind: 'starred' }),
@@ -248,6 +277,7 @@ export function useMailCommands({
       !handoffThread &&
       !organisePicker &&
       !bucketPickerOpen,
+    reader,
   )
 
   return { commandActions, appActions }

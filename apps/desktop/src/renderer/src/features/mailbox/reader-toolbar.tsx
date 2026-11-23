@@ -1,25 +1,68 @@
 import type { ThreadSummary } from '@amc/protocol'
-import { Forward, Reply, ReplyAll } from 'lucide-react'
+import { ArrowLeft, Forward, Maximize2, Reply, ReplyAll } from 'lucide-react'
 import { BucketPicker } from '@/components/bucket-picker'
 import { OrganiseToolbar } from '@/components/organise'
 import { Button } from '@/components/ui/button'
+import { Kbd } from '@/components/ui/kbd'
 import type { FilterAction } from './use-filter-actions'
 import type { useMailCompose } from './use-mail-compose'
 import type { useThreadActions } from './use-thread-actions'
 
 export function ReaderToolbar({
-  selected,
-  activeThread,
-  actions,
-  compose,
-  filterActions,
-}: {
+  expanded,
+  canExpand,
+  onToggleFocus,
+  ...props
+}: ReaderActionsProps & {
+  expanded: boolean
+  canExpand: boolean
+  onToggleFocus: (trigger: HTMLElement) => void
+}) {
+  return (
+    <div className="app-drag app-toolbar min-w-0 gap-1 px-3">
+      {(expanded || canExpand) && (
+        <Button
+          variant="ghost"
+          size={expanded ? 'sm' : 'icon-sm'}
+          className={expanded ? 'ml-[68px] gap-2' : undefined}
+          aria-label={expanded ? 'Back to mailbox' : 'Focus reader'}
+          aria-keyshortcuts={expanded ? 'Escape O' : 'O'}
+          title={expanded ? undefined : 'Focus reader (O)'}
+          onClick={(event) => onToggleFocus(event.currentTarget)}
+        >
+          {expanded ? (
+            <>
+              <ArrowLeft />
+              Back to mailbox
+              <Kbd aria-hidden="true">Esc</Kbd>
+            </>
+          ) : (
+            <Maximize2 />
+          )}
+        </Button>
+      )}
+      <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">
+        <ReaderActions {...props} />
+      </div>
+    </div>
+  )
+}
+
+interface ReaderActionsProps {
   selected: ThreadSummary | undefined
   activeThread: ThreadSummary | null
   actions: ReturnType<typeof useThreadActions>
   compose: ReturnType<typeof useMailCompose>
   filterActions: FilterAction[]
-}) {
+}
+
+function ReaderActions({
+  selected,
+  activeThread,
+  actions,
+  compose,
+  filterActions,
+}: ReaderActionsProps) {
   const {
     organise,
     organiseAccount,
@@ -32,7 +75,7 @@ export function ReaderToolbar({
   } = actions
   const { openingComposer, startCompose, draft, setHandoffThread } = compose
   return (
-    <div className="app-drag app-toolbar gap-0.5 overflow-x-auto px-3">
+    <>
       {organise.controls.length > 0 && <OrganiseToolbar controls={organise.controls} />}
       {filterActions.map(({ name, shortcut, disabled, run }) => (
         <Button
@@ -115,6 +158,6 @@ export function ReaderToolbar({
           onSelect={(bucket) => void setBucket(bucket)}
         />
       )}
-    </div>
+    </>
   )
 }

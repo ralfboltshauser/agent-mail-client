@@ -99,6 +99,7 @@ interface Props {
   onAgent: () => void
   composing: boolean
   snoozeEnabled: boolean
+  obscured?: boolean
 }
 
 function AccountBadge({ text, className }: { text: string; className?: string }) {
@@ -125,6 +126,7 @@ export function AppSidebar({
   onAgent,
   composing,
   snoozeEnabled,
+  obscured = false,
 }: Props) {
   const { open } = useSidebar()
   const accounts = useReplicaSelector(
@@ -144,7 +146,8 @@ export function AppSidebar({
     <Sidebar
       variant="sidebar"
       collapsible="none"
-      className="app-sidebar border-r border-sidebar-border"
+      inert={obscured}
+      className={cn('app-sidebar border-r border-sidebar-border', obscured && 'invisible')}
     >
       {/* Room for the macOS traffic lights; the strip drags the window. */}
       <div className="app-drag h-11 shrink-0" />

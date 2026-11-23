@@ -25,6 +25,8 @@ export function ShortcutsDialog({
         ['Toggle sidebar', '⌘B'],
         ['Check for New Mail', '⌘R / Ctrl+R'],
         ['Filter mail', '/'],
+        ['Focus reader / Back to mailbox', 'O'],
+        ['Return from Focus reader', 'Esc'],
         ['Next / previous thread', 'J / K'],
         ['Next / previous Inbox section', '⇧J / ⇧K'],
         ['Page down in reader', 'Space'],
