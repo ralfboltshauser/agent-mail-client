@@ -88,7 +88,7 @@ belong to the composer session refactor in PR #141.
 
 ## Sectioned Inbox
 
-The harness verifies the fixed order, the Updates preview, Account-scoped
+The harness verifies the fixed order, the Other mail preview, Account-scoped
 collapse after restart, Sender grouping, notification-open, keyboard focus,
 and the scroll anchor when an earlier section collapses. The large fixture
 indexes 5,105 Threads and mounts fewer than 40 options.

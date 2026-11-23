@@ -53,31 +53,33 @@ async function mountSections(
   return { ...adapter, result, app, notify: (row: ThreadSummary) => notify(row) }
 }
 
-it('starts with three Updates and preserves collapse across account switches and restart', async () => {
+it('starts with three entries in Other mail and preserves collapse across account switches and restart', async () => {
   const { api, result, app } = await mountSections()
   expect(api.threads).toHaveBeenCalledWith(inbox)
-  expect(headings()).toEqual(['Action/Reply4', 'Follow-up1', 'Updates3'])
-  // The legacy fixture has exactly three Updates. Move a fourth Thread in.
+  expect(headings()).toEqual(['Action/Reply4', 'Follow-up1', 'Other mail3'])
+  expect(byId('thread-4')?.textContent).toContain('Triage: Update')
+  expect(byId('thread-6')?.textContent).toContain('Triage: When I have time')
+  // Move a fourth thread into Other mail.
   await act(async () => api.setBucket({ threadId: 'thread-8', bucket: 'Later', reason: 'Update' }))
-  expect(header('Updates').textContent).toBe('Updates4')
+  expect(header('Other mail').textContent).toBe('Other mail4')
   expect(rowIds()).not.toContain('thread-8')
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Show all' })))
   expect(rowIds()).toContain('thread-8')
 
   const survivor = byId('thread-3')
-  await act(async () => fireEvent.click(header('Updates')))
+  await act(async () => fireEvent.click(header('Other mail')))
   expect(byId('thread-3')).toBe(survivor)
-  expect(header('Updates').getAttribute('aria-expanded')).toBe('false')
+  expect(header('Other mail').getAttribute('aria-expanded')).toBe('false')
   expect(rowIds()).not.toContain('thread-4')
 
   await act(async () => fireEvent.keyDown(document.body, { key: '1', metaKey: true }))
-  expect(header('Updates').getAttribute('aria-expanded')).toBe('true')
+  expect(header('Other mail').getAttribute('aria-expanded')).toBe('true')
   await act(async () => fireEvent.keyDown(document.body, { key: '0', metaKey: true }))
-  expect(header('Updates').getAttribute('aria-expanded')).toBe('false')
+  expect(header('Other mail').getAttribute('aria-expanded')).toBe('false')
 
   result.unmount()
   await act(async () => render(app))
-  expect(header('Updates').getAttribute('aria-expanded')).toBe('false')
+  expect(header('Other mail').getAttribute('aria-expanded')).toBe('false')
 })
 
 it('shows the New senders hint, advertises the existing T binding, and hides the hint on collapse', async () => {
@@ -347,13 +349,13 @@ it('navigates across section boundaries and activates disclosure with native key
   await act(async () => fireEvent.click(header('Follow-up')))
   expect(header('Follow-up').getAttribute('aria-expanded')).toBe('false')
   await act(async () => fireEvent.keyDown(header('Follow-up'), { key: 'J', shiftKey: true }))
-  expect(document.activeElement).toBe(header('Updates'))
-  await act(async () => fireEvent.keyDown(header('Updates'), { key: 'k' }))
+  expect(document.activeElement).toBe(header('Other mail'))
+  await act(async () => fireEvent.keyDown(header('Other mail'), { key: 'k' }))
   expect(document.activeElement).toBe(active)
   expect(selected().dataset.threadId).toBe('thread-8')
   await act(async () => fireEvent.keyDown(active, { key: 'j' }))
   expect(selected().dataset.threadId).toBe('thread-4')
-  expect(headings()).toEqual(['Action/Reply4', 'Follow-up1', 'Updates3'])
+  expect(headings()).toEqual(['Action/Reply4', 'Follow-up1', 'Other mail3'])
   await act(async () => fireEvent.keyDown(active, { key: 't' }))
   expect(screen.queryByRole('dialog')).toBeNull()
   await act(async () => fireEvent.keyDown(active, { key: 'T', shiftKey: true }))
@@ -371,10 +373,10 @@ it('adds and removes Follow-up in place and keeps keyboard navigation on visible
           : [],
     ),
   )
-  expect(headings()).toEqual(['Action/Reply4', 'Updates3'])
+  expect(headings()).toEqual(['Action/Reply4', 'Other mail3'])
   const list = listbox()
   const action = header('Action/Reply')
-  const updates = header('Updates')
+  const updates = header('Other mail')
   const rows = options()
   const current = selected()
   const heading = reader()
@@ -386,7 +388,7 @@ it('adds and removes Follow-up in place and keeps keyboard navigation on visible
 
   includeFollowUp = true
   await act(async () => emitChanged())
-  expect(headings()).toEqual(['Action/Reply4', 'Follow-up1', 'Updates3'])
+  expect(headings()).toEqual(['Action/Reply4', 'Follow-up1', 'Other mail3'])
   expect(document.activeElement).toBe(action)
   expect(
     screen.getByRole('button', { name: 'Mark Follow-up seen' }).getAttribute('aria-disabled'),
@@ -399,7 +401,7 @@ it('adds and removes Follow-up in place and keeps keyboard navigation on visible
 
   includeFollowUp = false
   await act(async () => emitChanged())
-  expect(headings()).toEqual(['Action/Reply4', 'Updates3'])
+  expect(headings()).toEqual(['Action/Reply4', 'Other mail3'])
   expect(document.activeElement).toBe(list)
   await act(async () => fireEvent.keyDown(list, { key: 'J', shiftKey: true }))
   expect(document.activeElement).toBe(updates)
@@ -547,7 +549,7 @@ it('indexes Threads beyond the legacy replica cap while mounting a bounded windo
   expect(listbox()).toBe(list)
 })
 
-it('marks only exposed unread Updates and undoes a specific Thread action', async () => {
+it('marks only exposed unread threads in Other mail and undoes a specific Thread action', async () => {
   const { api } = await mountSections()
   await act(async () => {
     for (const threadId of ['thread-4', 'thread-5', 'thread-6', 'thread-8']) {
@@ -556,18 +558,18 @@ it('marks only exposed unread Updates and undoes a specific Thread action', asyn
     await api.setBucket({ threadId: 'thread-8', bucket: 'Later', reason: 'Update' })
   })
   const organise = vi.spyOn(api, 'organise')
-  const markSeen = () => screen.getByRole('button', { name: 'Mark Updates seen' })
+  const markSeen = () => screen.getByRole('button', { name: 'Mark Other mail seen' })
 
-  await act(async () => fireEvent.click(header('Updates')))
+  await act(async () => fireEvent.click(header('Other mail')))
   expect(markSeen().getAttribute('aria-disabled')).toBe('true')
   await act(async () => fireEvent.click(markSeen()))
   expect(organise).not.toHaveBeenCalled()
-  expect(header('Updates').getAttribute('aria-expanded')).toBe('false')
+  expect(header('Other mail').getAttribute('aria-expanded')).toBe('false')
 
-  await act(async () => fireEvent.click(header('Updates')))
+  await act(async () => fireEvent.click(header('Other mail')))
   expect(organise).not.toHaveBeenCalled()
   await act(async () => fireEvent.click(markSeen()))
-  expect(header('Updates').getAttribute('aria-expanded')).toBe('true')
+  expect(header('Other mail').getAttribute('aria-expanded')).toBe('true')
   expect(organise.mock.calls).toEqual(
     ['thread-4', 'thread-5', 'thread-6'].map((threadId) => [
       { kind: 'read', threadId, value: true },

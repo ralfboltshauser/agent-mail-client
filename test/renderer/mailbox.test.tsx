@@ -110,6 +110,7 @@ it('shows sections for the selected Bucket without replacing the Thread or messa
   const scroll = before.heading.closest<HTMLElement>('.overflow-y-auto')
   if (!scroll) throw new Error('Expected the reader scroll container')
   const view = within(scroll)
+  expect(view.getByText('Triage')).toBeTruthy()
   const message = () => view.getByRole('button', { name: /Mina/, expanded: true })
   const messageButton = message()
   const body = view.getByText(/Could you approve the warm grey/)

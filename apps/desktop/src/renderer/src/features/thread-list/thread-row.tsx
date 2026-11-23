@@ -165,10 +165,16 @@ export const ThreadRow = memo(function ThreadRow({
                   variant="secondary"
                   className="h-[18px] max-w-[45%] shrink text-[10px] text-muted-foreground"
                 >
-                  <span className="truncate">{bucket}</span>
+                  <span className="truncate">
+                    <span className="sr-only">Triage: </span>
+                    {bucket}
+                  </span>
                 </Badge>
               </TooltipTrigger>
-              <TooltipContent className="max-w-64 break-words">{bucketReason}</TooltipContent>
+              <TooltipContent className="max-w-64 break-words">
+                <div className="font-semibold">Triage: {bucket}</div>
+                {bucketReason}
+              </TooltipContent>
             </Tooltip>
           )}
         </div>

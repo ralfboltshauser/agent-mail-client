@@ -75,19 +75,21 @@ The existing Organise journal is the authority for provider inverses. Do not use
 
 ### Sectioned Inbox
 
-In the unfiltered Inbox (Unified and single Account), render these exclusive sections in the order below. Membership takes the first matching predicate, with Seen evaluated immediately before the Updates catchall. Existing search, filtered results, and other views keep the normal Thread list.
+In the unfiltered Inbox (Unified and single Account), render these exclusive sections in the order below. Membership takes the first matching predicate, with Seen evaluated immediately before the Other mail catchall. Existing search, filtered results, and other views keep the normal Thread list.
 
-Show a Section from its first Thread or Sender card until its last entry leaves. Determine presence from all entries before applying collapse or the Updates preview. A collapsed Section or a Section with zero unread entries still shows its header while it has entries. Keep its collapse preference when it disappears. An empty Inbox shows **Inbox is clear** and **New mail will appear here.**
+Show a Section from its first Thread or Sender card until its last entry leaves. Determine presence from all entries before applying collapse or the Other mail preview. A collapsed Section or a Section with zero unread entries still shows its header while it has entries. Keep its collapse preference when it disappears. An empty Inbox shows **Inbox is clear** and **New mail will appear here.**
 
 | Section | Membership |
 | --- | --- |
 | New senders | New Sender on the representative incoming Inbox message, grouped by Account and address. One card with count and newest Thread. Open a scoped list for that Sender when there is more than one Thread. A card carries the literal From address and Account. |
 | Action/Reply | Reply or Action Bucket, including read Threads with outstanding assignments. |
 | Follow-up | Follow-up Bucket, including read Threads with outstanding assignments. |
-| Updates | Remaining Inbox Threads, including Update, Later, When I have time, unassigned, and read Threads with an owner action that remain in Inbox. Preserve original Bucket badges. |
+| Other mail | Remaining Inbox Threads, including Update, Later, When I have time, unassigned, and read Threads with an owner action that remain in Inbox. Preserve original Bucket badges. |
 | Seen | Read and unactioned for the current Inbox arrival. |
 
-Within each section use unread first, then newest activity, then stable ID. A sender card is unread if any represented Inbox Thread is unread. Default Updates to a three-row preview plus **Show all** when there are hidden rows. Other sections start expanded. Every section has a separately persisted collapse control and per-section **Mark seen**. Mark seen captures the unread Threads represented by the section's currently exposed rows, including every unread Thread represented by an exposed sender card. Collapsed sections and rows behind Show all are excluded. Standard Organise thread-level read semantics apply to each captured Thread. It does not accept Senders or clear action Buckets, so some read Threads remain where they were. Do not infer acted state from a read operation. Display Section counts including hidden rows.
+Within each section use unread first, then newest activity, then stable ID. A sender card is unread if any represented Inbox Thread is unread. Default Other mail to a three-row preview plus **Show all** when there are hidden rows. Other sections start expanded. Every section has a separately persisted collapse control and per-section **Mark seen**. Mark seen captures the unread Threads represented by the section's currently exposed rows, including every unread Thread represented by an exposed sender card. Collapsed sections and rows behind Show all are excluded. Standard Organise thread-level read semantics apply to each captured Thread. It does not accept Senders or clear action Buckets, so some read Threads remain where they were. Do not infer acted state from a read operation. Display Section counts including hidden rows.
+
+Use **Other mail** for the fallback section because **Update** is a specific triage Bucket. Thread row badges preserve the assigned Bucket. Their tooltip and the reader identify it as **Triage**. The section keeps its existing internal key so saved collapse preferences still apply.
 
 ```text
 MailWorkspace
@@ -95,7 +97,7 @@ MailWorkspace
     SectionedInbox
       SectionHeader (collapse, count, Mark seen)
       SenderCard or existing ThreadRow subscriber
-      ShowAll control (Updates)
+      ShowAll control (Other mail)
     existing ThreadReader
   TriageWorkspace (one active card when in review)
     Progress and status
