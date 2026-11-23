@@ -61,7 +61,6 @@ export function launchFeedback(
       projectId,
       title: 'AMC feedback',
       clientRequestId: id,
-      runtimeMode: 'approval-required',
       workspaceStrategy: { type: 'root' },
       message: feedbackMessage(draft, context),
     },

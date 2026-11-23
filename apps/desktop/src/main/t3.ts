@@ -225,18 +225,13 @@ export function mcpLauncher(address: string): T3Launcher {
   }
 }
 
-export function pairedFeedbackLauncher(
-  address: string,
-  fallback: () => Promise<T3Launcher>,
-): T3Launcher {
+export function pairedFeedbackLauncher(address: string): T3Launcher {
   const url = t3Url(address)
   return {
     key: `mcp:${url.href}`,
     projects: () => t3Projects(address),
     async launch(request, imagePath) {
-      // Once a feedback launch is dispatched, retrying with the CLI could create a second thread.
-      const client = await t3Client(address, false).catch(() => null)
-      if (!client) return (await fallback()).launch(request, imagePath)
+      const client = await t3Client(address, false)
       try {
         return await launchT3Feedback(client, url, request, imagePath)
       } finally {

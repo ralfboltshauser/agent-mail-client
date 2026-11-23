@@ -30,10 +30,12 @@ export interface FeedbackDraft {
   markdown: string
 }
 
+export type FeedbackSendResult = { opened: true } | { opened: false; reason: string }
+
 export interface FeedbackApi {
   onOpen(listener: () => void): () => void
   capture(view: string): Promise<{ id: string }>
-  send(id: string, draft: FeedbackDraft): Promise<{ opened: boolean }>
+  send(id: string, draft: FeedbackDraft): Promise<FeedbackSendResult>
   release(id: string): Promise<void>
   copy(id: string, draft: FeedbackDraft): Promise<void>
 }

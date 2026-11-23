@@ -55,7 +55,7 @@ import { AutoTriage } from './auto-triage'
 import { composeDraftPath } from './draft-updates'
 import { EngineClient, EngineError } from './engine'
 import { registerFeedbackIpc } from './feedback-ipc'
-import { Handoff, type T3Launcher, t3NavigationLink } from './handoff'
+import { Handoff, t3NavigationLink } from './handoff'
 import { handleMailRefreshKey, mailboxViewMenu } from './mail-menu'
 import { protectRemoteImageRequests } from './message-image-requests'
 import {
@@ -70,7 +70,7 @@ import { Replica } from './replica'
 import { resolveSenderAvatars } from './sender-avatars'
 import { SyncLoop } from './sync'
 import { mcpLauncher, savedT3Url } from './t3'
-import { cliLauncher, detectT3Cli } from './t3-cli'
+import { localT3Launcher } from './t3-cli'
 import { createTray } from './tray'
 import { onLowBattery, runTriageProcess } from './triage-process'
 
@@ -608,18 +608,19 @@ async function pair(engineUrl: string, code: string) {
 
 function registerComposeIpc() {
   handoff = new Handoff(openReplica().db)
-  let local: T3Launcher | null = null
-  ipcMain.handle('amc:t3Setup', async () => {
-    const cli = local ? null : await detectT3Cli()
-    if (cli) local = cliLauncher(cli)
-    return { kind: local ? 'cli' : 'mcp', address: savedT3Url() }
-  })
-  const launcher = (address: string | null) => {
+  ipcMain.handle('amc:t3Setup', async () => ({
+    kind: (await localT3Launcher()) ? 'cli' : 'mcp',
+    address: savedT3Url(),
+  }))
+  const launcher = async (address: string | null) => {
     if (address !== null) return mcpLauncher(address)
+    const local = await localT3Launcher()
     if (!local) throw new Error('AMC could not find the local T3 CLI.')
     return local
   }
-  ipcMain.handle('amc:t3Projects', (_e, address: string | null) => launcher(address).projects())
+  ipcMain.handle('amc:t3Projects', async (_e, address: string | null) =>
+    (await launcher(address)).projects(),
+  )
   ipcMain.handle(
     'amc:handoff',
     async (_e, address: string | null, projectId: string, threadId: string) => {
@@ -629,7 +630,7 @@ function registerComposeIpc() {
           requireEngine(),
           projectId,
           threadId,
-          launcher(address),
+          await launcher(address),
         )
         const link = thread.link && t3NavigationLink(thread.link)
         if (link) void shell.openExternal(link).catch(() => {})
@@ -642,7 +643,7 @@ function registerComposeIpc() {
   ipcMain.handle(
     'amc:cancelHandoff',
     async (_e, address: string | null, projectId: string, threadId: string) => {
-      await handoff.cancel(requireEngine(), projectId, threadId, launcher(address))
+      await handoff.cancel(requireEngine(), projectId, threadId, await launcher(address))
       broadcast('amc:changed')
     },
   )
@@ -984,7 +985,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', openWindow)
   app.whenReady().then(() => {
     protectRemoteImageRequests(session.defaultSession)
-    feedback = registerFeedbackIpc(() => window, openWindow)
+    feedback = registerFeedbackIpc(() => window, openWindow, startupLog)
     buildMenu()
     triage = new AutoTriage({
       enabled: !existsSync(triageOffFile()),

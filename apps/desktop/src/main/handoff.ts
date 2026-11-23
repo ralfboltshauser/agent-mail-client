@@ -9,7 +9,7 @@ export interface T3Launch {
   projectId: string
   title: string
   clientRequestId: string
-  runtimeMode: 'approval-required'
+  runtimeMode?: 'approval-required'
   workspaceStrategy: { type: 'root' }
   message: string
 }

@@ -12,6 +12,15 @@ export interface T3Cli {
   supportsRuntimeMode?: boolean
 }
 
+let localLauncher: T3Launcher | undefined
+
+export async function localT3Launcher(): Promise<T3Launcher | undefined> {
+  if (localLauncher) return localLauncher
+  const cli = await detectT3Cli()
+  if (cli) localLauncher = cliLauncher(cli)
+  return localLauncher
+}
+
 type RunCli = (executable: string, args: string[], input?: string) => Promise<string>
 
 const runCli: RunCli = (executable, args, input) =>
@@ -139,14 +148,8 @@ export function cliLauncher(
       try {
         // Check we can construct a navigation link before handing off the prompt.
         const environment = environmentId()
-        if (
-          imagePath &&
-          !supportsRuntimeMode &&
-          projectRuntimeModes(state)(request.projectId) !== request.runtimeMode
-        ) {
-          throw new Error('The local T3 CLI cannot require approval for this project.')
-        }
-        const runtime = supportsRuntimeMode ? ['--runtime-mode', request.runtimeMode] : []
+        const runtime =
+          supportsRuntimeMode && request.runtimeMode ? ['--runtime-mode', request.runtimeMode] : []
         const thread = JSON.parse(
           await run(
             executable,
