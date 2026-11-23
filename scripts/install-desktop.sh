@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ $# -gt 1 || ( $# -eq 1 && $1 != --from-package ) ]]; then
+  printf '%s\n' 'Usage: scripts/install-desktop.sh [--from-package]' >&2
+  exit 1
+fi
+
 if [[ $(uname -s) != Darwin || $(uname -m) != arm64 ]]; then
   printf '%s\n' 'AMC desktop installation requires an Apple silicon Mac.' >&2
   exit 1
@@ -20,7 +25,9 @@ check_destination() {
 }
 
 check_destination
-pnpm --filter @amc/desktop package:dir
+if [[ $# -eq 0 ]]; then
+  pnpm --filter @amc/desktop package:dir
+fi
 mkdir -p "$destination"
 staging=$(mktemp -d "$destination/.amc-install.XXXXXX")
 previous="$staging/previous.app"
@@ -42,6 +49,7 @@ trap cleanup EXIT
 
 ditto "apps/desktop/dist/mac-arm64/AMC.app" "$staging/AMC.app"
 /usr/bin/codesign --verify --deep --strict "$staging/AMC.app"
+[[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$staging/AMC.app/Contents/Info.plist") == "$bundle_id" ]]
 check_destination
 if [[ -e "$app" ]]; then
   # Reserve a unique Trash location before moving the installed app.
@@ -49,7 +57,9 @@ if [[ -e "$app" ]]; then
   trash=$(mktemp -d "$HOME/.Trash/AMC.XXXXXX")
   mv "$app" "$previous"
 fi
-mv "$staging/AMC.app" "$app"
+# Rename to the exact destination. An intervening install must never receive
+# this bundle as a nested directory.
+node -e 'require("node:fs").renameSync(process.argv[1], process.argv[2])' "$staging/AMC.app" "$app"
 installed=true
 if [[ -e "$previous" ]]; then
   mv "$previous" "$trash/AMC.app"

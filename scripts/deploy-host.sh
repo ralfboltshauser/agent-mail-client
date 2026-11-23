@@ -1,68 +1,52 @@
 #!/usr/bin/env bash
-# Builds the Engine and CLI, ships them to the Host as a new release, migrates, restarts,
-# and rolls back automatically if the Engine does not come up healthy.
-# Usage: pnpm deploy:host [ssh-target]   (default: ralf@ralfs-ubuntu)
+# Build the Engine and CLI, then activate the release under a lock on the Host.
+# Usage: pnpm deploy:host <ssh-target> (or set AMC_HOST)
 set -euo pipefail
-TARGET="${1:-${AMC_HOST:-ralf@ralfs-ubuntu}}"
-cd "$(dirname "$0")/.."
-
-if [ -n "$(git status --porcelain)" ] && [ "${AMC_ALLOW_DIRTY:-}" != "1" ]; then
-  echo "Working tree is dirty; commit first (or AMC_ALLOW_DIRTY=1)." >&2
+TARGET="${1:-${AMC_HOST:-}}"
+VERSION="${AMC_RELEASE_VERSION:-}"
+version_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+if [[ -n "$VERSION" && ! "$VERSION" =~ $version_pattern ]]; then
+  echo "AMC_RELEASE_VERSION must be a stable numeric version." >&2
   exit 1
 fi
-SHA=$(git rev-parse --short=12 HEAD)
-[ -n "$(git status --porcelain)" ] && SHA="$SHA-dirty"
+if [[ -z "$TARGET" || "$TARGET" == -* ]]; then
+  echo "Pass the SSH destination explicitly or set AMC_HOST." >&2
+  exit 1
+fi
+cd "$(dirname "$0")/.."
+
+if [[ -n "$VERSION" ]]; then
+  SHA=$(git rev-parse HEAD)
+else
+  SHA=$(git rev-parse --short=12 HEAD)
+fi
+if [[ -n "$(git status --porcelain)" ]]; then
+  if [[ -n "$VERSION" || "${AMC_ALLOW_DIRTY:-}" != 1 ]]; then
+    echo "Working tree is dirty; commit first." >&2
+    exit 1
+  fi
+  SHA="$SHA-dirty-$(date +%s)-$$"
+fi
 
 echo "→ Checking and building $SHA"
 pnpm -s check
 pnpm -s build
 
-echo "→ Shipping release $SHA to $TARGET"
-ssh "$TARGET" "rm -rf /tmp/amc-release && mkdir -p /tmp/amc-release"
-scp -q apps/engine/dist/amc-engine.mjs apps/engine/dist/amc-engine.mjs.map apps/cli/dist/amc.mjs \
-  deploy/amc-backup.service deploy/amc-backup.timer "$TARGET":/tmp/amc-release/
-
-ssh "$TARGET" "SHA=$SHA bash -s" <<'REMOTE'
-set -euo pipefail
-REL=/opt/amc/releases/$SHA
-PREV=$(readlink -f /opt/amc/current 2>/dev/null || true)
-sudo rm -rf "$REL" && sudo mkdir -p "$REL"
-trap 'rm -rf /tmp/amc-release' EXIT
-sudo install -m 644 /tmp/amc-release/*.mjs /tmp/amc-release/*.mjs.map "$REL"/
-echo "$SHA" | sudo tee "$REL/RELEASE" >/dev/null
-
-sudo ln -sfn "$REL" /opt/amc/current
-if ! sudo systemd-cat --identifier=amc-migration /usr/local/bin/amc-engine migrate --journal; then
-  echo "✗ migration failed; rolling back (see local journal tag amc-migration)" >&2
-  [ -n "$PREV" ] && sudo ln -sfn "$PREV" /opt/amc/current
+stage=$(ssh "$TARGET" 'mktemp -d /tmp/amc-release.XXXXXXXX')
+if [[ ! "$stage" =~ ^/tmp/amc-release\.[[:alnum:]]{8}$ ]]; then
+  echo "Invalid Host staging path." >&2
   exit 1
 fi
-sudo systemctl restart amc-engine.service
+trap 'ssh "$TARGET" "rm -rf -- $stage" >/dev/null 2>&1 || true' EXIT
+scp -q apps/engine/dist/amc-engine.mjs apps/engine/dist/amc-engine.mjs.map apps/cli/dist/amc.mjs \
+  deploy/amc-backup.service deploy/amc-backup.timer "$TARGET:$stage/"
 
-for _ in $(seq 1 20); do
-  if curl -fsS http://127.0.0.1:4410/health >/dev/null 2>&1; then
-    echo "✓ Engine healthy: $(curl -fsS http://127.0.0.1:4410/health)"
-    sudo install -m 644 /tmp/amc-release/amc-backup.service /tmp/amc-release/amc-backup.timer /etc/systemd/system/
-    sudo systemctl daemon-reload
-    sudo systemctl enable amc-backup.timer
-    sudo systemctl restart amc-backup.timer
-    # Keep the five newest releases.
-    ls -1dt /opt/amc/releases/* | tail -n +6 | xargs -r sudo rm -rf
-    exit 0
-  fi
-  sleep 0.5
-done
+echo "→ Activating Engine release $SHA"
+ssh "$TARGET" "sudo -n flock -n -E 75 /opt/amc/.deploy.lock bash -s -- $SHA $stage '$VERSION'" \
+  < scripts/activate-host-release.sh
 
-echo "✗ Engine did not become healthy; rolling back" >&2
-sudo journalctl -u amc-engine.service -n 30 --no-pager >&2 || true
-if [ -n "$PREV" ]; then
-  sudo ln -sfn "$PREV" /opt/amc/current
-  sudo systemctl restart amc-engine.service
-fi
-exit 1
-REMOTE
-
-# Install into the SSH user's agent directories, outside the privileged release step.
+# Skills belong to the SSH user. Keep the healthy Engine active if refresh fails.
 if ! ssh "$TARGET" /usr/local/bin/amc skills install; then
-  printf 'Engine release %s is active. To retry skill setup, run /usr/local/bin/amc skills install as your login on %s.\n' "$SHA" "$TARGET" >&2
+  echo "Engine is active. Retry '/usr/local/bin/amc skills install' as the SSH login." >&2
+  if [[ -n "$VERSION" ]]; then exit 76; fi
 fi

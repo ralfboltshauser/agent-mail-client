@@ -90,6 +90,66 @@ and generate a local encryption key with `(umask 077; openssl rand 32 > /path/to
 Run `AMC_CONFIG=/absolute/path/to/dev-config.json pnpm --filter @amc/engine dev`.
 Use provider fakes for mail operations.
 
+## Release AMC
+
+Invoke `$amc-release` in an AMC thread, or run `pnpm release` on the Apple
+silicon release Mac. Use `pnpm release --dry-run` to see the source commit,
+version, and cleanup candidates. The dry run refreshes remote-tracking refs
+and checks SSH access. Build, publication, installation and deletion happen
+only in the release run.
+
+Set up the local signing identity described above. Authenticate Git and
+`gh` for write access to the repository and configure SSH for the provisioned
+Ubuntu Engine Host. The SSH login must be able to run deployment commands
+through noninteractive sudo. Store the destination outside the checkout in
+`${XDG_CONFIG_HOME:-$HOME/.config}/amc/release.json` with mode `0600`. Use an SSH
+alias or `user@host` for `ubuntuSshTarget`. Keep passwords and keys in the
+existing credential stores.
+
+```json
+{
+  "ubuntuSshTarget": "amc-host",
+  "retiredDetachedWorktrees": []
+}
+```
+
+The runner builds the remote default branch tip in a temporary detached
+worktree. It runs the Mac verification gate, increments the patch version
+from the latest stable release tag or desktop manifest, and verifies the
+locally signed app and the disk image checksum. The stable tag records the source for both
+targets. That version appears in the Mac bundle and the Host's release
+receipt. The Engine and CLI manifests keep their own package versions.
+
+Ubuntu activates first. After it reports a healthy Engine, active backup
+timer, and refreshed CLI skills, the runner installs and opens the Mac app
+and updates the Mac CLI. GitHub receives the tag and generated release
+notes. The DMG stays on disk under
+`${XDG_STATE_HOME:-$HOME/.local/state}/amc/releases/<tag>/`. Desktop
+verification checks the installed app version, signature, and process.
+Use the sync check below when you also need to confirm the live profile
+connected.
+
+If a step fails after the tag push, rerun `pnpm release`. The newest
+unpublished stable tag pins the original commit, even if more PRs have
+merged. The Host reuses a healthy Engine for that commit and retries the
+remaining backup and CLI steps. The Mac installer reuses a matching app
+payload. A tag with a published release and no newer default-branch commit
+does not produce another version. If Apple Events access blocks a graceful
+quit, quit AMC with **⌘Q** and rerun. For a CLI skill conflict, preserve the
+edited skill elsewhere before retrying the installer.
+
+The release removes its own temporary worktree and fetches with
+`--prune` to clear stale remote-tracking refs. To retire an existing
+standalone worktree, confirm the owner and any automation have stopped using
+it, and add its absolute path to `retiredDetachedWorktrees`. Cleanup requires
+a detached checkout whose commit is an ancestor of the fetched default
+branch. The runner moves an eligible checkout to a private path and rechecks
+its state and open files before deleting it. It preserves locked worktrees
+and checkouts with changed, untracked, or ignored files, including local
+credentials and build artifacts. Use
+T3's workspace lifecycle for managed worktrees. Local branches and the
+primary checkout are preserved.
+
 ## Local verification
 
 On the Mac, enable the checked-in hooks once per clone with
@@ -126,7 +186,7 @@ The Engine runs as the `amc` system user so that nothing running as the owner, i
 
 ```sh
 scripts/provision-host.sh          # from the Mac: set up or repair the Host (idempotent)
-pnpm deploy:host                   # from the Mac: check, build, ship, migrate, restart, roll back on failure
+pnpm deploy:host <ssh-target>      # from the Mac: check, build, ship, migrate, restart, roll back on failure
 
 sudo amc-engine pair               # on the Host: one-time code for the amc CLI
 sudo amc-engine pair --desktop     # on the Host: one-time code for the desktop app
@@ -262,7 +322,9 @@ switch releases by hand:
 
 ```sh
 ls -1t /opt/amc/releases
-sudo ln -sfn /opt/amc/releases/<sha> /opt/amc/current && sudo systemctl restart amc-engine
+sudo flock /opt/amc/.deploy.lock bash -c \
+  'ln -sfn "$1" /opt/amc/current && systemctl restart amc-engine' \
+  _ /opt/amc/releases/<sha>
 ```
 
 After the Engine is healthy on an M9-compatible release, run
@@ -271,6 +333,9 @@ After the Engine is healthy on an M9-compatible release, run
 that backup status is unavailable.
 
 A migration that already ran is not undone by a rollback. Restore the `pre-migrate-*.db` copy from `/srv/amc/backups` with the Engine stopped.
+An interrupted activation records the candidate and prior release in
+`/opt/amc/.activation-pending`. Retry the recorded candidate to finish its
+activation or recover the prior service before choosing a different release.
 
 ## Recovering an unreleased Organise preview database
 

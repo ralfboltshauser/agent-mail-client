@@ -16,6 +16,7 @@
     "test:html-reader": "env -u ELECTRON_RUN_AS_NODE pnpm --filter @amc/desktop exec electron ../../test/electron/html-reader.mjs",
     "check": "pnpm typecheck && pnpm lint && pnpm lint:renderer && pnpm test",
     "verify": "sh scripts/verify-local.sh",
+    "release": "node scripts/release.mjs",
     "deploy:host": "scripts/deploy-host.sh",
     "cli:install": "pnpm --filter @amc/cli build && bash scripts/install-cli.sh",
     "desktop:install": "bash scripts/install-desktop.sh"
