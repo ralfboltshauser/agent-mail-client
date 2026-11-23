@@ -296,11 +296,25 @@ it('deduplicates slow inline bodies and retains iframe height and consent across
     expect(frame.srcdoc).toContain('data:image/png;base64,first-image-data')
     expect(frame.srcdoc).toContain('img-src data: cid:;')
     expect(frame.style.height).toBe('120px')
+    Object.defineProperties(frame, {
+      clientWidth: { value: 600 },
+      offsetHeight: { get: () => Number.parseInt(frame.style.height, 10) },
+    })
 
     const load = async (height: number) => {
       const frameDocument = frame.contentDocument
       if (!frameDocument?.body) throw new Error('Expected iframe body')
-      Object.defineProperty(frameDocument, 'URL', { configurable: true, value: 'about:srcdoc' })
+      // jsdom exposes the srcdoc attribute without navigating or laying out the document.
+      const parsed = new DOMParser().parseFromString(frame.srcdoc, 'text/html')
+      if (!parsed.firstChild) throw new Error('Expected srcdoc contents')
+      if (frameDocument.firstChild?.nodeType === Node.COMMENT_NODE) {
+        frameDocument.firstChild.remove()
+      }
+      frameDocument.prepend(frameDocument.importNode(parsed.firstChild, true))
+      Object.defineProperties(frameDocument, {
+        URL: { configurable: true, value: 'about:srcdoc' },
+        readyState: { configurable: true, value: 'complete' },
+      })
       const body = frameDocument.body
       Object.defineProperty(body, 'scrollHeight', { configurable: true, value: height })
       await act(async () => frame.dispatchEvent(new Event('load')))
@@ -308,8 +322,10 @@ it('deduplicates slow inline bodies and retains iframe height and consent across
     }
     const first = await load(240)
     expect(frame.style.height).toBe('242px')
-    const repeated = await load(240)
-    expect(first?.disconnect).toHaveBeenCalledTimes(1)
+    expect(frame.style.visibility).toBe('visible')
+    await act(async () => frame.dispatchEvent(new Event('load')))
+    expect(observers).toEqual([first])
+    expect(first?.disconnect).not.toHaveBeenCalled()
 
     const oldDocument = frame.contentDocument
     const oldLink = oldDocument.createElement('a')
@@ -322,15 +338,17 @@ it('deduplicates slow inline bodies and retains iframe height and consent across
       (button) => button.textContent === 'Load images',
     )
     await act(async () => allowImages?.click())
-    expect(repeated?.disconnect).toHaveBeenCalledTimes(1)
+    expect(first?.disconnect).toHaveBeenCalledTimes(1)
     expect(frame.srcdoc).toContain('img-src data: cid: https: http:;')
     expect(frame.style.height).toBe('242px')
+    await act(async () => frame.dispatchEvent(new Event('load')))
+    expect(frame.style.visibility).toBe('hidden')
     // A retained document or queued observer from the previous navigation is inert.
     expect(oldLink.dispatchEvent(new Event('click', { bubbles: true, cancelable: true }))).toBe(
       true,
     )
     expect(openExternal).toHaveBeenCalledTimes(1)
-    await act(async () => repeated?.measure())
+    await act(async () => first?.measure())
     expect(frame.style.height).toBe('242px')
     const consented = await load(240)
 

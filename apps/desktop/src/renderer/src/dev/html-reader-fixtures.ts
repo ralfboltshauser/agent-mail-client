@@ -58,6 +58,11 @@ export function htmlReaderFixture(id: string): string | null {
       </style>
       <p id="probe-theme">The workshop starts at 10.</p>
       <p id="probe-dark-card" style="background:#222;color:#fff">Bring a notebook.</p>`
+    case 'thread-8:latest':
+      return `<p>Paper mill newsletter</p>
+        <img id="probe-held" width="120" height="120" src="${location.origin}${imagePath}?source=held">
+        <div style="height:420px">New paper samples</div>
+        <p id="probe-newsletter-end">End of newsletter</p>`
     default:
       return null
   }

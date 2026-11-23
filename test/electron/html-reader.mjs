@@ -27,8 +27,9 @@ async function main() {
   let server
   let win
   let exitCode = 0
+  const heldImage = Promise.withResolvers()
   try {
-    server = await startReaderServer()
+    server = await startReaderServer(heldImage.promise)
     await app.whenReady()
     nativeTheme.themeSource = 'dark'
     protectRemoteImageRequests(session.defaultSession)
@@ -67,6 +68,39 @@ async function main() {
         marker,
       )
     }
+    const firstVisibleFrame = async (number, marker) => {
+      const selector = `[data-thread-id="thread-${number}"]`
+      await waitFor(() => run((value) => !!document.querySelector(value), selector), selector)
+      return run(
+        (row, id) =>
+          new Promise((resolve) => {
+            const deadline = performance.now() + 5000
+            const sample = () => {
+              const frame = [...document.querySelectorAll('iframe')].find((candidate) =>
+                candidate.contentDocument?.getElementById(id),
+              )
+              if (frame?.offsetHeight && getComputedStyle(frame).visibility === 'visible') {
+                const doc = frame.contentDocument
+                resolve({
+                  height: frame.offsetHeight,
+                  viewport: doc.documentElement.clientHeight,
+                  bottom: doc.getElementById(id).getBoundingClientRect().bottom,
+                  overflowY: getComputedStyle(doc.documentElement).overflowY,
+                  imageComplete: doc.getElementById('probe-held')?.complete,
+                })
+              } else if (performance.now() < deadline) {
+                requestAnimationFrame(sample)
+              } else {
+                resolve(null)
+              }
+            }
+            document.querySelector(row).click()
+            requestAnimationFrame(sample)
+          }),
+        selector,
+        marker,
+      )
+    }
     const measure = (marker, width) =>
       run(
         (id, requestedWidth) => {
@@ -100,7 +134,7 @@ async function main() {
             oversized: oversized && [oversized.width, oversized.height],
             endWidth: target.closest('table')?.offsetWidth,
             targetVisible: targetRect.left >= -1 && targetRect.right <= root.clientWidth + 1,
-            hasHorizontalControl: frame.parentElement.textContent.includes(
+            hasHorizontalControl: frame.parentElement.parentElement.textContent.includes(
               'Scroll message horizontally',
             ),
             finalLineVisible:
@@ -170,20 +204,39 @@ async function main() {
       false,
       'fitting mail adds no scroll control',
     )
-    await run(() =>
-      [...document.querySelectorAll('button')]
-        .find((button) => button.textContent.includes('Sending over the updated layout.'))
-        .click(),
-    )
+    await run(() => {
+      const older = [...document.querySelectorAll('button')].find((button) =>
+        button.textContent.includes('Sending over the updated layout.'),
+      )
+      window.olderMessage = older
+      older.click()
+      older.click()
+    })
     await waitFor(
       () =>
         run(() =>
-          [...document.querySelectorAll('iframe')].some((frame) =>
-            frame.contentDocument?.getElementById('probe-older'),
+          [...document.querySelectorAll('iframe')].some(
+            (frame) =>
+              frame.contentDocument?.getElementById('probe-older') && frame.offsetWidth === 0,
           ),
         ),
-      'older HTML message in the same thread',
+      'older HTML parses while collapsed',
     )
+    win.setContentSize(1000, 800)
+    await run(() => window.olderMessage.click())
+    await waitFor(
+      () =>
+        run(() =>
+          [...document.querySelectorAll('iframe')].some(
+            (frame) =>
+              frame.contentDocument?.getElementById('probe-older') &&
+              frame.offsetWidth > 0 &&
+              getComputedStyle(frame).visibility === 'visible',
+          ),
+        ),
+      'older HTML measures when reopened at a new width',
+    )
+    win.setContentSize(1360, 900)
 
     await run(() => {
       const frame = [...document.querySelectorAll('iframe')].find((item) =>
@@ -252,7 +305,8 @@ async function main() {
       }
     }
 
-    await selectThread(5, 'probe-feedback')
+    const firstFeedback = await firstVisibleFrame(5, 'probe-feedback')
+    assert.equal(firstFeedback?.overflowY, 'auto', 'height feedback settles before first reveal')
     const settled = await waitFor(async () => {
       const frame = await measure('probe-feedback')
       return frame.nativeVertical === 'auto' && frame.height
@@ -261,7 +315,7 @@ async function main() {
     assert.equal((await measure('probe-feedback')).height, settled, 'height feedback stops')
 
     await selectThread(6, 'probe-images')
-    assert.deepEqual(requests, { message: 0, parent: 0, missing: 0 })
+    assert.deepEqual(requests, { message: 0, parent: 0, missing: 0, held: 0 })
     await run(() => {
       const image = new Image()
       image.src = '/__amc_fixture_image?source=parent'
@@ -286,10 +340,47 @@ async function main() {
         ),
       'allowed image load and failed image settle',
     )
-    assert.deepEqual(requests, { message: 1, parent: 0, missing: 1 })
+    assert.deepEqual(requests, { message: 1, parent: 0, missing: 1, held: 0 })
     await waitFor(
       async () => (await measure('probe-images')).height > beforeConsent,
       'iframe grows after delayed image load',
+    )
+
+    await run(async () => {
+      const { setLoadRemoteImagesAutomatically } = await import(
+        '/src/data/remote-image-preferences.ts'
+      )
+      setLoadRemoteImagesAutomatically(true)
+    })
+    const firstNewsletter = await firstVisibleFrame(8, 'probe-newsletter-end')
+    assert.ok(firstNewsletter, 'newsletter appears with the image response held')
+    assert.equal(firstNewsletter.imageComplete, false)
+    assert.ok(
+      firstNewsletter.bottom <= firstNewsletter.viewport,
+      `first visible newsletter fits (${firstNewsletter.bottom}px in ${firstNewsletter.viewport}px)`,
+    )
+    await waitFor(() => requests.held > 0, 'held image request')
+    await run(() => {
+      window.firstNewsletterFrame = document.querySelector('iframe')
+    })
+    await selectThread(7, 'probe-theme')
+    const reopenedNewsletter = await firstVisibleFrame(8, 'probe-newsletter-end')
+    assert.deepEqual(reopenedNewsletter, firstNewsletter, 'reopened newsletter fits before release')
+    assert.equal(await run(() => window.firstNewsletterFrame.isConnected), false)
+    await waitFor(() => requests.held === 2, 'held image request from reopened newsletter')
+    heldImage.resolve()
+    await waitFor(
+      () => run(() => document.querySelector('iframe')?.contentDocument?.readyState === 'complete'),
+      'newsletter image completion',
+    )
+    await run(
+      () =>
+        new Promise((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    )
+    assert.ok(
+      Math.abs((await measure('probe-newsletter-end')).height - firstNewsletter.height) <= 1,
     )
 
     console.log(
@@ -354,6 +445,7 @@ async function main() {
     console.error(error)
     exitCode = 1
   } finally {
+    heldImage.resolve()
     win?.destroy()
     await server?.close()
     await rm(profile, { recursive: true })
