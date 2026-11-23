@@ -37,6 +37,7 @@ export function Composer({
 }) {
   const surface = useRef<HTMLDivElement>(null)
   const recipients = useRef<RecipientFocus>(null)
+  const discardInvoker = useRef<HTMLElement | null>(null)
   const [discardedElsewhere, setDiscardedElsewhere] = useState(false)
   const recipientInputs = () =>
     Array.from(surface.current?.querySelectorAll<HTMLInputElement>('[data-recipient-input]') ?? [])
@@ -73,6 +74,11 @@ export function Composer({
   const [sendAt, setSendAt] = useState('')
   const [signature, setSignature] = useState<string | null>(null)
   const locked = busy || confirmSend
+  const openDiscard = useCallback(() => {
+    const focused = document.activeElement
+    discardInvoker.current = focused instanceof HTMLElement ? focused : null
+    reviewDiscard()
+  }, [reviewDiscard])
 
   const changeAccount = useCallback(
     (accountId: string) => {
@@ -164,6 +170,14 @@ export function Composer({
           else recipients.current?.focus('to')
         }}
         onPointerDownOutside={(event) => event.preventDefault()}
+        onEscapeKeyDown={(event) => {
+          // Radix sees Escape before the recipient field can close its suggestions.
+          if (
+            event.target instanceof HTMLInputElement &&
+            event.target.matches('[data-recipient-input][aria-expanded="true"]')
+          )
+            event.preventDefault()
+        }}
         onKeyDownCapture={(event) => {
           if (event.nativeEvent.isComposing) return
           if (event.metaKey && event.shiftKey && !event.ctrlKey && !event.altKey) {
@@ -201,7 +215,7 @@ export function Composer({
             event.preventDefault()
             event.stopPropagation()
             if (!event.repeat && !locked && !uploading && !confirmDiscard && !discardedElsewhere)
-              reviewDiscard()
+              openDiscard()
           }
         }}
         onKeyDown={(event) => {
@@ -282,7 +296,7 @@ export function Composer({
               onSend={send}
               onScheduleChange={setSchedule}
               onSendAtChange={setSendAt}
-              onDiscard={reviewDiscard}
+              onDiscard={openDiscard}
               onSignature={toggleSignature}
               onUpload={addAttachments}
             />
@@ -292,6 +306,18 @@ export function Composer({
       {confirmDiscard && (
         <DiscardDraftDialog
           subject={confirmDiscard.subject}
+          onCloseAutoFocus={(event) => {
+            const invoker = discardInvoker.current
+            const composer = surface.current
+            const active = document.activeElement
+            if (
+              composer?.contains(invoker) &&
+              (active === document.body || composer.contains(active))
+            ) {
+              event.preventDefault()
+              invoker?.focus()
+            }
+          }}
           onConfirm={async () => {
             const result = await discard(confirmDiscard.revision)
             onDiscarded()
