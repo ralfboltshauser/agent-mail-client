@@ -1006,7 +1006,10 @@ it('offers Filter out in the toolbar and targets the right-clicked Inbox row', a
   const filterThread = vi.fn(async (_id: string, actionId: string) => result(actionId))
   Object.assign(adapter.api, { smartInbox: { ...smart, review: smart, filterThread } })
   await mount(adapter)
-  await click(screen.getByRole('button', { name: 'Filter out' }))
+  const filter = screen.getByRole('button', { name: 'Filter out' })
+  act(() => filter.focus())
+  expect(screen.getByRole('tooltip').textContent).toBe('Filter out!')
+  await click(filter)
   await act(async () => fireEvent.contextMenu(row('Sunday at the studio')))
   await click(
     within(screen.getByRole('menu', { name: 'Thread actions' })).getByRole('menuitem', {
@@ -1072,7 +1075,11 @@ it.each(['toolbar', 'context menu'] as const)(
         }),
       )
     } else {
-      await click(screen.getByRole('button', { name: 'Restore to Inbox' }))
+      const restore = screen.getByRole('button', { name: 'Restore to Inbox' })
+      expect(restore.getAttribute('aria-keyshortcuts')).toBeNull()
+      act(() => restore.focus())
+      expect(screen.getByRole('tooltip').textContent).toBe('Restore to Inbox')
+      await click(restore)
     }
     expect(restoreFiltered).toHaveBeenCalledExactlyOnceWith(visible.id, expect.any(String))
     expect(screen.getByRole('button', { name: 'Filtered 0' })).toBeTruthy()

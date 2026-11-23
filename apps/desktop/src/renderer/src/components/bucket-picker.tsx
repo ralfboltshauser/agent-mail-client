@@ -1,5 +1,6 @@
 import { BUCKETS, type Bucket } from '@amc/protocol'
-import { ChevronDown } from 'lucide-react'
+import { Layers } from 'lucide-react'
+import { ActionHint } from '@/components/action-hint'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -10,6 +11,7 @@ import {
   DropdownMenuShortcut,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { mailShortcuts } from '@/lib/mail-shortcuts'
 
 export function BucketPicker({
   current,
@@ -24,12 +26,21 @@ export function BucketPicker({
 }) {
   return (
     <DropdownMenu open={open} onOpenChange={onOpenChange}>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="sm" className="app-no-drag ml-auto" aria-keyshortcuts="B">
-          {current ?? 'Bucket'}
-          <ChevronDown />
-        </Button>
-      </DropdownMenuTrigger>
+      <ActionHint
+        label={current ? `Choose a Bucket · Current: ${current}` : 'Choose a Bucket'}
+        shortcuts={[mailShortcuts.bucket]}
+      >
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="app-no-drag text-muted-foreground"
+            aria-label={current ? `Bucket: ${current}` : 'Bucket'}
+          >
+            <Layers />
+          </Button>
+        </DropdownMenuTrigger>
+      </ActionHint>
       <DropdownMenuContent
         align="end"
         onKeyDownCapture={(event) => {

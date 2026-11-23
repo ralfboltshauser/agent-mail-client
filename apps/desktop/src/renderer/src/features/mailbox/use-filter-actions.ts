@@ -1,4 +1,5 @@
 import type { Label, ThreadSummary } from '@amc/protocol'
+import { FilterX, Inbox } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { getAmc } from '@/lib/amc'
@@ -9,6 +10,7 @@ import type { MailboxAccount } from './mailbox-queries'
 const filter = {
   name: 'Filter out',
   shortcut: '!',
+  icon: FilterX,
   queued: 'Filter out queued',
   applied: 'Filtered out',
   failed: 'Could not filter out this Thread',
@@ -16,6 +18,7 @@ const filter = {
 const restore = {
   name: 'Restore to Inbox',
   shortcut: undefined,
+  icon: Inbox,
   queued: 'Restore queued',
   applied: 'Restored to Inbox',
   failed: 'Could not restore this Thread',
@@ -23,7 +26,10 @@ const restore = {
 
 type Move = typeof filter | typeof restore
 type Pending = { move: Move; actionId?: string }
-export type FilterAction = Pick<Move, 'name' | 'shortcut'> & { disabled: boolean; run: () => void }
+export type FilterAction = Pick<Move, 'name' | 'shortcut' | 'icon'> & {
+  disabled: boolean
+  run: () => void
+}
 
 export function useFilterActions(accounts: MailboxAccount[], labels: Label[]) {
   const smart = getAmc().smartInbox

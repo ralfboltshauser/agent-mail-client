@@ -16,6 +16,7 @@ import {
   Tag,
   Trash2,
 } from 'lucide-react'
+import { ActionHint } from '@/components/action-hint'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -43,6 +44,7 @@ import {
 import { shareReply } from '@/data/share-reply'
 import { accountsQuery, countsQuery, labelsQuery } from '@/features/mailbox/mailbox-queries'
 import { useReplicaSelector } from '@/hooks/use-amc'
+import { mailShortcuts, shortcutLabel } from '@/lib/mail-shortcuts'
 import { cn } from '@/lib/utils'
 import type { Counts, View } from '../../../shared/api'
 import { SyncIndicator } from './sync-indicator'
@@ -191,15 +193,22 @@ export function AppSidebar({
             ))}
           </DropdownMenuContent>
         </DropdownMenu>
-        <Button
-          className="mt-1 h-9 justify-start px-3 shadow-none"
-          size="sm"
-          onClick={onCompose}
-          disabled={composing}
-        >
-          <SquarePen /> Compose{' '}
-          <Kbd className="ml-auto bg-primary-foreground/15 text-primary-foreground">C</Kbd>
-        </Button>
+        <ActionHint label="Compose" shortcuts={[mailShortcuts.compose]}>
+          <Button
+            className="mt-1 h-9 justify-start px-3 shadow-none"
+            size="sm"
+            onClick={onCompose}
+            disabled={composing}
+          >
+            <SquarePen /> Compose
+            <Kbd
+              aria-hidden="true"
+              className="ml-auto bg-primary-foreground/15 text-primary-foreground"
+            >
+              {shortcutLabel(mailShortcuts.compose)}
+            </Kbd>
+          </Button>
+        </ActionHint>
       </SidebarHeader>
 
       <SidebarContent className="gap-0">
