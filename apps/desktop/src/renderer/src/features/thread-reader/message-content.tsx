@@ -1,21 +1,24 @@
 import { INLINE_IMAGE_TYPES } from '@amc/composer'
 import type { AttachmentSummary } from '@amc/protocol'
-import { useEffect, useEffectEvent, useRef, useState } from 'react'
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import { HtmlBody, MIN_HTML_BODY_HEIGHT, TextBody } from '@/components/message-body'
 import { Skeleton } from '@/components/ui/skeleton'
 import { senderPreferenceKey } from '@/data/remote-image-preferences'
+import { replicaStoreFor } from '@/data/replica-store'
+import { useReplicaState, useSyncField } from '@/hooks/use-amc'
 import { getAmc } from '@/lib/amc'
 import { recordCaughtFailure } from '@/lib/failure'
 import type { ReplicaThreadMessage } from '../../../../shared/api'
+import { cachedHtmlQuery, htmlSourceKey, readerTextQuery } from './body-queries'
 
 function useBodyRequest(
-  key: string | null,
+  key: object | null,
   load: () => Promise<string | null>,
   enabled: boolean,
   supplied: string | null = null,
 ) {
-  const [result, setResult] = useState(() => ({ key: null as string | null, value: supplied }))
-  const pending = useRef(new Map<string, Promise<string | null>>())
+  const [result, setResult] = useState(() => ({ key: null as object | null, value: supplied }))
+  const pending = useRef(new Map<object, Promise<string | null>>())
   const start = useEffectEvent(load)
 
   if (supplied !== null && (result.key !== key || result.value !== supplied)) {
@@ -52,9 +55,7 @@ function useBodyRequest(
 
   return {
     value: result.value,
-    settled,
     hasResult: result.key !== null,
-    retry: () => setResult((current) => ({ ...current, key: null })),
   }
 }
 
@@ -68,9 +69,8 @@ function inlineImages(attachments: AttachmentSummary[]) {
   )
 }
 
-async function messageHtml(id: string, parts: AttachmentSummary[]) {
+async function embedInlineImages(html: string | null, parts: AttachmentSummary[]) {
   const api = getAmc()
-  const html = await api.messageHtml(id)
   if (!html || !/src=["']cid:/i.test(html)) return html
 
   const embedded = new Map(
@@ -93,40 +93,58 @@ async function messageHtml(id: string, parts: AttachmentSummary[]) {
 }
 
 export function MessageContent({ message }: { message: ReplicaThreadMessage }) {
-  const { id, bodyText, bodyRevision, hasHtml } = message
+  const { id, bodyText, hasHtml } = message
+  const engineUrl = useSyncField((status) => status?.engineUrl ?? null)
   const parts = hasHtml ? inlineImages(message.attachments) : []
-  // The bridge exposes the text revision and inline metadata. HTML-only changes with identical
-  // metadata have no version in the current API.
-  const htmlKey = hasHtml
-    ? JSON.stringify([
-        id,
-        bodyRevision,
-        parts.map((part) => [part.id, part.contentId, part.mimeType]),
-      ])
-    : null
-  const html = useBodyRequest(htmlKey, () => messageHtml(id, parts), hasHtml)
-  const deferred = useBodyRequest(
-    JSON.stringify([id, bodyRevision]),
-    async () => getAmc().messageText(id),
-    !hasHtml || (html.settled && !html.value),
-    bodyText,
+  const localHtml = hasHtml ? cachedHtmlQuery(engineUrl, message) : null
+  // Join the speculative read only when there is one to adopt. Other messages can
+  // use the normal HTML read, which checks SQLite before asking the Engine.
+  const [preparedHtmlKey] = useState(() =>
+    localHtml && replicaStoreFor(getAmc()).isQueryActive(localHtml) ? localHtml.key : null,
   )
+  const preparedHtml = localHtml?.key === preparedHtmlKey ? localHtml : null
+  const { snapshot: cachedHtml } = useReplicaState(preparedHtml)
+  const rawHtml = cachedHtml.data ?? null
+  const readyHtml = rawHtml && (!parts.length || !/src=["']cid:/i.test(rawHtml)) ? rawHtml : null
+  const source = hasHtml ? htmlSourceKey(message) : null
+  const htmlKey = useMemo(
+    () => (source === null ? null : { id, source, rawHtml }),
+    [id, source, rawHtml],
+  )
+  const html = useBodyRequest(
+    htmlKey,
+    async () => embedInlineImages(rawHtml ?? (await getAmc().messageHtml(id)), parts),
+    hasHtml && (!preparedHtml || cachedHtml.state !== 'first-load') && readyHtml === null,
+    readyHtml,
+  )
+  // If lookahead missed the HTML cache, the already available text can be read
+  // while the selected reader fetches HTML. A warm hit can render HTML directly.
+  const showText = !hasHtml || html.hasResult || (preparedHtml !== null && cachedHtml.data === null)
+  const needsText = bodyText === null && showText && !html.value
+  const { snapshot: deferred, refresh } = useReplicaState(
+    needsText ? readerTextQuery(engineUrl, message) : null,
+  )
+  const text = bodyText ?? deferred.data
+  const settled = deferred.state === 'first-error' || deferred.state === 'empty-success'
+  const [lastText, setLastText] = useState<string | null>(null)
+  if (text !== undefined && text !== lastText) setLastText(text)
+  const visibleText = text === undefined && !settled ? lastText : text
   const [reserveTextSpace] = useState(bodyText === null)
 
   if (hasHtml && html.value) {
     const senderKey = senderPreferenceKey(message.accountId, message.from?.address ?? null)
     return <HtmlBody html={html.value} senderKey={senderKey} />
   }
-  if (deferred.value !== null && (!hasHtml || html.hasResult)) {
+  if (visibleText != null && showText) {
     return (
       <div className={reserveTextSpace ? 'min-h-11' : undefined}>
-        <TextBody text={deferred.value} />
+        <TextBody text={visibleText} />
       </div>
     )
   }
-  if (deferred.settled && deferred.value === null) {
+  if (settled) {
     return (
-      <button type="button" className="min-h-11 text-sm underline" onClick={deferred.retry}>
+      <button type="button" className="min-h-11 text-sm underline" onClick={refresh}>
         Could not load message. Retry
       </button>
     )

@@ -16,6 +16,7 @@ import { useMailSearch } from '../search/use-mail-search'
 import { TriageReview } from '../triage-review/triage-review'
 import { useTriageReview } from '../triage-review/use-triage-review'
 import { ComposeOverlays } from './compose-overlays'
+import { InboxArchiveLookahead } from './inbox-archive-lookahead'
 import { MailPanes, MailReader } from './mail-panes'
 import {
   accountsQuery,
@@ -346,6 +347,14 @@ export function MailWorkspace({
                 expanded={expanded}
               />
             }
+          />
+        )}
+        {sectioned && organise.controls.some(({ id }) => id === 'archive') && (
+          <InboxArchiveLookahead
+            engineUrl={engineUrl}
+            mailbox={mailbox.query}
+            selectedId={selectedId}
+            readIds={inbox.readIds}
           />
         )}
         <ComposeOverlays compose={compose} />

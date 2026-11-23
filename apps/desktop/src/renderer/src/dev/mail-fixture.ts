@@ -440,6 +440,7 @@ export function createMailFixture(scenario: string) {
       return { undoSendSeconds }
     },
     messageText: async () => null,
+    cachedMessageHtml: async () => null,
     messageHtml: async () => null,
     inlineAttachment: async () => '',
     openAttachment: async () => {},

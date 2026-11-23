@@ -148,3 +148,20 @@ The scenario checks the same 32×32 slot before and after the logo arrives,
 plus DOM identity for the rows, selection, and reader.
 
 The triage harness also covers Filter out, exact Undo, the Filtered count and restore action, and inline reasons for Filter out and Block sender. Typing a reason has a budget of zero workspace, list, reader, and review card commits.
+
+## Inbox Archive advance
+
+The production keyboard Archive path uses controlled replies for the Inbox
+list, successor detail and first expanded body. On `3d49081`, the old reader
+remained while the Inbox reply was pending. Releasing the list selected the
+successor and showed “Loading thread.” Releasing detail then showed the
+message body skeleton until the HTML reply arrived.
+
+With lookahead, one successor detail read and one local HTML cache read settle
+before Archive. Both preparation replies produce zero Workspace, list, row,
+and reader commits. Releasing just the Inbox reply selects the successor and
+renders its body while both revalidation replies are still pending. The
+listbox, surviving row and focus keep their DOM identity. Preparation issues
+zero Engine-backed HTML or inline attachment requests and mounts zero message
+frames. The cloned no-op Inbox test permits one additional local detail read
+for the active successor and keeps the zero-commit budget.

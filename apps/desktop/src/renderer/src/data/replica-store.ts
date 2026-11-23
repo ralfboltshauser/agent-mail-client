@@ -54,6 +54,10 @@ export class ReplicaStore {
     return this.#cache.getSnapshot(query)
   }
 
+  isQueryActive<T>(query: ReplicaQuery<T>): boolean {
+    return this.#cache.isActive(query)
+  }
+
   subscribeQuery<T>(query: ReplicaQuery<T>, listener: Listener): () => void {
     const unsubscribe = this.#cache.subscribe(query, listener)
     if (++this.#queryUsers === 1) {
