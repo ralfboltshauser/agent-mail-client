@@ -1,4 +1,4 @@
-import { SNOOZED_LABEL } from '@amc/protocol'
+import { type Bucket, SNOOZED_LABEL } from '@amc/protocol'
 import { CircleAlert, MailOpen, Star } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { ThreadMessages } from '@/features/thread-reader/thread-messages'
@@ -21,6 +21,38 @@ interface Props {
 }
 
 const HIDDEN_LABELS = /:(INBOX|UNREAD|STARRED|IMPORTANT|SENT|DRAFT|CATEGORY_\w+)$/
+const STRUCTURED_REASON = /^Context: ([^|\r\n]+)(?: \| Action: ([^|\r\n]+))?$/
+
+function BucketCard({ bucket, reason }: { bucket: Bucket; reason: string }) {
+  const match = STRUCTURED_REASON.exec(reason)
+  const context = match?.[1]?.trim()
+  const action = match?.[2]?.trim()
+  const structured = context && (match?.[2] === undefined || action)
+
+  return (
+    <div className="mb-5 space-y-3 rounded-md bg-muted/65 px-4 py-3">
+      <Badge variant="secondary" className="text-accent-foreground">
+        {bucket}
+      </Badge>
+      {structured ? (
+        <dl className="space-y-3 select-text wrap-anywhere text-sm leading-relaxed">
+          <div>
+            <dt className="text-xs font-semibold text-muted-foreground">Context</dt>
+            <dd className="mt-0.5">{context}</dd>
+          </div>
+          {action ? (
+            <div>
+              <dt className="text-xs font-semibold text-muted-foreground">Action</dt>
+              <dd className="mt-0.5 font-medium">{action}</dd>
+            </div>
+          ) : null}
+        </dl>
+      ) : (
+        <p className="select-text wrap-anywhere text-sm leading-relaxed">{reason}</p>
+      )}
+    </div>
+  )
+}
 
 export function ThreadView({
   data,
@@ -88,14 +120,7 @@ export function ThreadView({
           </div>
         )}
         {thread.bucket && (
-          <div className="mb-5 flex items-start gap-2.5 rounded-md bg-muted/65 px-3 py-2.5">
-            <Badge variant="secondary" className="shrink-0 text-accent-foreground">
-              {thread.bucket.bucket}
-            </Badge>
-            <p className="select-text wrap-anywhere pt-px text-xs leading-relaxed text-muted-foreground">
-              {thread.bucket.reason}
-            </p>
-          </div>
+          <BucketCard bucket={thread.bucket.bucket} reason={thread.bucket.reason} />
         )}
         <div className="space-y-2.5">
           <ThreadMessages key={JSON.stringify([thread.accountId, thread.id])} messages={messages} />
