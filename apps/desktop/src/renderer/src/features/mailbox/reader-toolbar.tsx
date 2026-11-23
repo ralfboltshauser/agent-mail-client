@@ -1,10 +1,10 @@
 import type { ThreadSummary } from '@amc/protocol'
-import { ArrowLeft, Forward, Maximize2, Reply, ReplyAll } from 'lucide-react'
+import { ArrowLeft, Copy, Forward, Maximize2, Reply, ReplyAll, SendToBack, X } from 'lucide-react'
 import { BucketPicker } from '@/components/bucket-picker'
 import { OrganiseToolbar } from '@/components/organise'
-import { Button } from '@/components/ui/button'
-import { Kbd } from '@/components/ui/kbd'
-import { copyThreadReferenceLabel, copyThreadReferenceShortcut } from './thread-reference'
+import { ToolbarButton } from '@/components/toolbar-button'
+import { mailShortcuts } from '@/lib/mail-shortcuts'
+import { copyThreadReferenceLabel } from './thread-reference'
 import type { FilterAction } from './use-filter-actions'
 import type { useMailCompose } from './use-mail-compose'
 import type { useThreadActions } from './use-thread-actions'
@@ -20,31 +20,25 @@ export function ReaderToolbar({
   onToggleFocus: (trigger: HTMLElement) => void
 }) {
   return (
-    <div className="app-drag app-toolbar min-w-0 gap-1 px-3">
-      {(expanded || canExpand) && (
-        <Button
-          variant="ghost"
-          size={expanded ? 'sm' : 'icon-sm'}
-          className={expanded ? 'ml-[68px] gap-2' : undefined}
-          aria-label={expanded ? 'Back to mailbox' : 'Focus reader'}
-          aria-keyshortcuts={expanded ? 'Escape O' : 'O'}
-          title={expanded ? undefined : 'Focus reader (O)'}
-          onClick={(event) => onToggleFocus(event.currentTarget)}
-        >
-          {expanded ? (
-            <>
-              <ArrowLeft />
-              Back to mailbox
-              <Kbd aria-hidden="true">Esc</Kbd>
-            </>
-          ) : (
-            <Maximize2 />
-          )}
-        </Button>
-      )}
-      <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">
+    <div className="app-drag app-toolbar h-auto min-h-13 min-w-0 items-start px-3 py-2.5">
+      <fieldset className="flex min-w-0 flex-1 flex-wrap items-center gap-0.5">
+        <legend className="sr-only">Thread actions</legend>
+        {(expanded || canExpand) && (
+          <ToolbarButton
+            className={expanded ? 'ml-[68px]' : undefined}
+            label={expanded ? 'Back to mailbox' : 'Focus reader'}
+            shortcuts={
+              expanded
+                ? [mailShortcuts.escape, mailShortcuts.focusReader]
+                : [mailShortcuts.focusReader]
+            }
+            onClick={(event) => onToggleFocus(event.currentTarget)}
+          >
+            {expanded ? <ArrowLeft /> : <Maximize2 />}
+          </ToolbarButton>
+        )}
         <ReaderActions {...props} />
-      </div>
+      </fieldset>
     </div>
   )
 }
@@ -79,88 +73,72 @@ function ReaderActions({
   const { openingComposer, startCompose, draft, setHandoffThread } = compose
   return (
     <>
-      {organise.controls.length > 0 && <OrganiseToolbar controls={organise.controls} />}
-      {filterActions.map(({ name, shortcut, disabled, run }) => (
-        <Button
+      <OrganiseToolbar controls={organise.controls} />
+      {filterActions.map(({ name, shortcut, icon: Icon, disabled, run }) => (
+        <ToolbarButton
           key={name}
-          size="sm"
-          variant="ghost"
-          title={shortcut ? `${name} (${shortcut})` : undefined}
+          label={name}
+          shortcuts={shortcut ? [shortcut] : undefined}
           disabled={disabled}
           onClick={run}
         >
-          {name}
-        </Button>
+          <Icon />
+        </ToolbarButton>
       ))}
-      {activeThread && organiseAccount?.kind === 'imap' && organiseAccount.imapMoves === false && (
-        <span className="text-muted-foreground text-xs">
-          This IMAP server does not support safe moves
-        </span>
-      )}
       {activeThread && (
         <>
-          <Button
-            size="icon-sm"
-            variant="ghost"
-            title="Reply (R)"
-            aria-label="Reply"
+          <ToolbarButton
+            label="Reply"
+            shortcuts={[mailShortcuts.reply]}
             disabled={openingComposer}
             onClick={() => void startCompose('reply')}
           >
             <Reply />
-          </Button>
-          <Button
-            size="icon-sm"
-            variant="ghost"
-            title="Reply all (A)"
-            aria-label="Reply all"
+          </ToolbarButton>
+          <ToolbarButton
+            label="Reply all"
+            shortcuts={[mailShortcuts.replyAll]}
             disabled={openingComposer}
             onClick={() => void startCompose('reply-all')}
           >
             <ReplyAll />
-          </Button>
-          <Button
-            size="icon-sm"
-            variant="ghost"
-            title="Forward (F)"
-            aria-label="Forward"
+          </ToolbarButton>
+          <ToolbarButton
+            label="Forward"
+            shortcuts={[mailShortcuts.forward]}
             disabled={openingComposer}
             onClick={() => void startCompose('forward')}
           >
             <Forward />
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            title="Hand off (⇧T)"
+          </ToolbarButton>
+          <ToolbarButton
+            label="Hand off"
+            shortcuts={[mailShortcuts.handOff]}
             disabled={Boolean(draft) || openingComposer}
             onClick={() => setHandoffThread(activeThread.id)}
           >
-            Hand off
-          </Button>
+            <SendToBack />
+          </ToolbarButton>
           {onCopyThreadReference && (
-            <Button
-              size="sm"
-              variant="ghost"
-              title={`${copyThreadReferenceLabel} (${copyThreadReferenceShortcut})`}
-              aria-keyshortcuts="Meta+Shift+C"
+            <ToolbarButton
+              label={copyThreadReferenceLabel}
+              shortcuts={[mailShortcuts.copyThreadReference]}
               onClick={onCopyThreadReference}
             >
-              {copyThreadReferenceLabel}
-            </Button>
+              <Copy />
+            </ToolbarButton>
           )}
           {activeHandoff && (
-            <>
-              <span className="text-xs text-muted-foreground">Active hand-off</span>
-              <Button
-                size="sm"
-                variant="ghost"
+            <span className="inline-flex items-center gap-0.5 whitespace-nowrap text-xs text-muted-foreground">
+              Active hand-off
+              <ToolbarButton
+                label="End hand-off"
                 disabled={endingHandoff === activeHandoff.id}
                 onClick={() => void endHandoff(activeHandoff.id)}
               >
-                End hand-off
-              </Button>
-            </>
+                <X />
+              </ToolbarButton>
+            </span>
           )}
         </>
       )}
@@ -171,6 +149,11 @@ function ReaderActions({
           onOpenChange={(open) => setBucketPickerId(open ? selected.id : null)}
           onSelect={(bucket) => void setBucket(bucket)}
         />
+      )}
+      {activeThread && organiseAccount?.kind === 'imap' && organiseAccount.imapMoves === false && (
+        <span className="text-xs text-muted-foreground">
+          This IMAP server does not support safe moves
+        </span>
       )}
     </>
   )

@@ -1,19 +1,20 @@
 import { type RefObject, useEffect, useLayoutEffect, useRef } from 'react'
+import { mailShortcuts, tooltipDismissals } from '@/lib/mail-shortcuts'
 
 type HotkeyHandler = (event: KeyboardEvent) => void
 type HotkeyBinding = HotkeyHandler | { run: HotkeyHandler; when: (event: KeyboardEvent) => boolean }
 export type HotkeyMap = Record<string, HotkeyBinding>
 export const messageKeydownEvent = 'amc:message-keydown'
 const messageKeys = new Set([
-  'o',
-  'escape',
+  mailShortcuts.focusReader,
+  mailShortcuts.escape,
   'j',
   'k',
   'space',
-  '/',
-  'mod+f',
+  mailShortcuts.filterMail,
+  mailShortcuts.searchMail,
   'mod+k',
-  'mod+shift+c',
+  mailShortcuts.copyThreadReference,
 ])
 
 export function dispatchMessageKeydown(frame: HTMLIFrameElement, event: KeyboardEvent) {
@@ -54,7 +55,13 @@ export function useHotkeys(
       const inOverlay = target?.closest?.(
         'dialog[open], [role="dialog"], [role="alertdialog"], [role="menu"]',
       )
-      if (event.isComposing || event.keyCode === 229 || event.defaultPrevented || inOverlay) return
+      if (
+        event.isComposing ||
+        event.keyCode === 229 ||
+        (event.defaultPrevented && !tooltipDismissals.has(event)) ||
+        inOverlay
+      )
+        return
       const key = event.key === ' ' ? 'space' : event.key.toLowerCase()
       if (
         key === 'space' &&

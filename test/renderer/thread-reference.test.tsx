@@ -47,7 +47,7 @@ it('copies the exact loaded Thread from the toolbar, shortcut and command palett
   const writeText = mockClipboard()
   await mount(adapter)
   const heading = reader()
-  expect(copyButton().previousElementSibling?.textContent).toBe('Hand off')
+  expect(copyButton().previousElementSibling?.getAttribute('aria-label')).toBe('Hand off')
   adapter.api.thread.mockClear()
 
   await act(async () => fireEvent.click(copyButton()))
