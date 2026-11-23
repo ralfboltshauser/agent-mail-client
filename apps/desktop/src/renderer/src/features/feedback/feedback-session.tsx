@@ -4,6 +4,7 @@ import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import { createPortal, flushSync } from 'react-dom'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
+import { messageKeydownEvent } from '@/hooks/use-hotkeys'
 import { getAmc } from '@/lib/amc'
 import { type FeedbackDraft, feedbackView } from '../../../../shared/feedback'
 
@@ -129,11 +130,13 @@ export default function FeedbackSession({
     const handleKeyDown = (event: KeyboardEvent) => onKeyDown(event)
     window.addEventListener('keydown', handleKeyDown, true)
     // Agentation listens on the document. Keep AMC's window-level hotkeys out of feedback mode.
-    const stopMailHotkeys = (event: KeyboardEvent) => event.stopPropagation()
+    const stopMailHotkeys = (event: Event) => event.stopPropagation()
     document.addEventListener('keydown', stopMailHotkeys)
+    document.addEventListener(messageKeydownEvent, stopMailHotkeys)
     return () => {
       window.removeEventListener('keydown', handleKeyDown, true)
       document.removeEventListener('keydown', stopMailHotkeys)
+      document.removeEventListener(messageKeydownEvent, stopMailHotkeys)
     }
   }, [])
 

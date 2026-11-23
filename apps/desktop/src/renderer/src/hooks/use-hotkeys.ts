@@ -3,7 +3,7 @@ import { type RefObject, useEffect, useLayoutEffect, useRef } from 'react'
 type HotkeyHandler = (event: KeyboardEvent) => void
 type HotkeyBinding = HotkeyHandler | { run: HotkeyHandler; when: (event: KeyboardEvent) => boolean }
 export type HotkeyMap = Record<string, HotkeyBinding>
-const MESSAGE_KEYDOWN = 'amc:message-keydown'
+export const messageKeydownEvent = 'amc:message-keydown'
 const messageKeys = new Set([
   'o',
   'escape',
@@ -17,7 +17,7 @@ const messageKeys = new Set([
 ])
 
 export function dispatchMessageKeydown(frame: HTMLIFrameElement, event: KeyboardEvent) {
-  frame.dispatchEvent(new CustomEvent(MESSAGE_KEYDOWN, { bubbles: true, detail: event }))
+  frame.dispatchEvent(new CustomEvent(messageKeydownEvent, { bubbles: true, detail: event }))
 }
 
 function isTyping(target: EventTarget | null): boolean {
@@ -106,11 +106,11 @@ export function useHotkeys(
       }
     }
     window.addEventListener('keydown', onKey)
-    if (messageRoot) window.addEventListener(MESSAGE_KEYDOWN, onMessageKey)
+    if (messageRoot) window.addEventListener(messageKeydownEvent, onMessageKey)
     return () => {
       window.clearTimeout(pendingTimer)
       window.removeEventListener('keydown', onKey)
-      if (messageRoot) window.removeEventListener(MESSAGE_KEYDOWN, onMessageKey)
+      if (messageRoot) window.removeEventListener(messageKeydownEvent, onMessageKey)
     }
   }, [enabled, messageRoot])
 }
