@@ -427,11 +427,58 @@ describe('amc triage', () => {
   })
 })
 
-it('releases its lease when the acquisition response is lost', async () => {
+it('retries lease acquisition once after the Engine confirms cleanup', async () => {
+  const requests: string[] = []
   let holder: string | undefined
+  let firstAttempt = true
+  const run = vi.fn(async () => 'triaged')
+  vi.stubGlobal('fetch', async (url: URL, init: RequestInit) => {
+    const request = `${init.method} ${url.pathname}`
+    requests.push(request)
+    const body = init.body ? JSON.parse(String(init.body)) : undefined
+    switch (request) {
+      case 'POST /v1/triage/lease':
+        expect(holder).toBeUndefined()
+        holder = body.holder
+        if (firstAttempt) {
+          firstAttempt = false
+          throw new DOMException('Synthetic lost response', 'TimeoutError')
+        }
+        return Response.json({ granted: true })
+      case 'DELETE /v1/triage/lease':
+        expect(body.holder).toBe(holder)
+        holder = undefined
+        return new Response(null, { status: 204 })
+      case 'POST /v1/tokens':
+        expect(body.name).toBe(holder)
+        return Response.json({ id: 'test-token', token: 'agent' })
+      case 'DELETE /v1/tokens/test-token':
+        return new Response(null, { status: 204 })
+      default:
+        throw new Error(request)
+    }
+  })
+  await expect(withTriageGrant(config, 'a', false, signal(), run)).resolves.toBe('triaged')
+  expect(run).toHaveBeenCalledOnce()
+  expect(holder).toBeUndefined()
+  expect(requests).toEqual([
+    'POST /v1/triage/lease',
+    'DELETE /v1/triage/lease',
+    'POST /v1/triage/lease',
+    'POST /v1/tokens',
+    'DELETE /v1/tokens/test-token',
+    'DELETE /v1/triage/lease',
+  ])
+})
+
+it('releases its lease when both acquisition responses are lost', async () => {
+  let holder: string | undefined
+  const acquire = vi.fn()
   vi.stubGlobal('fetch', async (_url: URL, init: RequestInit) => {
     const body = JSON.parse(String(init.body))
     if (init.method === 'POST') {
+      acquire()
+      expect(holder).toBeUndefined()
       holder = body.holder
       throw new Error('Lost lease response')
     }
@@ -445,8 +492,33 @@ it('releases its lease when the acquisition response is lost', async () => {
     'Could not reach the Engine',
   )
   expect(holder).toBeUndefined()
+  expect(acquire).toHaveBeenCalledTimes(2)
   expect(model).not.toHaveBeenCalled()
 })
+
+it.each(['release failed', 'run aborted'])(
+  'stops acquisition recovery when %s',
+  async (outcome) => {
+    const controller = new AbortController()
+    const requests: string[] = []
+    const run = vi.fn()
+    vi.stubGlobal('fetch', async (url: URL, init: RequestInit) => {
+      requests.push(`${init.method} ${url.pathname}`)
+      if (init.method === 'POST') throw new DOMException('Synthetic timeout', 'TimeoutError')
+      if (outcome === 'release failed') return new Response(null, { status: 503 })
+      controller.abort()
+      return new Response(null, { status: 204 })
+    })
+
+    await expect(withTriageGrant(config, 'a', false, controller.signal, run)).rejects.toMatchObject(
+      {
+        reason: 'engine-timeout',
+      },
+    )
+    expect(requests).toEqual(['POST /v1/triage/lease', 'DELETE /v1/triage/lease'])
+    expect(run).not.toHaveBeenCalled()
+  },
+)
 
 it('reserves time to release the lease if grant revocation times out', async () => {
   const release = vi.fn()
