@@ -1,7 +1,7 @@
 import { INLINE_IMAGE_TYPES } from '@amc/composer'
 import type { AttachmentSummary } from '@amc/protocol'
 import { useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
-import { HtmlBody, MIN_HTML_BODY_HEIGHT, TextBody } from '@/components/message-body'
+import { HtmlBody, HtmlBodySkeleton, TextBody } from '@/components/message-body'
 import { Skeleton } from '@/components/ui/skeleton'
 import { senderPreferenceKey } from '@/data/remote-image-preferences'
 import { replicaStoreFor } from '@/data/replica-store'
@@ -150,19 +150,11 @@ export function MessageContent({ message }: { message: ReplicaThreadMessage }) {
     )
   }
 
+  if (hasHtml) return <HtmlBodySkeleton />
+
   return (
-    <div
-      className={hasHtml ? 'space-y-2 py-2' : 'min-h-11 py-2'}
-      style={hasHtml ? { minHeight: MIN_HTML_BODY_HEIGHT } : undefined}
-      aria-busy="true"
-    >
+    <div className="min-h-11 py-2" aria-busy="true">
       <Skeleton className="h-3 w-3/4" />
-      {hasHtml && (
-        <>
-          <Skeleton className="h-3 w-2/3" />
-          <Skeleton className="h-3 w-1/2" />
-        </>
-      )}
     </div>
   )
 }

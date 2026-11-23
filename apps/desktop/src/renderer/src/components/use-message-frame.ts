@@ -11,31 +11,67 @@ type Geometry = { height: number; scroll: 'horizontal' | 'message' | null }
 
 export function useMessageFrame(srcdoc: string) {
   const frame = useRef<HTMLIFrameElement>(null)
-  const [geometry, setGeometry] = useState<Geometry>({ height: MIN_HTML_BODY_HEIGHT, scroll: null })
+  const [state, setState] = useState({
+    srcdoc,
+    revision: 0,
+    ready: false,
+    height: MIN_HTML_BODY_HEIGHT,
+    scroll: null as Geometry['scroll'],
+  })
+  const { revision, ready, height, scroll } = state
+  if (state.srcdoc !== srcdoc) {
+    setState({ srcdoc, revision: revision + 1, ready: false, height, scroll })
+  }
 
   useLayoutEffect(() => {
     const el = frame.current
     if (!el) return
-    let disconnect = () => {}
-    const onLoad = () => {
-      disconnect()
-      const doc = el.contentDocument
-      if (doc?.URL !== 'about:srcdoc' || !doc.body || !doc.defaultView) return
-      disconnect = observeMessageFrame(el, doc, (next) => {
-        setGeometry((current) =>
-          current.height === next.height && current.scroll === next.scroll ? current : next,
-        )
+    // Every navigation has the same URL, including a consent change that replaces srcdoc.
+    const marker = `amc-message-${revision}`
+    const source = `<!--${marker}-->${srcdoc}`
+    let discoveryFrame = 0
+    let candidate: Document | undefined
+    let disconnect: (() => void) | undefined
+
+    const startSizing = () => {
+      if (!candidate || candidate !== el.contentDocument || candidate.readyState === 'loading')
+        return
+      candidate.removeEventListener('readystatechange', startSizing)
+      disconnect = observeMessageFrame(el, candidate, (next) => {
+        setState((current) => {
+          if (current.revision !== revision) return current
+          if (current.ready && current.height === next.height && current.scroll === next.scroll)
+            return current
+          return { ...current, ...next, ready: true }
+        })
       })
     }
-    el.addEventListener('load', onLoad)
-    if (el.srcdoc !== srcdoc) el.srcdoc = srcdoc
-    return () => {
-      el.removeEventListener('load', onLoad)
-      disconnect()
-    }
-  }, [srcdoc])
 
-  return { frame, ...geometry }
+    const discover = () => {
+      if (candidate) return
+      const doc = el.contentDocument
+      if (doc?.URL !== 'about:srcdoc' || doc.firstChild?.nodeValue !== marker) return
+      candidate = doc
+      window.cancelAnimationFrame(discoveryFrame)
+      doc.addEventListener('readystatechange', startSizing)
+      startSizing()
+    }
+    const poll = () => {
+      discover()
+      if (!candidate) discoveryFrame = window.requestAnimationFrame(poll)
+    }
+    el.addEventListener('load', discover)
+    if (el.srcdoc !== source) el.srcdoc = source
+    poll()
+    return () => {
+      window.cancelAnimationFrame(discoveryFrame)
+      el.removeEventListener('load', discover)
+      candidate?.removeEventListener('readystatechange', startSizing)
+      disconnect?.()
+    }
+  }, [srcdoc, revision])
+
+  return { frame, ready, height, scroll }
 }
 
 function observeMessageFrame(
@@ -56,6 +92,12 @@ function observeMessageFrame(
   let previous: Geometry | undefined
   const heights = new Set<number>()
 
+  const setScrollableHeight = (height: number) => {
+    fallbackHeight = Math.min(MAX_FALLBACK_HEIGHT, height)
+    root.style.setProperty('overflow-y', 'auto', 'important')
+    return fallbackHeight
+  }
+
   const restartSizing = () => {
     heights.clear()
     requestedHeight = undefined
@@ -64,8 +106,8 @@ function observeMessageFrame(
     root.style.setProperty('overflow-y', 'hidden', 'important')
   }
 
-  const measure = () => {
-    if (!active || frame.contentDocument !== doc || frame.closest('[hidden]')) return
+  const measure = (): Geometry | undefined => {
+    if (!active || frame.contentDocument !== doc || frame.clientWidth === 0) return
     const viewport = doc.defaultView
     if (!viewport) return
     if (width !== frame.clientWidth) {
@@ -105,9 +147,7 @@ function observeMessageFrame(
       if (height === requestedHeight) {
         if (frame.offsetHeight === height) heights.clear()
       } else if (heights.has(height) || heights.size >= MAX_AUTO_SIZE_PASSES) {
-        fallbackHeight = Math.min(MAX_FALLBACK_HEIGHT, Math.max(height, ...heights))
-        root.style.setProperty('overflow-y', 'auto', 'important')
-        height = fallbackHeight
+        height = setScrollableHeight(Math.max(height, ...heights))
       } else {
         heights.add(height)
       }
@@ -115,16 +155,41 @@ function observeMessageFrame(
     }
 
     const scroll = fallbackHeight !== undefined ? 'message' : horizontal ? 'horizontal' : null
-    if (previous?.height === height && previous.scroll === scroll) return
-    previous = { height, scroll }
-    onGeometry(previous)
+    return { height, scroll }
+  }
+
+  const measureInitial = () => {
+    const originalHeight = frame.style.height
+    let largest = MIN_HTML_BODY_HEIGHT
+    try {
+      // Verify the layout at its proposed height while the iframe is hidden.
+      // React publishes only the settled height, together with visibility.
+      for (let pass = 0; pass <= MAX_AUTO_SIZE_PASSES; pass++) {
+        const next = measure()
+        if (!next || next.height === frame.offsetHeight) return next
+        largest = Math.max(largest, next.height)
+        frame.style.height = `${next.height}px`
+      }
+      frame.style.height = `${setScrollableHeight(largest)}px`
+      width = frame.clientWidth
+      return measure()
+    } finally {
+      frame.style.height = originalHeight
+    }
+  }
+
+  const update = () => {
+    const next = previous ? measure() : measureInitial()
+    if (!next || (previous?.height === next.height && previous.scroll === next.scroll)) return
+    previous = next
+    onGeometry(next)
   }
 
   const schedule = () => {
     if (!active || pendingFrame !== undefined) return
     pendingFrame = window.requestAnimationFrame(() => {
       pendingFrame = undefined
-      measure()
+      update()
     })
   }
   const onResource = (event: Event) => {
@@ -143,7 +208,7 @@ function observeMessageFrame(
   }
   const onKey = (event: KeyboardEvent) => dispatchMessageKeydown(frame, event)
 
-  measure()
+  update()
   const observer = new ResizeObserver(schedule)
   observer.observe(body, { box: 'border-box' })
   observer.observe(frame, { box: 'border-box' })
@@ -155,6 +220,7 @@ function observeMessageFrame(
   return () => {
     active = false
     if (fitted) root.style.setProperty('zoom', senderZoom, senderZoomPriority)
+    if (fallbackHeight !== undefined) root.style.setProperty('overflow-y', 'hidden', 'important')
     if (pendingFrame !== undefined) window.cancelAnimationFrame(pendingFrame)
     observer.disconnect()
     doc.removeEventListener('load', onResource, true)

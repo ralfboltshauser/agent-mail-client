@@ -8,13 +8,13 @@ const renderer = join(desktop, 'src/renderer')
 const desktopRequire = createRequire(join(desktop, 'package.json'))
 const load = (id) => import(pathToFileURL(desktopRequire.resolve(id)).href)
 
-export const requests = { message: 0, parent: 0, missing: 0 }
+export const requests = { message: 0, parent: 0, missing: 0, held: 0 }
 const pixel = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jPioAAAAASUVORK5CYII=',
   'base64',
 )
 
-export async function startReaderServer() {
+export async function startReaderServer(heldImage) {
   const [{ createServer }, { default: react }, { default: tailwind }] = await Promise.all([
     load('vite'),
     load('@vitejs/plugin-react'),
@@ -42,7 +42,7 @@ export async function startReaderServer() {
               res.writeHead(404).end()
               return
             }
-            await delay(200)
+            await (source === 'held' ? heldImage : delay(200))
             res
               .writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' })
               .end(pixel)

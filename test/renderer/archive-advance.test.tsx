@@ -71,7 +71,8 @@ function archiveFixture(holdRevalidation = false) {
 const archive = (target: HTMLElement) => fireEvent.keyDown(target, { key: 'e' })
 const frame = () => document.querySelector<HTMLIFrameElement>('iframe[title="Message"]')
 const detailLoading = () => screen.queryByText('Loading thread', { exact: true })
-const bodyLoading = () => document.querySelector('[aria-busy="true"]')
+// This harness checks data availability. Electron checks iframe geometry and visibility.
+const bodyLoading = () => document.querySelector('[aria-busy="true"]:not(:has(iframe))')
 
 it('advances from Archive to the already prepared successor body after the list accepts the write', async () => {
   const {

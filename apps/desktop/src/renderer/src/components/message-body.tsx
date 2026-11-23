@@ -1,6 +1,7 @@
 import { ImageOff } from 'lucide-react'
 import { memo, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
 import {
   allowRemoteImagesFromSender,
   setLoadRemoteImagesAutomatically,
@@ -9,9 +10,22 @@ import {
 import { getAmc } from '@/lib/amc'
 import { messageDocument, sanitizeMessageHtml } from './html-message-document'
 
-import { useMessageFrame } from './use-message-frame'
+import { MIN_HTML_BODY_HEIGHT, useMessageFrame } from './use-message-frame'
 
-export { MIN_HTML_BODY_HEIGHT } from './use-message-frame'
+export function HtmlBodySkeleton({ decorative = false }: { decorative?: boolean }) {
+  return (
+    <div
+      className="space-y-2 py-2"
+      style={{ minHeight: MIN_HTML_BODY_HEIGHT }}
+      aria-busy={decorative ? undefined : true}
+      aria-hidden={decorative ? true : undefined}
+    >
+      <Skeleton className="h-3 w-3/4" />
+      <Skeleton className="h-3 w-2/3" />
+      <Skeleton className="h-3 w-1/2" />
+    </div>
+  )
+}
 
 /**
  * Renders sanitized HTML in a sandboxed iframe. Links open in the default browser.
@@ -29,7 +43,7 @@ export const HtmlBody = memo(function HtmlBody({
   const { clean, hasRemote } = useMemo(() => sanitizeMessageHtml(html), [html])
   const doc = useMemo(() => messageDocument(clean, remote), [clean, remote])
 
-  const { frame, height, scroll } = useMessageFrame(doc)
+  const { frame, ready, height, scroll } = useMessageFrame(doc)
 
   return (
     <div className="space-y-2">
@@ -71,20 +85,27 @@ export const HtmlBody = memo(function HtmlBody({
         <Button
           variant="link"
           size="sm"
-          className="h-auto p-0 text-xs"
+          className={ready ? 'h-auto p-0 text-xs' : 'invisible h-auto p-0 text-xs'}
           onClick={() => frame.current?.focus({ preventScroll: true })}
         >
           {scroll === 'horizontal' ? 'Scroll message horizontally' : 'Scroll within message'}
         </Button>
       )}
-      <iframe
-        ref={frame}
-        title="Message"
-        sandbox="allow-same-origin"
-        className="block w-full rounded-md border border-border/70 bg-white focus-visible:outline-2 focus-visible:outline-ring"
-        // Chromium uses the embedding element's scheme for the message's media queries.
-        style={{ height, colorScheme: 'only light' }}
-      />
+      <div className="relative" aria-busy={!ready || undefined}>
+        {!ready && (
+          <div className="absolute inset-0">
+            <HtmlBodySkeleton decorative />
+          </div>
+        )}
+        <iframe
+          ref={frame}
+          title="Message"
+          sandbox="allow-same-origin"
+          className="block w-full rounded-md border border-border/70 bg-white focus-visible:outline-2 focus-visible:outline-ring"
+          // Chromium uses the embedding element's scheme for the message's media queries.
+          style={{ height, visibility: ready ? 'visible' : 'hidden', colorScheme: 'only light' }}
+        />
+      </div>
     </div>
   )
 })
