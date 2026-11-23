@@ -441,6 +441,37 @@ async function main() {
       'native sidebar wheel scrolling',
     )
     console.log(`Sidebar row kept its ${open.width}px width when Triage overflowed`)
+
+    assert.equal(
+      await run(() => {
+        const frame = document.querySelector('iframe[title="Message"]')
+        frame.focus()
+        return document.activeElement === frame
+      }),
+      true,
+      'the HTML message has keyboard focus',
+    )
+    await wc.debugger.sendCommand('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: 'r',
+      code: 'KeyR',
+      text: 'r',
+    })
+    await wc.debugger.sendCommand('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: 'r',
+      code: 'KeyR',
+    })
+    await waitFor(
+      () =>
+        run(
+          () =>
+            document.querySelector(
+              '[role="dialog"] input[value="Re: Samples from the paper mill"]',
+            ) !== null,
+        ),
+      'reply composer for the focused HTML message',
+    )
   } catch (error) {
     console.error(error)
     exitCode = 1
