@@ -1,4 +1,4 @@
-import { TriangleAlert } from 'lucide-react'
+import { CircleAlert, TriangleAlert } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { shareReply } from '@/data/share-reply'
@@ -129,19 +129,22 @@ export function SyncIndicator() {
           className="grid gap-1 rounded-md px-2 py-1.5 text-[11px] text-muted-foreground"
         >
           <div className="flex items-center gap-2">
-            <span
-              aria-hidden
-              className={cn(
-                'size-1.5 shrink-0 rounded-full',
-                tone === 'ok' && 'bg-emerald-500',
-                tone === 'busy' && 'motion-safe:animate-pulse bg-star',
-                tone === 'bad' && 'bg-destructive',
+            <span aria-hidden className="grid size-3 shrink-0 place-items-center">
+              {tone === 'bad' ? (
+                <CircleAlert className="size-3 text-destructive" />
+              ) : (
+                <span
+                  className={cn(
+                    'size-1.5 rounded-full bg-current',
+                    tone === 'busy' && 'motion-safe:animate-pulse',
+                  )}
+                />
               )}
-            />
+            </span>
             <span className="truncate tabular-nums">{text}</span>
           </div>
           {(healthUnavailable || warnings.length > 0) && (
-            <output className="flex items-center gap-1.5 text-star">
+            <output className="flex items-center gap-1.5 text-foreground">
               <TriangleAlert aria-hidden className="size-3 shrink-0" />
               {healthUnavailable ? 'Engine health unavailable' : 'Engine health warning'}
             </output>

@@ -38,24 +38,8 @@ export function participantsLine(people: Address[], self: Set<string>): string {
   return `${names.slice(0, 2).join(', ')} +${names.length - 2}`
 }
 
-export function initials(a: Address | null): string {
-  const name = personName(a)
-  const parts = name.split(/\s+/).filter(Boolean)
-  return (
-    ((parts[0]?.[0] ?? '') + (parts.length > 1 ? (parts.at(-1)?.[0] ?? '') : '')).toUpperCase() ||
-    '?'
-  )
-}
-
 export function fileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 ** 2) return `${Math.round(bytes / 1024)} KB`
   return `${(bytes / 1024 ** 2).toFixed(1)} MB`
-}
-
-/** A stable soft colour per person, for avatars. */
-export function hueFor(text: string): number {
-  let h = 0
-  for (const ch of text) h = (h * 31 + ch.charCodeAt(0)) % 360
-  return h
 }

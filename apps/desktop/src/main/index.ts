@@ -982,7 +982,7 @@ function createWindow() {
     show: false,
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 16 },
-    backgroundColor: nativeTheme.shouldUseDarkColors ? '#1b1b1f' : '#fdfdfd',
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#161616' : '#fdfdfd',
     webPreferences: {
       preload: join(import.meta.dirname, '../preload/index.cjs'),
       sandbox: true,

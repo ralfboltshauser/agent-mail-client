@@ -2,6 +2,7 @@ import { act, cleanup, render } from '@testing-library/react'
 import { Profiler } from 'react'
 import { expect, it, vi } from 'vitest'
 import { SenderAvatarCache } from '../../apps/desktop/src/renderer/src/features/sender-avatar/cache'
+import { avatarInitials } from '../../apps/desktop/src/renderer/src/features/sender-avatar/initials'
 import { SenderAvatar } from '../../apps/desktop/src/renderer/src/features/sender-avatar/sender-avatar'
 import type { DesktopSenderAvatarResults, SmartInboxApi } from '../../apps/desktop/src/shared/api'
 import { deferred } from './adapter'
@@ -14,6 +15,15 @@ const row = (messageId: string, digest: string | null) => ({
   color: '#304879',
   source: digest ? ('favicon' as const) : ('initials' as const),
   digest,
+})
+
+it('assigns initials colors by normalized email, with a name fallback', () => {
+  const ada = avatarInitials('ada@fixture.dev', 'Ada Baker')
+  expect(avatarInitials('  ADA@FIXTURE.DEV ', 'Ada Jones').color).toBe(ada.color)
+  expect(avatarInitials('casey@fixture.dev', 'Ada Baker').color).not.toBe(ada.color)
+  expect(avatarInitials(null, ' Ada Baker ').color).toBe(
+    avatarInitials(undefined, 'ADA BAKER').color,
+  )
 })
 
 it('batches mounted avatars and commits only consumers of the changed image', async () => {
