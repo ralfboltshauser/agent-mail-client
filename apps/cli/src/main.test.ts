@@ -43,6 +43,38 @@ it.each(['0', '1'])('reports a missing triage account with AMC_DEBUG=%s', async 
   }
 })
 
+it.each([
+  ['triage', '--account', 'gmail', 'filtered'],
+  ['triage', 'filtered', '--account', 'gmail'],
+])('sends the account scope for %j %j %j %j', async (...args) => {
+  const requests: string[] = []
+  const server = createServer((req, res) => {
+    requests.push(req.url ?? '')
+    res.setHeader('Content-Type', 'application/json')
+    res.end(JSON.stringify({ threads: [], cursor: null }))
+  })
+  server.listen(0, '127.0.0.1')
+  try {
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('Expected a TCP address')
+    await promisify(execFile)(
+      process.execPath,
+      [fileURLToPath(new URL('./main.ts', import.meta.url)), ...args],
+      {
+        env: {
+          ...process.env,
+          AMC_ENGINE_URL: `http://127.0.0.1:${address.port}`,
+          AMC_TOKEN: 'test',
+        },
+      },
+    )
+    expect(requests).toEqual(['/v1/filtered?accountId=gmail'])
+  } finally {
+    server.close()
+  }
+})
+
 it('reports unavailable backup health from an older Engine in doctor', async () => {
   const server = createServer((_req, res) => {
     res.setHeader('Content-Type', 'application/json')

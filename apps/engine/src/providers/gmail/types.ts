@@ -14,6 +14,8 @@ export interface GmailLabel {
   color?: { backgroundColor?: string; textColor?: string }
 }
 
+export type GmailLabelCreation = Pick<GmailLabel, 'id'> & Partial<Omit<GmailLabel, 'id'>>
+
 export interface GmailHeader {
   name: string
   value: string
@@ -95,7 +97,7 @@ export interface GmailApi {
     beforeDispatch?: () => void,
   ): Promise<GmailMessageState>
   setTrashed(id: string, trashed: boolean): Promise<GmailMessageState>
-  createLabel(name: string, signal?: AbortSignal): Promise<GmailLabel>
+  createLabel(name: string, signal?: AbortSignal): Promise<GmailLabelCreation>
   history(
     startHistoryId: string,
     pageToken?: string,

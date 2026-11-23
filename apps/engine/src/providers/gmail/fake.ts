@@ -6,6 +6,7 @@ import type {
   GmailHistoryList,
   GmailHistoryRecord,
   GmailLabel,
+  GmailLabelCreation,
   GmailMessage,
   GmailMessageState,
   GmailProfile,
@@ -255,7 +256,7 @@ export class FakeGmail implements GmailApi {
     return { labelIds: next, historyId: message.historyId }
   }
 
-  async createLabel(name: string): Promise<GmailLabel> {
+  async createLabel(name: string): Promise<GmailLabelCreation> {
     const label = { id: `Label_${this.labelList.length}`, name, type: 'user' as const }
     if (this.labelList.some((existing) => existing.name === name))
       throw new GmailHttpError(409, 'conflict', 'Label already exists')
