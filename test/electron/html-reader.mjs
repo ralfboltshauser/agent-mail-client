@@ -69,6 +69,21 @@ async function checkComposerKeyboard(wc, run) {
   await expectFocus('subject')
   await press('E', 69, commandShift)
   await expectFocus('from')
+  await press('Backspace', 8, 4)
+  // The Cancel button can receive focus before the new modal layer owns Escape.
+  await waitFor(
+    () =>
+      run(() => {
+        const [composer] = document.querySelectorAll('[role="dialog"]')
+        return (
+          document.activeElement.textContent === 'Cancel' &&
+          composer?.style.pointerEvents === 'none'
+        )
+      }),
+    'discard confirmation focus and active modal layer',
+  )
+  await press('Escape', 27)
+  await expectFocus('from')
   await press('S', 83, commandShift)
   await expectFocus('subject')
   await press('C', 67, commandShift)

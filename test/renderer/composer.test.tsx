@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, screen, within } from '@testing-library/react'
 import { expect, it, vi } from 'vitest'
 import { LocalDraftUpdates } from '../../apps/desktop/src/main/draft-updates'
 import {
+  type ComposeAttachment,
   type ComposePatch,
   DRAFT_CHANGED,
   type SendRequest,
@@ -118,27 +119,82 @@ it('keeps a partial address after moving to another field and pressing Escape', 
   expect(adapter.api.saveCompose).not.toHaveBeenCalled()
 })
 
-it('keeps a highlighted contact uncommitted when using a field shortcut', async () => {
-  const { adapter, dialog, recipient, subject } = await openComposer()
-  vi.spyOn(adapter.api, 'contacts').mockResolvedValueOnce([
-    {
-      address: 'alex@example.test',
-      name: 'Alex',
-      lastSeenAt: 0,
-      receivedCount: 1,
-      sentCount: 0,
-    },
-  ])
-  await act(async () => fireEvent.change(recipient, { target: { value: 'Alex' } }))
-  await act(async () => vi.advanceTimersByTimeAsync(140))
-  await act(async () => fireEvent.keyDown(recipient, { key: 'ArrowDown' }))
-  expect(dialog.getByRole('option', { name: /Alex/, selected: true })).toBeTruthy()
+it.each(['field shortcut', 'Escape'] as const)(
+  'keeps a highlighted contact uncommitted after %s',
+  async (action) => {
+    const { adapter, dialog, recipient, subject } = await openComposer()
+    vi.spyOn(adapter.api, 'contacts').mockResolvedValueOnce([
+      {
+        address: 'alex@example.test',
+        name: 'Alex',
+        lastSeenAt: 0,
+        receivedCount: 1,
+        sentCount: 0,
+      },
+    ])
+    await act(async () => fireEvent.change(recipient, { target: { value: 'Alex' } }))
+    await act(async () => vi.advanceTimersByTimeAsync(140))
+    await act(async () => fireEvent.keyDown(recipient, { key: 'ArrowDown' }))
+    expect(dialog.getByRole('option', { name: /Alex/, selected: true })).toBeTruthy()
+    await act(async () => {
+      fireEvent.keyDown(
+        recipient,
+        action === 'Escape' ? { key: 'Escape' } : { key: 'S', metaKey: true, shiftKey: true },
+      )
+    })
+    expect(document.activeElement).toBe(action === 'Escape' ? recipient : subject)
+    expect(dialog.queryByRole('option', { name: /Alex/ })).toBeNull()
+    expect(dialog.queryByRole('alert')).toBeNull()
+    expect(dialog.queryByRole('button', { name: 'Remove alex@example.test' })).toBeNull()
+    expect((recipient as HTMLInputElement).value).toBe('Alex')
+  },
+)
+
+it('restores the composing field when Escape cancels Discard', async () => {
+  const { dialog, subject } = await openComposer()
+  const from = dialog.getByRole('combobox', { name: 'From' })
   await act(async () => {
-    fireEvent.keyDown(recipient, { key: 'S', metaKey: true, shiftKey: true })
+    from.focus()
+    fireEvent.keyDown(from, { key: 'Backspace', metaKey: true })
   })
+  const discard = screen.getByRole('dialog', { name: 'Discard draft?' })
+  await act(async () => {
+    fireEvent.keyDown(within(discard).getByRole('button', { name: 'Cancel' }), { key: 'Escape' })
+    await vi.advanceTimersByTimeAsync(0)
+  })
+  expect(screen.queryByRole('dialog', { name: 'Discard draft?' })).toBeNull()
+  expect(document.activeElement).toBe(from)
+  await act(async () => fireEvent.keyDown(from, { key: 'S', metaKey: true, shiftKey: true }))
   expect(document.activeElement).toBe(subject)
-  expect(dialog.queryByRole('button', { name: 'Remove alex@example.test' })).toBeNull()
-  expect((recipient as HTMLInputElement).value).toBe('Alex')
+})
+
+it('inserts a pasted image without stealing focus from Subject when the upload finishes', async () => {
+  const { adapter, editor, subject } = await openComposer()
+  const pending = deferred<ComposeAttachment>()
+  const upload = vi.spyOn(adapter.api, 'addComposeAttachment').mockReturnValueOnce(pending.promise)
+  const file = Object.assign(new File(['image'], 'pasted.png', { type: 'image/png' }), {
+    arrayBuffer: async () => new Uint8Array([1]).buffer,
+  })
+  await act(async () => {
+    editor.focus()
+    fireEvent.paste(editor, { clipboardData: { files: [file] } })
+  })
+  expect(upload).toHaveBeenCalledOnce()
+  await act(async () => fireEvent.keyDown(editor, { key: 'S', metaKey: true, shiftKey: true }))
+  expect(document.activeElement).toBe(subject)
+  await act(async () => {
+    pending.resolve({
+      id: 'part-1',
+      filename: file.name,
+      mimeType: file.type,
+      contentId: 'image-1',
+      size: 1,
+    })
+    await pending.promise
+    await vi.advanceTimersByTimeAsync(20)
+  })
+  expect(within(editor).getByRole('img', { name: file.name })).toBeTruthy()
+  expect(document.activeElement).toBe(subject)
 })
 
 it('applies one subject character without replacing the composer fields', async () => {

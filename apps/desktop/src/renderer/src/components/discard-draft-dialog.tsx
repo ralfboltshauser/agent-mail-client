@@ -9,10 +9,12 @@ export function DiscardDraftDialog({
   subject,
   onConfirm,
   onClose,
+  onCloseAutoFocus,
 }: {
   subject: string
   onConfirm: () => Promise<DiscardDraftResult>
   onClose: () => void
+  onCloseAutoFocus?: (event: Event) => void
 }) {
   const [pending, setPending] = useState(false)
   const submitting = useRef(false)
@@ -46,7 +48,7 @@ export function DiscardDraftDialog({
         if (!open && !submitting.current) onClose()
       }}
     >
-      <DialogContent showCloseButton={false}>
+      <DialogContent showCloseButton={false} onCloseAutoFocus={onCloseAutoFocus}>
         <DialogTitle>Discard draft?</DialogTitle>
         <DialogDescription className="wrap-anywhere">
           “{subject || '(No subject)'}” will be deleted from AMC. A matching copy that AMC wrote in

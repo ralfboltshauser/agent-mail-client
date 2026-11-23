@@ -267,15 +267,11 @@ export function useComposerSession(draft: ComposeDraft, onDiscarded: (dirty: boo
             new Uint8Array(await file.arrayBuffer()),
             inline,
           )
-          if (part.contentId) {
-            editor
-              ?.chain()
-              .focus()
-              .insertContent({
-                type: INLINE_IMAGE_NAME,
-                attrs: { src: `cid:${part.contentId}`, alt: part.filename },
-              })
-              .run()
+          if (part.contentId && editor && !editor.isDestroyed) {
+            editor.commands.insertContent({
+              type: INLINE_IMAGE_NAME,
+              attrs: { src: `cid:${part.contentId}`, alt: part.filename },
+            })
           }
           session.updateAttachments([...session.attachments, part])
         }
