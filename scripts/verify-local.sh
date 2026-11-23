@@ -7,6 +7,7 @@ if [ "$(uname -s)" != Darwin ]; then
 fi
 
 pnpm install --frozen-lockfile
+bash test/release/activate-host.sh
 pnpm check
 pnpm build
 pnpm test:html-reader -AppleShowScrollBars Always
