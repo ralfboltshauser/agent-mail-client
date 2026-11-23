@@ -45,6 +45,9 @@ function observeMessageFrame(
 ) {
   const root = doc.documentElement
   const body = doc.body
+  const senderZoom = root.style.getPropertyValue('zoom')
+  const senderZoomPriority = root.style.getPropertyPriority('zoom')
+  let fitted = false
   let active = true
   let pendingFrame: number | undefined
   let width = frame.clientWidth
@@ -69,6 +72,21 @@ function observeMessageFrame(
       width = frame.clientWidth
       restartSizing()
     }
+    if (fitted) {
+      root.style.setProperty('zoom', senderZoom, senderZoomPriority)
+      fitted = false
+    }
+    const availableWidth = root.clientWidth
+    const contentWidth = root.scrollWidth
+    if (availableWidth > 0 && contentWidth > availableWidth) {
+      // Zoom participates in layout, so frame height includes the scaled content.
+      root.style.setProperty(
+        'zoom',
+        String((root.currentCSSZoom * availableWidth) / contentWidth),
+        'important',
+      )
+      fitted = true
+    }
     const horizontal = root.scrollWidth > root.clientWidth
     let height = fallbackHeight
     if (height === undefined) {
@@ -78,7 +96,7 @@ function observeMessageFrame(
       const rootOverflow = root.scrollHeight > root.clientHeight ? root.scrollHeight : 0
       const contentHeight = Math.max(
         bodyRect.height + bodyTop,
-        body.scrollHeight + bodyTop,
+        body.scrollHeight * (body.currentCSSZoom ?? 1) + bodyTop,
         rootOverflow,
       )
       const scrollbar = horizontal ? Math.max(0, viewport.innerHeight - root.clientHeight) : 0
@@ -136,6 +154,7 @@ function observeMessageFrame(
   doc.addEventListener('keydown', onKey)
   return () => {
     active = false
+    if (fitted) root.style.setProperty('zoom', senderZoom, senderZoomPriority)
     if (pendingFrame !== undefined) window.cancelAnimationFrame(pendingFrame)
     observer.disconnect()
     doc.removeEventListener('load', onResource, true)
