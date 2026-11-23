@@ -1,106 +1,18 @@
 ---
 name: amc-feedback
-description: Handle one piece of owner feedback about AMC (a thread opened from AMC's "Send feedback" shortcut, usually with a screenshot and element annotations). Triage it against open issues and PRs, then either attach it to existing work or fix it end to end — implement via subagents, review, merge, deploy, verify — and report back in one short message. Use when a thread starts with "AMC feedback" or the owner says "feedback:" about AMC.
+description: Triage owner feedback from AMC's Send Feedback shortcut or a message marked "AMC feedback" or "feedback:" about AMC. Read local evidence, find existing work, and route implementation through amc-work.
 ---
 
-# AMC feedback handler
+# AMC feedback
 
-The owner is daily-driving AMC and sends feedback from inside the app. Your job: turn one piece of feedback into a shipped fix (or a well-placed note on existing work) with **zero extra effort from the owner**. The owner should never have to approve, re-explain, or babysit.
+1. Confirm the desired behavior from the owner's text and any annotations. If the capture has no request or usable annotation, wait for the owner to add details. Split unrelated requests so each can be researched, built and verified independently.
+2. Inspect the screenshot or its original local PNG in place. Use the context block for the version, view and capture time. If there is a log excerpt, read it locally and match relevant warnings to that time. Follow a run or request ID with `amc logs --run <id>` or `amc logs --request <id>` on the machine that owns the logs when it helps explain the behavior. If the excerpt has expired, continue from the remaining evidence.
+3. Restate the symptom and desired behavior using synthetic examples. Pass that brief to [amc-work](../amc-work/SKILL.md). Start with its T3 triage Todo as soon as there is an actionable request. Treat actionable change feedback as a build request unless the owner asks to investigate or defer it.
 
-## Input
+If the owner supplies a snapshot from **Help → Copy Diagnostics** or the command palette, check its versions, Desktop sync state, health warning codes, Engine diagnostic status and recent local warnings. Apply the same external-report limits as for the local excerpt.
 
-A feedback thread contains some of:
-- **Owner text** — what's wrong or wanted. Authoritative.
-- **Screenshot** of the AMC window. Inspect the attached image when visible. If the message supplies a `Local screenshot` path, open the original PNG with a local image viewer. AMC manages the capture's retention, so inspect it in place without making a temporary copy or running a cleanup command.
-- **Annotations** — Agentation-style list: element selector / React component name, the owner's note per element, optionally selected text.
-- **Local log excerpt** — path to a recent, sanitized extract on the Mac. Read it locally if present.
-- **Context block** — AMC version (git SHA), app view (route/folder/mode), window size, timestamp. No mail content.
+## Private feedback evidence
 
-## Privacy (non-negotiable)
+Screenshots, annotations and logs can contain real mail. Keep original captures and raw excerpts local and under AMC's retention policy. Use a sanitized brief in searches, delegate prompts, issues, PRs, branch names, fixtures and logs. Describe the UI and behavior without real senders, addresses, subjects or bodies. Share a local capture path only with a local delegate that needs to inspect it. Include only the relevant event, error class and correlation ID when sharing diagnostic evidence externally.
 
-Screenshots and annotations can show real mail: senders, subjects, bodies.
-- Never copy mail content, names, addresses or subjects from the screenshot into issues, PRs, commits, branch names, test fixtures, logs or subagent briefs. Describe UI instead ("the sender row in the triage card", "a long subject truncates").
-- Never upload the screenshot anywhere (GitHub, artifacts, external services). Subagents get a written description, not the image, unless they run locally and need it for visual repro — then pass the local path only.
-- Reproduce with synthetic data or `AMC-E2E-` test threads sent to the owner's own addresses only.
-
-## Step 1 — Understand (2 min max)
-
-Restate the feedback as one sentence: **problem → desired behaviour**, plus the affected area (renderer feature folder / engine module / CLI / MCP). If the feedback holds several unrelated points, split it and handle each separately (one issue/PR per point).
-
-Read the file identified by `Local log excerpt` if the thread supplies a path. Match its warnings, errors and correlation IDs to the screenshot timestamp. If screenshot Details show a run ID, run `amc logs --run <id>` on the machine with those logs. For a request ID, run `amc logs --request <id>` on that machine. Include only the relevant event, error class and correlation ID in external reports. If the excerpt has expired, use the correlation ID from the screenshot or continue with the other evidence.
-
-If the owner supplies a snapshot from **Help → Copy Diagnostics** or the command palette, use its versions, Desktop sync state, health warning codes, Engine diagnostic status and recent local warnings to investigate. Use the same external-report limits as for the local excerpt.
-
-Classify:
-| Kind | Example | Default path |
-|---|---|---|
-| Bug | flicker, wrong count, crash, broken key | fix now |
-| Polish | spacing, copy, shortcut, small UX | fix now |
-| Feature (small, clear) | add a button/key/setting | fix now |
-| Feature (large or ambiguous) | new workflow, data model change | issue + spec, ask owner only if truly blocked |
-| Question | "why does X…" | answer, no code |
-
-Only ask the owner when the decision is genuinely theirs and can't be defaulted. Otherwise pick the sensible default and say what you picked.
-
-## Step 2 — Triage against existing work
-
-```bash
-cd /Users/ralf/Documents/codex/agent-mail-client && git pull -q
-gh issue list --state open --limit 100 --json number,title,labels
-gh pr list --state open --json number,title,headRefName
-gh issue list --state closed --search "<keywords>" --limit 20 --json number,title,closedAt
-```
-Search by component/area keywords, not mail content. Also check running T3 subagent threads for AMC if available.
-
-Decide:
-- **Already fixed on main but not installed** → install (Step 5) and report.
-- **Open PR covers it** → add the feedback (described, privacy-safe) as a PR comment; if the PR's author agent is still running, steer it; otherwise make sure it gets finished.
-- **Open issue covers it** → comment with the new evidence; if it's small and clearly wanted now, fix it (Step 3) and close the issue via the PR.
-- **Closed issue, regression** → new issue referencing the old one, then fix.
-- **Nothing exists** → for "fix now" kinds go to Step 3 directly (the PR description is the record); for large features open an `idea` or `enhancement` issue and stop unless the owner said to build.
-
-## Step 3 — Implement (via subagents)
-
-You supervise; Codex subagents do the work. Target the AMC project with `delegate_task`, using `providerInstanceId: codex`, model `gpt-6.2-sol`, `options: {reasoningEffort: medium}`, and `runtimeMode: full-access`. Follow the workspace and scratch-file guidance in [AGENTS.md](../../../AGENTS.md).
-
-Every brief starts with:
-> NEVER request approval or sandbox escalation. The owner is away. You may write scratch files under /tmp. If something would need approval, skip it and note it.
-
-The brief includes the desired behavior, likely files, acceptance criteria, and the smallest test that proves the change. Point to AGENTS.md, GLOSSARY.md, and the relevant ADRs. Carry forward the privacy rules. Ask the delegate to use unsigned commits, open a PR without merging it, and report the URL, head SHA, checks already run, and any pending CI.
-
-Independent feedback items → parallel subagents in separate checkouts. Don't stack conflicting work on the same files.
-
-## Step 4 — Review (one round)
-
-Start a **new** `delegate_task` (role review) with the PR URL, the problem statement and acceptance criteria. Ask it to block only on real harm: correctness, data loss, privacy, security (ADR 0001: sending requires a scoped grant and explicit owner approval; ADR 0002: no API keys), IMAP safety (never plain EXPUNGE), rerender regressions. Fix small findings yourself or via the implementer; don't do a second review round for nits.
-
-## Step 5 — Merge, release, verify
-
-If checks or reviews are pending, call T3's `watch_pull_request` and yield. On wake, check the current head and reverify any changed findings before proceeding. Merge the reviewed SHA once checks and reviews pass, then update the AMC checkout and run `pnpm check`.
-Deploy only what changed:
-- Engine (`apps/engine`, `packages/*` used by engine, migrations): `pnpm deploy:host`
-- Desktop: quit AMC (`osascript -e 'quit app "AMC"'`, wait until the process is gone), `pnpm desktop:install`, `open -a ~/Applications/AMC.app`
-- CLI: `pnpm cli:install`
-
-Then verify the actual fix in the running app or CLI (computer use / CLI), on synthetic or `AMC-E2E-` data. Check the new launch reaches `Engine sync phase: live` using the [Desktop startup check](../../../docs/runbook.md#everyday-commands). If deploy or verification fails, fix forward or revert — never leave the owner on a broken build.
-
-If a desktop re-pair is needed: `ssh ralfs-ubuntu 'sudo -n amc-engine pair --desktop'` then `open -a ~/Applications/AMC.app --args --engine-url=https://ralfs-ubuntu.tail4b5789.ts.net:4443 --pairing-code=CODE`. Never type passwords; escalate password prompts only.
-
-## Step 6 — Report back (in the feedback thread)
-
-One short message, owner-facing, plain language:
-- **What you understood** (one line).
-- **Outcome**: "Fixed and installed" / "Added to #N (in progress)" / "Filed as idea #N" / "Answered".
-- What to try now (e.g. "press F in triage").
-- Links: PR/issue.
-- Anything you defaulted that they may want to change.
-
-No process narration, no mail content.
-
-## Guardrails
-
-- Never send email, never let agents send (ADR 0001).
-- Never delete owner data; Host DB is read-only, never select bodies/subjects/addresses.
-- Never Accept/Block real third-party senders in tests.
-- YAGNI: smallest change that resolves the feedback. One review round.
-- If the fix would change the data model or a decided spec (docs/specs, ADRs), update the spec in the same PR or open an issue instead of silently diverging.
+Reply in the feedback thread with the outcome, the linked work if any, and anything the owner needs to try or decide.
