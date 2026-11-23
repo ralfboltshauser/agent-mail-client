@@ -200,22 +200,82 @@ it('follows the latest visible section order and leaves selection alone after a 
   expect(bodyLoading()).toBeNull()
 })
 
-it('loads HTML through the normal reader only after a speculative local cache miss', async () => {
-  const { adapter, detailGate, listGate } = archiveFixture()
+it('shows prepared text immediately while uncached HTML loads in the reader', async () => {
+  const adapter = rendererAdapter()
   const { api } = adapter
+  const read = api.thread.getMockImplementation()
+  if (!read) throw new Error('Expected synthetic detail reads')
+  api.thread.mockImplementation(async (id) => {
+    const detail = await read(id)
+    if (id !== 'thread-2' || !detail) return detail
+    return {
+      ...detail,
+      messages: detail.messages.map((message) => ({
+        ...message,
+        hasHtml: true,
+        bodyText: 'Prepared readable text',
+      })),
+    }
+  })
   const localHtml = vi.spyOn(api, 'cachedMessageHtml').mockResolvedValue(null)
-  const visibleHtml = vi.spyOn(api, 'messageHtml').mockResolvedValue('<p>Visible HTML fetch</p>')
+  const gate = deferred<string>()
+  const visibleHtml = vi.spyOn(api, 'messageHtml').mockReturnValue(gate.promise)
   await mount(adapter)
-  await act(async () => detailGate.resolve())
   expect(localHtml).toHaveBeenCalledWith('thread-2:latest')
   expect(visibleHtml).not.toHaveBeenCalled()
   expect(frame()).toBeNull()
 
   await act(async () => archive(listbox()))
-  expect(visibleHtml).not.toHaveBeenCalled()
-  await act(async () => listGate.resolve())
   expect(visibleHtml).toHaveBeenCalledExactlyOnceWith('thread-2:latest')
+  expect(screen.getByText('Prepared readable text')).toBeTruthy()
+  expect(bodyLoading()).toBeNull()
+  await act(async () => gate.resolve('<p>Visible HTML fetch</p>'))
   expect(frame()?.srcdoc).toContain('Visible HTML fetch')
+})
+
+it('requests the current HTML when attachment metadata supersedes a pending reply', async () => {
+  const adapter = rendererAdapter()
+  const { api } = adapter
+  const read = api.thread.getMockImplementation()
+  if (!read) throw new Error('Expected synthetic detail reads')
+  let filename = 'old.txt'
+  api.thread.mockImplementation(async (id) => {
+    const detail = await read(id)
+    if (id !== 'thread-1' || !detail) return detail
+    return {
+      ...detail,
+      messages: detail.messages.map((message) =>
+        message.id.endsWith(':latest')
+          ? {
+              ...message,
+              hasHtml: true,
+              attachments: [
+                {
+                  id: 'fixture-file',
+                  filename,
+                  mimeType: 'text/plain',
+                  size: 10,
+                  inline: false,
+                  contentId: null,
+                },
+              ],
+            }
+          : message,
+      ),
+    }
+  })
+  const superseded = deferred<null>()
+  const html = vi
+    .spyOn(api, 'messageHtml')
+    .mockReturnValueOnce(superseded.promise)
+    .mockResolvedValueOnce('<p>Current HTML after attachment change</p>')
+  await mount(adapter)
+  expect(html).toHaveBeenCalledExactlyOnceWith('thread-1:latest')
+  filename = 'current.txt'
+  await act(async () => adapter.emitChanged())
+  expect(html).toHaveBeenCalledTimes(2)
+  await act(async () => superseded.resolve(null))
+  expect(frame()?.srcdoc).toContain('Current HTML after attachment change')
 })
 
 it('adopts the in-flight local body and drops its superseded reply after a replica change', async () => {

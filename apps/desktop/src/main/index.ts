@@ -873,7 +873,10 @@ function registerReadIpc() {
     ).contacts
   })
   handle('amc:messageText', (_e, messageId: string) => openReplica().messageText(messageId))
-  handle('amc:cachedMessageHtml', (_e, messageId: string) => openReplica().html(messageId))
+  // Cap speculative IPC and renderer cache use. The selected reader can load the full body.
+  handle('amc:cachedMessageHtml', (_e, messageId: string) =>
+    openReplica().html(messageId, 256 * 1024),
+  )
   handle('amc:messageHtml', async (_e, messageId: string) => {
     const local = openReplica()
     const cached = local.html(messageId)

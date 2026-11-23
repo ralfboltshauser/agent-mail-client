@@ -15,9 +15,14 @@ export function readerTextQuery(engineUrl: string | null, message: ReplicaThread
   })
 }
 
+// Match the fields the Desktop replica uses to invalidate a stored HTML body.
+export function htmlSourceKey(message: ReplicaThreadMessage) {
+  return JSON.stringify([message.bodyRevision, message.hasHtml, message.attachments])
+}
+
 export function cachedHtmlQuery(engineUrl: string | null, message: ReplicaThreadMessage) {
   return forEngine(engineUrl, {
-    key: JSON.stringify(['cached-html', message.accountId, message.id, message.bodyRevision]),
+    key: JSON.stringify(['cached-html', message.accountId, message.id, htmlSourceKey(message)]),
     load: () => getAmc().cachedMessageHtml(message.id),
     retainDuringBootstrap: 'defer-reads',
   })

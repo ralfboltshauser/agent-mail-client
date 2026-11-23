@@ -147,3 +147,16 @@ it('keeps cached HTML through label changes and invalidates it when its known so
     replica.db.close()
   }
 })
+
+it('skips oversized cached HTML during preparation and keeps it available to the reader', () => {
+  const replica = new Replica(':memory:')
+  try {
+    const html = '<p>é</p>'
+    replica.putHtml('cached-message', html)
+    expect(replica.html('cached-message', html.length)).toBeNull()
+    expect(replica.html('cached-message', Buffer.byteLength(html))).toBe(html)
+    expect(replica.html('cached-message')).toBe(html)
+  } finally {
+    replica.db.close()
+  }
+})

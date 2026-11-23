@@ -535,10 +535,12 @@ export class Replica {
       : null
   }
 
-  html(messageId: string): string | null {
-    const row = this.db.prepare('SELECT html FROM html WHERE message_id = ?').get(messageId) as
-      | { html: string }
-      | undefined
+  html(messageId: string, maxBytes: number | null = null): string | null {
+    const row = this.db
+      .prepare(
+        'SELECT html FROM html WHERE message_id = ?1 AND (?2 IS NULL OR octet_length(html) <= ?2)',
+      )
+      .get(messageId, maxBytes) as { html: string } | undefined
     return row?.html ?? null
   }
 

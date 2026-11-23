@@ -9,7 +9,7 @@ import { useReplicaState, useSyncField } from '@/hooks/use-amc'
 import { getAmc } from '@/lib/amc'
 import { recordCaughtFailure } from '@/lib/failure'
 import type { ReplicaThreadMessage } from '../../../../shared/api'
-import { cachedHtmlQuery, readerTextQuery } from './body-queries'
+import { cachedHtmlQuery, htmlSourceKey, readerTextQuery } from './body-queries'
 
 function useBodyRequest(
   key: object | null,
@@ -55,7 +55,6 @@ function useBodyRequest(
 
   return {
     value: result.value,
-    settled,
     hasResult: result.key !== null,
   }
 }
@@ -94,7 +93,7 @@ async function embedInlineImages(html: string | null, parts: AttachmentSummary[]
 }
 
 export function MessageContent({ message }: { message: ReplicaThreadMessage }) {
-  const { id, bodyText, bodyRevision, hasHtml } = message
+  const { id, bodyText, hasHtml } = message
   const engineUrl = useSyncField((status) => status?.engineUrl ?? null)
   const parts = hasHtml ? inlineImages(message.attachments) : []
   const localHtml = hasHtml ? cachedHtmlQuery(engineUrl, message) : null
@@ -107,10 +106,10 @@ export function MessageContent({ message }: { message: ReplicaThreadMessage }) {
   const { snapshot: cachedHtml } = useReplicaState(preparedHtml)
   const rawHtml = cachedHtml.data ?? null
   const readyHtml = rawHtml && (!parts.length || !/src=["']cid:/i.test(rawHtml)) ? rawHtml : null
-  const partKey = JSON.stringify(parts.map((part) => [part.id, part.contentId, part.mimeType]))
+  const source = hasHtml ? htmlSourceKey(message) : null
   const htmlKey = useMemo(
-    () => (hasHtml ? { id, bodyRevision, partKey, rawHtml } : null),
-    [hasHtml, id, bodyRevision, partKey, rawHtml],
+    () => (source === null ? null : { id, source, rawHtml }),
+    [id, source, rawHtml],
   )
   const html = useBodyRequest(
     htmlKey,
@@ -118,7 +117,10 @@ export function MessageContent({ message }: { message: ReplicaThreadMessage }) {
     hasHtml && (!preparedHtml || cachedHtml.state !== 'first-load') && readyHtml === null,
     readyHtml,
   )
-  const needsText = bodyText === null && (!hasHtml || (html.settled && !html.value))
+  // If lookahead missed the HTML cache, the already available text can be read
+  // while the selected reader fetches HTML. A warm hit can render HTML directly.
+  const showText = !hasHtml || html.hasResult || (preparedHtml !== null && cachedHtml.data === null)
+  const needsText = bodyText === null && showText && !html.value
   const { snapshot: deferred, refresh } = useReplicaState(
     needsText ? readerTextQuery(engineUrl, message) : null,
   )
@@ -133,7 +135,7 @@ export function MessageContent({ message }: { message: ReplicaThreadMessage }) {
     const senderKey = senderPreferenceKey(message.accountId, message.from?.address ?? null)
     return <HtmlBody html={html.value} senderKey={senderKey} />
   }
-  if (visibleText != null && (!hasHtml || html.hasResult)) {
+  if (visibleText != null && showText) {
     return (
       <div className={reserveTextSpace ? 'min-h-11' : undefined}>
         <TextBody text={visibleText} />
