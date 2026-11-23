@@ -23,6 +23,7 @@ export function ActionHint({
       <TooltipContent
         side="bottom"
         sideOffset={4}
+        data-action-hint=""
         onEscapeKeyDown={(event) => {
           tooltipDismissals.add(event)
         }}

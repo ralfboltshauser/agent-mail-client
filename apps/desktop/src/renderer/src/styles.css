@@ -140,6 +140,11 @@
   -webkit-app-region: no-drag;
 }
 
+/* Pass clicks to controls underneath both the hint and its Radix positioner. */
+[data-radix-popper-content-wrapper]:has(> [data-action-hint]) {
+  pointer-events: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   ::before,
