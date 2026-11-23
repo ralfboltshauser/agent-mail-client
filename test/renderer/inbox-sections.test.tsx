@@ -5,6 +5,7 @@ import { App } from '@/app'
 import type {
   AmcApi,
   DesktopSenderAvatarResults,
+  ReviewApi,
   SmartInboxApi,
 } from '../../apps/desktop/src/shared/api'
 import { deferred, rendererAdapter } from './adapter'
@@ -83,6 +84,164 @@ it('starts with three Updates and preserves collapse across account switches and
   await act(async () => render(app))
   expect(header('Updates').getAttribute('aria-expanded')).toBe('false')
 })
+
+it('shows the New senders hint, advertises the existing T binding, and hides the hint on collapse', async () => {
+  const triageQueue = vi.fn(async () => ({ revision: 0, cards: [], cursor: null }))
+  const { api } = await mountSections(withNewSenders, {
+    ...senderControls(),
+    triageQueue,
+    review: {
+      reviewPairing: vi.fn(async () => 'synthetic-pairing'),
+      reviewBucket: vi.fn<ReviewApi['reviewBucket']>(),
+      reviewOrganise: vi.fn<ReviewApi['reviewOrganise']>(),
+      reviewOrganiseStatus: vi.fn<ReviewApi['reviewOrganiseStatus']>(),
+    },
+  })
+  const hint = () => screen.queryByText(/Accept or block each sender/)
+  expect(hint()?.querySelector('kbd')?.textContent).toBe('T')
+  expect(hint()?.textContent).toBe('Accept or block each sender. Press T to review.')
+
+  const markSeen = screen.getByRole('button', { name: 'Mark New senders seen' })
+  act(() => markSeen.focus())
+  await act(async () => vi.advanceTimersByTimeAsync(400))
+  expect(screen.getByRole('tooltip').textContent).toBe('Mark Threads as read without deciding')
+
+  await act(async () => fireEvent.click(header('New senders')))
+  expect(hint()).toBeNull()
+  await act(async () => fireEvent.click(header('New senders')))
+  expect(hint()).toBeTruthy()
+
+  const active = listbox()
+  const sender = byId('thread-1')
+  if (!sender) throw new Error('Expected a New sender card')
+  await act(async () => fireEvent.click(sender))
+  expect(selected()).toBe(sender)
+  await act(async () => fireEvent.keyDown(active, { key: 'x' }))
+  expect(api.smartInbox?.decideSender).not.toHaveBeenCalled()
+  await act(async () => fireEvent.keyDown(active, { key: 't' }))
+  expect(screen.getByRole('dialog', { name: 'Triage Inbox' })).toBeTruthy()
+  expect(triageQueue).toHaveBeenCalled()
+})
+
+it('preserves Reply all on A for the selected New sender Thread', async () => {
+  const smart = senderControls()
+  const { api } = await mountSections(withNewSenders, smart)
+  expect(selected().dataset.threadId).toBe('thread-1')
+  await act(async () => fireEvent.keyDown(listbox(), { key: 'a' }))
+  expect(api.startCompose).toHaveBeenCalledWith(
+    expect.objectContaining({ mode: 'reply-all', threadId: 'thread-1' }),
+  )
+  expect(smart.decideSender).not.toHaveBeenCalled()
+})
+
+it('applies inline sender decisions and undoes the exact action without opening the card', async () => {
+  const smart = senderControls()
+  const accepted = deferred<Awaited<ReturnType<SmartInboxApi['decideSender']>>>()
+  smart.decideSender.mockReturnValueOnce(accepted.promise)
+  const { emitChanged } = await mountSections(
+    (rows) =>
+      withNewSenders(rows).map((row) =>
+        smart.ownerAction.mock.calls.length && row.id === 'thread-1'
+          ? { ...row, inboxSender: undefined }
+          : row,
+      ),
+    smart,
+  )
+  const card = selected()
+  if (!card.parentElement) throw new Error('Expected the sender row wrapper')
+  const controls = within(card.parentElement)
+  const accept = controls.getByRole('button', { name: 'Accept' })
+  const block = controls.getByRole('button', { name: 'Block' })
+  expect(card.contains(accept)).toBe(false)
+  expect(card.contains(block)).toBe(false)
+  act(() => accept.focus())
+  fireEvent.keyDown(accept, { key: 'Enter' })
+  expect(document.activeElement).toBe(accept)
+  await act(async () => {
+    fireEvent.click(accept)
+    fireEvent.click(block)
+  })
+  expect(document.activeElement).toBe(listbox())
+  expect(selected()).toBe(card)
+  expect(smart.decideSender).toHaveBeenCalledExactlyOnceWith({
+    accountId: 'studio',
+    address: 'sender-0@example.test',
+    expectedRevision: 3,
+    clientActionId: expect.any(String),
+    decision: 'accept',
+    source: 'thread-action',
+  })
+  const firstAction = smart.decideSender.mock.calls[0][0].clientActionId
+  await act(async () => accepted.resolve(senderResult(firstAction)))
+  await act(async () => vi.advanceTimersByTimeAsync(1))
+  const notice = screen.getByText('Sender accepted').closest('li')
+  if (!notice) throw new Error('Expected a sender decision Undo toast')
+  await act(async () => fireEvent.click(within(notice).getByRole('button', { name: 'Undo' })))
+  expect(smart.undoOwnerAction).toHaveBeenCalledWith(firstAction)
+
+  smart.decideSender.mockImplementationOnce(async ({ clientActionId }) => ({
+    ...senderResult(clientActionId),
+    status: 'pending',
+  }))
+  await act(async () => fireEvent.click(block))
+  expect(smart.decideSender).toHaveBeenLastCalledWith(
+    expect.objectContaining({ decision: 'block', address: 'sender-0@example.test' }),
+  )
+  const secondAction = smart.decideSender.mock.calls[1][0].clientActionId
+  await act(async () => vi.advanceTimersByTimeAsync(1501))
+  expect(smart.ownerAction).toHaveBeenCalledWith(secondAction)
+  expect(screen.getByText('Sender blocked')).toBeTruthy()
+
+  await act(async () => emitChanged())
+  expect(screen.queryByText('sender-0@example.test')).toBeNull()
+  expect(byId('thread-2')).toBeTruthy()
+})
+
+function withNewSenders(rows: ThreadSummary[]): ThreadSummary[] {
+  return rows.map((row, index) =>
+    index > 1
+      ? row
+      : {
+          ...row,
+          inboxSender: {
+            accountId: row.accountId,
+            address: `sender-${index}@example.test`,
+            status: 'new',
+            messageId: `sender-message-${index}`,
+            revision: 3,
+          },
+        },
+  )
+}
+
+function senderResult(actionId: string): Awaited<ReturnType<SmartInboxApi['decideSender']>> {
+  return {
+    actionId,
+    accountId: 'studio',
+    kind: 'sender:decision',
+    status: 'applied',
+    error: null,
+    mutationIds: [],
+    undo: null,
+  }
+}
+
+function senderControls() {
+  return {
+    listSenders: vi.fn(),
+    decideSender: vi.fn<SmartInboxApi['decideSender']>(async ({ clientActionId }) =>
+      senderResult(clientActionId),
+    ),
+    adoptScreenedDestination: vi.fn(),
+    ownerAction: vi.fn<SmartInboxApi['ownerAction']>(async (actionId) => senderResult(actionId)),
+    undoOwnerAction: vi.fn<SmartInboxApi['undoOwnerAction']>(async (actionId) => ({
+      ...senderResult(actionId),
+      undo: { status: 'applied', error: null, mutationIds: [] },
+    })),
+    triageQueue: vi.fn(),
+    resolveSenderAvatars: vi.fn(async () => ({ rows: [] })),
+  } satisfies SmartInboxApi
+}
 
 it('groups new Senders by Account and opens all represented Threads', async () => {
   const { notify, api } = await mountSections((threads) =>
