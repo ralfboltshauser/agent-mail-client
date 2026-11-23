@@ -52,7 +52,7 @@ async function readIdentities(ids: string[]) {
     })
   } catch (cause) {
     recordCaughtFailure(cause)
-    return []
+    return null
   }
 }
 
@@ -115,7 +115,12 @@ export function useAgentActivity(open: boolean) {
       void Promise.all(batches.map(readIdentities)).then((results) => {
         if (!stillOpen() || enrichment !== active.enrichment) return
         setIdentities((previous) => {
-          const next = new Map(results.flat())
+          const next = new Map(previous)
+          results.forEach((result, index) => {
+            if (!result) return
+            for (const id of batches[index]) next.delete(id)
+            for (const [id, identity] of result) next.set(id, identity)
+          })
           if (
             next.size === previous.size &&
             [...next].every(([id, identity]) => {

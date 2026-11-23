@@ -63,7 +63,11 @@ it('shows dated operations, current Thread identities and outcomes before diagno
   expect(event('Add Label', 'Failed').queryByRole('button', { name: 'Undo' })).toBeNull()
   expect(event('Assign Bucket', 'Rejected').getByText('Thread unavailable')).toBeTruthy()
   expect(event('Update draft', 'Applied').getByText(/Draft saved in AMC/)).toBeTruthy()
-  expect(event('Star', 'Applied').getByText(/Newer Gmail changes preserved/)).toBeTruthy()
+  const star = event('Star', 'Applied')
+  expect(star.getByText('Newer Gmail changes preserved')).toBeTruthy()
+  expect(star.queryByText('Undone')).toBeNull()
+  await click(star.getByRole('button', { name: 'Details' }))
+  expect(star.getByText('Undo preserved newer Gmail changes')).toBeTruthy()
 
   const details = assigned.getByRole('button', { name: 'Details' })
   await click(details)
@@ -168,9 +172,14 @@ it('batches distinct targets and rejects stale summary results after refresh', a
   adapter.api.summaries.mockRejectedValueOnce(new Error('Replica temporarily unavailable'))
   await click(button('Refresh'))
   expect(event('Archive', 'Partially applied').getByText('3 Threads')).toBeTruthy()
-  expect(feed().textContent).not.toContain(firstSubject)
+  expect(feed().textContent).toContain(firstSubject)
   expect(dialog().queryByRole('alert')).toBeNull()
   expect(adapter.api.thread).not.toHaveBeenCalled()
+
+  adapter.api.summaries.mockResolvedValueOnce([])
+  await click(button('Refresh'))
+  expect(event('Assign Bucket', 'Applied').getByText('Thread unavailable')).toBeTruthy()
+  expect(feed().textContent).not.toContain(firstSubject)
 })
 
 it('suppresses closed-session reads and distinguishes Undo failure from a failed follow-up refresh', async () => {

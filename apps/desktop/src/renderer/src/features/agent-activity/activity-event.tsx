@@ -47,15 +47,16 @@ function threadName(identity: ThreadIdentity | undefined) {
 
 function eventNotices(action: AgentAction) {
   const notices: string[] = []
+  const undoConflicted = action.mutations.some(({ undo }) => undo?.superseded?.length)
   if (action.currentDraftMirrorFailed)
     notices.push('Draft saved in AMC. Sync to Account Drafts will retry.')
-  if (action.mutations.some(({ undo }) => undo?.superseded?.length))
-    notices.push('Newer Gmail changes preserved')
+  if (undoConflicted) notices.push('Newer Gmail changes preserved')
   if (action.mutations.some(({ undo }) => undo?.status === 'failed')) notices.push('Undo failed')
   if (action.mutations.some(({ undo }) => undo?.status === 'partial'))
     notices.push('Undo partially applied')
   if (action.mutations.some(({ undo }) => undo?.status === 'pending')) notices.push('Undo pending')
   if (
+    !undoConflicted &&
     action.mutations.some(({ undo }) => undo?.status === 'applied') &&
     !action.mutations.some(({ undo }) => undo && undo.status !== 'applied')
   ) {
@@ -108,6 +109,7 @@ function EventDetails({
           {action.threads.map((id) => {
             const identity = identities.get(id)
             const mutation = action.mutations.find(({ threadId }) => threadId === id)
+            const undo = mutation?.undo
             return (
               <li key={id} className="grid gap-0.5 wrap-anywhere">
                 <span className="font-medium">
@@ -125,13 +127,15 @@ function EventDetails({
                     )}
                   </p>
                 )}
-                {mutation?.undo && (
+                {undo && (
                   <p>
-                    Undo {outcomes[mutation.undo.status].label.toLowerCase()}
-                    {mutation.undo.error && (
-                      <span className="text-destructive"> · {mutation.undo.error}</span>
-                    )}
-                    {!!mutation.undo.superseded?.length && ' · Newer Gmail changes preserved'}
+                    {undo.status === 'applied' && undo.superseded?.length
+                      ? 'Undo preserved newer Gmail changes'
+                      : `Undo ${outcomes[undo.status].label.toLowerCase()}`}
+                    {undo.error && <span className="text-destructive"> · {undo.error}</span>}
+                    {undo.status !== 'applied' &&
+                      !!undo.superseded?.length &&
+                      ' · Newer Gmail changes preserved'}
                   </p>
                 )}
               </li>
