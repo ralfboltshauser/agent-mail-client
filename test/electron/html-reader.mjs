@@ -35,7 +35,13 @@ async function main() {
       show: false,
       width: 1360,
       height: 900,
-      webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
+      webPreferences: {
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+        // Exercise foreground reader behavior in a hidden test window.
+        backgroundThrottling: false,
+      },
     })
     const wc = win.webContents
     wc.debugger.attach('1.3')
@@ -190,14 +196,22 @@ async function main() {
       await selectThread(thread, 'probe-end')
       for (const width of [undefined, 623, 320, 900, 623]) {
         if (width) await measure('probe-end', width)
-        await delay(120)
-        const fitted = await measure('probe-end')
-        assert.equal(fitted.overflow, 0, `thread ${thread} at ${fitted.width}px`)
+        const fitted = await waitFor(
+          async () => {
+            const frame = await measure('probe-end')
+            return (
+              (!width || frame.width === width) &&
+              frame.overflow === 0 &&
+              !frame.hasHorizontalControl &&
+              frame.finalLineVisible &&
+              frame
+            )
+          },
+          `thread ${thread} to fit at ${width ? `${width}px` : 'the reading pane width'}`,
+        )
         assert.equal(fitted.endWidth, 780, 'fixed-width table keeps its layout')
         assert.equal(fitted.zoom < 1, fitted.width < 780, 'scale only when needed')
-        assert.equal(fitted.hasHorizontalControl, false)
         assert.ok(fitted.targetVisible, 'final column fits without scrolling')
-        assert.ok(fitted.finalLineVisible, 'last line fits in the measured frame height')
         assert.equal((await measure('probe-code')).lines, 1, 'preformatted text keeps its line')
       }
     }
