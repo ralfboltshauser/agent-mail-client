@@ -6,10 +6,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
+import { isCorrelationId, REQUEST_ID_HEADER } from '@amc/observability'
 import { expect, it } from 'vitest'
 
 it.each(['0', '1'])('reports a missing triage account with AMC_DEBUG=%s', async (debug) => {
+  let requestId: string | string[] | undefined
   const server = createServer((req, res) => {
+    requestId = req.headers[REQUEST_ID_HEADER]
     if (req.url !== '/v1/accounts') {
       res.writeHead(404).end('{}')
       return
@@ -38,6 +41,7 @@ it.each(['0', '1'])('reports a missing triage account with AMC_DEBUG=%s', async 
     const stderr = debug === '1' ? expect.stringMatching(/\n\s+at /) : `${message}\n`
     await expect(result).rejects.toMatchObject({ code: 1, stdout: '', stderr })
     await expect(result).rejects.toHaveProperty('stderr', expect.stringContaining(message))
+    expect(isCorrelationId(requestId)).toBe(true)
   } finally {
     server.close()
   }

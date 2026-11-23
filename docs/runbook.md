@@ -100,8 +100,21 @@ amc pair <code> --engine https://ralfs-ubuntu.tail4b5789.ts.net:4443
 amc status
 
 systemctl status amc-engine
-journalctl -u amc-engine -f        # JSON logs; pipe through `npx pino-pretty` to read
+journalctl -u amc-engine -f -o cat # local Engine service output
 ```
+
+
+For Desktop startup verification, find the latest live marker in the current local
+log after launching the new build.
+
+```sh
+grep -F 'Engine sync phase: live' "$HOME/Library/Logs/AMC/main.log" | tail -n 1
+```
+
+Check that its `ts` follows the launch. If the active file rotated, search
+`main.log.1` through `main.log.4`. This replaces the old userData `startup.log`
+check. See the [local observability spec](specs/observability.md#storage-and-retention)
+for the Engine journal retention policy and rollout.
 
 ## Network
 

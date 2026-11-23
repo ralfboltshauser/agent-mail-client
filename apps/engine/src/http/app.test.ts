@@ -1,4 +1,5 @@
 import { mkdirSync } from 'node:fs'
+import { isCorrelationId, newRequestId, REQUEST_ID_HEADER } from '@amc/observability'
 import { describe, expect, it } from 'vitest'
 import { createPairingCode, DAY_MS, issueToken } from '../auth/tokens.ts'
 import { MIGRATIONS } from '../db/migrations.ts'
@@ -15,14 +16,18 @@ function setup(configOverrides = {}) {
 describe('HTTP API', () => {
   it('serves public health without a token', async () => {
     const { app } = setup()
-    const res = await app.request('/health')
+    const requestId = newRequestId()
+    const res = await app.request('/health', { headers: { [REQUEST_ID_HEADER]: requestId } })
+    expect(res.headers.get(REQUEST_ID_HEADER)).toBe(requestId)
     expect(res.status).toBe(200)
     expect(await res.json()).toMatchObject({ ok: true })
   })
 
   it('requires a token for /v1', async () => {
     const { app } = setup()
-    expect((await app.request('/v1/me')).status).toBe(401)
+    const unauthenticated = await app.request('/v1/me')
+    expect(unauthenticated.status).toBe(401)
+    expect(isCorrelationId(unauthenticated.headers.get(REQUEST_ID_HEADER))).toBe(true)
     expect(
       (await app.request('/v1/me', { headers: { Authorization: 'Bearer amc_bad' } })).status,
     ).toBe(401)

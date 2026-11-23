@@ -58,6 +58,9 @@ importers:
 
   apps/cli:
     dependencies:
+      '@amc/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
       '@amc/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -86,6 +89,9 @@ importers:
       '@amc/composer':
         specifier: workspace:*
         version: link:../../packages/composer
+      '@amc/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
       '@amc/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -189,6 +195,9 @@ importers:
       '@amc/composer':
         specifier: workspace:*
         version: link:../../packages/composer
+      '@amc/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
       '@amc/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -286,6 +295,12 @@ importers:
       '@tiptap/starter-kit':
         specifier: ^3.35.0
         version: 3.35.0
+
+  packages/observability:
+    dependencies:
+      hono:
+        specifier: ^4.10.1
+        version: 4.13.19
 
   packages/protocol:
     dependencies:

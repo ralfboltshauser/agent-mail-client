@@ -30,6 +30,7 @@
   "dependencies": {
     "@amc/cli": "workspace:*",
     "@amc/composer": "workspace:*",
+    "@amc/observability": "workspace:*",
     "@amc/protocol": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@tanstack/react-virtual": "^3.14.26",

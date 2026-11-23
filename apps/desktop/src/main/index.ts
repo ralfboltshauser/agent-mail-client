@@ -1,15 +1,9 @@
-import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createLogger, resolveLogLevel } from '@amc/observability'
+import { macLogDirectory, rotatingFileSink } from '@amc/observability/node'
 import type {
   ComposeDraft,
   ComposePatch,
@@ -118,19 +112,11 @@ function loadLastTriageRun(): TriageStatus['lastRun'] {
   }
 }
 
-function startupLog(event: string) {
-  try {
-    appendFileSync(
-      join(app.getPath('userData'), 'startup.log'),
-      `${new Date().toISOString()} [${process.pid}] ${event}\n`,
-      {
-        mode: 0o600,
-      },
-    )
-  } catch {
-    // Diagnostics must never prevent the app from opening.
-  }
-}
+const mainLog = createLogger({
+  component: 'main',
+  level: resolveLogLevel(process.env.AMC_LOG_LEVEL),
+  sink: rotatingFileSink(join(macLogDirectory(), 'main.log')),
+})
 
 function setStartupStatus(status: SyncStatus) {
   startupStatus = status
@@ -138,13 +124,13 @@ function setStartupStatus(status: SyncStatus) {
 }
 
 function restoreSavedPairing() {
-  startupLog('reading saved pairing')
+  mainLog.log('info', 'desktop.startup.pairing', { stage: 'reading' })
   const pairing = loadPairing()
   if (pairing.state === 'paired') {
-    startupLog('saved pairing loaded')
+    mainLog.log('info', 'desktop.startup.pairing', { stage: 'loaded' })
     connect(pairing.engineUrl, pairing.token)
   } else if (pairing.state === 'read-error') {
-    startupLog('saved pairing unreadable')
+    mainLog.log('warn', 'desktop.startup.pairing', { stage: 'unreadable' })
     setStartupStatus({ ...UNPAIRED, phase: 'pairing-read-error', engineUrl: pairing.engineUrl })
   } else {
     setStartupStatus({ ...UNPAIRED, engineUrl: pairing.engineUrl })
@@ -220,7 +206,7 @@ function startSync(client: EngineClient) {
   loop.on('status', (status) => {
     if (sync !== loop) return
     if (status.phase === 'unpaired') {
-      startupLog('Engine rejected saved pairing (401)')
+      mainLog.log('warn', 'desktop.startup.pairing', { stage: 'rejected' })
       stopSync()
       engine = null
       organise = null
@@ -230,7 +216,7 @@ function startSync(client: EngineClient) {
       return
     }
     if (replayOnLive && status.phase !== reportedPhase) {
-      startupLog(`Engine sync phase: ${status.phase}`)
+      mainLog.log('info', 'desktop.sync.phase', { phase: status.phase })
       reportedPhase = status.phase
     }
     broadcast('amc:status', status)
@@ -985,7 +971,13 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', openWindow)
   app.whenReady().then(() => {
     protectRemoteImageRequests(session.defaultSession)
-    feedback = registerFeedbackIpc(() => window, openWindow, startupLog)
+    feedback = registerFeedbackIpc(
+      () => window,
+      openWindow,
+      (stage) => {
+        mainLog.log('warn', 'feedback.launch.failed', { stage })
+      },
+    )
     buildMenu()
     triage = new AutoTriage({
       enabled: !existsSync(triageOffFile()),

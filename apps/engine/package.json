@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@amc/composer": "workspace:*",
+    "@amc/observability": "workspace:*",
     "@amc/protocol": "workspace:*",
     "@hocuspocus/provider": "^4.9.0",
     "@hocuspocus/server": "^4.9.0",

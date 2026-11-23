@@ -2,5 +2,5 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "rootDir": "src", "outDir": ".types" },
   "include": ["src"],
-  "references": [{ "path": "../../packages/protocol" }]
+  "references": [{ "path": "../../packages/observability" }, { "path": "../../packages/protocol" }]
 }
