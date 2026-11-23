@@ -17,13 +17,7 @@ import { silentLog, tempDir, testDb } from '../../test-support.ts'
 import { Mutations } from '../mutations.ts'
 import { MailQueries } from '../queries.ts'
 import { MailStore } from '../store.ts'
-import {
-  decideSender,
-  listSenders,
-  SenderRevisionConflict,
-  senderActionStatus,
-  undoSender,
-} from './actions.ts'
+import { decideSender, listSenders, senderActionStatus, undoSender } from './actions.ts'
 import { normalizeSender } from './index.ts'
 
 const mailbox = 'owner@example.com'
@@ -87,52 +81,40 @@ it('acknowledges an already accepted sender under the new action ID', async () =
     expect(decideSender(store, principal, stale)).toEqual(receipt)
     expect(senderActionStatus(db, stale.clientActionId)).toEqual(receipt)
     expect(senderActionStatus(db, original.clientActionId).status).toBe('applied')
+    expect(
+      db
+        .prepare("SELECT count(*) AS n FROM triage_event WHERE kind = 'decision' AND action_id = ?")
+        .get(stale.clientActionId),
+    ).toEqual({ n: 1 })
   } finally {
     db.close()
   }
 })
 
-it.each([false, true])(
-  'guards one Sender retry against a second rule change (raced: %s)',
-  async (raced) => {
-    const { db, store, principal } = await gmailFixture()
-    try {
-      const original = decideSender(store, principal, request())
-      const stale = { ...request(), decision: 'accept' as const }
-      let conflict: SenderRevisionConflict | undefined
-      try {
-        decideSender(store, principal, stale)
-      } catch (error) {
-        if (!(error instanceof SenderRevisionConflict)) throw error
-        conflict = error
-      }
-      expect(conflict?.currentRevision).toBe(1)
-      const retry = { ...stale, retryRevision: conflict?.currentRevision }
-      if (raced) {
-        decideSender(store, principal, { ...request(), expectedRevision: 1, decision: 'clear' })
-        expect(() => decideSender(store, principal, retry)).toThrow(
-          'The sender rule changed while saving the decision. Choose Accept or Block again.',
-        )
-        expect(
-          db.prepare('SELECT revision, decision FROM sender_rule WHERE address = ?').get(sender),
-        ).toEqual({ revision: 2, decision: null })
-        expect(() => senderActionStatus(db, stale.clientActionId)).toThrow('unavailable')
-      } else {
-        const applied = decideSender(store, principal, retry)
-        expect(applied).toMatchObject({
-          actionId: stale.clientActionId,
-          status: 'applied',
-          revision: 2,
-        })
-        expect(decideSender(store, principal, stale)).toEqual(applied)
-        expect(undoSender(store, principal, stale.clientActionId).undo?.status).toBe('applied')
-        expect(senderActionStatus(db, original.actionId).revision).toBe(3)
-      }
-    } finally {
-      db.close()
-    }
-  },
-)
+it('rejects a delayed opposite choice after another owner has changed the rule', async () => {
+  const { db, store, principal } = await gmailFixture()
+  try {
+    const other = owner(db)
+    const first = decideSender(store, principal, { ...request(), decision: 'accept' })
+    const delayed = { ...request(), expectedRevision: 1, decision: 'block' as const }
+    decideSender(store, other, { ...request(), expectedRevision: 1, decision: 'clear' })
+    expect(() => decideSender(store, principal, delayed)).toThrow(
+      'The sender rule changed while saving the decision. Choose Accept or Block again.',
+    )
+    expect(
+      db.prepare('SELECT revision, decision FROM sender_rule WHERE address = ?').get(sender),
+    ).toEqual({ revision: 2, decision: null })
+    expect(() => senderActionStatus(db, delayed.clientActionId)).toThrow('unavailable')
+    expect(
+      db
+        .prepare('SELECT count(*) AS n FROM triage_event WHERE action_id = ?')
+        .get(delayed.clientActionId),
+    ).toEqual({ n: 0 })
+    expect(senderActionStatus(db, first.actionId).status).toBe('superseded')
+  } finally {
+    db.close()
+  }
+})
 
 it('screens exact Gmail arrivals across queue restarts and honors an external return to Inbox', async () => {
   const { db, store, gmail, sync, principal, queries } = await gmailFixture()

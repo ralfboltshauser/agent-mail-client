@@ -16,7 +16,7 @@ import { silentLog, tempDir, testConfig } from '../../test-support.ts'
 import { Drafts } from '../drafts.ts'
 import { Mutations } from '../mutations.ts'
 import { MailQueries } from '../queries.ts'
-import { senderActionStatus, undoSender } from '../senders/actions.ts'
+import { decideSender, senderActionStatus, undoSender } from '../senders/actions.ts'
 import { MailStore } from '../store.ts'
 import { messageFeatures } from './annotations.ts'
 import { correctionActions, markConfirmedReply } from './corrections.ts'
@@ -198,7 +198,7 @@ function effective(db: ReturnType<typeof openDatabase>, account: string) {
   }).map(({ labelId }) => labelId)
 }
 
-it('publishes accepted Sender state to existing replicas and reports the current revision on conflict', async () => {
+it('publishes accepted Sender state and requires a fresh revision for an opposite choice', async () => {
   const { db, put, http, queries } = setup(24)
   try {
     const address = 'person@example.test'
@@ -223,10 +223,11 @@ it('publishes accepted Sender state to existing replicas and reports the current
     const stale = await http(path, 'POST', block)
     expect(stale.status).toBe(409)
     expect(await stale.json()).toMatchObject({
-      error: 'sender_revision_conflict',
-      currentRevision: 1,
+      error: 'sender',
+      message: 'The sender rule changed while saving the decision. Choose Accept or Block again.',
     })
-    const accepted = await http(path, 'POST', { ...block, retryRevision: 1 })
+    expect((await http(path, 'POST', { ...block, retryRevision: 1 })).status).toBe(409)
+    const accepted = await http(path, 'POST', { ...block, expectedRevision: 1 })
     expect(accepted.status).toBe(202)
     expect(await accepted.json()).toMatchObject({ actionId: block.clientActionId, revision: 2 })
   } finally {
@@ -347,6 +348,48 @@ it('upgrades populated pre-confidence databases and keeps existing Buckets outsi
       setAt: expect.any(Number),
     })
     expect((await (await http('/v1/triage/queue')).json()).cards).toEqual([])
+  } finally {
+    db.close()
+  }
+})
+
+it('republishes accepted Sender threads once when upgrading an existing v24 database', () => {
+  const { db, put, store, queries } = setup(24)
+  try {
+    const address = 'accepted@example.test'
+    const accepted = put('a', 'accepted-1', address, 10, 'accepted-thread')
+    put('a', 'accepted-2', address, 20, 'accepted-thread')
+    const other = put('b', 'other-account', address, 30)
+    const principal = authenticate(
+      db,
+      issueToken(db, { kind: 'cli', scopes: ['admin'], name: 'Fixture owner' }).secret,
+    )
+    if (!principal) throw new Error('Missing fixture credentials')
+    decideSender(store, principal, {
+      accountId: 'a',
+      address,
+      expectedRevision: 0,
+      decision: 'accept',
+      clientActionId: randomUUID(),
+    })
+    const rules = db.prepare('SELECT * FROM sender_rule').all()
+    const actions = db.prepare('SELECT * FROM owner_action').all()
+    const history = db.prepare('SELECT * FROM triage_event').all()
+    const mail = db.prepare('SELECT * FROM message').all()
+    const existingModseq = db.prepare('SELECT max(modseq) AS seq FROM change_log').get()?.seq
+    const changes = db.prepare('SELECT entity, entity_id, op FROM change_log WHERE modseq > ?')
+    expect(migrate(db)).toBe(25)
+    expect(migrate(db)).toBe(25)
+    expect(changes.all(existingModseq ?? 0)).toEqual([
+      { entity: 'thread', entity_id: accepted, op: 'upsert' },
+    ])
+    expect(queries.threadSummary(accepted)?.inboxSender?.decision).toBe('accept')
+    expect(queries.threadSummary(other)?.inboxSender?.decision).toBeNull()
+    expect(db.prepare('SELECT * FROM sender_rule').all()).toEqual(rules)
+    expect(db.prepare('SELECT * FROM owner_action').all()).toEqual(actions)
+    expect(db.prepare('SELECT * FROM triage_event').all()).toEqual(history)
+    expect(db.prepare('SELECT * FROM message').all()).toEqual(mail)
+    expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([])
   } finally {
     db.close()
   }

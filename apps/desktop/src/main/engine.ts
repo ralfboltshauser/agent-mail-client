@@ -4,13 +4,11 @@ import type { ApiError } from '@amc/protocol'
 export class EngineError extends Error {
   readonly status: number
   readonly code: string
-  readonly currentRevision?: number
 
-  constructor(status: number, code: string, message: string, currentRevision?: number) {
+  constructor(status: number, code: string, message: string) {
     super(message)
     this.status = status
     this.code = code
-    this.currentRevision = currentRevision
   }
 }
 
@@ -64,15 +62,8 @@ export class EngineClient {
       )
     }
     if (!res.ok) {
-      const body = (await res.json().catch(() => ({}))) as Partial<ApiError> & {
-        currentRevision?: number
-      }
-      throw new EngineError(
-        res.status,
-        body.error ?? 'error',
-        body.message ?? res.statusText,
-        body.currentRevision,
-      )
+      const body = (await res.json().catch(() => ({}))) as Partial<ApiError>
+      throw new EngineError(res.status, body.error ?? 'error', body.message ?? res.statusText)
     }
     return res
   }

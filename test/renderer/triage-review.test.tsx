@@ -1,7 +1,5 @@
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
-import { type EngineClient, EngineError } from '../../apps/desktop/src/main/engine'
-import { submitSenderDecision } from '../../apps/desktop/src/main/sender-decision'
 import type { ReviewApi, SmartInboxApi } from '../../apps/desktop/src/shared/api'
 import { deferred, rendererAdapter } from './adapter'
 import { commits, expectBudget } from './profile'
@@ -466,7 +464,7 @@ it('updates the Sender row on an open low-confidence card after replica sync', a
   expect(document.activeElement).toBe(heading)
 })
 
-it.each(['stale Accept', 'stale Block', 'already applied', 'changed twice'] as const)(
+it.each(['Accept', 'Block', 'already applied', 'revision conflict'] as const)(
   'handles a low-confidence Sender decision when the rule is %s',
   async (scenario) => {
     const { adapter, low, setCards, smart, result } = await fixture()
@@ -483,38 +481,24 @@ it.each(['stale Accept', 'stale Block', 'already applied', 'changed twice'] as c
     adapter.api.thread.mockImplementation(async (id) =>
       id === low.threadId ? structuredClone(detail) : ((await readThread?.(id)) ?? null),
     )
-    const request =
-      vi.fn<(...args: Parameters<EngineClient['request']>) => Promise<OwnerActionStatus>>()
     const message =
       'The sender rule changed while saving the decision. Choose Accept or Block again.'
-    if (scenario !== 'already applied')
-      request.mockRejectedValueOnce(new EngineError(409, 'sender_revision_conflict', message, 3))
-    if (scenario === 'changed twice')
-      request.mockRejectedValueOnce(new EngineError(409, 'sender_revision_conflict', message, 4))
     smart.decideSender.mockImplementation(async (input) => {
-      request.mockResolvedValue({
+      if (scenario === 'revision conflict') throw new Error(`Review rejected: ${message}`)
+      setCards()
+      return {
         ...result(input.clientActionId),
         ...(scenario === 'already applied' ? { alreadyApplied: true } : {}),
-      })
-      try {
-        const receipt = await submitSenderDecision({ request }, input, () => true)
-        setCards()
-        return receipt
-      } catch (error) {
-        if (error instanceof EngineError) throw new Error(`Review rejected: ${error.message}`)
-        throw error
       }
     })
     setCards(low)
     await mount(adapter)
     await open()
-    await press(scenario === 'stale Block' ? 'x' : 'a')
+    await press(scenario === 'Block' ? 'x' : 'a')
     const input = smart.decideSender.mock.calls[0][0]
     expect(input.expectedRevision).toBe(2)
-    expect(request.mock.calls.map(([, { body }]) => body)).toEqual(
-      scenario === 'already applied' ? [input] : [input, { ...input, retryRevision: 3 }],
-    )
-    if (scenario === 'changed twice') {
+    expect(smart.decideSender).toHaveBeenCalledTimes(1)
+    if (scenario === 'revision conflict') {
       expect(
         within(review()).getByText(`Accept person@example.test · Failed. ${message}`),
       ).toBeTruthy()
@@ -555,7 +539,7 @@ it.each(['f', '2', 'e'])(
       )
     } else {
       expect(smart.reviewOrganise).toHaveBeenCalledExactlyOnceWith(
-        { kind: 'archive', threadId: card.threadId },
+        { kind: 'archive', threadId: card.threadId, reviewedInboxMessageIds: [card.messageId] },
         expect.any(String),
         card.messageId,
       )

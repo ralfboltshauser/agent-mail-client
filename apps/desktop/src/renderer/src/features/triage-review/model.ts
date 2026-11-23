@@ -66,9 +66,9 @@ export function reviewError(cause: unknown) {
   )
 }
 
-export function inboxMessageIds(card: Preview) {
+export function inboxMessageIds(card: Preview, kind: 'filter' | 'organise') {
   const label = (name: string) => `${card.accountId}:${name}`
-  const excluded = ['SENT', 'DRAFT', 'SPAM', 'TRASH'].map(label)
+  const excluded = (kind === 'filter' ? ['SENT', 'DRAFT', 'SPAM', 'TRASH'] : ['DRAFT']).map(label)
   return card.detail.messages
     .filter(
       ({ labelIds }) =>
@@ -83,12 +83,15 @@ export function sameTarget(a: Preview, b: Preview, decision?: Decision) {
   if (decision?.kind === 'filter' && decision.input.expectedInboxMessageIds) {
     return (
       a.predictionId === b.predictionId &&
-      JSON.stringify(decision.input.expectedInboxMessageIds) === JSON.stringify(inboxMessageIds(b))
+      JSON.stringify(decision.input.expectedInboxMessageIds) ===
+        JSON.stringify(inboxMessageIds(b, 'filter'))
     )
   }
   if (decision?.kind === 'organise') {
-    const shown = inboxMessageIds(a)
-    return shown.length > 0 && JSON.stringify(shown) === JSON.stringify(inboxMessageIds(b))
+    const shown = inboxMessageIds(a, 'organise')
+    return (
+      shown.length > 0 && JSON.stringify(shown) === JSON.stringify(inboxMessageIds(b, 'organise'))
+    )
   }
   if (decision?.kind === 'bucket' && decision.input.expectedBucketTarget) {
     const target = decision.input.expectedBucketTarget

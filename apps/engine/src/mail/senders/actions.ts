@@ -28,15 +28,6 @@ export class SenderError extends Error {
   }
 }
 
-export class SenderRevisionConflict extends SenderError {
-  readonly currentRevision: number
-
-  constructor(currentRevision: number) {
-    super('The sender rule changed while saving the decision. Choose Accept or Block again.')
-    this.currentRevision = currentRevision
-  }
-}
-
 export class SenderBlockVerificationRequired extends Error {}
 
 export function liveOwner(db: Db, tokenId: string, scope: 'admin' | 'organize' = 'admin'): boolean {
@@ -268,8 +259,10 @@ export function decideSender(
     const currentRevision = previous?.revision ?? 0
     const chosen = decision === 'clear' ? null : decision
     const alreadyApplied = previous?.decision === chosen
-    if (!alreadyApplied && currentRevision !== (input.retryRevision ?? expectedRevision))
-      throw new SenderRevisionConflict(currentRevision)
+    if (!alreadyApplied && currentRevision !== expectedRevision)
+      throw new SenderError(
+        'The sender rule changed while saving the decision. Choose Accept or Block again.',
+      )
     if (!alreadyApplied && decision === 'block' && account.kind === 'imap') {
       if (!JSON.parse(String(account.cursor)).imapMoves)
         throw new SenderError('This IMAP Account does not support safe moves')
@@ -295,7 +288,6 @@ export function decideSender(
       Date.now(),
     )
     ownerReasonRetry(db, clientActionId, input.reason)
-    if (alreadyApplied && !input.reason) return senderActionStatus(db, clientActionId)
     const sample = db
       .prepare(`
       SELECT m.id, m.thread_id FROM message m JOIN sender_index i ON i.message_id = m.id

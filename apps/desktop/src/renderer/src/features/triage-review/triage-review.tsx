@@ -166,7 +166,7 @@ export function TriageReview({
       const bucket = BUCKETS[Number(key) - 1]
       if (key === ' ') void store.decide(card, id, { kind: 'skip' }, 'Skip')
       else if (key === 'f') {
-        const expectedInboxMessageIds = inboxMessageIds(card)
+        const expectedInboxMessageIds = inboxMessageIds(card, 'filter')
         if (!expectedInboxMessageIds.length) {
           setMessage('There are no eligible Inbox messages to filter.')
           return

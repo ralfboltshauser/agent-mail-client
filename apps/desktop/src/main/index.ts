@@ -68,7 +68,6 @@ import { createQuitHandler } from './quit'
 import { loadRenderer } from './renderer-load'
 import { Replica } from './replica'
 import { resolveSenderAvatars } from './sender-avatars'
-import { submitSenderDecision } from './sender-decision'
 import { SyncLoop } from './sync'
 import { mcpLauncher, savedT3Url } from './t3'
 import { localT3Launcher } from './t3-cli'
@@ -372,13 +371,15 @@ function registerIpc() {
   ipcMain.handle('amc:listSenders', (_event, query: unknown) =>
     requireEngine().get(`/v1/senders?${queryString(SenderListQuery.parse(query))}`),
   )
-  ipcMain.handle('amc:decideSender', (_event, input: unknown) => {
-    const connection = requireEngine()
-    const { retryRevision: _, ...decision } = SenderDecision.parse(input)
-    return submitSenderDecision(connection, decision, () => engine === connection).catch(
-      reportReviewRejection,
-    )
-  })
+  ipcMain.handle('amc:decideSender', (_event, input: unknown) =>
+    requireEngine()
+      .request('/v1/senders/decisions', {
+        method: 'POST',
+        body: SenderDecision.parse(input),
+        signal: AbortSignal.timeout(10_000),
+      })
+      .catch(reportReviewRejection),
+  )
   const submitFilter = (input: unknown) =>
     requireEngine()
       .request('/v1/filtered/decisions', {

@@ -2,10 +2,11 @@ import { z } from 'zod'
 
 const thread = z.object({ threadId: z.string().min(1).max(512) })
 const id = z.string().uuid()
+const reviewedInboxMessageIds = z.array(thread.shape.threadId).min(1).optional()
 export const SNOOZED_LABEL = 'AMC/Snoozed'
 
 export const OrganiseAction = z.discriminatedUnion('kind', [
-  thread.extend({ kind: z.literal('archive') }),
+  thread.extend({ kind: z.literal('archive'), reviewedInboxMessageIds }),
   thread.extend({ kind: z.literal('trash'), value: z.boolean() }),
   thread.extend({ kind: z.literal('read'), value: z.boolean() }),
   thread.extend({ kind: z.literal('star'), value: z.boolean() }),
@@ -18,6 +19,7 @@ export const OrganiseAction = z.discriminatedUnion('kind', [
     kind: z.literal('snooze'),
     until: z.number().int().positive().max(8.64e15),
     noReply: z.boolean().optional(),
+    reviewedInboxMessageIds,
   }),
   thread.extend({ kind: z.literal('mute'), value: z.boolean() }),
   z.object({

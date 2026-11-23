@@ -70,7 +70,6 @@ export const SenderDecision = z.object({
   clientActionId: z.uuid(),
   reason: OwnerReason.optional(),
   source: z.enum(['triage-key', 'thread-action']).optional(),
-  retryRevision: z.number().int().nonnegative().optional(),
 })
 export type SenderDecision = z.infer<typeof SenderDecision>
 

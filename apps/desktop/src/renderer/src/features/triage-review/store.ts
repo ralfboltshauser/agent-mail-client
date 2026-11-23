@@ -14,6 +14,7 @@ import {
 import {
   cardKey,
   type Decision,
+  inboxMessageIds,
   type Preview,
   type ReviewAction,
   reviewError,
@@ -418,6 +419,12 @@ export class ReviewStore {
   decide = async (card: Preview, id: string, decision: Decision, label: string) => {
     const position = this.#position(card)
     if (!position || this.busy || this.#view.error) return
+    if (decision.kind === 'organise') {
+      decision = {
+        ...decision,
+        input: { ...decision.input, reviewedInboxMessageIds: inboxMessageIds(card, 'organise') },
+      }
+    }
     const action: ReviewAction = {
       ...position,
       id,

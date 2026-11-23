@@ -127,7 +127,12 @@ function patchesFor(
     patch.snoozedUntil = action.until
     inverse.snoozedUntil = null
   }
+  const reviewed =
+    'reviewedInboxMessageIds' in action && action.reviewedInboxMessageIds
+      ? new Set(action.reviewedInboxMessageIds)
+      : null
   for (const message of messages) {
+    if (reviewed && !reviewed.has(message.id)) continue
     if (message.labelIds.includes(`${thread.accountId}:DRAFT`)) continue
     const delta = imap ? imapActionLabels(action, thread.accountId, message.labelIds) : state
     patch.labels[message.id] = delta
@@ -543,20 +548,28 @@ export class OrganiseSync extends EventEmitter<{ changed: [] }> {
       // FIFO preserves your intent across a disconnect. Submit one at a time so a deleted
       // Thread cannot reject the newer actions on other Threads.
       while (request && !signal.aborted) {
+        const reviewed =
+          'reviewedInboxMessageIds' in request.action && request.action.reviewedInboxMessageIds
+        // An older Engine must fail closed instead of stripping the reviewed scope.
+        const path = reviewed ? '/v1/mutations/review' : '/v1/mutations'
         try {
-          const res = await post('/v1/mutations', { mutations: [request] })
+          const res = await post(path, { mutations: [request] })
           if (signal.aborted) return
           this.#local.resolve(res.mutations)
         } catch (error) {
           if (signal.aborted) return
-          if (!(error instanceof EngineError) || ![400, 409].includes(error.status)) throw error
+          if (!(error instanceof EngineError)) throw error
+          const needsUpdate = reviewed && error.status === 404
+          if (!needsUpdate && ![400, 409].includes(error.status)) throw error
           this.#local.resolve([
             {
               id: request.id,
               threadId: request.action.threadId ?? '',
               modseq: 0,
               status: 'failed',
-              error: error.message,
+              error: needsUpdate
+                ? 'Update the Engine to organise reviewed Inbox messages.'
+                : error.message,
             },
           ])
         }
