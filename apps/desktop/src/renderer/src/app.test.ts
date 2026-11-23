@@ -172,7 +172,7 @@ function reader() {
 }
 function retry(description: string) {
   const alert = [...document.querySelectorAll('[role="alert"]')].find(
-    (element) => element.textContent === description,
+    (element) => element.firstElementChild?.textContent === description,
   )
   const button = alert?.parentElement?.querySelector('button')
   if (!button) throw new Error(`Missing retry for "${description}"`)

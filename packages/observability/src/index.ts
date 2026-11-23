@@ -10,9 +10,11 @@ import {
 } from './events.ts'
 import { newRunId } from './ids.ts'
 
+export { rendererFailureSources } from './desktop-events.ts'
 export {
   type ErrorClass,
   type ErrorCode,
+  errorClasses,
   type SafeError,
   sanitizeError,
   sanitizeErrorMessage,

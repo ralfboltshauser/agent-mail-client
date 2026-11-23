@@ -74,6 +74,7 @@ it.each(['crash', 'timeout', 'quit'])('revokes the named grant after worker %s',
     engineUrl: 'http://engine.invalid',
     token: 'scoped',
     recent: true,
+    runId: expect.any(String),
   })
   if (exit === 'crash') child.emit('exit', 1)
   if (exit === 'timeout') await vi.advanceTimersByTimeAsync(180_000)
@@ -137,7 +138,10 @@ it('preserves a safe worker failure across the process boundary', async () => {
     signal,
   )
   await spawned
-  child.emit('message', { failure: { reason: 'agent-missing', className: 'ClaudeAuthError' } })
+  child.emit('message', {
+    runId: child.postMessage.mock.calls[0]?.[0].runId,
+    failure: { reason: 'agent-missing', className: 'ClaudeAuthError' },
+  })
   await expect(result).rejects.toMatchObject({
     reason: 'agent-missing',
     message: expect.stringContaining('Claude Code was not found'),

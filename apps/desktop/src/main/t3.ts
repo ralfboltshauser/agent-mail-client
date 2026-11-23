@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { basename, join } from 'node:path'
+import { fetchWithRequestId } from '@amc/observability'
 import {
   type OAuthClientProvider,
   UnauthorizedError,
@@ -17,6 +18,7 @@ import { app, shell } from 'electron'
 import type { T3Project } from '../shared/api'
 import { archiveLegacyCredentials, credentialPath, writeCredentials } from './credential-files'
 import type { T3Launch, T3Launcher, T3Thread } from './handoff'
+import { operationFailure } from './observability'
 
 interface Credentials {
   url: string
@@ -30,7 +32,8 @@ function loadPairing(): Credentials | null {
   try {
     archiveLegacyCredentials(join(app.getPath('userData'), 't3-pairing.json'))
     return JSON.parse(readFileSync(pairingFile(), 'utf8')) as Credentials
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') operationFailure('t3-connect', error)
     return null
   }
 }
@@ -64,10 +67,13 @@ export function t3Client(address: string, allowPairing = true): Promise<Client> 
   const previous = connection
   const client = connectT3(url).catch((error: unknown) => {
     if (connection?.client === client) connection = undefined
+    operationFailure('t3-connect', error)
     throw error
   })
   connection = { url: url.href, client }
-  void previous?.client.then((client) => client.close()).catch(() => {})
+  void previous?.client
+    .then((client) => client.close())
+    .catch((error: unknown) => operationFailure('t3-close', error))
   return client
 }
 
@@ -77,7 +83,10 @@ async function connectT3(url: URL, allowPairing = true): Promise<Client> {
   const client = new Client({ name: 'AMC Desktop', version: '1.0.0' })
   if (stored?.tokens) {
     const provider = oauthProvider(stored)
-    const transport = new StreamableHTTPClientTransport(url, { authProvider: provider })
+    const transport = new StreamableHTTPClientTransport(url, {
+      authProvider: provider,
+      fetch: fetchWithRequestId,
+    })
     try {
       await client.connect(transport)
       return client
@@ -156,7 +165,10 @@ async function pairT3(url: URL): Promise<Client> {
       .end(value ? 'Return to AMC to choose a project.' : 'T3 sign-in was declined.')
     finish(value)
   })
-  const transport = new StreamableHTTPClientTransport(url, { authProvider: provider })
+  const transport = new StreamableHTTPClientTransport(url, {
+    authProvider: provider,
+    fetch: fetchWithRequestId,
+  })
   const client = new Client({ name: 'AMC Desktop', version: '1.0.0' })
   try {
     await client.connect(transport)
@@ -166,7 +178,10 @@ async function pairT3(url: URL): Promise<Client> {
     if (!(error instanceof UnauthorizedError)) throw error
     const value = await code
     if (!value) throw new Error('T3 sign-in was declined or timed out.')
-    const authorized = new StreamableHTTPClientTransport(url, { authProvider: provider })
+    const authorized = new StreamableHTTPClientTransport(url, {
+      authProvider: provider,
+      fetch: fetchWithRequestId,
+    })
     // finishAuth uses discovery state on this transport, populated by the initial connection.
     await transport.finishAuth(value)
     await client.connect(authorized)
@@ -208,8 +223,8 @@ async function launchInT3(address: string, request: T3Launch): Promise<T3Thread>
     const response = await client.callTool({ name: 't3_thread_launch', arguments: { ...request } })
     const thread = response.structuredContent as T3Thread | undefined
     if (!response.isError && thread?.threadId) return thread
-  } catch {
-    // Provider errors can echo the draft credential in the prompt.
+  } catch (error) {
+    operationFailure('t3-launch', error)
   }
   throw new Error(
     'T3 could not confirm the launch. Retry, or check that AMC has Supervised access.',
@@ -235,7 +250,7 @@ export function pairedFeedbackLauncher(address: string): T3Launcher {
       try {
         return await launchT3Feedback(client, url, request, imagePath)
       } finally {
-        await client.close().catch(() => {})
+        await client.close().catch((error: unknown) => operationFailure('t3-close', error))
       }
     },
   }
@@ -246,7 +261,7 @@ export async function launchT3Feedback(
   endpoint: URL,
   request: T3Launch,
   imagePath?: string,
-  upload = fetch,
+  upload = fetchWithRequestId,
 ): Promise<T3Thread> {
   const options = { timeout: 20_000 }
   let attachment:
@@ -305,7 +320,7 @@ export async function launchT3Feedback(
             undefined,
             options,
           )
-          .catch(() => {})
+          .catch((error: unknown) => operationFailure('t3-launch', error))
         throw error
       }
     }

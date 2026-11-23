@@ -41,7 +41,12 @@ it('debounces from the last arrival and enforces a global cooldown, including ma
   await vi.advanceTimersByTimeAsync(2 * minute - 1)
   expect(run).not.toHaveBeenCalled()
   await vi.advanceTimersByTimeAsync(1)
-  expect(run).toHaveBeenCalledExactlyOnceWith('one', expect.any(AbortSignal), true)
+  expect(run).toHaveBeenCalledExactlyOnceWith(
+    'one',
+    expect.any(AbortSignal),
+    true,
+    expect.any(String),
+  )
   expect(triage.status.lastRun).toEqual({
     at: Date.now(),
     result: { assigned: 2, skipped: 1 },
@@ -122,10 +127,15 @@ it('skips low battery, then resumes pending work', async () => {
 it('limits manual runs to recent mail unless the account-wide scope is requested', async () => {
   const { triage, run } = setup()
   await triage.now('one')
-  expect(run).toHaveBeenCalledExactlyOnceWith('one', expect.any(AbortSignal), true)
+  expect(run).toHaveBeenCalledExactlyOnceWith(
+    'one',
+    expect.any(AbortSignal),
+    true,
+    expect.any(String),
+  )
   await vi.advanceTimersByTimeAsync(10 * minute)
   await triage.now('one', false)
-  expect(run).toHaveBeenLastCalledWith('one', expect.any(AbortSignal), false)
+  expect(run).toHaveBeenLastCalledWith('one', expect.any(AbortSignal), false, expect.any(String))
 })
 
 it('publishes a safe reason and logs its error class without the original message', async () => {
@@ -137,8 +147,10 @@ it('publishes a safe reason and logs its error class without the original messag
   await triage.now('one')
   const message = 'Could not reach the Engine. Check the Engine connection and retry.'
   expect(triage.status.lastRun?.error).toBe(message)
-  expect(sink).toHaveBeenCalledOnce()
-  const line = sink.mock.calls[0]?.[0] ?? ''
+  const line =
+    sink.mock.calls
+      .map(([entry]) => entry)
+      .find((entry) => JSON.parse(entry).event === 'triage.run.failed') ?? ''
   const record = JSON.parse(line)
   expect(record).toMatchObject({
     event: 'triage.run.failed',
@@ -148,5 +160,10 @@ it('publishes a safe reason and logs its error class without the original messag
     msg: message,
   })
   expect(isCorrelationId(record.runId)).toBe(true)
-  expect(line).not.toContain(cause.message)
+  expect(triage.status.lastRun?.failure).toEqual({
+    errorClass: 'TypeError',
+    kind: 'Run',
+    id: record.runId,
+  })
+  expect(sink.mock.calls.flat().join('')).not.toContain(cause.message)
 })

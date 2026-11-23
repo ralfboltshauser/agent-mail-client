@@ -5,6 +5,7 @@ import { isAbsolute, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { T3Project, T3RuntimeMode } from '../shared/api'
 import type { T3Launcher, T3Thread } from './handoff'
+import { operationFailure } from './observability'
 
 export interface T3Cli {
   executable: string
@@ -59,8 +60,9 @@ export async function detectT3Cli(
           baseDir,
           supportsRuntimeMode: /^\s*--runtime-mode(?:[\s,=]|$)/m.test(help),
         }
-    } catch {
+    } catch (error) {
       // Older or moved desktop installs can leave a shim behind.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') operationFailure('t3-connect', error)
     }
   }
   return null
@@ -72,7 +74,8 @@ function readdirProfiles(share: string): string[] {
       .filter((name) => name === 't3code' || name.startsWith('t3code-'))
       .sort()
       .map((name) => join(share, name))
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') operationFailure('t3-connect', error)
     return []
   }
 }
@@ -101,6 +104,7 @@ function projectRuntimeModes(state: string): (id: string) => T3RuntimeMode | 'un
           'full-access',
       )
   } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') operationFailure('t3-projects', error)
     return () => ((error as NodeJS.ErrnoException).code === 'ENOENT' ? 'full-access' : 'unknown')
   }
 }
@@ -140,7 +144,8 @@ export function cliLauncher(
           ...project,
           localDefaultMode: runtimeMode(project.id),
         }))
-      } catch {
+      } catch (error) {
+        operationFailure('t3-projects', error)
         throw new Error('AMC could not read local T3 projects. Open T3 Code and try again.')
       }
     },
@@ -170,7 +175,8 @@ export function cliLauncher(
         if (typeof thread?.threadId !== 'string' || !thread.threadId)
           throw new Error('Missing thread ID.')
         return { threadId: thread.threadId, link: threadLink(environment, thread.threadId) }
-      } catch {
+      } catch (error) {
+        operationFailure('t3-launch', error)
         throw new Error(
           'T3 could not confirm the launch. Check that T3 Code is running, then retry.',
         )

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { SenderAvatarResolve, SenderAvatarResults } from '@amc/protocol'
 import type { DesktopSenderAvatarResults } from '../shared/api'
 import type { EngineClient } from './engine'
+import { operationFailure } from './observability'
 
 const digestPattern = /^[a-f0-9]{64}$/
 const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])
@@ -121,7 +122,8 @@ async function readPng(
     )
       return null
     return imagePrefix + bytes.toString('base64')
-  } catch {
+  } catch (error) {
+    operationFailure('sender-avatar', error)
     return null
   }
 }

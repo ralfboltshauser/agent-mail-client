@@ -1,5 +1,5 @@
 import { describeTriageFailure, TriageFailure } from '@amc/cli/triage'
-import { type Logger, newRunId } from '@amc/observability'
+import { type Logger, newRunId, type RunId } from '@amc/observability'
 import type { TriageResult, TriageStatus } from '../shared/api'
 
 const DEBOUNCE = 2 * 60_000
@@ -19,7 +19,12 @@ interface TriageOptions {
   log: Logger
 }
 
-type Run = (accountId: string, signal: AbortSignal, recent: boolean) => Promise<TriageResult | null>
+type Run = (
+  accountId: string,
+  signal: AbortSignal,
+  recent: boolean,
+  runId: RunId,
+) => Promise<TriageResult | null>
 
 export class AutoTriage {
   readonly #options: TriageOptions
@@ -118,7 +123,8 @@ export class AutoTriage {
     const controller = new AbortController()
     this.#controller = controller
     const { signal } = controller
-    const log = this.#options.log.with({ runId: newRunId() })
+    const runId = newRunId()
+    const log = this.#options.log.with({ runId })
     this.#active = Promise.resolve().then(async () => {
       try {
         const account = this.#options.accountForRun(
@@ -154,7 +160,14 @@ export class AutoTriage {
         for (const [id] of pending) this.#pending.delete(id)
         const at = Date.now()
         try {
-          const result = await run(account, signal, recent)
+          const accountLog = log.with({ accountId: account })
+          accountLog.log('info', 'triage.run.started', {})
+          const result = await accountLog.span('triage.run', () =>
+            run(account, signal, recent, runId),
+          )
+          accountLog.log('info', 'triage.run.finished', {
+            outcome: result === null ? 'busy' : 'ok',
+          })
           if (result === null) {
             if (this.#run === run && this.#enabled) {
               for (const [id, accountId] of pending) this.#pending.set(id, accountId)
@@ -176,7 +189,16 @@ export class AutoTriage {
           const message = signal.aborted
             ? new TriageFailure('interrupted').message
             : (diagnostics[0]?.message ?? new TriageFailure('unexpected').message)
-          this.#record({ at, result: null, error: message })
+          this.#record({
+            at,
+            result: null,
+            error: message,
+            failure: {
+              errorClass: diagnostics[0]?.className ?? 'TriageFailure',
+              kind: 'Run',
+              id: runId,
+            },
+          })
           if (signal.aborted && this.#run === run && this.#enabled) {
             for (const [id, accountId] of pending) this.#pending.set(id, accountId)
           }
@@ -185,7 +207,7 @@ export class AutoTriage {
         const { className, reason } = describeTriageFailure(error)
         log.log('error', 'triage.run.failed', { stage: 'prepare', errorClass: className, reason })
         this.#retryAt = Date.now() + COOLDOWN
-        this.#skip('Could not prepare triage.')
+        this.#skip(`Could not prepare triage. ${className} · Run ${runId}`)
       } finally {
         this.#active = undefined
         this.#controller = null

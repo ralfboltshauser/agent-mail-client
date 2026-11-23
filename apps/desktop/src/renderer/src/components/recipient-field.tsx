@@ -2,6 +2,7 @@ import type { Address, Contact } from '@amc/protocol'
 import { X } from 'lucide-react'
 import { useEffect, useId, useState } from 'react'
 import { getAmc } from '@/lib/amc'
+import { recordCaughtFailure } from '@/lib/failure'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 
@@ -33,7 +34,7 @@ export function RecipientField({
         .then((contacts) => {
           if (!stale) setMatches(contacts)
         })
-        .catch(() => {})
+        .catch(recordCaughtFailure)
     }, 140)
     return () => {
       stale = true

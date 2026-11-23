@@ -1,6 +1,7 @@
 import { COMPOSER_FIELD, INLINE_IMAGE_NAME } from '@amc/composer'
 import type { ComposeAttachment, ComposeDraft, ComposeFields, ComposePatch } from '@amc/protocol'
 import * as Y from 'yjs'
+import { recordCaughtFailure } from '@/lib/failure'
 import type { AmcApi } from '../../../../shared/api'
 
 import { DRAFT_POLL_INTERVAL, isMissingDraft } from './draft-availability'
@@ -302,7 +303,7 @@ export class DraftSession {
   }
 
   whenSaved() {
-    return this.#saveChain.catch(() => {})
+    return this.#saveChain.catch(recordCaughtFailure)
   }
 
   changed() {
@@ -404,6 +405,7 @@ export class DraftSession {
           }
         })
         .catch((cause) => {
+          recordCaughtFailure(cause)
           if (!connected || skipPoll() || uploadInFlight() || !isMissingDraft(cause)) return
           this.#discarded = true
           clearInterval(poll)

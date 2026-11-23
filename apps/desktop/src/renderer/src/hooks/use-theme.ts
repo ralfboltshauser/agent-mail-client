@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useState } from 'react'
+import { recordCaughtFailure } from '@/lib/failure'
 
 export type Theme = 'light' | 'dark' | 'system'
 
@@ -8,7 +9,9 @@ function stored(): Theme {
   try {
     const value = localStorage.getItem('amc.theme')
     return value === 'light' || value === 'dark' ? value : 'system'
-  } catch {
+  } catch (error) {
+    recordCaughtFailure(error)
+
     return 'system'
   }
 }
@@ -23,7 +26,9 @@ export function useTheme() {
   useEffect(() => {
     try {
       localStorage.setItem('amc.theme', theme)
-    } catch {}
+    } catch (error) {
+      recordCaughtFailure(error)
+    }
   }, [theme])
   useEffect(() => {
     const media = matchMedia(SYSTEM_DARK)

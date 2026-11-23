@@ -137,13 +137,22 @@ it('retains same-key data on refresh and failure and accepts an authoritative em
   const query = { key: 'inbox', load }
   const stop = store.subscribeQuery(query, ignore)
   await settle()
-  expect(store.getQuery(query)).toEqual({ state: 'first-error', error })
+  expect(store.getQuery(query)).toEqual({
+    state: 'first-error',
+    error,
+    failure: expect.stringMatching(/^Error · Request /),
+  })
   await store.refresh(query)
   const data = store.getQuery(query).data
   const retry = store.refresh(query)
   expect(store.getQuery(query)).toEqual({ state: 'cached+refreshing', data: ['a'] })
   await retry
-  expect(store.getQuery(query)).toEqual({ state: 'cached+error', data: ['a'], error })
+  expect(store.getQuery(query)).toEqual({
+    state: 'cached+error',
+    data: ['a'],
+    error,
+    failure: expect.stringMatching(/^Error · Request /),
+  })
   expect(store.getQuery(query).data).toBe(data)
   await store.refresh(query)
   expect(store.getQuery(query)).toEqual({ state: 'empty-success', data: [] })

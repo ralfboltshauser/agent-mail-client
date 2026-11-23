@@ -1,6 +1,7 @@
 import { existsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { app, Menu, type MenuItemConstructorOptions, nativeImage, shell, Tray } from 'electron'
+import { operationFailure } from './observability'
 
 export function createTray(
   openWindow: () => void,
@@ -22,7 +23,7 @@ export function createTray(
       if (!openAtLogin || status === 'enabled' || status === 'requires-approval')
         writeFileSync(initialized, '')
     } catch (error) {
-      console.error('Could not update the AMC login item', error)
+      operationFailure('login-settings', error)
     }
   }
 
@@ -43,7 +44,7 @@ export function createTray(
           click: () => {
             void shell
               .openExternal('x-apple.systempreferences:com.apple.LoginItems-Settings.extension')
-              .catch((error) => console.error('Could not open Login Items settings', error))
+              .catch((error) => operationFailure('login-settings', error))
           },
         },
         {

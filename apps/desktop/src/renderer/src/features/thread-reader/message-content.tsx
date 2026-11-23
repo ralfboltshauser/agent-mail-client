@@ -5,6 +5,7 @@ import { HtmlBody, MIN_HTML_BODY_HEIGHT, TextBody } from '@/components/message-b
 import { Skeleton } from '@/components/ui/skeleton'
 import { senderPreferenceKey } from '@/data/remote-image-preferences'
 import { getAmc } from '@/lib/amc'
+import { recordCaughtFailure } from '@/lib/failure'
 import type { ReplicaThreadMessage } from '../../../../shared/api'
 
 function useBodyRequest(
@@ -77,7 +78,10 @@ async function messageHtml(id: string, parts: AttachmentSummary[]) {
       parts
         .filter((part) => html.includes(`cid:${part.contentId}`))
         .map(async (part) => {
-          const content = await api.inlineAttachment(part.id).catch(() => '')
+          const content = await api.inlineAttachment(part.id).catch((error: unknown) => {
+            recordCaughtFailure(error)
+            return ''
+          })
           return [part.contentId, content ? `data:${part.mimeType};base64,${content}` : ''] as const
         }),
     ),

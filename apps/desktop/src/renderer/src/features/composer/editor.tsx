@@ -13,6 +13,7 @@ import { Bold, Italic, List } from 'lucide-react'
 import { memo, useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { getAmc } from '@/lib/amc'
+import { recordCaughtFailure } from '@/lib/failure'
 import type { DraftSession } from './draft-session'
 
 function InlinePreview({ draftId, src, alt }: { draftId: string; src: string; alt: string }) {
@@ -27,7 +28,7 @@ function InlinePreview({ draftId, src, alt }: { draftId: string; src: string; al
           if (active && INLINE_IMAGE_TYPES.includes(mimeType))
             setUrl(`data:${mimeType};base64,${content}`)
         })
-        .catch(() => {})
+        .catch(recordCaughtFailure)
     }
     return () => {
       active = false

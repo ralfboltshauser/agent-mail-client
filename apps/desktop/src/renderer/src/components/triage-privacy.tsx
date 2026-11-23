@@ -2,6 +2,7 @@ import type { TriageHistoryEvent, TriageHistoryPage, TriagePhysicalPurge } from 
 import { useState } from 'react'
 import { ReasonInput } from '@/features/triage-review/reason-input'
 import { getAmc } from '@/lib/amc'
+import { failureText } from '@/lib/failure'
 import { Button } from './ui/button'
 
 export function TriagePrivacy() {
@@ -36,8 +37,8 @@ export function TriagePrivacy() {
             setStatus('')
             try {
               if (await exportHistory({ includeReasons })) setStatus('Triage export saved.')
-            } catch {
-              setStatus('Could not export. Choose a new file and try again.')
+            } catch (error) {
+              setStatus(`Could not export. ${failureText(error)}`)
             } finally {
               setIncludeReasons(false)
               setExporting(false)
@@ -79,8 +80,8 @@ function ActionHistory() {
     setError('')
     try {
       await work()
-    } catch {
-      setError('Could not complete the history request. Try again.')
+    } catch (cause) {
+      setError(`Could not complete the history request. Try again. ${failureText(cause)}`)
     } finally {
       setBusy(false)
     }

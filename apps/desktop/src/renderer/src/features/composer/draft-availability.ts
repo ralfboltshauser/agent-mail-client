@@ -7,6 +7,7 @@ export function isMissingDraft(cause: unknown) {
   // Electron serializes invoke errors with a prefix and drops custom properties.
   return (
     cause instanceof Error &&
-    (cause.message === DRAFT_MISSING || cause.message.endsWith(`: Error: ${DRAFT_MISSING}`))
+    (cause.message === DRAFT_MISSING ||
+      cause.message.split('\n')[0]?.endsWith(`: Error: ${DRAFT_MISSING}`))
   )
 }

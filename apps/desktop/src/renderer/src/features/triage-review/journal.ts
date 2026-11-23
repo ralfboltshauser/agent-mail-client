@@ -1,3 +1,4 @@
+import { recordCaughtFailure } from '@/lib/failure'
 import type { AmcApi, ReviewApi, SmartInboxApi } from '../../../../shared/api'
 import type { ActionStatus, ReviewAction, Session } from './model'
 
@@ -14,7 +15,9 @@ export function loadReview(scope: string): SavedReview {
     const saved = JSON.parse(localStorage.getItem(storageKey) ?? 'null') as SavedReview | null
     if (saved?.scope === scope && saved.sessions && Array.isArray(saved.history)) return saved
     localStorage.removeItem(storageKey)
-  } catch {
+  } catch (error) {
+    recordCaughtFailure(error)
+
     // A missing or unreadable local cache starts a fresh session.
   }
   return { scope, sessions: {}, history: [] }
@@ -124,7 +127,8 @@ export async function poll(
     }
     return {
       status: item.status === 'sent' ? ('applied' as const) : ('failed' as const),
-      error: item.status === 'sent' ? null : 'Check the Outbox for delivery details.',
+      error:
+        item.status === 'sent' ? null : (item.detail ?? 'Check the Outbox for delivery details.'),
     }
   }
   if (action.decision.kind === 'organise') {

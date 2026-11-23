@@ -1,13 +1,59 @@
+import { newRequestId, RENDERER_LOG_CHANNEL, type RendererLogReport } from '@amc/observability'
 import type { ComposePatch, ThreadSummary } from '@amc/protocol'
 import { contextBridge, ipcRenderer } from 'electron'
 import type { AmcApi, ReviewApi, SmartInboxApi, SyncStatus } from '../shared/api'
+import { failureDetails, formatFailure, readFailure, rendererReport } from '../shared/failure'
+
+// One in-flight report and a small queue bound memory and IPC pressure in a failing window.
+const reports: RendererLogReport[] = []
+let reporting = false
+async function drainReports() {
+  reporting = true
+  try {
+    for (let report = reports.shift(); report; report = reports.shift()) {
+      await ipcRenderer.invoke(RENDERER_LOG_CHANNEL, report)
+    }
+  } catch {
+    // The reporting channel can disappear during a renderer reload.
+    reports.length = 0
+  } finally {
+    reporting = false
+  }
+}
+
+function reportFailure(value: RendererLogReport) {
+  if (!process.isMainFrame || reports.length >= 16) return
+  const report = rendererReport(value)
+  if (!report) return
+  reports.push(report)
+  if (!reporting) void drainReports()
+}
+
+function ipcRejection(error: unknown) {
+  const known = readFailure(error)
+  const details = known ?? failureDetails(error, newRequestId(), 'Request')
+  reportFailure({
+    source: 'ipc.rejected',
+    errorClass: details.errorClass,
+    ...(details.kind === 'Run'
+      ? { runId: details.id as RendererLogReport['runId'] }
+      : { requestId: details.id as RendererLogReport['requestId'] }),
+  })
+  return known ? error : new Error(formatFailure(details))
+}
 
 const invoke =
-  (channel: string) =>
+  (channel: string, preserveError = false) =>
   (...args: unknown[]) =>
-    ipcRenderer.invoke(`amc:${channel}`, ...args)
+    ipcRenderer.invoke(`amc:${channel}`, ...args).catch((error: unknown) => {
+      const failure = ipcRejection(error)
+      throw preserveError ? error : failure
+    })
 
 const api: AmcApi = {
+  reportFailure,
+  logSettings: invoke('logSettings') as AmcApi['logSettings'],
+  setDebugLogging: invoke('setDebugLogging') as AmcApi['setDebugLogging'],
   feedback: {
     onOpen(listener) {
       const handler = () => listener()
@@ -15,10 +61,10 @@ const api: AmcApi = {
       ipcRenderer.send('amc:feedbackReady')
       return () => ipcRenderer.off('amc:feedbackOpen', handler)
     },
-    capture: invoke('feedbackCapture') as AmcApi['feedback']['capture'],
-    send: invoke('feedbackSend') as AmcApi['feedback']['send'],
-    release: invoke('feedbackRelease') as AmcApi['feedback']['release'],
-    copy: invoke('feedbackCopy') as AmcApi['feedback']['copy'],
+    capture: invoke('feedbackCapture', true) as AmcApi['feedback']['capture'],
+    send: invoke('feedbackSend', true) as AmcApi['feedback']['send'],
+    release: invoke('feedbackRelease', true) as AmcApi['feedback']['release'],
+    copy: invoke('feedbackCopy', true) as AmcApi['feedback']['copy'],
   },
   smartInbox: {
     review: {
@@ -100,7 +146,7 @@ const api: AmcApi = {
   discardDraft: invoke('discardDraft') as AmcApi['discardDraft'],
   stageComposeBody(id: string, patch: ComposePatch) {
     const error = ipcRenderer.sendSync('amc:stageComposeBody', id, patch)
-    if (error) throw new Error(error)
+    if (error) throw ipcRejection(new Error(error))
   },
   saveCompose: invoke('saveCompose') as AmcApi['saveCompose'],
   addComposeAttachment: invoke('addComposeAttachment') as AmcApi['addComposeAttachment'],

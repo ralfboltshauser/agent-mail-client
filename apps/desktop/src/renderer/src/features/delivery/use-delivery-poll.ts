@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { failureText, recordCaughtFailure } from '@/lib/failure'
 
 type DeliveryRow = { id: string } & Record<string, string | number | boolean | null>
 type PollSnapshot<Row> = { rows?: Row[]; error: string }
@@ -43,10 +44,12 @@ export function useDeliveryPoll<Row extends DeliveryRow>(
         const rows = reconcileRows(previous.rows, incoming)
         if (rows !== previous.rows || previous.error) publish({ rows, error: '' })
       } catch (cause) {
-        if (!active) return
-        const error = cause instanceof Error && cause.message ? cause.message : 'Refresh failed.'
         const previous = lastSnapshot.current
-        if (previous.error !== error) publish({ ...previous, error })
+        if (!active || previous.error) {
+          recordCaughtFailure(cause)
+          return
+        }
+        publish({ ...previous, error: failureText(cause) })
       }
     }
     const pollOnce = () => {

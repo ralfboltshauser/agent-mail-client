@@ -6,6 +6,7 @@ import { accountsQuery } from '@/features/mailbox/mailbox-queries'
 import { useReplicaSelector, useSyncField } from '@/hooks/use-amc'
 import { cn } from '@/lib/utils'
 import type { SyncStatus } from '../../../shared/api'
+import { formatFailure } from '../../../shared/failure'
 
 function ago(ms: number, now: number) {
   const s = Math.max(0, Math.round((now - ms) / 1000))
@@ -22,7 +23,10 @@ function indicatorStatus(status: SyncStatus | null) {
     progress,
     lastSyncAt,
     error,
-    engineUrl,
+    failure,
+    healthFailure,
+    mailCheckFailure,
+    accountFailures,
     healthWarnings,
     healthRefreshFailed,
     mailCheck,
@@ -32,7 +36,10 @@ function indicatorStatus(status: SyncStatus | null) {
     progress,
     lastSyncAt,
     error,
-    engineUrl,
+    failure,
+    healthFailure,
+    mailCheckFailure,
+    accountFailures,
     healthWarnings,
     healthRefreshFailed,
     mailCheck,
@@ -53,7 +60,7 @@ export function SyncIndicator() {
         },
         broken: data
           .filter((a) => a.status === 'error' || a.status === 'auth_expired')
-          .map((a) => ({ address: a.address, status: a.status, lastError: a.lastError })),
+          .map((a) => a.status),
       }
     },
     (left, right) => shareReply(left, right) === left,
@@ -76,12 +83,12 @@ export function SyncIndicator() {
   } else if (status.mailCheck === 'checking') {
     tone = 'busy'
     text = 'Checking for new mail…'
-  } else if (status.phase === 'offline' || status.phase === 'error') {
+  } else if (status.phase === 'offline' || status.phase === 'error' || status.failure) {
     tone = 'bad'
     text = 'Reconnecting…'
   } else if (broken.length > 0) {
     tone = 'bad'
-    text = broken[0]?.status === 'auth_expired' ? 'Sign in again needed' : 'Account sync error'
+    text = broken[0] === 'auth_expired' ? 'Sign in again needed' : 'Account sync error'
   } else if (status.mailCheck === 'failed') {
     tone = 'bad'
     text = 'Could not check for new mail'
@@ -92,13 +99,13 @@ export function SyncIndicator() {
 
   const healthUnavailable = status.healthRefreshFailed === true
   const warnings = healthUnavailable ? [] : (status.healthWarnings ?? [])
-  const detail = [
-    ...warnings,
-    status.error,
-    ...broken.map((a) => `${a.address}: ${a.lastError ?? a.status}`),
-    status.engineUrl,
-  ].filter(Boolean)
-  const tooltip = [...new Set(detail)].join('\n')
+  const failureDetails = [
+    status.failure,
+    status.mailCheckFailure,
+    status.healthFailure,
+    ...Object.values(status.accountFailures ?? {}),
+  ].flatMap((failure) => (failure ? [formatFailure(failure)] : []))
+  const tooltip = warnings.length > 0 ? 'The Engine reported an operational warning.' : status.error
 
   return (
     <Tooltip>
@@ -127,6 +134,16 @@ export function SyncIndicator() {
           )}
         </div>
       </TooltipTrigger>
+      {failureDetails.length > 0 && (
+        <details className="px-2 pb-1 text-[11px] text-muted-foreground">
+          <summary className="w-fit cursor-pointer">Details</summary>
+          {failureDetails.map((detail) => (
+            <p className="select-text break-all font-mono" key={detail}>
+              {detail}
+            </p>
+          ))}
+        </details>
+      )}
       {tooltip && (
         <TooltipContent side="top" className="max-w-80 whitespace-pre-line">
           {tooltip}

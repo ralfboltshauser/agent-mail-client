@@ -3,14 +3,18 @@ import { useId, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { getAmc } from '@/lib/amc'
+import { failureText } from '@/lib/failure'
+import { type FailureDetails, formatFailure } from '../../../shared/failure'
 
 /** First run: connect this Mac to the Engine with a one-time code from the Host. */
 export function PairScreen({
   savedEngineUrl,
   recoveryMessage,
+  failure,
 }: {
   savedEngineUrl: string | null
   recoveryMessage: string | null
+  failure?: FailureDetails
 }) {
   const urlId = useId()
   const codeId = useId()
@@ -26,9 +30,7 @@ export function PairScreen({
     try {
       await getAmc().pair(engineUrl.trim(), code.trim())
     } catch (e) {
-      setError(
-        (e as Error).message.replace(/^Error invoking remote method '[^']+': (Error: )?/, ''),
-      )
+      setError(failureText(e))
     } finally {
       setBusy(false)
     }
@@ -52,6 +54,9 @@ export function PairScreen({
             {recoveryMessage ? (
               <p role="alert" className="text-sm text-destructive">
                 {recoveryMessage}
+                {failure && (
+                  <span className="mt-1 block select-text text-xs">{formatFailure(failure)}</span>
+                )}
               </p>
             ) : (
               <p className="text-sm leading-relaxed text-muted-foreground">
@@ -91,7 +96,9 @@ export function PairScreen({
               className="flex items-start gap-2 rounded-md bg-destructive/10 p-2.5 text-sm text-destructive"
             >
               <CircleAlert className="mt-0.5 size-4 shrink-0" />
-              {error}
+              <span>
+                Could not connect.<span className="mt-1 block select-text text-xs">{error}</span>
+              </span>
             </p>
           )}
           <Button

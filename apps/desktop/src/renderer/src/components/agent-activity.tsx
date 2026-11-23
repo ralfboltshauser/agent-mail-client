@@ -10,6 +10,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { getAmc } from '@/lib/amc'
+import { failureText } from '@/lib/failure'
 import { MailLoading, MailState } from './mail-state'
 import { Badge } from './ui/badge'
 
@@ -38,7 +39,7 @@ export function AgentActivity({
       setCursor(before)
       setNext(page.nextBefore)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not load Agent activity')
+      setError(`Could not load Agent activity. ${failureText(cause)}`)
     } finally {
       setBusy(false)
     }

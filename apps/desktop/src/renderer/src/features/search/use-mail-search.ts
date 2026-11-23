@@ -1,6 +1,7 @@
 import type { SearchHit } from '@amc/protocol'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { getAmc } from '@/lib/amc'
+import { failureText, recordCaughtFailure } from '@/lib/failure'
 
 interface HistorySearch {
   accountId: string | null
@@ -8,6 +9,7 @@ interface HistorySearch {
   hits: SearchHit[] | null
   loading: boolean
   failed: boolean
+  failure?: string
 }
 
 export function useMailSearch(accountId: string | null) {
@@ -52,22 +54,25 @@ export function useMailSearch(accountId: string | null) {
       hits: matches(current) ? current.hits : null,
       loading: true,
       failed: matches(current) && current.failed,
+      failure: matches(current) ? current.failure : undefined,
     }))
     try {
       const hits = await getAmc().search(text, accountId)
       if (generation === request.current) {
         setHistory({ accountId, text, hits, loading: false, failed: false })
       }
-    } catch {
+    } catch (error) {
       if (generation === request.current) {
+        const failure = failureText(error)
         setHistory((current) => ({
           accountId,
           text,
           hits: matches(current) ? current.hits : null,
           loading: false,
           failed: true,
+          failure,
         }))
-      }
+      } else recordCaughtFailure(error)
     }
   }
 

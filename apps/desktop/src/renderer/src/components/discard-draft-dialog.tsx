@@ -1,6 +1,7 @@
 import type { DiscardDraftResult } from '@amc/protocol'
 import { useRef, useState } from 'react'
 import { toast } from 'sonner'
+import { failureText } from '@/lib/failure'
 import { Button } from './ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from './ui/dialog'
 
@@ -32,7 +33,7 @@ export function DiscardDraftDialog({
       }
       onClose()
     } catch (cause) {
-      toast.error((cause as Error).message)
+      toast.error('Could not discard draft', { description: failureText(cause) })
     } finally {
       submitting.current = false
       setPending(false)

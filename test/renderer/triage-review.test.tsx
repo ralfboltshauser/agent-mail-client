@@ -280,7 +280,7 @@ it('checks the live queue at the end and retries a failed refresh before showing
   await act(async () =>
     staleEnd.resolve({ reviewLookup: true, cards: [], revision: 11, cursor: null }),
   )
-  expect(within(review()).getByRole('alert').textContent).toBe('Offline')
+  expect(within(review()).getByRole('alert').textContent).toMatch(/Error · Request /)
   expect(within(review()).queryByText('All clear')).toBeNull()
   await click(within(review()).getByRole('button', { name: 'Retry' }))
   expect(within(review()).getByText('1 skipped')).toBeTruthy()
@@ -500,7 +500,12 @@ it.each(['Accept', 'Block', 'already applied', 'revision conflict'] as const)(
     expect(smart.decideSender).toHaveBeenCalledTimes(1)
     if (scenario === 'revision conflict') {
       expect(
-        within(review()).getByText(`Accept person@example.test · Failed. ${message}`),
+        within(review()).getByText(
+          (text) =>
+            text.startsWith('Accept person@example.test · Failed.') &&
+            text.includes(message) &&
+            text.includes('Error · Request'),
+        ),
       ).toBeTruthy()
       expect(within(review()).getByText('Suggested: Filter out')).toBeTruthy()
     } else {

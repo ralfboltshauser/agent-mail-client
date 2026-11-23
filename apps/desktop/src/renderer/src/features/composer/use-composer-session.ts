@@ -10,6 +10,7 @@ import {
 import type { Editor } from '@tiptap/react'
 import { useCallback, useEffect, useEffectEvent, useRef, useState } from 'react'
 import { getAmc } from '@/lib/amc'
+import { failureText, recordCaughtFailure } from '@/lib/failure'
 import { DraftSession } from './draft-session'
 
 type DraftReview = { subject: string; revision: number }
@@ -38,7 +39,7 @@ export function useComposerSession(draft: ComposeDraft, onDiscarded: (dirty: boo
   }, [session])
 
   const reportError = useCallback((cause: unknown) => {
-    setError((cause as Error).message)
+    setError(failureText(cause))
   }, [])
 
   const showConflict = useCallback(
@@ -54,7 +55,11 @@ export function useComposerSession(draft: ComposeDraft, onDiscarded: (dirty: boo
     (cause: unknown) => {
       const message = (cause as Error).message
       showConflict(message.includes('may have changed'))
-      setError(message)
+      setError(
+        message.includes('may have changed')
+          ? `Reopen the draft to review its fields. ${failureText(cause)}`
+          : failureText(cause),
+      )
     },
     [showConflict],
   )
@@ -218,18 +223,19 @@ export function useComposerSession(draft: ComposeDraft, onDiscarded: (dirty: boo
         const message = (cause as Error).message
         if (message.includes(DRAFT_CHANGED)) {
           request.current = null
-          setError(DRAFT_CHANGED)
+          setError(`${DRAFT_CHANGED}. ${failureText(cause)}`)
           showConflict(true)
           try {
             const next = await getAmc().composeDraft(session.id)
             session.rebase(next)
             showConflict(false)
-          } catch {
+          } catch (error) {
+            recordCaughtFailure(error)
             // Keep the review message and allow a manual reload.
           }
         } else if (message.includes(MIRROR_CHANGED)) {
           request.current = null
-          setError(MIRROR_CHANGED)
+          setError(`${MIRROR_CHANGED} ${failureText(cause)}`)
         } else if (request.current) {
           setError(`${message} Check the Outbox or confirm this send again.`)
         } else saveError(cause)

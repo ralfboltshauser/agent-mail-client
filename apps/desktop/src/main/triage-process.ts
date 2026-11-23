@@ -1,8 +1,10 @@
 import { execFile } from 'node:child_process'
 import { join } from 'node:path'
 import { TriageFailure, withTriageGrant } from '@amc/cli/triage'
+import { newRunId } from '@amc/observability'
 import { powerMonitor, utilityProcess } from 'electron'
 import type { TriageResult } from '../shared/api'
+import { mainLog, operationFailure } from './observability'
 import type { TriageWorkerReply, TriageWorkerRequest } from './triage-worker'
 
 export function runTriageProcess(
@@ -11,13 +13,14 @@ export function runTriageProcess(
   recent: boolean,
   signal: AbortSignal,
   quitting: AbortSignal,
+  runId = newRunId(),
 ) {
   return withTriageGrant(
     config,
     accountId,
     false,
     AbortSignal.any([signal, quitting]),
-    (grant) => runWorker({ ...grant, recent }, signal, quitting),
+    (grant) => runWorker({ ...grant, recent, runId }, signal, quitting),
     3_000,
   )
 }
@@ -29,7 +32,10 @@ function runWorker(
 ): Promise<TriageResult> {
   signal.throwIfAborted()
   quitting.throwIfAborted()
-  return new Promise((resolve, reject) => {
+  const { runId } = request
+  const log = mainLog.with({ runId })
+  log.log('debug', 'desktop.operation.started', { stage: 'triage-worker' })
+  return new Promise<TriageResult>((resolve, reject) => {
     let child: ReturnType<typeof utilityProcess.fork>
     try {
       child = utilityProcess.fork(join(import.meta.dirname, 'triage-worker.js'), [], {
@@ -57,7 +63,7 @@ function runWorker(
       else child.postMessage(request)
     })
     child.once('message', (message: TriageWorkerReply) => {
-      reply = message
+      if (message.runId === runId) reply = message
       child.kill()
     })
     child.once('exit', () => {
@@ -69,11 +75,20 @@ function runWorker(
         const cause = new Error()
         cause.name = reply.failure.className
         reject(new TriageFailure(reply.failure.reason, { cause }))
-      } else if (reply) resolve(reply)
+      } else if (reply) resolve({ assigned: reply.assigned, skipped: reply.skipped })
       else if (timedOut) reject(new TriageFailure('timeout'))
       else reject(new TriageFailure(spawned ? 'worker-exit' : 'worker-start'))
     })
-  })
+  }).then(
+    (value) => {
+      log.log('debug', 'desktop.operation.finished', { stage: 'triage-worker' })
+      return value
+    },
+    (err: unknown) => {
+      log.log('error', 'desktop.operation.failed', { stage: 'triage-worker', err })
+      throw err
+    },
+  )
 }
 
 export async function onLowBattery(): Promise<boolean> {
@@ -81,6 +96,9 @@ export async function onLowBattery(): Promise<boolean> {
   return new Promise((resolve) => {
     execFile('/usr/bin/pmset', ['-g', 'batt'], { timeout: 2_000 }, (error, stdout) => {
       const charge = stdout.match(/\b(\d+)%/)?.[1]
+      if (error) operationFailure('battery', error)
+      else if (charge === undefined)
+        operationFailure('battery', new Error('Battery reading unavailable'))
       resolve(!!error || charge === undefined || Number(charge) < 20)
     })
   })

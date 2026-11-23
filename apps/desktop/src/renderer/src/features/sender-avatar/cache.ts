@@ -1,4 +1,5 @@
 import type { SenderAvatarResolve } from '@amc/protocol'
+import { recordCaughtFailure } from '@/lib/failure'
 import type { DesktopSenderAvatarResults, SmartInboxApi } from '../../../../shared/api'
 
 type Message = SenderAvatarResolve['messages'][number]
@@ -100,7 +101,9 @@ export class SenderAvatarCache {
       const known = Array.from(new Set(selected.flatMap(({ digest }) => (digest ? [digest] : []))))
       const reply = await this.#resolve({ messages: selected.map(({ message }) => message) }, known)
       if (generation === this.#generation) this.#apply(selected, reply)
-    } catch {
+    } catch (error) {
+      recordCaughtFailure(error)
+
       if (generation === this.#generation) this.#apply(selected, { rows: [] })
     } finally {
       this.#inFlight = false

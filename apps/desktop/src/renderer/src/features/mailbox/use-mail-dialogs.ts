@@ -1,6 +1,7 @@
 import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { getAmc } from '@/lib/amc'
+import { failureText } from '@/lib/failure'
 
 function focusedElement() {
   return document.activeElement instanceof HTMLElement ? document.activeElement : null
@@ -27,7 +28,7 @@ export function useMailDialogs() {
       .sendSettings()
       .then(({ undoSendSeconds }) => setSendSettings(undoSendSeconds))
       .catch((cause: Error) =>
-        toast.error('Could not open settings', { description: cause.message }),
+        toast.error('Could not open settings', { description: failureText(cause) }),
       )
   }
   const rememberFocus = () => {

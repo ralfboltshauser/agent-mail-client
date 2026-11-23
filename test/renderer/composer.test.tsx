@@ -348,7 +348,7 @@ it('keeps unsaved body and headers in place and saves them into a new draft on r
   const keep = dialog.getByRole('button', { name: 'Keep as new draft' })
   adapter.api.saveCompose.mockRejectedValueOnce(new Error('The Engine is offline'))
   await act(async () => fireEvent.click(keep))
-  expect(dialog.getByRole('alert').textContent).toContain('The Engine is offline')
+  expect(dialog.getByRole('alert').textContent).toMatch(/Error · Request /)
   expect(editor.textContent).toBe('Local body')
   await act(async () => fireEvent.click(keep))
   expect(adapter.api.startCompose).toHaveBeenCalledTimes(2)

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
+import { newRunId } from '@amc/observability'
 import type {
   AccountSummary,
   Bucket,
@@ -21,6 +22,7 @@ import type {
   TriageCounts,
 } from '../shared/api'
 import { LocalDraftUpdates } from './draft-updates'
+import { mainLog, operationFailure } from './observability'
 import { LocalOrganise, ORGANISE_SCHEMA } from './organise'
 
 const UNTRIAGED_INBOX = "in_inbox = 1 AND json_extract(data, '$.bucket.bucket') IS NULL"
@@ -123,6 +125,8 @@ export class Replica {
       'UPDATE message SET data = ?, body_text = ? WHERE id = ? AND body_text IS NULL',
     )
     let cursor = 0
+    const log = mainLog.with({ runId: newRunId() })
+    log.log('debug', 'desktop.operation.started', { stage: 'replica-migration' })
     const step = () => {
       if (!this.db.isOpen) return
       try {
@@ -132,6 +136,7 @@ export class Replica {
             | undefined
           if (!row) {
             this.db.prepare("INSERT OR IGNORE INTO meta VALUES (?, '1')").run(marker)
+            log.log('debug', 'desktop.operation.finished', { stage: 'replica-migration' })
             return
           }
           cursor = row.cursor
@@ -141,9 +146,9 @@ export class Replica {
             break // Yield after each body to keep other Electron work responsive.
           }
         }
-      } catch {
+      } catch (err) {
         // Keep the legacy read path available and retry after the next start.
-        console.error('Could not split legacy replica message bodies')
+        log.log('error', 'desktop.operation.failed', { stage: 'replica-migration', err })
         return
       }
       setImmediate(step).unref()
@@ -182,7 +187,11 @@ export class Replica {
       fn()
       this.db.exec('COMMIT')
     } catch (error) {
-      this.db.exec('ROLLBACK')
+      try {
+        this.db.exec('ROLLBACK')
+      } catch (rollback) {
+        operationFailure('replica-rollback', rollback)
+      }
       throw error
     }
   }

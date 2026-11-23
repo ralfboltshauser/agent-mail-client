@@ -6,6 +6,7 @@ import type {
   TriageCardId,
   TriageQueuePage,
 } from '@amc/protocol'
+import { failureText } from '@/lib/failure'
 import type { ReviewOrganiseAction, ThreadWithMessages } from '../../../../shared/api'
 
 export type Candidate = TriageQueuePage['cards'][number]
@@ -60,10 +61,25 @@ export const cardKey = (id: TriageCardId) =>
   JSON.stringify(id.kind === 'sender' ? [id.accountId, id.address] : [id.threadId])
 
 export function reviewError(cause: unknown) {
-  return (cause instanceof Error ? cause.message : String(cause)).replace(
-    /^Error invoking remote method '[^']+': (?:Error|EngineError): /,
-    '',
-  )
+  const message =
+    cause instanceof Error
+      ? cause.message.replace(/^Error invoking remote method '[^']+': (?:Error|EngineError): /, '')
+      : ''
+  const details = failureText(cause)
+  if (message.startsWith('Review rejected: ')) {
+    const staleRule =
+      'The sender rule changed while saving the decision. Choose Accept or Block again.'
+    const hint = message.split('\n')[0] === `Review rejected: ${staleRule}` ? `${staleRule} ` : ''
+    return `Review rejected: ${hint}${details}`
+  }
+  if (message === 'This card changed. Use Retry to review the current card.') {
+    return `${message} ${details}`
+  }
+  if (message.startsWith('Triage queue changed. Start a fresh snapshot.')) {
+    return `Triage queue changed. Start a fresh snapshot. ${details}`
+  }
+  if (message.startsWith('Owner action unavailable')) return `Owner action unavailable. ${details}`
+  return details
 }
 
 export function inboxMessageIds(card: Preview, kind: 'filter' | 'organise') {

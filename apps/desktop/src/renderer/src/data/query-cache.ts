@@ -1,3 +1,4 @@
+import { failureText, recordCaughtFailure } from '@/lib/failure'
 import { shareReply } from './share-reply'
 
 export interface ReplicaQuery<T> {
@@ -12,10 +13,15 @@ export interface ReplicaQuery<T> {
 }
 
 export type QuerySnapshot<T> =
-  | { state: 'first-load'; data?: undefined; error?: undefined }
-  | { state: 'first-error'; data?: undefined; error: unknown }
-  | { state: 'cached' | 'empty-success' | 'cached+refreshing'; data: T; error?: undefined }
-  | { state: 'cached+error'; data: T; error: unknown }
+  | { state: 'first-load'; data?: undefined; error?: undefined; failure?: undefined }
+  | { state: 'first-error'; data?: undefined; error: unknown; failure?: string }
+  | {
+      state: 'cached' | 'empty-success' | 'cached+refreshing'
+      data: T
+      error?: undefined
+      failure?: undefined
+    }
+  | { state: 'cached+error'; data: T; error: unknown; failure?: string }
 
 type Listener = () => void
 const reusableVersion = <T>(snapshot: QuerySnapshot<T>) =>
@@ -155,12 +161,16 @@ export class QueryCache {
         try {
           reply = await query.load(data)
         } catch (error) {
-          if (entry.generation !== generation || (partial() && hasPopulatedData)) return
+          if (entry.generation !== generation || (partial() && hasPopulatedData)) {
+            recordCaughtFailure(error)
+            return
+          }
+          const failure = failureText(error)
           this.#publish(
             entry,
             hasData(snapshot)
-              ? { state: 'cached+error', data: snapshot.data, error }
-              : { state: 'first-error', error },
+              ? { state: 'cached+error', data: snapshot.data, error, failure }
+              : { state: 'first-error', error, failure },
           )
           return
         }

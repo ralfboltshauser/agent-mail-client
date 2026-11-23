@@ -6,6 +6,7 @@ import { accountsQuery, type MailboxThreadQuery } from '@/features/mailbox/mailb
 import { reviewError } from '@/features/triage-review/model'
 import { useReplicaSelector } from '@/hooks/use-amc'
 import { getAmc } from '@/lib/amc'
+import { failureText, recordCaughtFailure } from '@/lib/failure'
 import { cn } from '@/lib/utils'
 
 type Decision = 'accept' | 'block'
@@ -89,7 +90,11 @@ export const InboxSenderActions = memo(function InboxSenderActions({
                           id: actionId,
                         })
                     },
-                    () => toast.error('Could not confirm Undo', { id: actionId }),
+                    (error: unknown) =>
+                      toast.error('Could not confirm Undo', {
+                        id: actionId,
+                        description: failureText(error),
+                      }),
                   )
                 },
               },
@@ -101,7 +106,10 @@ export const InboxSenderActions = memo(function InboxSenderActions({
         for (let attempt = 0; attempt < 20 && !undoing; attempt++) {
           await new Promise((resolve) => setTimeout(resolve, 1500))
           if (undoing) break
-          const status = await smart.ownerAction(actionId).catch(() => null)
+          const status = await smart.ownerAction(actionId).catch((error: unknown) => {
+            recordCaughtFailure(error)
+            return null
+          })
           if (!status || status.status === 'pending' || undoing) continue
           report(status)
           break

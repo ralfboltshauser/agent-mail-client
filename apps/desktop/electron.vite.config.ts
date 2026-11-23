@@ -32,6 +32,7 @@ export default defineConfig({
     },
     build: {
       rollupOptions: {
+        output: { chunkFileNames: 'chunks/[name].js' },
         input: {
           index: resolve('src/main/index.ts'),
           'triage-worker': resolve('src/main/triage-worker.ts'),
@@ -40,7 +41,7 @@ export default defineConfig({
     },
   },
   preload: {
-    plugins: [externalizeDepsPlugin()],
+    plugins: [externalizeDepsPlugin({ exclude: ['@amc/observability'] })],
     build: { rollupOptions: { output: { format: 'cjs', entryFileNames: '[name].cjs' } } },
   },
   renderer: {

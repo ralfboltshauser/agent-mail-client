@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import { type EventFields, newRunId, type RunId } from '@amc/observability'
 import {
   doctorWarnings,
   type Health,
@@ -9,9 +10,13 @@ import {
   type SyncState,
 } from '@amc/protocol'
 import type { SyncStatus } from '../shared/api'
+import { type FailureDetails, failureDetails } from '../shared/failure'
 import { type EngineClient, EngineError } from './engine'
 import { newInboxMessages } from './notifications'
+import { failureScope, knownFailure, mainLog, rememberFailure } from './observability'
 import type { Replica } from './replica'
+
+type SyncStage = EventFields<'desktop.sync.failed'>['stage']
 
 const SNAPSHOT_ORDER: SyncEntity[] = ['account', 'label', 'draft', 'thread', 'message']
 const sleep = (ms: number, signal: AbortSignal) =>
@@ -45,6 +50,33 @@ export class SyncLoop extends EventEmitter<{
   #pullAgain = false
   #healthRefresh = 0
   #nextMailCheckAt = 0
+  #accountFailures = new Map<string, FailureDetails>()
+  readonly #failures = new Map<SyncStage, FailureDetails>()
+
+  #failed(stage: SyncStage, err: unknown, runId: RunId): FailureDetails {
+    const previous = this.#failures.get(stage)
+    if (previous) return previous
+    const details = failureDetails(err, runId, 'Run')
+    const request = knownFailure(err)
+    mainLog.log(
+      'error',
+      'desktop.sync.failed',
+      { stage, err },
+      {
+        ...(request && failureScope(request)),
+        runId,
+      },
+    )
+    this.#failures.set(stage, details)
+    return details
+  }
+
+  #recovered(stage: SyncStage) {
+    const failure = this.#failures.get(stage)
+    if (!failure) return
+    mainLog.log('info', 'desktop.sync.recovered', { stage }, failureScope(failure))
+    this.#failures.delete(stage)
+  }
 
   constructor(engine: EngineClient, replica: Replica) {
     super()
@@ -69,7 +101,11 @@ export class SyncLoop extends EventEmitter<{
   }
 
   start(): void {
-    void this.#run()
+    void this.#run().catch((err: unknown) => {
+      if (this.#controller.signal.aborted) return
+      const failure = this.#failed('connect', err, newRunId())
+      this.#set({ phase: 'error', error: 'Sync stopped', failure })
+    })
   }
 
   stop(): void {
@@ -80,7 +116,9 @@ export class SyncLoop extends EventEmitter<{
     const signal = this.#controller.signal
     if (signal.aborted || Date.now() < this.#nextMailCheckAt) return
     this.#nextMailCheckAt = Infinity
-    this.#set({ mailCheck: 'checking' })
+    const runId = newRunId()
+    mainLog.log('debug', 'desktop.sync.started', { stage: 'check-mail' }, { runId })
+    this.#set({ mailCheck: 'checking', mailCheckFailure: undefined })
     try {
       const { ok } = await this.#engine.request<{ ok: boolean }>('/v1/sync/check-mail', {
         method: 'POST',
@@ -89,9 +127,16 @@ export class SyncLoop extends EventEmitter<{
       if (signal.aborted) return
       // The provider pass has published its changes. Pull through the normal replica path.
       if (this.#replica.modseq !== null && this.#status.phase !== 'bootstrapping') await this.pull()
-      if (!signal.aborted) this.#set({ mailCheck: ok ? undefined : 'failed' })
-    } catch {
-      if (!signal.aborted) this.#set({ mailCheck: 'failed' })
+      if (!ok) throw new Error('Mail check failed')
+      this.#recovered('check-mail')
+      this.#set({ mailCheck: undefined })
+    } catch (error) {
+      if (!signal.aborted) {
+        this.#set({
+          mailCheck: 'failed',
+          mailCheckFailure: this.#failed('check-mail', error, runId),
+        })
+      }
     } finally {
       this.#nextMailCheckAt = Date.now() + 5_000
     }
@@ -105,6 +150,8 @@ export class SyncLoop extends EventEmitter<{
       this.#pullAgain = true
       return this.#pulling
     }
+    const runId = newRunId()
+    mainLog.log('debug', 'desktop.sync.started', { stage: 'pull' }, { runId })
     this.#pulling = (async () => {
       try {
         do {
@@ -114,14 +161,22 @@ export class SyncLoop extends EventEmitter<{
           } catch (error) {
             signal.throwIfAborted()
             if (!(error instanceof EngineError && error.code === 'resync_required')) throw error
-            await this.#bootstrap()
+            this.#failed('bootstrap', error, runId)
+            await this.#bootstrap(runId)
             signal.throwIfAborted()
             this.#set({ phase: 'live', progress: null })
             this.#pullAgain = true
           }
         } while (this.#pullAgain && !signal.aborted)
+        this.#recovered('pull')
+        if (this.#status.phase === 'live' && this.#status.failure) this.#set({ failure: undefined })
       } catch (error) {
-        if (!signal.aborted) throw error
+        if (!signal.aborted) {
+          const failure = this.#failed('pull', error, runId)
+          if (this.#status.phase === 'live') this.#set({ failure })
+          rememberFailure(error, knownFailure(error) ?? failure)
+          throw error
+        }
       } finally {
         this.#pulling = null
       }
@@ -131,50 +186,125 @@ export class SyncLoop extends EventEmitter<{
 
   async #refreshHealth(signal: AbortSignal): Promise<void> {
     const refresh = ++this.#healthRefresh
-    const health = await this.#engine
-      .get<Health>('/v1/health', { signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]) })
-      .catch(() => null)
-    if (signal.aborted || refresh !== this.#healthRefresh) return
-    if (health) this.#set({ healthWarnings: doctorWarnings(health), healthRefreshFailed: false })
-    else this.#set({ healthRefreshFailed: true })
+    const runId = newRunId()
+    mainLog.log('debug', 'desktop.sync.started', { stage: 'health' }, { runId })
+    try {
+      const health = await this.#engine.get<Health>('/v1/health', {
+        signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+      })
+      if (signal.aborted || refresh !== this.#healthRefresh) return
+      this.#set({
+        healthWarnings: doctorWarnings(health),
+        healthRefreshFailed: false,
+        healthFailure: undefined,
+      })
+      this.#recovered('health')
+    } catch (error) {
+      if (signal.aborted || refresh !== this.#healthRefresh) return
+      this.#set({ healthRefreshFailed: true, healthFailure: this.#failed('health', error, runId) })
+    }
+  }
+
+  pullInBackground() {
+    void this.pull().catch(() => {
+      // Pull records the failure before rejecting. Polling and stream changes retry it.
+    })
+  }
+
+  #refreshAccountFailures() {
+    const accounts = this.#replica.accounts()
+    const failures = new Map<string, FailureDetails>()
+    for (const account of accounts) {
+      if (account.status !== 'error' && account.status !== 'auth_expired') continue
+      const last = this.#accountFailures.get(account.id)
+      if (last) {
+        failures.set(account.id, last)
+        continue
+      }
+      const err = new EngineError(
+        0,
+        account.status === 'auth_expired' ? 'unauthorized' : 'error',
+        'Account sync failed',
+      )
+      const failure = failureDetails(err, newRunId(), 'Run')
+      mainLog.log(
+        'error',
+        'desktop.sync.failed',
+        { stage: 'account', err },
+        {
+          ...failureScope(failure),
+          accountId: account.id,
+        },
+      )
+      failures.set(account.id, failure)
+    }
+    for (const [accountId, failure] of this.#accountFailures) {
+      if (!failures.has(accountId)) {
+        mainLog.log(
+          'info',
+          'desktop.sync.recovered',
+          { stage: 'account' },
+          {
+            ...failureScope(failure),
+            accountId,
+          },
+        )
+      }
+    }
+    if (failures.size || this.#accountFailures.size) {
+      this.#accountFailures = failures
+      this.#set({ accountFailures: Object.fromEntries(failures) })
+    }
   }
 
   async #run(): Promise<void> {
     const signal = this.#controller.signal
     let backoff = 1000
     while (!signal.aborted) {
+      const runId = newRunId()
+      let stage: SyncStage = 'connect'
+      mainLog.log('debug', 'desktop.sync.started', { stage }, { runId })
       try {
         const me = await this.#engine.get<Me>('/v1/me', {
           signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
         })
         if (signal.aborted) return
+        this.#recovered('connect')
         this.#set({ snoozeEnabled: me.features?.snooze === true })
         void this.#refreshHealth(signal)
         if (this.#replica.modseq === null) {
-          await this.#bootstrap()
+          stage = 'bootstrap'
+          await this.#bootstrap(runId)
           this.#set({ phase: 'live', progress: null })
         }
+        stage = 'pull'
         await this.pull()
         if (signal.aborted) return
-        this.#set({ phase: 'live', error: null, progress: null })
+        this.#refreshAccountFailures()
+        this.#set({ phase: 'live', error: null, progress: null, failure: undefined })
         backoff = 1000
         const poll = setInterval(() => {
-          void this.pull().catch(() => {})
+          this.pullInBackground()
           void this.#refreshHealth(signal)
         }, 60_000)
+        stage = 'stream'
+        mainLog.log('debug', 'desktop.sync.started', { stage }, { runId })
         try {
           await this.#engine.events(
             '/v1/sync/events',
             (event) => {
-              if (event === 'change') void this.pull().catch(() => {})
+              if (event === 'change') this.pullInBackground()
             },
             signal,
+            () => this.#recovered('stream'),
           )
+          if (!signal.aborted) throw new Error('Event stream closed')
         } finally {
           clearInterval(poll)
         }
       } catch (error) {
         if (signal.aborted) return
+        const failure = this.#failed(stage, error, runId)
         if (error instanceof EngineError && error.code === 'resync_required') {
           this.#replica.clear({ keepNotificationHistory: true })
           this.emit('changed')
@@ -183,6 +313,7 @@ export class SyncLoop extends EventEmitter<{
         if (error instanceof EngineError && error.status === 401) {
           this.#set({
             phase: 'unpaired',
+            failure,
             progress: null,
             error:
               'The Engine rejected this pairing. Generate a new desktop pairing code on the Host.',
@@ -192,7 +323,8 @@ export class SyncLoop extends EventEmitter<{
         const offline = error instanceof EngineError && error.code === 'unreachable'
         this.#set({
           phase: offline ? 'offline' : 'error',
-          error: (error as Error).message,
+          error: offline ? 'Could not reach the Engine' : 'Sync interrupted',
+          failure,
           snoozeEnabled: false,
         })
         await sleep(backoff, signal)
@@ -201,7 +333,8 @@ export class SyncLoop extends EventEmitter<{
     }
   }
 
-  async #bootstrap(): Promise<void> {
+  async #bootstrap(runId: RunId): Promise<void> {
+    mainLog.log('debug', 'desktop.sync.started', { stage: 'bootstrap' }, { runId })
     const signal = this.#controller.signal
     signal.throwIfAborted()
     this.#set({ phase: 'bootstrapping', progress: 0 })
@@ -230,6 +363,7 @@ export class SyncLoop extends EventEmitter<{
     }
     this.#replica.modseq = state.modseq
     this.#replica.organise.rebuild()
+    this.#recovered('bootstrap')
   }
 
   async #pullChanges(): Promise<void> {
@@ -255,6 +389,8 @@ export class SyncLoop extends EventEmitter<{
           if (res.organiseFailures) this.#replica.organise.notice(res.organiseFailures)
           this.#replica.organise.rebuild()
         })
+        if (res.changes.some((change) => change.entity === 'account'))
+          this.#refreshAccountFailures()
         if (notifications.length) this.emit('newMail', notifications)
         if (arrivals?.size) this.emit('arrivals', arrivals)
         if (res.changes.length > 0 || res.organiseFailures?.length) this.emit('changed')

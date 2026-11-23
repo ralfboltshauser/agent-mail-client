@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 import { useOrganise } from '@/components/organise'
 import { useReplicaSelector, useSyncField } from '@/hooks/use-amc'
 import { getAmc } from '@/lib/amc'
+import { failureText } from '@/lib/failure'
 import type { MailboxAccount } from './mailbox-queries'
 
 export function useThreadActions({
@@ -32,7 +33,7 @@ export function useThreadActions({
     try {
       await getAmc().setBucket({ threadId: selected.id, bucket, reason: 'Set manually' })
     } catch (error) {
-      toast.error('Could not move Thread', { description: (error as Error).message })
+      toast.error('Could not move Thread', { description: failureText(error) })
     }
   }
   const phase = useSyncField((status) => status?.phase)
@@ -63,7 +64,7 @@ export function useThreadActions({
       setInactiveHandoff(id)
       toast.success('Hand-off ended')
     } catch (error) {
-      toast.error('Could not end hand-off', { description: (error as Error).message })
+      toast.error('Could not end hand-off', { description: failureText(error) })
     } finally {
       setEndingHandoff(null)
     }
