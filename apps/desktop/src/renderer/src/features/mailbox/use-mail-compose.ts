@@ -1,5 +1,12 @@
-import type { ComposeDraft, ComposeStart, OutboxItem, ThreadSummary } from '@amc/protocol'
-import { useEffect, useRef, useState } from 'react'
+import {
+  type ComposeDraft,
+  type ComposeStart,
+  DRAFT_RECOVERY_PENDING,
+  type OutboxItem,
+  THREAD_DRAFT_UNAVAILABLE,
+  type ThreadSummary,
+} from '@amc/protocol'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { DRAFT_POLL_INTERVAL, isMissingDraft } from '@/features/composer/draft-availability'
 import { getAmc } from '@/lib/amc'
@@ -41,23 +48,38 @@ export function useMailCompose(
     }
   }, [minimisedId, draft, openingComposer])
 
-  const openDraft = async (id: string) => {
-    if (opening.current || draft) return
-    opening.current = true
-    setOpeningComposer(true)
-    try {
-      setDraft(await getAmc().composeDraft(id))
-      setMinimised(null)
-    } catch (cause) {
-      if (isMissingDraft(cause)) {
-        setMinimised((current) => (current?.id === id ? null : current))
+  const hasDraft = draft !== null
+  const loadDraft = useCallback(
+    async (load: () => Promise<ComposeDraft>, id?: string) => {
+      if (opening.current || hasDraft) return
+      opening.current = true
+      setOpeningComposer(true)
+      try {
+        setDraft(await load())
+        setMinimised(null)
+      } catch (cause) {
+        if (id && isMissingDraft(cause)) {
+          setMinimised((current) => (current?.id === id ? null : current))
+        }
+        const hint = [THREAD_DRAFT_UNAVAILABLE, DRAFT_RECOVERY_PENDING].find(
+          (message) => cause instanceof Error && cause.message.includes(message),
+        )
+        const failure = failureText(cause)
+        toast.error('Could not open draft', { description: hint ? `${hint} ${failure}` : failure })
+      } finally {
+        opening.current = false
+        setOpeningComposer(false)
       }
-      toast.error('Could not open draft', { description: failureText(cause) })
-    } finally {
-      opening.current = false
-      setOpeningComposer(false)
-    }
-  }
+    },
+    [hasDraft],
+  )
+
+  const openDraft = (id: string) => loadDraft(() => getAmc().composeDraft(id), id)
+  const openDraftByMessage = useCallback(
+    (messageId: string, imapRevision?: string) =>
+      void loadDraft(() => getAmc().composeDraftByMessage(messageId, imapRevision)),
+    [loadDraft],
+  )
 
   const startCompose = async (mode: ComposeStart['mode'], target = thread) => {
     if (opening.current || draft || (mode !== 'new' && !target)) return
@@ -103,6 +125,7 @@ export function useMailCompose(
     minimised,
     setMinimised,
     openDraft,
+    openDraftByMessage,
     startCompose,
     queued,
   }

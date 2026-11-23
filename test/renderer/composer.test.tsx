@@ -9,7 +9,7 @@ import {
   type SendRequest,
 } from '../../packages/protocol/src/index'
 
-import { deferred } from './adapter'
+import { deferred, rendererAdapter } from './adapter'
 import { commits, expectBudget } from './profile'
 import { listbox, mount } from './workspace'
 
@@ -26,6 +26,51 @@ async function openComposer() {
   commits.clear()
   return { adapter, dialog, subject, editor, recipient }
 }
+
+it('retries opening the exact draft from the thread without losing the draft card', async () => {
+  const { api, emitChanged } = await mount(rendererAdapter('draft-reader'))
+  const editDraft = screen.getByRole('button', { name: 'Edit draft' })
+  const slowOpen = deferred<Awaited<ReturnType<typeof api.composeDraftByMessage>>>()
+  api.composeDraftByMessage
+    .mockRejectedValueOnce(new Error('The Engine is offline'))
+    .mockReturnValueOnce(slowOpen.promise)
+  await act(async () => {
+    editDraft.focus()
+    fireEvent.click(editDraft)
+  })
+  await act(async () => vi.advanceTimersByTimeAsync(1))
+  expect(screen.getByText('Could not open draft')).toBeTruthy()
+  expect(document.activeElement).toBe(editDraft)
+  await act(async () => {
+    fireEvent.click(editDraft)
+    emitChanged()
+  })
+  expect(screen.getByRole('button', { name: 'Edit draft' })).toBe(editDraft)
+  expect(editDraft.getAttribute('aria-disabled')).toBe('true')
+  await act(async () => fireEvent.click(editDraft))
+  expect(api.composeDraftByMessage.mock.calls).toEqual([
+    ['thread-1:older', undefined],
+    ['thread-1:older', undefined],
+  ])
+  const existing = await api.composeDraft('draft-1')
+  await act(async () => slowOpen.resolve(existing))
+  const composer = within(screen.getByRole('dialog', { name: 'Compose' }))
+  const subject = composer.getByRole<HTMLInputElement>('textbox', { name: 'Subject' })
+  expect(subject.value).toBe(existing.subject)
+  expect(api.startCompose).not.toHaveBeenCalled()
+  const send = vi.spyOn(api, 'sendDraft')
+  await act(async () => fireEvent.change(subject, { target: { value: 'Reviewed draft' } }))
+  await act(async () => fireEvent.click(composer.getByRole('button', { name: /^Send ⌘/ })))
+  expect(send).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({
+      draftId: existing.id,
+      revision: existing.revision,
+      edits: expect.objectContaining({
+        fields: expect.objectContaining({ subject: 'Reviewed draft' }),
+      }),
+    }),
+  )
+})
 
 it.each([
   ['c', 'new', 'To'],

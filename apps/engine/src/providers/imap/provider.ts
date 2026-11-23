@@ -150,11 +150,11 @@ export class ImapProvider {
     return imapEndpoint(this.#credentials.imap)
   }
 
-  #draftId(folder: string, uid: number, uidValidity: bigint): string {
+  draftId(folder: string, uid: number, uidValidity: string): string {
     return JSON.stringify({
       folder,
       uid,
-      uidValidity: String(uidValidity),
+      uidValidity,
       endpoint: this.draftEndpoint,
     })
   }
@@ -175,7 +175,7 @@ export class ImapProvider {
           uid: item.uid,
           uidValidity: String(box.uidValidity),
           size: item.size ?? 0,
-          id: this.#draftId(folder.path, item.uid, box.uidValidity),
+          id: this.draftId(folder.path, item.uid, String(box.uidValidity)),
         })
       }
       return drafts
@@ -217,7 +217,7 @@ export class ImapProvider {
       const result = await client.append(folder.path, source, ['\\Draft', '\\Seen'])
       if (!result || !result.uid || !result.uidValidity)
         throw new Error('No UID for saved IMAP draft')
-      const id = this.#draftId(folder.path, result.uid, result.uidValidity)
+      const id = this.draftId(folder.path, result.uid, String(result.uidValidity))
       return { id, message: { id }, sourceHash: draftSourceHash(source) }
     })
   }

@@ -38,6 +38,7 @@ import {
   SenderAvatarResolve,
   SenderDecision,
   SenderListQuery,
+  THREAD_DRAFT_UNAVAILABLE,
   TriageExportInput,
   TriageHistoryQuery,
   TriageQueueQuery,
@@ -63,7 +64,7 @@ import { projectActionFailures } from './action-failures'
 import { clearPairing, loadPairing, savePairing } from './auth'
 import { AutoTriage } from './auto-triage'
 import { desktopDiagnostics, installedCliVersion } from './diagnostics'
-import { composeDraftPath } from './draft-updates'
+import { composeDraftPath, DraftRecoveryPending } from './draft-updates'
 import { carryRequest, EngineClient, EngineError } from './engine'
 import { registerFeedbackIpc } from './feedback-ipc'
 import { Handoff, t3NavigationLink } from './handoff'
@@ -332,6 +333,7 @@ function requireEngine(): EngineClient {
 const safeEngineHints = new Set([
   DRAFT_CHANGED,
   DRAFT_MISSING,
+  THREAD_DRAFT_UNAVAILABLE,
   MIRROR_CHANGED,
   'The recipients, subject or attachments may have changed. Reopen the draft to review them.',
   'Triage queue changed. Start a fresh snapshot.',
@@ -364,7 +366,8 @@ function handle<Args extends unknown[], Result>(
         throw ipcError(channel, error.original, `Review rejected: ${hint}`)
       }
       const hint =
-        error instanceof EngineError && safeEngineHints.has(error.message)
+        error instanceof DraftRecoveryPending ||
+        (error instanceof EngineError && safeEngineHints.has(error.message))
           ? error.message
           : undefined
       throw ipcError(channel, error, hint)
@@ -770,6 +773,24 @@ function registerComposeIpc() {
   handle('amc:composeDraft', async (_e, id: string) => {
     await draftRecovery
     return requireEngine().get(draftPath(id), { signal: AbortSignal.timeout(15_000) })
+  })
+  handle('amc:composeDraftByMessage', async (_e, messageId: string, imapRevision?: string) => {
+    const client = requireEngine()
+    const recovering = draftRecovery
+    await recovering
+    if (engine !== client) throw new Error('The Engine pairing changed')
+    const path = `${compose}/drafts/by-message/${encodeURIComponent(messageId)}`
+    const query = imapRevision ? `?${new URLSearchParams({ imapRevision })}` : ''
+    const load = () =>
+      client.get<ComposeDraft>(path + query, { signal: AbortSignal.timeout(15_000) })
+    const draft = await load()
+    const recoveryChanged = recovering !== draftRecovery
+    if (recoveryChanged) await draftRecovery
+    if (engine !== client) throw new Error('The Engine pairing changed')
+    const replayed = await openReplica().draftUpdates.recover(client, draft.id)
+    const opened = recoveryChanged || replayed ? await load() : draft
+    if (engine !== client || opened.id !== draft.id) throw new Error('The draft changed')
+    return opened
   })
   handle('amc:discardDraft', async (_e, id: string, revision: number) => {
     const client = requireEngine()

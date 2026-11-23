@@ -259,6 +259,7 @@ export interface AmcApi {
   startCompose(input: ComposeStart): Promise<ComposeDraft>
   composeDrafts(): Promise<VersionedDraft[]>
   composeDraft(id: string): Promise<ComposeDraft>
+  composeDraftByMessage(messageId: string, imapRevision?: string): Promise<ComposeDraft>
   discardDraft(id: string, revision: number): Promise<DiscardDraftResult>
   stageComposeBody(id: string, patch: ComposePatch): void
   saveCompose(id: string, patch: ComposePatch): Promise<ComposeDraft>

@@ -48,6 +48,10 @@ export interface ComposePatch {
 }
 
 export const DRAFT_MISSING = 'Draft does not exist'
+export const DRAFT_RECOVERY_PENDING =
+  'AMC still has unsaved changes for this draft. Try opening it again.'
+export const THREAD_DRAFT_UNAVAILABLE =
+  'This draft is unavailable from the thread. Check Drafts or try again after sync.'
 export const DRAFT_CHANGED = 'Draft changed. Review before sending'
 export const MIRROR_CHANGED =
   'Send cancelled. The provider draft was changed or removed. Review it before sending.'
