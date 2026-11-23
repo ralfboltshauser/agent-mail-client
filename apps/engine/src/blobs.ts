@@ -73,6 +73,7 @@ export class BlobStore {
     try {
       return readFileSync(this.path(hash))
     } catch {
+      // Callers treat unreadable files as unavailable and can refetch them from the provider.
       return null
     }
   }

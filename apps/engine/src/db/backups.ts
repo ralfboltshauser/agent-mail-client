@@ -85,6 +85,7 @@ export function latestBackup(dir: string): { at: number; bytes: number } | null 
       try {
         prepareSnapshot(path, false)
       } catch {
+        // Health represents an unverifiable snapshot as unavailable. The backup job reports failures.
         return null
       }
       verifiedBackup = fingerprint

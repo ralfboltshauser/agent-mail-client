@@ -1,7 +1,11 @@
+import type { RequestId } from '@amc/observability'
+
+type FinishPoll = ((ok: boolean) => void) & { requestId?: RequestId }
+
 /** A manual request joins the next pass through the existing, serial provider loop. */
 export class ManualPoll {
   readonly #signal: AbortSignal
-  #pending?: (ok: boolean) => void
+  #pending?: FinishPoll
   #waiting?: AbortController
   #backingOff = false
 
@@ -9,7 +13,7 @@ export class ManualPoll {
     this.#signal = signal
   }
 
-  request(): Promise<boolean> {
+  request(requestId?: RequestId): Promise<boolean> {
     const signal = this.#signal
     if (signal.aborted || this.#backingOff) return Promise.resolve(false)
     return new Promise((resolve) => {
@@ -22,12 +26,12 @@ export class ManualPoll {
         resolve(ok)
       }
       signal.addEventListener('abort', abort, { once: true })
-      this.#pending = finish
+      this.#pending = Object.assign(finish, { requestId })
       this.#waiting?.abort()
     })
   }
 
-  take(): ((ok: boolean) => void) | undefined {
+  take(): FinishPoll | undefined {
     const finish = this.#pending
     this.#pending = undefined
     return finish

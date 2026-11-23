@@ -13,6 +13,7 @@ import { MAX_ATTACHMENT_BYTES } from '../mail/drafts.ts'
 import { type Outbox, requireDesktopSend } from '../mail/outbox.ts'
 import { getSetting, setSetting } from '../settings.ts'
 import type { AppEnv } from './app.ts'
+import { readJson } from './json.ts'
 import { getAttachment, type MailDeps } from './mail.ts'
 
 const id = z.string().min(1).max(512)
@@ -61,7 +62,7 @@ const attachment = z.object({
 })
 
 async function body<T>(c: Context<AppEnv>, schema: z.ZodType<T>): Promise<T> {
-  const result = schema.safeParse(await c.req.json().catch(() => null))
+  const result = schema.safeParse(await readJson(c.req))
   if (!result.success) throw new HTTPException(400, { message: 'Invalid compose request' })
   return result.data
 }

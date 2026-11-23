@@ -1,4 +1,6 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomUUID } from 'node:crypto'
+import { newRunId } from '@amc/observability'
 import {
   type AgentMutationResult,
   actionLabels,
@@ -13,6 +15,7 @@ import {
 } from '@amc/protocol'
 import { agentGrantActive, type Principal } from '../auth/tokens.ts'
 import { transaction } from '../db/database.ts'
+import { OperationStatus } from '../db/diagnostics.ts'
 import type { Logger } from '../log.ts'
 import { GmailHttpError } from '../providers/gmail/http.ts'
 import { gmailSender } from '../providers/gmail/mapping.ts'
@@ -294,6 +297,9 @@ export class Mutations {
   readonly #store: MailStore
   readonly #api: (accountId: string) => GmailApi | null
   readonly #log: Logger
+  readonly #workerStatus = new OperationStatus()
+  readonly #actionLog = new AsyncLocalStorage<Logger>()
+  readonly #runningRetries = new Map<string, { id: string; log: Logger }>()
   readonly #imap: ImapMutationRunner | undefined
   readonly #now: () => number
   readonly snoozeEnabled: boolean
@@ -338,7 +344,9 @@ export class Mutations {
   }
 
   kick() {
-    void this.tick().catch((error) => this.#log.error({ err: error }, 'organise queue error'))
+    void this.tick().catch(() => {
+      // tick records the worker failure before rejecting to its caller.
+    })
   }
 
   submit(principal: string, requests: MutationRequest[], allowTrash = true): MutationResult[] {
@@ -1434,6 +1442,30 @@ export class Mutations {
   }
 
   async tick(): Promise<void> {
+    const start = performance.now()
+    try {
+      await this.#tick()
+      const { recovered, count } = this.#workerStatus.success()
+      if (recovered)
+        this.#log.log('info', 'mutation.worker.finished', {
+          recovered,
+          count,
+          durationMs: performance.now() - start,
+        })
+    } catch (err) {
+      const count = this.#workerStatus.failure(err)
+      if (count)
+        this.#log.log('error', 'mutation.worker.finished', {
+          recovered: false,
+          count,
+          durationMs: performance.now() - start,
+          err,
+        })
+      throw err
+    }
+  }
+
+  async #tick(): Promise<void> {
     scanSenderEnvelopes(this.#store)
     transaction(this.#db, () => {
       if (!this.snoozeEnabled) {
@@ -1493,7 +1525,9 @@ export class Mutations {
         if (row.account_status === 'auth_expired') {
           this.#finish(row, 'failed', 'Sign in to IMAP again to organise this Account')
         } else {
-          const task = this.#writeImap(row).finally(() => this.#running.delete(row.account_id))
+          const task = this.#runAction(row, () => this.#writeImap(row)).finally(() =>
+            this.#running.delete(row.account_id),
+          )
           this.#running.set(row.account_id, task)
           started.push(task)
         }
@@ -1512,11 +1546,42 @@ export class Mutations {
         }
         continue
       }
-      const task = this.#write(api, row).finally(() => this.#running.delete(row.account_id))
+      const task = this.#runAction(row, () => this.#write(api, row)).finally(() =>
+        this.#running.delete(row.account_id),
+      )
       this.#running.set(row.account_id, task)
       started.push(task)
     }
     await Promise.all(started)
+  }
+
+  async #runAction(row: MutationRow, work: () => Promise<void>) {
+    // Mutation IDs supplied by a Client are application data. Allocate a private log ID.
+    const retry = this.#runningRetries.get(row.account_id)
+    if (retry && retry.id !== row.id) this.#runningRetries.delete(row.account_id)
+    const log =
+      retry?.id === row.id
+        ? retry.log
+        : this.#log.with({ accountId: row.account_id, runId: newRunId() })
+    const start = performance.now()
+    await this.#actionLog.run(log, work)
+    const current = this.#row(row.id)
+    if (!current || current.status === 'pending') return
+    const recovered = this.#runningRetries.delete(row.account_id) || row.attempts > 0
+    log.log(
+      recovered || current.status !== 'applied' ? 'info' : 'debug',
+      'mutation.action.finished',
+      {
+        durationMs: performance.now() - start,
+        outcome:
+          current.status === 'applied'
+            ? 'applied'
+            : current.status === 'partial'
+              ? 'partial'
+              : 'failed',
+        recovered: recovered && current.status === 'applied',
+      },
+    )
   }
 
   async #writeImap(row: MutationRow) {
@@ -1578,7 +1643,7 @@ export class Mutations {
             () => this.#saveJournal(row, journal),
             allowTrash,
             beforeWrite,
-            this.#log.child({ mutation: row.id }),
+            this.#actionLog.getStore() ?? this.#log.with({ accountId: row.account_id }),
             snoozing || !!this.#screenRequest(row),
             screen
               ? {
@@ -2146,7 +2211,8 @@ export class Mutations {
           try {
             checkpoint = (await api.getMessageState(rawId(message_id), true)) ?? message
           } catch {
-            // Keep the acknowledgement even if the checkpoint read fails.
+            // The write is acknowledged already. A missing optional checkpoint is handled
+            // by Undo's verification; a log for each affected message would repeat the outcome.
           }
         }
         const revisions = this.#revisions(after, checkpoint.historyId)
@@ -2520,6 +2586,14 @@ export class Mutations {
     this.#db
       .prepare('UPDATE mutation SET attempts = attempts + 1, next_attempt = ? WHERE id = ?')
       .run(this.#now() + Math.max(delay, retryAfter), row.id)
+    const log =
+      this.#actionLog.getStore() ?? this.#log.with({ accountId: row.account_id, runId: newRunId() })
+    this.#runningRetries.set(row.account_id, { id: row.id, log })
+    log.log(row.attempts === 0 ? 'warn' : 'debug', 'mutation.retry', {
+      attempt: row.attempts + 1,
+      durationMs: Math.max(delay, retryAfter),
+      err: error,
+    })
     return true
   }
 

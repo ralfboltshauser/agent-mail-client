@@ -55,9 +55,9 @@ export function gmailPubSub(project: string, secretsDir: string): GmailPubSub {
         })
       }
       token = (await auth.getAccessToken()).token
-    } catch {
+    } catch (cause) {
       auth = undefined
-      throw new GmailPubSubError('Cannot authenticate Gmail Pub/Sub subscriber')
+      throw new GmailPubSubError('Cannot authenticate Gmail Pub/Sub subscriber', { cause })
     }
     if (!token) throw new GmailPubSubError('No Gmail Pub/Sub access token')
     const response = await fetch(`https://pubsub.googleapis.com/v1/${subscription}:${action}`, {

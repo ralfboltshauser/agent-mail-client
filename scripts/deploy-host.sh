@@ -32,8 +32,8 @@ sudo install -m 644 /tmp/amc-release/*.mjs /tmp/amc-release/*.mjs.map "$REL"/
 echo "$SHA" | sudo tee "$REL/RELEASE" >/dev/null
 
 sudo ln -sfn "$REL" /opt/amc/current
-if ! sudo amc-engine migrate; then
-  echo "✗ migration failed; rolling back" >&2
+if ! sudo systemd-cat --identifier=amc-migration /usr/local/bin/amc-engine migrate --journal; then
+  echo "✗ migration failed; rolling back (see local journal tag amc-migration)" >&2
   [ -n "$PREV" ] && sudo ln -sfn "$PREV" /opt/amc/current
   exit 1
 fi

@@ -8,6 +8,7 @@ import {
   SNOOZE_DISABLED,
 } from '../mail/mutations.ts'
 import { type AppEnv, requireScope } from './app.ts'
+import { readJson } from './json.ts'
 
 const requireOrganiseClient: MiddlewareHandler<AppEnv> = async (c, next) => {
   const { kind } = c.get('principal')
@@ -23,7 +24,7 @@ const MutationKinds = z.object({
 export function mutationRoutes(queue: Mutations) {
   const routes = new Hono<AppEnv>()
   const submit: Handler<AppEnv> = async (c) => {
-    const body: unknown = await c.req.json().catch(() => null)
+    const body: unknown = await readJson(c.req)
     if (!queue.snoozeEnabled) {
       const batch = MutationKinds.safeParse(body)
       if (batch.data?.mutations.some(({ action }) => action.kind === 'unsnooze'))
@@ -51,7 +52,7 @@ export function mutationRoutes(queue: Mutations) {
   routes.post('/mutations', requireScope('organize'), requireOrganiseClient, submit)
   routes.post('/mutations/review', requireScope('organize'), requireOrganiseClient, submit)
   routes.post('/mutations/status', requireScope('organize'), requireOrganiseClient, async (c) => {
-    const parsed = MutationLookup.safeParse(await c.req.json().catch(() => null))
+    const parsed = MutationLookup.safeParse(await readJson(c.req))
     if (!parsed.success)
       return c.json({ error: 'bad_request', message: 'Invalid mutation IDs' }, 400)
     const mutations = queue.lookup(c.get('principal').tokenId, parsed.data.ids)

@@ -4,12 +4,13 @@ import { setBucketAsAgent } from '../mail/agent-actions.ts'
 import type { MailStore } from '../mail/store.ts'
 import { correctBucket, setOwnerBucket } from '../mail/triage/corrections.ts'
 import { type AppEnv, requireScope } from './app.ts'
+import { readJson } from './json.ts'
 
 export function bucketRoutes(store: MailStore) {
   const routes = new Hono<AppEnv>()
 
   routes.put('/bucket', requireScope('organize'), async (c) => {
-    const body = await c.req.json().catch(() => null)
+    const body = await readJson(c.req)
     if (body && typeof body === 'object' && 'intent' in body) {
       const review = BucketReviewInput.safeParse(body)
       if (!review.success)

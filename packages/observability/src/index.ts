@@ -13,6 +13,7 @@ import { newRunId } from './ids.ts'
 export {
   type ErrorClass,
   type ErrorCode,
+  errorClasses,
   type SafeError,
   sanitizeError,
   sanitizeErrorMessage,

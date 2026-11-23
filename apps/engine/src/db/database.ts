@@ -1,7 +1,9 @@
 import { mkdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { type EventFields, newRunId } from '@amc/observability'
 import type { Logger } from '../log.ts'
+import type { OperationStatus } from './diagnostics.ts'
 import { MIGRATIONS, type Migration } from './migrations.ts'
 
 export type Db = DatabaseSync
@@ -50,8 +52,46 @@ export function backupTo(db: Db, targetPath: string): void {
  */
 export function migrate(
   db: Db,
-  options: { backupDir?: string; log?: Logger; migrations?: readonly Migration[] } = {},
+  options: {
+    backupDir?: string
+    log?: Logger
+    migrations?: readonly Migration[]
+    status?: OperationStatus
+  } = {},
 ): number {
+  const log = options.log?.with({ runId: newRunId() })
+  const start = performance.now()
+  log?.log('debug', 'deploy.migration.started', {})
+  let stage: EventFields<'deploy.migration.failed'>['stage'] = 'verify'
+  try {
+    const { version, applied } = applyMigrations(db, { ...options, log }, (next) => {
+      stage = next
+    })
+    const state = options.status?.success()
+    log?.log('info', 'deploy.migration.succeeded', {
+      schemaVersion: version,
+      durationMs: performance.now() - start,
+      count: applied,
+      recovered: state?.recovered ?? false,
+    })
+    return version
+  } catch (err) {
+    options.status?.failure(err)
+    log?.log('error', 'deploy.migration.failed', {
+      durationMs: performance.now() - start,
+      count: 1,
+      stage,
+      err,
+    })
+    throw err
+  }
+}
+
+function applyMigrations(
+  db: Db,
+  options: { backupDir?: string; log?: Logger; migrations?: readonly Migration[] },
+  setStage: (stage: 'backup' | 'apply') => void,
+): { version: number; applied: number } {
   const migrations = options.migrations ?? MIGRATIONS
   const current = schemaVersion(db)
   const hasTable = (name: string) =>
@@ -82,15 +122,33 @@ export function migrate(
   const pending = migrations
     .filter((m) => m.version > current)
     .sort((a, b) => a.version - b.version)
-  if (pending.length === 0) return current
+  if (pending.length === 0) return { version: current, applied: 0 }
 
   if (current > 0 && options.backupDir) {
-    mkdirSync(options.backupDir, { recursive: true })
-    const target = join(options.backupDir, `pre-migrate-v${current}-${Date.now()}.db`)
-    backupTo(db, target)
-    options.log?.info({ target }, 'backed up database before migrating')
+    setStage('backup')
+    const start = performance.now()
+    try {
+      mkdirSync(options.backupDir, { recursive: true })
+      const target = join(options.backupDir, `pre-migrate-v${current}-${Date.now()}.db`)
+      backupTo(db, target)
+      options.log?.log('info', 'deploy.backup.succeeded', {
+        stage: 'pre-migration',
+        durationMs: performance.now() - start,
+        count: 1,
+        recovered: false,
+      })
+    } catch (err) {
+      options.log?.log('error', 'deploy.backup.failed', {
+        stage: 'pre-migration',
+        durationMs: performance.now() - start,
+        count: 1,
+        err,
+      })
+      throw err
+    }
   }
 
+  setStage('apply')
   for (const migration of pending) {
     transaction(db, () => {
       db.exec(
@@ -103,15 +161,16 @@ export function migrate(
       )
       db.exec(`PRAGMA user_version = ${migration.version}`)
     })
-    options.log?.info({ version: migration.version, name: migration.name }, 'applied migration')
+    options.log?.log('info', 'deploy.migration.applied', { schemaVersion: migration.version })
   }
-  return schemaVersion(db)
+  return { version: schemaVersion(db), applied: pending.length }
 }
 
 export function fileSize(path: string): number {
   try {
     return statSync(path).size
   } catch {
+    // The WAL can disappear between checks. Missing sizes are represented as zero.
     return 0
   }
 }

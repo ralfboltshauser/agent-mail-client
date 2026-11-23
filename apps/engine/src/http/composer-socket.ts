@@ -1,16 +1,29 @@
 import type { Server } from 'node:http'
+import {
+  isCorrelationId,
+  newRequestId,
+  REQUEST_ID_HEADER,
+  type RequestId,
+} from '@amc/observability'
 import { Hocuspocus } from '@hocuspocus/server'
 import { WebSocketServer } from 'ws'
 import * as Y from 'yjs'
 import type { Config } from '../config.ts'
 import type { Db } from '../db/database.ts'
+import type { Logger } from '../log.ts'
 import { DraftError, type Drafts } from '../mail/drafts.ts'
 import { allowedComposerLogin, COMPOSER_WS, composerDraft } from './composer-link.ts'
 
 const ACCESS_ENDED = { code: 4403, reason: 'Composer Link is no longer available' }
 const MAX_UPDATE = 1_500_000
 
-export function serveComposerSocket(server: Server, config: Config, db: Db, drafts: Drafts) {
+export function serveComposerSocket(
+  server: Server,
+  config: Config,
+  db: Db,
+  drafts: Drafts,
+  log?: Logger,
+) {
   const origin = config.composerOrigin
   if (!origin) return () => {}
   const sockets = new WebSocketServer({ noServer: true, maxPayload: MAX_UPDATE + 1024 })
@@ -63,14 +76,36 @@ export function serveComposerSocket(server: Server, config: Config, db: Db, draf
     },
   })
 
+  let stopping = false
+  sockets.on('headers', (headers, req) => {
+    headers.push(`${REQUEST_ID_HEADER}: ${req.headers[REQUEST_ID_HEADER]}`)
+  })
   server.on('upgrade', (req, socket, head) => {
+    const incoming = req.headers[REQUEST_ID_HEADER]
+    const requestId = isCorrelationId(incoming) ? (incoming as RequestId) : newRequestId()
+    req.headers[REQUEST_ID_HEADER] = requestId
+    const streamLog = log?.with({ requestId })
+    const start = performance.now()
+    const reportClose = (
+      reason: 'shutdown' | 'client' | 'authorization' | 'failed',
+      err?: unknown,
+    ) =>
+      streamLog?.log(reason === 'failed' ? 'warn' : 'debug', 'http.stream.closed', {
+        transport: 'websocket',
+        reason,
+        durationMs: performance.now() - start,
+        err,
+      })
     const login = req.headers['tailscale-user-login']
     if (
       req.url !== COMPOSER_WS ||
       req.headers.origin !== origin ||
       !allowedComposerLogin(config, typeof login === 'string' ? login : null)
     ) {
-      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+      reportClose('authorization')
+      socket.end(
+        `HTTP/1.1 403 Forbidden\r\n${REQUEST_ID_HEADER}: ${requestId}\r\nConnection: close\r\n\r\n`,
+      )
       return
     }
     const headers = new Headers()
@@ -78,6 +113,8 @@ export function serveComposerSocket(server: Server, config: Config, db: Db, draf
       if (typeof value === 'string') headers.set(name, value)
     }
     sockets.handleUpgrade(req, socket, head, (ws) => {
+      streamLog?.log('debug', 'http.stream.opened', { transport: 'websocket' })
+      let failure: Error | undefined
       const connection = hocuspocus.handleConnection(
         ws,
         new Request(new URL(COMPOSER_WS, origin), { headers }),
@@ -90,8 +127,21 @@ export function serveComposerSocket(server: Server, config: Config, db: Db, draf
         connection.handleMessage(message)
       })
       ws.on('pong', () => connection.touch())
-      ws.on('error', () => ws.terminate())
-      ws.on('close', (code, reason) => connection.handleClose({ code, reason: reason.toString() }))
+      ws.on('error', (err) => {
+        failure = err
+        ws.terminate()
+      })
+      ws.on('close', (code, reason) => {
+        const outcome = stopping
+          ? 'shutdown'
+          : code === ACCESS_ENDED.code
+            ? 'authorization'
+            : failure || (code !== 1000 && code !== 1001)
+              ? 'failed'
+              : 'client'
+        reportClose(outcome, failure)
+        connection.handleClose({ code, reason: reason.toString() })
+      })
     })
   })
 
@@ -111,6 +161,7 @@ export function serveComposerSocket(server: Server, config: Config, db: Db, draf
     for (const ws of sockets.clients) ws.ping()
   }, 15_000).unref()
   return () => {
+    stopping = true
     clearInterval(heartbeat)
     clearInterval(timer)
     for (const ws of sockets.clients) ws.terminate()

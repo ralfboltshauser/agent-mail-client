@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { open } from 'node:fs/promises'
+import type { EventFields } from '@amc/observability'
 import type { LabelPatch } from '@amc/protocol'
 import { transaction } from '../../db/database.ts'
 import type { Logger } from '../../log.ts'
@@ -77,21 +78,24 @@ async function openSource(
   }
 }
 
+type VerificationStage = EventFields<'sync.imap.writeback.verification'>['stage']
+type Verify = (stage: VerificationStage, err?: unknown) => void
+
 async function moveLookup(
   sync: ImapAccountSync,
   source: MessageLocation,
   destination: Folder,
-  log: Logger,
+  verify: Verify,
 ) {
   if (!source.source_blob) {
-    log.warn('IMAP move verification snapshot omitted because the source hash is missing')
+    verify('missing-source-hash')
     return
   }
   const row = sync.store.db
     .prepare('SELECT rfc_message_id FROM message WHERE id = ?')
     .get(source.message_id) as { rfc_message_id: string | null } | undefined
   if (!row?.rfc_message_id) {
-    log.warn('IMAP move verification snapshot omitted because Message-ID is missing')
+    verify('missing-message-id')
     return
   }
   try {
@@ -103,52 +107,47 @@ async function moveLookup(
         firstNewUid: box.uidNext,
       }
     }
-  } catch {
-    log.warn('IMAP move verification could not open the destination before the move')
+  } catch (err) {
+    verify('open-destination', err)
     return
   }
-  log.warn('IMAP move verification could not read destination UIDVALIDITY or UIDNEXT')
+  verify('missing-uid-state')
 }
 
 async function findMovedUid(
   client: ImapClient,
   move: Move,
-  log: Logger,
+  verify: Verify,
   reportedValidity?: string,
 ) {
   const { destination, source, lookup } = move
   if (!lookup || !source.source_blob) {
-    log.warn('IMAP move verification fallback skipped because the pre-move snapshot is missing')
+    verify('missing-snapshot')
     return
   }
   const { messageId, validity, firstNewUid } = lookup
   if (reportedValidity && reportedValidity !== validity) {
-    log.warn(
-      'IMAP move verification stopped because COPYUID disagrees with destination UIDVALIDITY',
-    )
+    verify('changed-validity')
     return
   }
 
-  let stage = 'open destination'
   try {
     const open = () => client.mailboxOpen(destination.path, { readOnly: true })
     if (String((await open()).uidValidity) !== validity) {
-      log.warn('IMAP move verification stopped because destination UIDVALIDITY changed')
+      verify('changed-validity')
       return
     }
-    stage = 'search by Message-ID'
     const matches = await client.search({ header: { 'Message-ID': messageId } }, { uid: true })
     if (!matches || !matches.length) {
-      log.warn('IMAP move verification found no Message-ID candidates')
+      verify('no-candidates')
       return
     }
 
-    stage = 'hash candidate source'
     let uid: number | undefined
     for (const candidate of new Set(matches)) {
       const { content } = await client.download(String(candidate), undefined, { uid: true })
       if (!content) {
-        log.warn('IMAP move verification could not download a candidate')
+        verify('candidate-download')
         return
       }
       const hash = createHash('sha256')
@@ -156,26 +155,22 @@ async function findMovedUid(
       if (hash.digest('hex') !== source.source_blob) continue
       // A UID already allocated before the move cannot identify the moved copy.
       if (uid !== undefined || candidate < firstNewUid) {
-        log.warn('IMAP move verification found an ambiguous full-source match')
+        verify('ambiguous-match')
         return
       }
       uid = candidate
     }
     if (uid === undefined) {
-      log.warn('IMAP move verification found no matching source hash')
+      verify('no-match')
       return
     }
-    stage = 'recheck destination UIDVALIDITY'
     if (String((await open()).uidValidity) !== validity) {
-      log.warn(
-        'IMAP move verification stopped because destination UIDVALIDITY changed during lookup',
-      )
+      verify('changed-validity')
       return
     }
     return { uid, validity }
-  } catch {
-    // Provider errors may include mail data.
-    log.warn({ stage }, 'IMAP move verification fallback failed')
+  } catch (err) {
+    verify('verify', err)
   }
 }
 
@@ -200,6 +195,7 @@ async function readSourceSender(sync: ImapAccountSync, source: MessageLocation) 
       await file.close()
     }
   } catch {
+    // Sender proof is optional. Without it the guarded write remains ineligible.
     return null
   }
 }
@@ -212,6 +208,40 @@ export async function executeImap(
   allowTrash: boolean,
   beforeWrite: () => void,
   log: Logger,
+  requireDestinationUid = false,
+  screening?: { address?: string; filtered?: boolean; intoManaged: boolean },
+) {
+  const stages = new Map<VerificationStage, { count: number; err?: unknown }>()
+  const verify: Verify = (stage, err) => {
+    const prior = stages.get(stage)
+    stages.set(stage, { count: (prior?.count ?? 0) + 1, err: prior?.err ?? err })
+  }
+  try {
+    return await writeImap(
+      sync,
+      changes,
+      entry,
+      save,
+      allowTrash,
+      beforeWrite,
+      verify,
+      requireDestinationUid,
+      screening,
+    )
+  } finally {
+    for (const [stage, fields] of stages)
+      log.log('debug', 'sync.imap.writeback.verification', { stage, ...fields })
+  }
+}
+
+async function writeImap(
+  sync: ImapAccountSync,
+  changes: ImapChange[],
+  entry: ImapJournalEntry,
+  save: () => void,
+  allowTrash: boolean,
+  beforeWrite: () => void,
+  verify: Verify,
   requireDestinationUid = false,
   screening?: { address?: string; filtered?: boolean; intoManaged: boolean },
 ) {
@@ -232,8 +262,8 @@ export async function executeImap(
     const { source, destination, flags } = move
     const path = decodeURIComponent(source.path_key)
     if (!uid || !validity) {
-      log.warn('IMAP move returned incomplete COPYUID; verifying the destination UID')
-      const recovered = await findMovedUid(client, move, log, validity)
+      verify('incomplete-copyuid')
+      const recovered = await findMovedUid(client, move, verify, validity)
       uid = recovered?.uid
       validity = recovered?.validity
       if (!recovered) await sync.refreshOrganiseFolder(destination)
@@ -249,7 +279,7 @@ export async function executeImap(
         })
         change.revisions = Object.fromEntries(Object.keys(change.after).map((id) => [id, revision]))
       } else {
-        if (observed) log.warn('IMAP move destination UID is already assigned to another message')
+        if (observed) verify('assigned-uid')
         delete change.revisions
         if (requireDestinationUid)
           entry.error ??= screening
@@ -283,7 +313,7 @@ export async function executeImap(
       return true
     }
     if (screening && (!pending.copied?.uid || !pending.copied.validity)) {
-      const recovered = await findMovedUid(client, pending.move, log, pending.copied?.validity)
+      const recovered = await findMovedUid(client, pending.move, verify, pending.copied?.validity)
       if (!recovered) {
         stopCopyCleanup()
         await sync.refreshOrganiseFolder(destination)
@@ -345,9 +375,10 @@ export async function executeImap(
           (await client.messageFlagsAdd(String(uid), ['\\Deleted'], { uid: true }))) &&
           (await client.uidExpunge(uid)) &&
           !(await readFlags(client, uid)))
-    } catch {
+    } catch (err) {
       // The copy is confirmed. A later pass can find this UID already gone if
       // the server removed it before the connection or its response was lost.
+      verify('remove-source', err)
     }
     if (!removed) {
       await sync.refreshOrganiseFolder(destination)
@@ -504,7 +535,7 @@ export async function executeImap(
         continue
       }
     }
-    const lookup = destination && (await moveLookup(sync, source, destination, log))
+    const lookup = destination && (await moveLookup(sync, source, destination, verify))
     const uid = String(source.uid)
     const path = decodeURIComponent(source.path_key)
     const flags = (await openSource(client, source, false)) && (await readFlags(client, source.uid))

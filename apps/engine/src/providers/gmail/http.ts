@@ -30,10 +30,9 @@ export class GmailHttpError extends Error {
 }
 
 export interface RetryInfo {
-  path: string
+  attempt: number
   status: number
   delayMs: number
-  rate: number
 }
 
 type Cost = keyof typeof QUOTA_COST
@@ -119,7 +118,7 @@ export class GmailHttpApi implements GmailApi {
         signal?.throwIfAborted()
         if (options.writeback || options.method || attempt >= 8 || error instanceof OAuthError)
           throw error
-        await this.#delay(path, 0, attempt, signal)
+        await this.#delay(0, attempt, signal)
         continue
       }
       if (res.ok) {
@@ -160,7 +159,7 @@ export class GmailHttpApi implements GmailApi {
         (res.status === 403 && reason === 'backendError')
       if (retryable && attempt < 8 && !options.writeback && !options.submission) {
         if (quota) this.#limiter.penalize()
-        await this.#delay(path, res.status, attempt, signal, quota, retryAfterMs)
+        await this.#delay(res.status, attempt, signal, quota, retryAfterMs)
         continue
       }
       if (quota) this.#limiter.penalize()
@@ -174,7 +173,6 @@ export class GmailHttpApi implements GmailApi {
   }
 
   async #delay(
-    path: string,
     status: number,
     attempt: number,
     signal: AbortSignal | undefined,
@@ -183,7 +181,7 @@ export class GmailHttpApi implements GmailApi {
   ) {
     const base = quota ? Math.min(5_000 * (attempt + 1), 60_000) : 2 ** attempt * 500
     const delayMs = (retryAfterMs || base) + Math.random() * 250
-    this.#onRetry?.({ path, status, delayMs, rate: this.#limiter.rate })
+    this.#onRetry?.({ attempt: attempt + 1, status, delayMs })
     await sleep(delayMs, undefined, signal ? { signal } : undefined)
   }
 

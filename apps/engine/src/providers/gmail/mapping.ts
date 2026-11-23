@@ -26,6 +26,7 @@ function decodeBody(part: GmailPart): string {
   try {
     return new TextDecoder(charsetOf(part), { fatal: false }).decode(bytes)
   } catch {
+    // An unsupported MIME charset uses the documented UTF-8 fallback.
     return new TextDecoder('utf-8').decode(bytes)
   }
 }

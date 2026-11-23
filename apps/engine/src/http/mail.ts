@@ -30,6 +30,7 @@ import {
 import { verifyImapAccount } from '../providers/imap/client.ts'
 import type { SyncManager } from '../sync/manager.ts'
 import { type AppEnv, requireScope } from './app.ts'
+import { readJson } from './json.ts'
 
 export interface MailDeps {
   db: Db
@@ -65,7 +66,7 @@ export function mailRoutes(deps: MailDeps) {
   })
 
   r.post('/accounts/imap', requireScope('admin'), async (c) => {
-    const parsed = ImapAccountInput.safeParse(await c.req.json().catch(() => null))
+    const parsed = ImapAccountInput.safeParse(await readJson(c.req))
     if (!parsed.success) {
       return c.json(
         { error: 'bad_request', message: 'Expected an address and TLS logins for IMAP and SMTP' },
@@ -73,41 +74,62 @@ export function mailRoutes(deps: MailDeps) {
       )
     }
     const { address, ...credentials } = parsed.data
-    return deps.sync.withImapPaused(address, async () => {
-      try {
-        await (deps.verifyImap ?? verifyImapAccount)(credentials)
-      } catch {
-        return c.json(
-          {
-            error: 'imap_signin_failed',
-            message: 'Could not verify the IMAP and SMTP logins over TLS',
-          },
-          400,
-        )
-      }
-      try {
-        const { id, created } = upsertImapAccount(db, deps.store, deps.sealer, {
-          address,
-          credentials,
-        })
-        return c.json({ accountId: id, address, created } satisfies ImapAccountAdded)
-      } catch (error) {
-        if (error instanceof AccountConflict) {
-          return c.json({ error: 'account_conflict', message: error.message }, 409)
+    return deps.sync.withImapPaused(
+      address,
+      async () => {
+        try {
+          await (deps.verifyImap ?? verifyImapAccount)(credentials)
+        } catch (err) {
+          log.log(
+            'warn',
+            'auth.account.signin',
+            { provider: 'imap', outcome: 'failed', err },
+            { requestId: c.get('requestId') },
+          )
+          return c.json(
+            {
+              error: 'imap_signin_failed',
+              message: 'Could not verify the IMAP and SMTP logins over TLS',
+            },
+            400,
+          )
         }
-        log.error('could not save IMAP Account')
-        return c.json(
-          { error: 'account_save_failed', message: 'Could not save the IMAP Account' },
-          500,
-        )
-      }
-    })
+        try {
+          const { id, created } = upsertImapAccount(db, deps.store, deps.sealer, {
+            address,
+            credentials,
+          })
+          log.log(
+            'info',
+            'auth.account.signin',
+            { provider: 'imap', outcome: created ? 'created' : 'updated' },
+            { accountId: id, requestId: c.get('requestId') },
+          )
+          return c.json({ accountId: id, address, created } satisfies ImapAccountAdded)
+        } catch (error) {
+          if (error instanceof AccountConflict) {
+            return c.json({ error: 'account_conflict', message: error.message }, 409)
+          }
+          log.log(
+            'error',
+            'auth.account.signin',
+            { provider: 'imap', outcome: 'failed', err: error },
+            { requestId: c.get('requestId') },
+          )
+          return c.json(
+            { error: 'account_save_failed', message: 'Could not save the IMAP Account' },
+            500,
+          )
+        }
+      },
+      c.get('requestId'),
+    )
   })
 
   // Adding a Gmail Account: the Client opens authUrl in a browser with a loopback redirect on
   // its own machine, then hands the code back here. The Engine alone exchanges and keeps it.
   r.post('/accounts/gmail/start', requireScope('admin'), async (c) => {
-    const parsed = GmailAuthStart.safeParse(await c.req.json().catch(() => null))
+    const parsed = GmailAuthStart.safeParse(await readJson(c.req))
     if (!parsed.success)
       return c.json({ error: 'bad_request', message: 'Expected redirectUri' }, 400)
     const redirect = new URL(parsed.data.redirectUri)
@@ -136,7 +158,7 @@ export function mailRoutes(deps: MailDeps) {
   })
 
   r.post('/accounts/gmail/complete', requireScope('admin'), async (c) => {
-    const parsed = GmailAuthComplete.safeParse(await c.req.json().catch(() => null))
+    const parsed = GmailAuthComplete.safeParse(await readJson(c.req))
     if (!parsed.success)
       return c.json({ error: 'bad_request', message: 'Expected code and state' }, 400)
     const pending = db
@@ -168,8 +190,13 @@ export function mailRoutes(deps: MailDeps) {
         address: profile.emailAddress,
         credentials,
       })
-      deps.sync.startAccount(id)
-      log.info({ account: id, created }, 'gmail account signed in')
+      deps.sync.startAccount(id, c.get('requestId'))
+      log.log(
+        'info',
+        'auth.account.signin',
+        { provider: 'gmail', outcome: created ? 'created' : 'updated' },
+        { accountId: id, requestId: c.get('requestId') },
+      )
       return c.json({ accountId: id, address: profile.emailAddress, created })
     } catch (error) {
       if (error instanceof AccountConflict) {
@@ -177,7 +204,12 @@ export function mailRoutes(deps: MailDeps) {
       }
       const message =
         error instanceof OAuthError ? error.message : 'Could not complete the Google sign-in'
-      log.warn({ err: (error as Error).message }, 'gmail sign-in failed')
+      log.log(
+        'warn',
+        'auth.account.signin',
+        { provider: 'gmail', outcome: 'failed', err: error },
+        { requestId: c.get('requestId') },
+      )
       return c.json({ error: 'oauth_failed', message }, 400)
     }
   })
@@ -203,7 +235,7 @@ export function mailRoutes(deps: MailDeps) {
 
   r.post('/drafts', requireScope('draft'), async (c) => {
     try {
-      const body = (await c.req.json().catch(() => null)) as Parameters<Drafts['create']>[0] | null
+      const body = (await readJson(c.req)) as Parameters<Drafts['create']>[0] | null
       if (!body || typeof body !== 'object' || Array.isArray(body))
         return c.json({ error: 'bad_request', message: 'Expected a draft object' }, 400)
       const principal = c.get('principal')

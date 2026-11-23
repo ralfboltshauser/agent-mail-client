@@ -41,6 +41,7 @@ function setup(
     Pick<ConstructorParameters<typeof SyncManager>[0], 'imapClient' | 'imapPollMs' | 'log'>
   > = {},
   configOverrides: Partial<ReturnType<typeof testConfig>> = {},
+  fetchImpl?: typeof fetch,
 ) {
   const config = { ...testConfig(), composerOrigin: 'http://127.0.0.1:4410', ...configOverrides }
   const db = testDb()
@@ -86,7 +87,8 @@ function setup(
       oauthClient,
       verifyImap,
       drafts,
-      log: silentLog,
+      fetchImpl,
+      log: options.log ?? silentLog,
     },
   })
   const admin = issueToken(db, { kind: 'cli', name: 'mac', scopes: ['read', 'admin'] }).secret
@@ -279,6 +281,50 @@ describe('mail routes', () => {
       (await call('/v1/accounts/gmail/start', reader, { redirectUri: 'http://127.0.0.1:1/cb' }))
         .status,
     ).toBe(403)
+  })
+
+  it('logs a Gmail sign-in failure without forwarding provider response text', async () => {
+    const canary = 'Synthetic OAuth body unlock=canary-secret-26 owner@example.invalid'
+    const records: string[] = []
+    const log = createLogger('debug', undefined, (line) => records.push(line))
+    const fetchImpl: typeof fetch = vi.fn().mockResolvedValue(
+      Response.json(
+        {
+          error: 'invalid_grant',
+          error_description: canary,
+        },
+        { status: 400 },
+      ),
+    )
+    const { call, admin } = setup({ log }, {}, fetchImpl)
+    const started = await call('/v1/accounts/gmail/start', admin, {
+      redirectUri: 'http://127.0.0.1:5555/callback',
+    })
+    const { state } = await started.json()
+    const rejected = await call('/v1/accounts/gmail/complete', admin, {
+      code: 'synthetic-code',
+      state,
+    })
+    expect(rejected.status).toBe(400)
+    expect(records.map((line) => JSON.parse(line))).toContainEqual(
+      expect.objectContaining({
+        event: 'auth.account.signin',
+        provider: 'gmail',
+        outcome: 'failed',
+        requestId: rejected.headers.get('x-amc-request-id'),
+        err: expect.objectContaining({ class: 'OAuthError', message: '[redacted]' }),
+      }),
+    )
+    for (const value of [
+      canary,
+      'canary-secret-26',
+      'owner@example.invalid',
+      admin,
+      state,
+      'synthetic-code',
+    ]) {
+      expect(records.join('\n')).not.toContain(value)
+    }
   })
 
   it('refuses to complete a sign-in with an unknown state', async () => {
@@ -755,9 +801,8 @@ it('processes an Inbox delivery from IDLE before the first Archive backfill page
 it('finishes the first sync when a server stops answering IDLE before the next folder', async () => {
   vi.useFakeTimers()
   const imap = new FakeImap(['CONDSTORE'])
-  const log = createLogger('silent')
-  const info = vi.spyOn(log, 'info')
-  const warn = vi.spyOn(log, 'warn')
+  const records: Record<string, unknown>[] = []
+  const log = createLogger('debug', undefined, (line) => records.push(JSON.parse(line)))
   const { db, sync, call, admin } = setup({ imapClient: () => imap.client, log })
   imap.addFolder('Archive', '\\Archive')
   imap.addFolder('Junk', '\\Junk')
@@ -804,15 +849,14 @@ it('finishes the first sync when a server stops answering IDLE before the next f
       lastError: 'IMAP idle (INBOX): Server did not finish IDLE',
     })
     expect(health.accounts[0].lastError).toBe(accounts[0].lastError)
-    expect(warn).toHaveBeenCalledWith(
+    expect(records).toContainEqual(
       expect.objectContaining({
-        account: accounts[0].id,
-        phase: 'idle',
-        folder: 'INBOX',
-        errorClass: 'ImapIdleFailure',
-        errorMessage: 'Server did not finish IDLE',
+        event: 'sync.imap.idle.reconnect',
+        accountId: accounts[0].id,
+        retryMs: 5000,
+        runId: expect.any(String),
+        err: expect.objectContaining({ class: 'ImapIdleFailure' }),
       }),
-      'IMAP sync failed',
     )
 
     await vi.advanceTimersByTimeAsync(5_000)
@@ -829,10 +873,14 @@ it('finishes the first sync when a server stops answering IDLE before the next f
     expect(imap.usable).toBe(true)
     await sync.stop()
     expect(imap.usable).toBe(false)
-    expect(info.mock.calls).toEqual([
-      [{ account: accounts[0].id, phase: 'start', folder: null }, 'IMAP runner started'],
-      [{ account: accounts[0].id, phase: 'stop', folder: null }, 'IMAP runner stopped'],
-    ])
+    expect(records).toContainEqual(
+      expect.objectContaining({
+        event: 'sync.imap.idle.connected',
+        accountId: accounts[0].id,
+        recovered: true,
+        mode: 'poll',
+      }),
+    )
   } finally {
     await sync.stop()
     vi.useRealTimers()

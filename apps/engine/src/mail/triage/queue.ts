@@ -38,6 +38,7 @@ export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
       boundary = Cursor.parse(JSON.parse(input.cursor))
       if (boundary[0] !== account) throw new Error()
     } catch {
+      // The route logs the classified 400 response for this invalid cursor.
       throw new SenderError('Invalid triage queue cursor', 400)
     }
   }

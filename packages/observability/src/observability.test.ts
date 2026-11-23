@@ -1,5 +1,7 @@
 import { Hono } from 'hono'
 import { describe, expect, expectTypeOf, it, vi } from 'vitest'
+import { engineEvents } from './engine-events.ts'
+import type { EventName } from './events.ts'
 import { type RequestLogEnv, requestLogging } from './hono.ts'
 import {
   createLogger,
@@ -45,6 +47,54 @@ function expectPrivate(output: string) {
 }
 
 describe('structured logger', () => {
+  it('projects all Engine events with provider and request canaries present', () => {
+    const lines: string[] = []
+    const log = createLogger({
+      component: 'engine',
+      level: 'debug',
+      routes: new Set(['/v1/diagnostics']),
+      sink: (line) => lines.push(line),
+      stackFiles,
+    })
+    for (const [event, spec] of Object.entries(engineEvents)) {
+      const fields = Object.fromEntries(
+        Object.entries(spec.fields).map(([field, rule]) => [
+          field,
+          typeof rule !== 'string'
+            ? rule[0]
+            : rule === 'route'
+              ? '/v1/diagnostics'
+              : rule === 'error'
+                ? maliciousError()
+                : rule === 'status'
+                  ? 500
+                  : rule === 'boolean'
+                    ? true
+                    : 1,
+        ]),
+      )
+      log.log(
+        'error',
+        event as EventName,
+        {
+          ...fields,
+          subject: secret,
+          body: secret,
+          ownerReason: secret,
+          authorization: secret,
+          displayName: secret,
+          attachmentName: secret,
+          sender: secret,
+          recipient: secret,
+          url: secret,
+        } as never,
+        { accountId: secret, requestId: newRequestId() },
+      )
+    }
+    expect(lines.map((line) => JSON.parse(line).event)).toEqual(Object.keys(engineEvents))
+    expectPrivate(lines.join('\n'))
+  })
+
   it('allows declared metadata and drops mail canaries through each logger entry point', async () => {
     const lines: string[] = []
     const log = createLogger({

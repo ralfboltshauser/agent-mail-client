@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
 
@@ -45,6 +45,11 @@ await build({
   format: 'esm',
   sourcemap: 'linked',
   define: {
+    AMC_ENGINE_STACK_FILES: JSON.stringify(
+      readdirSync('src', { recursive: true }).filter(
+        (file) => file.endsWith('.ts') && !file.endsWith('.test.ts'),
+      ),
+    ),
     AMC_VERSION: JSON.stringify(version),
     AMC_AVATAR_WORKER: JSON.stringify(avatarWorker.outputFiles[0].text),
     AMC_PURGE_WORKER: JSON.stringify(purgeWorker.outputFiles[0].text),
