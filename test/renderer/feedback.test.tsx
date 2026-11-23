@@ -1,4 +1,4 @@
-import { act, fireEvent, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { rendererAdapter } from './adapter'
 import { expectBudget } from './profile'
@@ -97,12 +97,14 @@ describe('desktop feedback', () => {
     expect(adapter.api.feedback.capture).not.toHaveBeenCalled()
     fireEvent.keyDown(window, { key: 'Enter', metaKey: true })
     await waitFor(() => expect(adapter.api.feedback.send).toHaveBeenCalledTimes(1))
-    const copy = await screen.findByRole('button', { name: 'Copy feedback' })
+    const fallback = await screen.findByRole('region', { name: 'Send Feedback' })
+    expect(within(fallback).getByRole('button', { name: 'Copy feedback' })).toBeTruthy()
     expect(screen.getByRole('alert').textContent).toBe('AMC could not find a local T3 connection.')
     await waitFor(() =>
       expect(screen.getAllByText('AMC could not find a local T3 connection.')).toHaveLength(2),
     )
-    fireEvent.click(copy)
+    const notifications = screen.getByRole('region', { name: /Notifications/ })
+    fireEvent.click(within(notifications).getByRole('button', { name: 'Copy feedback' }))
 
     const draft = { text: 'Adjust spacing', markdown: '' }
     expect(adapter.api.feedback.send).toHaveBeenCalledExactlyOnceWith('renderer-fixture', draft)

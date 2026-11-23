@@ -27,12 +27,14 @@ export default function FeedbackSession({
   const note = useRef<HTMLTextAreaElement>(null)
   const closeButton = useRef<HTMLButtonElement>(null)
   const submitted = useRef<{ draft: FeedbackDraft; id?: string }>(null)
+  const failureToast = useRef<string | number | undefined>(undefined)
   const [failure, setFailure] = useState('')
   const showToolbar = status === 'annotating' || status === 'reviewing' || status === 'capturing'
   const busy = status === 'capturing' || status === 'sending'
 
   function close() {
     if (busy) return
+    if (failureToast.current !== undefined) toast.dismiss(failureToast.current)
     const id = submitted.current?.id
     if (id)
       void getAmc()
@@ -77,7 +79,9 @@ export default function FeedbackSession({
   }
 
   function fail(reason: string) {
-    toast.error(reason)
+    failureToast.current = toast.error(reason, {
+      action: { label: 'Copy feedback', onClick: () => void copy() },
+    })
     setFailure(reason)
     setStatus('failed')
   }
@@ -136,6 +140,7 @@ export default function FeedbackSession({
         await navigator.clipboard.writeText(
           [item.draft.text, item.draft.markdown].filter(Boolean).join('\n\n'),
         )
+      if (failureToast.current !== undefined) toast.dismiss(failureToast.current)
       setStatus(item.id ? 'copied-with-screenshot' : 'copied')
     } catch {
       toast.error('AMC could not copy the feedback.')
