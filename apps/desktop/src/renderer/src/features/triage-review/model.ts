@@ -18,7 +18,7 @@ export type Decision =
   | { kind: 'filter'; input: FilterReviewInput }
   | { kind: 'bucket'; input: BucketReviewInput }
   | { kind: 'organise'; input: Exclude<ReviewOrganiseAction, { kind: 'undo' }> }
-  | { kind: 'skip' }
+  | { kind: 'skip'; revisited?: true }
   | { kind: 'reply'; deadline: number; draftId: string }
 
 export type ActionStatus =
@@ -52,8 +52,6 @@ export interface Session {
   batch: string
   ids: TriageCardId[]
   index: number
-  cursor: string | null
-  nextBatch?: string
 }
 
 export const cardKey = (id: TriageCardId) =>
