@@ -112,12 +112,6 @@ function loadLastTriageRun(): TriageStatus['lastRun'] {
   }
 }
 
-const mainLog = createLogger({
-  component: 'main',
-  level: resolveLogLevel(process.env.AMC_LOG_LEVEL),
-  sink: rotatingFileSink(join(macLogDirectory(), 'main.log')),
-})
-
 function setStartupStatus(status: SyncStatus) {
   startupStatus = status
   broadcast('amc:status', status)
@@ -216,7 +210,8 @@ function startSync(client: EngineClient) {
       return
     }
     if (replayOnLive && status.phase !== reportedPhase) {
-      mainLog.log('info', 'desktop.sync.phase', { phase: status.phase })
+      const log = status.phase === 'live' ? startupMarkerLog : mainLog
+      log.log('info', 'desktop.sync.phase', { phase: status.phase })
       reportedPhase = status.phase
     }
     broadcast('amc:status', status)
@@ -961,9 +956,19 @@ function buildMenu() {
 app.setName('AMC')
 // Both the packaged app and electron-vite use the original dev profile by default.
 const customProfile = app.commandLine.getSwitchValue('user-data-dir')
-const profile = customProfile || join(app.getPath('appData'), '@amc', 'desktop')
+const defaultProfile = join(app.getPath('appData'), '@amc', 'desktop')
+const profile = customProfile || defaultProfile
 mkdirSync(profile, { recursive: true })
 app.setPath('userData', profile)
+const mainLogSink = rotatingFileSink(
+  join(profile === defaultProfile ? macLogDirectory() : join(profile, 'logs'), 'main.log'),
+)
+const mainLog = createLogger({
+  component: 'main',
+  level: resolveLogLevel(process.env.AMC_LOG_LEVEL),
+  sink: mainLogSink,
+})
+const startupMarkerLog = createLogger({ component: 'main', sink: mainLogSink })
 
 if (!app.requestSingleInstanceLock()) {
   app.quit()
@@ -1064,7 +1069,7 @@ if (!app.requestSingleInstanceLock()) {
         quittingTriage.abort()
         const stoppingTriage = stopSync()
         if (changedTimer) clearTimeout(changedTimer)
-        return Promise.allSettled([flushDrafts(), stoppingTriage])
+        return Promise.allSettled([flushDrafts(), stoppingTriage, mainLogSink.close()])
       },
       // The replica already has each staged edit. Exit even if the Engine or triage stalls.
       () => app.exit(0),

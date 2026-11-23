@@ -113,7 +113,8 @@ grep -F 'Engine sync phase: live' "$HOME/Library/Logs/AMC/main.log" | tail -n 1
 
 Check that its `ts` follows the launch. If the active file rotated, search
 `main.log.1` through `main.log.4`. This replaces the old userData `startup.log`
-check. See the [local observability spec](specs/observability.md#storage-and-retention)
+check. A launch with a separate `--user-data-dir` writes to `logs/main.log` inside
+that profile. See the [local observability spec](specs/observability.md#storage-and-retention)
 for the Engine journal retention policy and rollout.
 
 ## Network

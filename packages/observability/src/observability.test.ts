@@ -19,6 +19,11 @@ const canaries = [
   'canary@example.invalid',
   'canary-subject-7f3a',
   'canary-token-7f3a-01234567890123456789',
+  'Canary body 9f13',
+  'Canary Display Name',
+  'canary-invoice-9f13.pdf',
+  'Canary owner reason 9f13',
+  'https://canary.example.invalid/a?proof=9f13',
 ]
 const secret = canaries.join(' ')
 const sourceFile = '/synthetic/amc/src/http.ts'
@@ -54,6 +59,11 @@ describe('structured logger', () => {
       msg: secret,
       sender: secret,
       token: secret,
+      attachmentName: secret,
+      displayName: secret,
+      ownerReason: secret,
+      authorization: secret,
+      url: secret,
       toJSON: () => secret,
     }
     const badScope = { requestId: secret, runId: secret, accountId: secret, token: secret } as never
