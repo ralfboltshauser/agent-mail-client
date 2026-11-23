@@ -82,6 +82,37 @@ describe('Gmail Pub/Sub sync', () => {
     vi.useRealTimers()
   })
 
+  it.each([false, true])(
+    'checks all Gmail accounts immediately and coalesces bursts (push: %s)',
+    async (push) => {
+      fixture = setup(push)
+      const { sync, owner, other, store } = fixture
+      const ownerHistory = vi.spyOn(owner, 'history')
+      const otherHistory = vi.spyOn(other, 'history')
+      await fixture.start()
+      ownerHistory.mockClear()
+      otherHistory.mockClear()
+      owner.add('owner-new', { subject: 'New mail for owner' })
+      other.add('other-new', { subject: 'New mail for other account' })
+
+      const checking = sync.checkMail()
+      expect(sync.checkMail()).toBe(checking)
+      expect(await checking).toBe(true)
+      expect(store.hasMessage('owner', 'owner-new')).toBe(true)
+      expect(store.hasMessage('other', 'other-new')).toBe(true)
+      expect(ownerHistory).toHaveBeenCalledTimes(1)
+      expect(otherHistory).toHaveBeenCalledTimes(1)
+
+      await vi.advanceTimersByTimeAsync(4_999)
+      expect(sync.checkMail()).toBe(checking)
+      expect(ownerHistory).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(await sync.checkMail()).toBe(true)
+      expect(ownerHistory).toHaveBeenCalledTimes(2)
+      expect(otherHistory).toHaveBeenCalledTimes(2)
+    },
+  )
+
   it('starts a watch per Gmail account and renews both daily', async () => {
     fixture = setup()
     const startedAt = Date.now()

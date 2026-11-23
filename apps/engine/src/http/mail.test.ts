@@ -686,6 +686,44 @@ it('backs off repeated early IDLE disconnects and resets after a stable minute',
   }
 })
 
+it('checks IMAP folders immediately through the active IDLE connection', async () => {
+  const { db, imap, sync, call, admin } = setup()
+  imap.addFolder('Archive', '\\Archive')
+  const list = vi.spyOn(imap, 'list')
+  const endIdle = vi.spyOn(imap, 'noop')
+  // Keep IDLE pending until the runner asks ImapFlow to end it with NOOP.
+  let finishIdle: (() => void) | undefined
+  const idle = imap.idle.bind(imap)
+  vi.spyOn(imap, 'idle').mockImplementation(async () => {
+    await idle()
+    await new Promise<void>((resolve) => {
+      finishIdle = resolve
+    })
+  })
+  endIdle.mockImplementation(async () => finishIdle?.())
+  imap.on('close', () => finishIdle?.())
+  try {
+    expect((await call('/v1/accounts/imap', admin, login)).status).toBe(200)
+    await vi.waitFor(() => {
+      expect(list).toHaveBeenCalledTimes(1)
+      expect(imap.idles.length).toBeGreaterThanOrEqual(3)
+    })
+    endIdle.mockClear()
+
+    imap.add('Archive', 'Subject: Manual IMAP delivery')
+    const response = await call('/v1/sync/check-mail', admin, {})
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ ok: true })
+    expect(endIdle).toHaveBeenCalled()
+    expect(list).toHaveBeenCalledTimes(2)
+    expect(db.prepare('SELECT subject FROM message').all()).toEqual([
+      { subject: 'Manual IMAP delivery' },
+    ])
+  } finally {
+    await sync.stop()
+  }
+})
+
 it('processes an Inbox delivery from IDLE before the first Archive backfill page', async () => {
   const { db, imap, sync, call, admin } = setup()
   imap.addFolder('Archive', '\\Archive')

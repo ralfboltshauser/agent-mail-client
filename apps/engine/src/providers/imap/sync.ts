@@ -168,8 +168,9 @@ export class ImapAccountSync {
     return done
   }
 
-  async waitForInbox(ms: number, signal: AbortSignal): Promise<number> {
-    if (signal.aborted || this.#inboxChanged || this.#organise || !this.client.usable) return 0
+  async waitForInbox(ms: number, signal: AbortSignal, wakeSignal?: AbortSignal): Promise<number> {
+    const waiting = wakeSignal ? AbortSignal.any([signal, wakeSignal]) : signal
+    if (waiting.aborted || this.#inboxChanged || this.#organise || !this.client.usable) return 0
     const selected = this.client.mailbox
     if (!selected || selected.path !== 'INBOX') {
       const box = await this.#openFolder('INBOX')
@@ -184,19 +185,19 @@ export class ImapAccountSync {
         this.#inboxChanged = true
       }
     }
-    if (signal.aborted || this.#inboxChanged || this.#organise || !this.client.usable) return 0
+    if (waiting.aborted || this.#inboxChanged || this.#organise || !this.client.usable) return 0
 
     const start = Date.now()
     let wake: () => void = () => {}
     const pause = new Promise<void>((resolve) => {
       wake = () => {
         clearTimeout(timer)
-        signal.removeEventListener('abort', wake)
+        waiting.removeEventListener('abort', wake)
         this.#wake = undefined
         resolve()
       }
       const timer = setTimeout(wake, ms)
-      signal.addEventListener('abort', wake, { once: true })
+      waiting.addEventListener('abort', wake, { once: true })
       this.#wake = wake
     })
     let pending = true

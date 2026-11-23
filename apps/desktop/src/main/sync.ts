@@ -44,6 +44,7 @@ export class SyncLoop extends EventEmitter<{
   #pulling: Promise<void> | null = null
   #pullAgain = false
   #healthRefresh = 0
+  #nextMailCheckAt = 0
 
   constructor(engine: EngineClient, replica: Replica) {
     super()
@@ -73,6 +74,27 @@ export class SyncLoop extends EventEmitter<{
 
   stop(): void {
     this.#controller.abort()
+  }
+
+  async checkMail(): Promise<void> {
+    const signal = this.#controller.signal
+    if (signal.aborted || Date.now() < this.#nextMailCheckAt) return
+    this.#nextMailCheckAt = Infinity
+    this.#set({ mailCheck: 'checking' })
+    try {
+      const { ok } = await this.#engine.request<{ ok: boolean }>('/v1/sync/check-mail', {
+        method: 'POST',
+        signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
+      })
+      if (signal.aborted) return
+      // The provider pass has published its changes. Pull through the normal replica path.
+      if (this.#replica.modseq !== null && this.#status.phase !== 'bootstrapping') await this.pull()
+      if (!signal.aborted) this.#set({ mailCheck: ok ? undefined : 'failed' })
+    } catch {
+      if (!signal.aborted) this.#set({ mailCheck: 'failed' })
+    } finally {
+      this.#nextMailCheckAt = Date.now() + 5_000
+    }
   }
 
   /** Pull now; coalesces concurrent requests into one extra pull. */

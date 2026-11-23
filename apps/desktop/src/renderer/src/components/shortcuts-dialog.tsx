@@ -23,6 +23,7 @@ export function ShortcutsDialog({
         ['Settings', '⌘,'],
         ['Send Feedback', feedbackShortcut],
         ['Toggle sidebar', '⌘B'],
+        ['Check for New Mail', '⌘R / Ctrl+R'],
         ['Filter mail', '/'],
         ['Next / previous thread', 'J / K'],
         ['Next / previous Inbox section', '⇧J / ⇧K'],

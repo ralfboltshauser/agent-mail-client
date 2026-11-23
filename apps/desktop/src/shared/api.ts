@@ -90,6 +90,7 @@ export interface SyncStatus {
   snoozeEnabled?: boolean
   healthWarnings?: string[]
   healthRefreshFailed?: boolean
+  mailCheck?: 'checking' | 'failed'
   engineUrl: string | null
   /** Bootstrap progress, 0..1. */
   progress: number | null

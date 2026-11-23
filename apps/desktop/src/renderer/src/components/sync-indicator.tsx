@@ -17,9 +17,26 @@ function ago(ms: number, now: number) {
 
 function indicatorStatus(status: SyncStatus | null) {
   if (!status) return null
-  const { phase, progress, lastSyncAt, error, engineUrl, healthWarnings, healthRefreshFailed } =
-    status
-  return { phase, progress, lastSyncAt, error, engineUrl, healthWarnings, healthRefreshFailed }
+  const {
+    phase,
+    progress,
+    lastSyncAt,
+    error,
+    engineUrl,
+    healthWarnings,
+    healthRefreshFailed,
+    mailCheck,
+  } = status
+  return {
+    phase,
+    progress,
+    lastSyncAt,
+    error,
+    engineUrl,
+    healthWarnings,
+    healthRefreshFailed,
+    mailCheck,
+  }
 }
 
 /** One honest line about sync: live, catching up, offline, or what is wrong. */
@@ -56,12 +73,18 @@ export function SyncIndicator() {
   } else if (status.phase === 'bootstrapping') {
     tone = 'busy'
     text = `Downloading mail${status.progress ? ` · ${Math.round(status.progress * 100)}%` : '…'}`
+  } else if (status.mailCheck === 'checking') {
+    tone = 'busy'
+    text = 'Checking for new mail…'
   } else if (status.phase === 'offline' || status.phase === 'error') {
     tone = 'bad'
     text = 'Reconnecting…'
   } else if (broken.length > 0) {
     tone = 'bad'
     text = broken[0]?.status === 'auth_expired' ? 'Sign in again needed' : 'Account sync error'
+  } else if (status.mailCheck === 'failed') {
+    tone = 'bad'
+    text = 'Could not check for new mail'
   } else if (backfilling) {
     tone = 'busy'
     text = `Fetching history · ${backfilling.messageCount.toLocaleString()}${backfilling.estimatedTotal ? ` of ${backfilling.estimatedTotal.toLocaleString()}` : ''}`

@@ -14,13 +14,15 @@ import type { Drafts } from '../mail/drafts.ts'
 import type { Mutations } from '../mail/mutations.ts'
 import type { MailQueries } from '../mail/queries.ts'
 import type { MailStore } from '../mail/store.ts'
-import { type AppEnv, requireScope } from './app.ts'
+import type { SyncManager } from '../sync/manager.ts'
+import { type AppEnv, requireOwnerAdmin, requireScope } from './app.ts'
 
 export interface SyncDeps {
   db: Db
   store: MailStore
   queries: MailQueries
   drafts: Drafts
+  sync: Pick<SyncManager, 'checkMail'>
 }
 
 function load(deps: SyncDeps, entity: SyncEntity, id: string) {
@@ -62,6 +64,10 @@ export function syncRoutes(deps: SyncDeps, queue?: Mutations, shutdownSignal?: A
       )
     await next()
   })
+
+  r.post('/sync/check-mail', requireOwnerAdmin, async (c) =>
+    c.json({ ok: await deps.sync.checkMail() }),
+  )
 
   r.get('/sync/state', requireScope('read'), (c) => c.json(syncState(db)))
 

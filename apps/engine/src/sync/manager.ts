@@ -31,7 +31,9 @@ import {
 } from '../providers/imap/client.ts'
 import { ImapProvider } from '../providers/imap/provider.ts'
 import { ImapAccountSync, ImapIdleFailure, ImapSyncFailure } from '../providers/imap/sync.ts'
+import { ManualPoll } from './manual-poll.ts'
 
+const MANUAL_POLL_COOLDOWN_MS = 5_000
 const WATCH_RENEW_MS = 24 * 60 * 60_000
 const WATCH_RETRY_MS = 60_000
 const PUSH_POLL_MS = 60_000
@@ -87,6 +89,7 @@ type GmailPubSubHealth = NonNullable<Health['gmailPubSub']>
 
 interface Runner {
   stop: () => void
+  checkMail: () => Promise<boolean>
   done: Promise<void>
   api?: GmailApi
   gmailHealth?: () => GmailPushHealth
@@ -118,6 +121,8 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
   readonly #runners = new Map<string, Runner>()
   readonly #paused = new Map<string, Promise<void>>()
   #stopping = false
+  #manualCheck?: Promise<boolean>
+  #nextManualCheckAt = 0
   #pubSub?: { controller: AbortController; done: Promise<void> }
   #pullHealthy = false
   #lastNotificationAt: number | null = null
@@ -144,6 +149,20 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
     for (const row of listAccountRows(this.#o.db)) {
       if (row.status !== 'auth_expired') this.startAccount(row.id)
     }
+  }
+
+  /** Coalesce owner requests across Clients through completion and a short cooldown. */
+  checkMail(): Promise<boolean> {
+    if (this.#stopping) return Promise.resolve(false)
+    if (this.#manualCheck && Date.now() < this.#nextManualCheckAt) return this.#manualCheck
+    this.#nextManualCheckAt = Infinity
+    this.#manualCheck = Promise.all(
+      listAccountRows(this.#o.db).map(({ id }) => this.#runners.get(id)?.checkMail() ?? false),
+    ).then((results) => {
+      this.#nextManualCheckAt = Date.now() + MANUAL_POLL_COOLDOWN_MS
+      return results.every(Boolean)
+    })
+    return this.#manualCheck
   }
 
   gmailPubSubHealth(): GmailPubSubHealth {
@@ -362,6 +381,7 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
         })
     const controller = new AbortController()
     const signal = controller.signal
+    const manual = new ManualPoll(signal)
     const stop = () => controller.abort()
     const isCurrent = () => !signal.aborted && this.#runners.get(accountId)?.stop === stop
     const sync = new GmailAccountSync(
@@ -465,6 +485,7 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
       let lastLabels = Date.now()
       while (!signal.aborted) {
         notified = false
+        const finishCheck = manual.take()
         try {
           if (Date.now() - lastLabels > this.#o.labelsEveryMs) {
             await sync.syncLabels()
@@ -478,26 +499,28 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
           else startBackfill()
           if (changes > 0) this.emit('change')
           backoff = this.#o.pollMs
+          finishCheck?.(true)
         } catch (error) {
+          finishCheck?.(false)
           if (fail(error)) return
           backoff = Math.min(backoff * 2, 5 * 60_000)
           pollIntervalMs = backoff
-          await sleep(backoff, signal)
-          continue
-        }
-        if (!pubSub) {
-          pollIntervalMs = backoff
-          await sleep(backoff, signal)
+          await manual.wait((wake) => sleep(backoff, AbortSignal.any([signal, wake])))
           continue
         }
         if (!notified) {
           waiting = new AbortController()
+          const pushWake = waiting.signal
           const healthy = this.#pullHealthy && watchHealthy && (watchExpiresAt ?? 0) > Date.now()
-          pollIntervalMs = healthy ? PUSH_POLL_MS : backoff
-          await sleep(pollIntervalMs, AbortSignal.any([signal, waiting.signal]))
+          const interval = healthy ? PUSH_POLL_MS : backoff
+          pollIntervalMs = interval
+          await manual.wait((wake) => sleep(interval, AbortSignal.any([signal, pushWake, wake])))
           waiting = undefined
         }
-        if (notified) await sleep(NOTIFICATION_DEBOUNCE_MS, signal)
+        if (notified)
+          await manual.wait((wake) =>
+            sleep(NOTIFICATION_DEBOUNCE_MS, AbortSignal.any([signal, wake])),
+          )
       }
     }
 
@@ -516,8 +539,9 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
           this.emit('change')
           break
         } catch (error) {
+          manual.take()?.(false)
           if (fail(error)) return
-          await sleep(30_000, signal)
+          await manual.wait((wake) => sleep(30_000, AbortSignal.any([signal, wake])))
         }
       }
       if (isCurrent()) {
@@ -531,6 +555,7 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
     this.#runners.set(accountId, {
       stop,
       done,
+      checkMail: () => manual.request(),
       api,
       gmailHealth: () => ({
         watchExpiresAt,
@@ -553,6 +578,7 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
     const { db, store, log, sealer, imapPollMs } = this.#o
     const controller = new AbortController()
     const signal = controller.signal
+    const manual = new ManualPoll(signal)
     let active: ImapAccountSync | undefined
     let useIdle = true
     const report = (failure: ImapSyncFailure, socketError?: Error) => {
@@ -586,6 +612,7 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
           let summary = 'Could not open stored IMAP credentials'
           let socketError: Error | undefined
           let folder: string | null = null
+          let finishCheck: ReturnType<ManualPoll['take']>
           try {
             const credentials = sealer.open<ImapCredentials>(row.credentials)
             phase = 'connect'
@@ -610,12 +637,12 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
               let idleTime = 0
               let nextPoll = 0
               let backfilled = false
-              const wait = async (ms: number) => {
+              const wait = async (ms: number, wake?: AbortSignal) => {
                 try {
-                  if (useIdle) idleTime += await sync.waitForInbox(ms, signal)
+                  if (useIdle) idleTime += await sync.waitForInbox(ms, signal, wake)
                   else {
                     const start = Date.now()
-                    await sleep(ms, signal)
+                    await sleep(ms, wake ? AbortSignal.any([signal, wake]) : signal)
                     idleTime += Date.now() - start
                   }
                   if (idleTime >= 60_000) retryMs = 5_000
@@ -650,8 +677,13 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
                   summary = 'Could not process queued IMAP work'
                   if (await sync.runQueuedOrganise()) nextPoll = 0
                   if (signal.aborted || !client.usable) break
+                  finishCheck = manual.take()
                   const mode =
-                    Date.now() >= nextPoll ? 'all' : sync.inboxChanged ? 'inbox' : 'backfill'
+                    finishCheck || Date.now() >= nextPoll
+                      ? 'all'
+                      : sync.inboxChanged
+                        ? 'inbox'
+                        : 'backfill'
                   if (mode !== 'backfill' || !backfilled) {
                     phase = mode
                     folder = mode === 'inbox' ? 'INBOX' : null
@@ -662,11 +694,15 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
                     touchAccountSync(db, row.id)
                     setAccountStatus(db, store, row.id, backfilled ? 'ready' : 'backfilling')
                     this.emit('change')
+                    finishCheck?.(true)
+                    finishCheck = undefined
                   }
                   const remaining = Math.max(0, nextPoll - Date.now())
                   phase = useIdle ? 'idle' : 'poll'
                   folder = useIdle ? 'INBOX' : null
-                  await wait(Math.min(backfilled ? 60_000 : 200, remaining))
+                  await manual.wait((wake) =>
+                    wait(Math.min(backfilled ? 60_000 : 200, remaining), wake),
+                  )
                 }
                 if (signal.aborted) return
                 throw new ImapSyncFailure(phase, folder, 'IMAP connection closed')
@@ -689,8 +725,14 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
                     error instanceof ImapAuthError ? error.message : summary,
                     error,
                   )
-            if (report(failure, socketError)) return
-            await sleep(retryMs, signal)
+            const authExpired = report(failure, socketError)
+            const finish = finishCheck ?? manual.take()
+            finish?.(false)
+            if (authExpired) {
+              controller.abort()
+              return
+            }
+            await manual.wait((wake) => sleep(retryMs, AbortSignal.any([signal, wake])))
             retryMs = Math.min(retryMs * 2, 5 * 60_000)
           }
         }
@@ -698,7 +740,12 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
         log.info({ account: row.id, phase: 'stop', folder: null }, 'IMAP runner stopped')
       }
     })()
-    this.#runners.set(row.id, { stop: () => controller.abort(), done, imap: () => active })
+    this.#runners.set(row.id, {
+      stop: () => controller.abort(),
+      done,
+      checkMail: () => manual.request(),
+      imap: () => active,
+    })
   }
 
   async stop(): Promise<void> {
@@ -709,5 +756,7 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
     this.#runners.clear()
     this.#pubSub = undefined
     this.#pullHealthy = false
+    this.#manualCheck = undefined
+    this.#nextManualCheckAt = 0
   }
 }
