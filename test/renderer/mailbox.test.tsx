@@ -15,6 +15,19 @@ import {
 
 const secondSubject = 'Sunday at the studio'
 
+function compactViewport() {
+  const query = new EventTarget()
+  const matchMedia = window.matchMedia
+  let compact = false
+  vi.stubGlobal('matchMedia', (media: string) =>
+    media === '(width < 1000px)' ? Object.assign(query, { matches: compact }) : matchMedia(media),
+  )
+  return () => {
+    compact = true
+    act(() => query.dispatchEvent(new Event('change')))
+  }
+}
+
 function mailboxNodes(subject = firstSubject) {
   const list = listbox()
   const rows = options()
@@ -254,6 +267,91 @@ it('hands focus from the command palette to the reader and back to the mailbox',
   expect(document.activeElement).toBe(scroll)
   command('Back to mailbox')
   expectContinuity(before)
+})
+
+it('opens a compact notification during loading and keeps Back available after a failure', async () => {
+  const adapter = rendererAdapter()
+  const target = (await adapter.api.thread('thread-3'))?.thread
+  if (!target) throw new Error('Expected notification thread')
+  let notify: ((thread: NonNullable<typeof target>) => void) | undefined
+  adapter.api.onOpenThread = (callback) => {
+    notify = callback
+    return () => {
+      notify = undefined
+    }
+  }
+  const narrow = compactViewport()
+  await mount(adapter)
+  const list = listbox()
+  narrow()
+  expect(screen.queryByRole('heading', { name: firstSubject, level: 1 })).toBeNull()
+
+  const failure = deferred<void>()
+  adapter.api.thread.mockImplementationOnce(async () => {
+    await failure.promise
+    throw new Error('Synthetic detail read failed')
+  })
+  await act(async () => notify?.(target))
+  const back = screen.getByRole('button', { name: 'Back to mailbox' })
+  expect(screen.getByText('Loading thread')).toBeTruthy()
+  await act(async () => failure.resolve())
+  expect(screen.getByText('Could not open this thread')).toBeTruthy()
+  expect(screen.getByRole('button', { name: 'Back to mailbox' })).toBe(back)
+
+  const late = deferred<Awaited<ReturnType<typeof adapter.api.thread>>>()
+  const detail = await adapter.api.thread(target.id)
+  adapter.api.thread.mockReturnValueOnce(late.promise)
+  await act(async () => fireEvent.click(screen.getAllByRole('button', { name: 'Retry' })[0]))
+  fireEvent.click(back)
+  await act(async () => late.resolve(detail))
+  expect(listbox()).toBe(list)
+  expect(document.activeElement).toBe(list)
+  expect(selected()).toBe(row(target.subject))
+  expect(screen.queryByRole('heading', { name: target.subject, level: 1 })).toBeNull()
+})
+
+it('opens the exact sent delivery while its row is missing from Sent', async () => {
+  const adapter = rendererAdapter()
+  const [delivery] = await adapter.api.outbox()
+  const detail = await adapter.api.thread('thread-3')
+  const other = await adapter.api.thread('thread-2')
+  if (!detail || !other) throw new Error('Expected two synthetic threads')
+  adapter.api.outbox = async () => [{ ...delivery, status: 'sent', threadId: detail.thread.id }]
+  const readThreads = adapter.api.threads.getMockImplementation()
+  if (!readThreads) throw new Error('Expected synthetic mailbox reads')
+  adapter.api.threads.mockImplementation((query) =>
+    query.view.kind === 'sent' ? Promise.resolve([other.thread]) : readThreads(query),
+  )
+  const narrow = compactViewport()
+  await mount(adapter)
+  narrow()
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Outbox' })))
+  const late = deferred<typeof detail>()
+  adapter.api.thread.mockReturnValueOnce(late.promise)
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'View Thread' })))
+  expect(screen.getByText('Loading thread')).toBeTruthy()
+  await act(async () => late.resolve(detail))
+  expect(reader(detail.thread.subject)).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: 'Back to mailbox' }))
+  expect(selected()).toBe(row(other.thread.subject))
+  expect(options()).toHaveLength(1)
+})
+
+it('advances the compact reader after Archive and returns to Inbox when empty', async () => {
+  const adapter = rendererAdapter()
+  const narrow = compactViewport()
+  await mount(adapter)
+  narrow()
+  await act(async () => fireEvent.click(row(firstSubject)))
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Archive' })))
+  expect(reader(secondSubject)).toBeTruthy()
+  expect(screen.getByRole('button', { name: 'Back to mailbox' })).toBeTruthy()
+
+  adapter.api.threads.mockResolvedValue([])
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Archive' })))
+  expect(screen.queryByRole('button', { name: 'Back to mailbox' })).toBeNull()
+  expect(screen.getByText('Inbox is clear')).toBeTruthy()
+  expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Inbox' }))
 })
 
 it('applies one off-reader bucket change to the existing row', async () => {

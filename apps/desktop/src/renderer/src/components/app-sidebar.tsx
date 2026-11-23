@@ -172,7 +172,7 @@ export function AppSidebar({
       variant="sidebar"
       collapsible="none"
       inert={obscured}
-      className={cn('app-sidebar border-r border-sidebar-border', obscured && 'invisible')}
+      className={cn('app-sidebar shrink-0 border-r border-sidebar-border', obscured && 'invisible')}
     >
       {/* Room for the macOS traffic lights; the strip drags the window. */}
       <div className="app-drag h-11 shrink-0" />

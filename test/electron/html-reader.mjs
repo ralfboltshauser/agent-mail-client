@@ -222,6 +222,114 @@ async function main() {
         width,
       )
 
+    await waitFor(
+      () => run(() => !!document.querySelector('[data-thread-id="thread-7"]')),
+      'mailbox rows',
+    )
+    await run(() => {
+      window.compactList = document.querySelector('[role="listbox"]')
+      window.compactRow = document.querySelector('[data-thread-id="thread-7"]')
+    })
+    win.setContentSize(640, 560)
+    await waitFor(
+      () => run(() => window.innerWidth === 640 && !document.querySelector('iframe')),
+      '640px window with the split reader closed',
+    )
+    assert.deepEqual(
+      await run(() => {
+        const list = document.querySelector('[role="listbox"]')
+        const sidebar = document.querySelector('[data-slot="sidebar"]')
+        return [
+          list === window.compactList,
+          Math.round(
+            list.closest('[data-thread-viewport]').getBoundingClientRect().width +
+              sidebar.getBoundingClientRect().width,
+          ),
+          document.querySelector('[data-slot="resizable-handle"]').offsetWidth === 0,
+        ]
+      }),
+      [true, 640, true],
+      'the list uses all mailbox space at the narrow window width',
+    )
+    await selectThread(7, 'probe-theme')
+    await waitFor(
+      () => run(() => document.querySelector('[aria-label="Back to mailbox"]')?.offsetWidth > 0),
+      'compact reader Back button',
+    )
+    assert.equal(
+      await run(() =>
+        Math.round(document.querySelector('[data-focus-reader]').getBoundingClientRect().width),
+      ),
+      640,
+      'the compact reader fills the window',
+    )
+    await run(() => document.querySelector('[aria-label="Back to mailbox"]').click())
+    assert.equal(
+      await run(
+        () =>
+          document.activeElement === window.compactList &&
+          document.querySelector('[data-thread-id="thread-7"]') === window.compactRow,
+      ),
+      true,
+      'Back restores the same list and row with keyboard focus',
+    )
+
+    const pressCompactKey = async (key, windowsVirtualKeyCode) => {
+      for (const type of ['rawKeyDown', 'keyUp']) {
+        await wc.debugger.sendCommand('Input.dispatchKeyEvent', {
+          type,
+          key,
+          windowsVirtualKeyCode,
+        })
+      }
+    }
+    await pressCompactKey('ArrowUp', 38)
+    assert.equal(
+      await run(() => !document.querySelector('[data-focus-reader]')),
+      true,
+      'arrow selection stays in the compact list',
+    )
+    await pressCompactKey('ArrowDown', 40)
+    await pressCompactKey('Enter', 13)
+    await waitFor(
+      () => run(() => !!document.querySelector('[data-focus-reader] iframe')),
+      'Enter opens the selected compact thread',
+    )
+    await run(() => {
+      const frame = document.querySelector('[data-focus-reader] iframe')
+      window.compactFrame = frame
+      frame.focus()
+    })
+    win.setContentSize(1000, 760)
+    await waitFor(
+      () => run(() => document.querySelector('[data-slot="resizable-handle"]').offsetWidth > 0),
+      'the split returns at 1000px',
+    )
+    win.setContentSize(999, 760)
+    await waitFor(
+      () => run(() => document.querySelector('[data-slot="resizable-handle"]').offsetWidth === 0),
+      'the split hides at 999px',
+    )
+    assert.equal(
+      await run(() => document.querySelector('[data-focus-reader] iframe') === window.compactFrame),
+      true,
+      'the open message keeps its iframe as the layout changes',
+    )
+    await pressCompactKey('Escape', 27)
+    await waitFor(
+      () =>
+        run(
+          () =>
+            !document.querySelector('[data-focus-reader]') &&
+            document.activeElement === window.compactList,
+        ),
+      'Escape from HTML returns to the compact list',
+    )
+    win.setContentSize(1360, 900)
+    await waitFor(
+      () => run(() => document.querySelector('[data-slot="resizable-handle"]').offsetWidth > 0),
+      'wide window',
+    )
     await selectThread(7, 'probe-theme')
     const messageColors = () =>
       run(() => {
@@ -325,7 +433,7 @@ async function main() {
         .selectAllChildren(frame.contentDocument.getElementById('probe-first'))
     })
     await run(async () => (await import('/src/lib/amc.ts')).getAmc().syncNow())
-    win.setContentSize(900, 780)
+    win.setContentSize(1000, 780)
     await delay(100)
     assert.equal(
       await run(() =>
@@ -459,7 +567,7 @@ async function main() {
     )
 
     console.log(
-      `HTML reader verified in Chromium ${process.versions.chrome}, minimum-window iframe ${narrowReaderWidth}px`,
+      `HTML reader verified in Chromium ${process.versions.chrome}, split-view iframe ${narrowReaderWidth}px`,
     )
 
     const sidebarLayout = () =>

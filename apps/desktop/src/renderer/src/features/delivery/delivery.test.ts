@@ -267,7 +267,7 @@ it('keeps uncertain and resolved rows mounted through equal and failed polls', a
   expect(button('View Thread')).toBe(viewThread)
   expect(button('Undo')).toBeUndefined()
   await click('View Thread')
-  expect(onThread).toHaveBeenCalledExactlyOnceWith('thread-1')
+  expect(onThread).toHaveBeenCalledExactlyOnceWith('thread-1', uncertain.accountId)
 })
 
 it('confirms reopening an uncertain send across polled refreshes', async () => {
