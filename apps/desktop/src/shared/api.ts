@@ -96,7 +96,8 @@ export interface SyncStatus {
   accountFailures?: Record<string, FailureDetails>
   failure?: FailureDetails
   mailCheckFailure?: FailureDetails
-  mailCheck?: 'checking' | 'failed'
+  mailCheck?: 'checking' | 'updating' | 'failed'
+  mailCheckStartedAt?: number
   engineUrl: string | null
   /** Bootstrap progress, 0..1. */
   progress: number | null

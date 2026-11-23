@@ -114,11 +114,16 @@ export class SyncLoop extends EventEmitter<{
 
   async checkMail(): Promise<void> {
     const signal = this.#controller.signal
-    if (signal.aborted || Date.now() < this.#nextMailCheckAt) return
+    const startedAt = Date.now()
+    if (signal.aborted || startedAt < this.#nextMailCheckAt) return
     this.#nextMailCheckAt = Infinity
     const runId = newRunId()
     mainLog.log('debug', 'desktop.sync.started', { stage: 'check-mail' }, { runId })
-    this.#set({ mailCheck: 'checking', mailCheckFailure: undefined })
+    this.#set({
+      mailCheck: 'checking',
+      mailCheckStartedAt: startedAt,
+      mailCheckFailure: undefined,
+    })
     try {
       const { ok } = await this.#engine.request<{ ok: boolean }>('/v1/sync/check-mail', {
         method: 'POST',
@@ -126,14 +131,19 @@ export class SyncLoop extends EventEmitter<{
       })
       if (signal.aborted) return
       // The provider pass has published its changes. Pull through the normal replica path.
-      if (this.#replica.modseq !== null && this.#status.phase !== 'bootstrapping') await this.pull()
+      if (this.#replica.modseq !== null && this.#status.phase !== 'bootstrapping') {
+        this.#set({ mailCheck: 'updating' })
+        await this.pull()
+        if (signal.aborted) return
+      }
       if (!ok) throw new Error('Mail check failed')
       this.#recovered('check-mail')
-      this.#set({ mailCheck: undefined })
+      this.#set({ mailCheck: undefined, mailCheckStartedAt: undefined })
     } catch (error) {
       if (!signal.aborted) {
         this.#set({
           mailCheck: 'failed',
+          mailCheckStartedAt: undefined,
           mailCheckFailure: this.#failed('check-mail', error, runId),
         })
       }

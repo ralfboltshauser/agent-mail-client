@@ -61,17 +61,42 @@ it('commits only the indicator during a no-op Check for New Mail', async () => {
   const before = mailboxNodes()
   adapter.api.threads.mockClear()
 
-  await act(async () => adapter.emitStatus({ mailCheck: 'checking' }))
-  expect(screen.getByText('Checking for new mail…')).toBeTruthy()
+  await act(async () =>
+    adapter.emitStatus({ mailCheck: 'checking', mailCheckStartedAt: Date.now() }),
+  )
+  const label = screen.getByText('Checking for new mail…')
   expectContinuity(before)
   expectBudget({ ...idleMailbox, indicator: 1 })
 
-  await act(async () => adapter.emitStatus({ mailCheck: undefined, lastSyncAt: Date.now() }))
+  const trigger = label.closest<HTMLElement>('[data-slot="tooltip-trigger"]')
+  expect(trigger?.tabIndex).toBe(0)
+  if (!trigger) throw new Error('Expected a mail check tooltip trigger')
+  act(() => trigger.focus())
+  expect(screen.getByRole('tooltip').textContent).toContain('Waiting for the Engine')
+  await act(async () => vi.advanceTimersByTimeAsync(10_000))
+  expect(screen.getByRole('tooltip').textContent).toContain('10s elapsed')
+
+  await act(async () => adapter.emitStatus({ mailCheck: 'updating' }))
+  expect(screen.getByText('Updating mailbox…').closest('[data-slot="tooltip-trigger"]')).toBe(
+    trigger,
+  )
+  expect(screen.getByRole('tooltip').textContent).toContain('Applying sync changes')
+  expect(screen.getByRole('tooltip').textContent).toContain('10s elapsed')
+  expect(document.activeElement).toBe(trigger)
+
+  act(() => before.list.focus())
+  await act(async () =>
+    adapter.emitStatus({
+      mailCheck: undefined,
+      mailCheckStartedAt: undefined,
+      lastSyncAt: Date.now(),
+    }),
+  )
   expect(screen.getByText('Up to date · just now')).toBeTruthy()
+  expect(screen.queryByRole('tooltip')).toBeNull()
   expect(adapter.api.threads).not.toHaveBeenCalled()
   expectContinuity(before)
-  expectBudget({ ...idleMailbox, indicator: 2 })
-  expect(commitCounts().indicator).toBe(2)
+  expectBudget({ ...idleMailbox, indicator: 4 })
 })
 
 it.each(['immediate', 'staggered'] as const)(

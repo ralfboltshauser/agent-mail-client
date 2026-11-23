@@ -30,6 +30,7 @@ function indicatorStatus(status: SyncStatus | null) {
     healthWarnings,
     healthRefreshFailed,
     mailCheck,
+    mailCheckStartedAt,
   } = status
   return {
     phase,
@@ -43,6 +44,7 @@ function indicatorStatus(status: SyncStatus | null) {
     healthWarnings,
     healthRefreshFailed,
     mailCheck,
+    mailCheckStartedAt,
   }
 }
 
@@ -74,6 +76,7 @@ export function SyncIndicator() {
 
   let tone: 'ok' | 'busy' | 'bad' = 'ok'
   let text = status.lastSyncAt ? `Up to date · ${ago(status.lastSyncAt, now)}` : 'Connecting…'
+  let mailCheckDetail: string | undefined
   if (status.phase === 'paused') {
     tone = 'busy'
     text = 'Sync paused'
@@ -83,6 +86,11 @@ export function SyncIndicator() {
   } else if (status.mailCheck === 'checking') {
     tone = 'busy'
     text = 'Checking for new mail…'
+    mailCheckDetail = 'Waiting for the Engine to check all mail accounts.'
+  } else if (status.mailCheck === 'updating') {
+    tone = 'busy'
+    text = 'Updating mailbox…'
+    mailCheckDetail = 'Applying sync changes to this device.'
   } else if (status.phase === 'offline' || status.phase === 'error' || status.failure) {
     tone = 'bad'
     text = 'Reconnecting…'
@@ -105,7 +113,13 @@ export function SyncIndicator() {
     status.healthFailure,
     ...Object.values(status.accountFailures ?? {}),
   ].flatMap((failure) => (failure ? [formatFailure(failure)] : []))
-  const tooltip = [...new Set([...warnings, status.error].filter(Boolean))].join('\n')
+  const elapsed =
+    mailCheckDetail && status.mailCheckStartedAt !== undefined
+      ? `${Math.max(0, Math.floor((now - status.mailCheckStartedAt) / 1000))}s elapsed`
+      : undefined
+  const tooltip = [
+    ...new Set([mailCheckDetail, elapsed, ...warnings, status.error].filter(Boolean)),
+  ].join('\n')
 
   return (
     <Tooltip>
@@ -145,7 +159,7 @@ export function SyncIndicator() {
         </details>
       )}
       {tooltip && (
-        <TooltipContent side="top" className="max-w-80 whitespace-pre-line">
+        <TooltipContent side="top" collisionPadding={8} className="max-w-80 whitespace-pre-line">
           {tooltip}
         </TooltipContent>
       )}
