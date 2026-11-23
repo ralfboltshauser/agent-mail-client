@@ -42,9 +42,12 @@ function BucketCard({ bucket, reason }: { bucket: Bucket; reason: string }) {
 
   return (
     <div className="mb-5 space-y-3 rounded-md bg-muted/65 px-4 py-3">
-      <Badge variant="secondary" className="text-accent-foreground">
-        {bucket}
-      </Badge>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span className="text-xs font-semibold text-muted-foreground">Triage</span>
+        <Badge variant="secondary" className="text-accent-foreground">
+          {bucket}
+        </Badge>
+      </div>
       {structured && nextStepLabel ? (
         <dl className="space-y-3 select-text wrap-anywhere text-sm leading-relaxed">
           <div>

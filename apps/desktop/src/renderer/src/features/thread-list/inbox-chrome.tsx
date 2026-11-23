@@ -70,13 +70,14 @@ export const InboxSectionHeader = memo(function InboxSectionHeader({
     }
   }
   const Chevron = collapsed ? ChevronRight : ChevronDown
+  const label = section === 'Updates' ? 'Other mail' : section
   const newSenders = section === 'New senders'
   const showHint = newSenders && !collapsed && !!getAmc().smartInbox
   const markButton = (
     <Button
       variant="ghost"
       size="sm"
-      aria-label={`Mark ${section} seen`}
+      aria-label={`Mark ${label} seen`}
       aria-disabled={!canMark}
       className="h-10 rounded-none pr-5 focus-visible:ring-inset aria-disabled:opacity-50"
       onClick={() => void markSeen()}
@@ -98,7 +99,7 @@ export const InboxSectionHeader = memo(function InboxSectionHeader({
             className="flex h-10 w-full cursor-pointer justify-start rounded-none font-semibold focus-visible:ring-inset has-[>svg]:pl-4.5"
           >
             <Chevron aria-hidden />
-            <span className="truncate">{section}</span>
+            <span className="truncate">{label}</span>
             <span className="text-xs tabular-nums text-muted-foreground">{count}</span>
           </Button>
         </h3>
