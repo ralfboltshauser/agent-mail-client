@@ -6,6 +6,7 @@ import {
   setLoadRemoteImagesAutomatically,
   useRemoteImages,
 } from '@/data/remote-image-preferences'
+import { dispatchMessageKeydown } from '@/hooks/use-hotkeys'
 import { getAmc } from '@/lib/amc'
 import { messageDocument, sanitizeMessageHtml } from './html-message-document'
 
@@ -58,16 +59,19 @@ export const HtmlBody = memo(function HtmlBody({
         const href = link.getAttribute('href') ?? link.getAttribute('xlink:href') ?? ''
         if (/^(https?|mailto):/i.test(href)) void getAmc().openExternal(href)
       }
+      const onKey = (event: KeyboardEvent) => dispatchMessageKeydown(el, event)
       measure()
       const observer = new ResizeObserver(measure)
       observer.observe(body, { box: 'border-box' })
       document.addEventListener('click', onClick)
       document.addEventListener('auxclick', onClick)
+      document.addEventListener('keydown', onKey)
       disconnect = () => {
         observing = false
         observer.disconnect()
         document.removeEventListener('click', onClick)
         document.removeEventListener('auxclick', onClick)
+        document.removeEventListener('keydown', onKey)
       }
     }
     el.addEventListener('load', onLoad)

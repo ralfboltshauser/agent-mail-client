@@ -1,6 +1,6 @@
 import type { ThreadSummary } from '@amc/protocol'
 import { Inbox, Layers, Search } from 'lucide-react'
-import { memo, type ReactNode, useMemo } from 'react'
+import { memo, type ReactNode, type RefObject, useLayoutEffect, useMemo } from 'react'
 import { MailLoading, MailState } from '@/components/mail-state'
 import { ThreadList } from '@/components/thread-list'
 import { ThreadView } from '@/components/thread-view'
@@ -10,6 +10,7 @@ import { replicaStoreFor } from '@/data/replica-store'
 import { shareReply } from '@/data/share-reply'
 import { useReplicaSelector } from '@/hooks/use-amc'
 import { getAmc } from '@/lib/amc'
+import { cn } from '@/lib/utils'
 import type { View } from '../../../../shared/api'
 import { SearchInput } from '../search/search-input'
 import type { useMailSearch } from '../search/use-mail-search'
@@ -39,6 +40,9 @@ export function MailPanes({
   onSelect,
   move,
   readerToolbar,
+  expanded,
+  listRef,
+  readerRef,
   getFilterActions,
   reader,
 }: {
@@ -54,6 +58,9 @@ export function MailPanes({
   onSelect: (id: string) => void
   move: (delta: number) => void
   readerToolbar: ReactNode
+  expanded: boolean
+  listRef: RefObject<HTMLDivElement | null>
+  readerRef: RefObject<HTMLDivElement | null>
   getFilterActions: (thread: ThreadSummary) => FilterAction[]
   reader: ReactNode
 }) {
@@ -73,7 +80,11 @@ export function MailPanes({
   return (
     <ResizablePanelGroup orientation="horizontal" className="h-full">
       <ResizablePanel defaultSize="40%" minSize="25%" maxSize="60%">
-        <div className="flex h-full flex-col">
+        <div
+          ref={listRef}
+          inert={expanded}
+          className={cn('flex h-full flex-col', expanded && 'invisible')}
+        >
           <header className="app-drag app-toolbar gap-2 px-3.5">
             <h2
               data-mailbox-heading
@@ -143,9 +154,17 @@ export function MailPanes({
           </div>
         </div>
       </ResizablePanel>
-      <ResizableHandle />
+      <ResizableHandle disabled={expanded} className={expanded ? 'invisible' : undefined} />
       <ResizablePanel defaultSize="60%" minSize="35%">
-        <div className="flex h-full flex-col">
+        <div
+          ref={readerRef}
+          tabIndex={-1}
+          data-focus-reader={expanded || undefined}
+          className={cn(
+            'flex h-full flex-col outline-none',
+            expanded && 'fixed inset-0 z-[15] bg-background',
+          )}
+        >
           {readerToolbar}
           {reader}
         </div>
@@ -209,14 +228,18 @@ export const MailReader = memo(function MailReader({
   selectedAccountId,
   accountId,
   snoozeEnabled,
+  readerRef,
   scrollRef,
+  expanded,
 }: {
   engineUrl: string | null
   selectedId: string | undefined
   selectedAccountId: string | undefined
   accountId: string | null
   snoozeEnabled: boolean
+  readerRef: RefObject<HTMLDivElement | null>
   scrollRef: React.RefObject<HTMLDivElement | null>
+  expanded: boolean
 }) {
   const query = selectedThreadQuery(
     engineUrl,
@@ -229,6 +252,13 @@ export const MailReader = memo(function MailReader({
     (snapshot) => ({ data: snapshot.data, failed: queryFailed(snapshot) }),
     (left, right) => left.data === right.data && left.failed === right.failed,
   )
+  const hasData = data != null
+  useLayoutEffect(() => {
+    const active = document.activeElement
+    if (expanded && hasData && (active === readerRef.current || active === document.body)) {
+      scrollRef.current?.focus({ preventScroll: true })
+    }
+  }, [expanded, hasData, readerRef, scrollRef])
   const refresh = () => {
     if (query) void replicaStoreFor(getAmc()).refresh(query)
   }
@@ -246,6 +276,7 @@ export const MailReader = memo(function MailReader({
           snoozeEnabled={snoozeEnabled}
           labelNames={labelNames}
           scrollRef={scrollRef}
+          expanded={expanded}
         />
       </div>
     </>

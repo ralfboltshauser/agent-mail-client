@@ -36,6 +36,7 @@ import {
   useThreadSelection,
 } from './use-mailbox-navigation'
 import { useMailboxRows } from './use-mailbox-rows'
+import { useReaderFocus } from './use-reader-focus'
 import { useThreadActions } from './use-thread-actions'
 
 const NO_ACCOUNTS: MailboxAccount[] = []
@@ -51,7 +52,6 @@ export function MailWorkspace({
   onToggleTheme: () => void
 }) {
   const [sidebarOpen, setSidebarOpen] = useState(true)
-  const readerScroll = useRef<HTMLDivElement>(null)
   const snoozeEnabled = useSyncField((status) => status?.snoozeEnabled === true)
   const { accountId, setAccountId, view, setView, notification, setNotification } =
     useMailboxNavigation(snoozeEnabled)
@@ -136,8 +136,22 @@ export function MailWorkspace({
   const { openingComposer, openDraft, startCompose, setMinimised } = compose
   const dialogs = useMailDialogs()
   const { rememberFocus, restoreDialogFocus, openSendSettings } = dialogs
+  const ownView = !search && (view.kind === 'drafts' || view.kind === 'outbox')
+  const readerFocus = useReaderFocus(
+    key,
+    selectedId,
+    !!activeThread && !ownView && !openingComposer,
+  )
+  const { expanded, collapse } = readerFocus
+  const paletteReaderThread = useRef<string | null>(null)
+
+  const focusSearch = () => {
+    if (expanded) readerFocus.exit(searchInput.current)
+    else searchInput.current?.focus()
+  }
 
   const goTo = (next: View, target?: string) => {
+    collapse()
     resetSearch(true)
     openSender(null)
     setBucketPickerId(null)
@@ -150,6 +164,7 @@ export function MailWorkspace({
   useEffect(
     () =>
       getAmc().onOpenThread((target) => {
+        collapse()
         closeReview(false)
         const next = target.inInbox ? INBOX : { kind: 'all' as const }
         resetSearch(true)
@@ -169,17 +184,18 @@ export function MailWorkspace({
       setSelection,
       openSender,
       closeReview,
+      collapse,
     ],
   )
 
   const selectAccount = (id: string | null) => {
+    collapse()
     resetSearch(false)
     setNotification(null)
     setBucketPickerId(null)
     setAccountId(id)
     select(null, mailboxKey(id, view, filter))
   }
-  const ownView = !search && (view.kind === 'drafts' || view.kind === 'outbox')
   const { commandActions, appActions } = useMailCommands({
     accounts,
     selected,
@@ -193,13 +209,17 @@ export function MailWorkspace({
     goTo,
     selectAccount,
     move,
-    jumpSection: sectioned && inbox.senderId === null ? inboxFocus : undefined,
-    searchInput,
-    readerScroll,
+    jumpSection: sectioned && inbox.senderId === null && !expanded ? inboxFocus : undefined,
+    focusSearch,
+    readerFocus,
+    queueReaderToggle: () => {
+      paletteReaderThread.current = selectedId
+    },
     clearSearch,
     reviewOpen: review.open,
     openReview:
       sectioned &&
+      !expanded &&
       getAmc().smartInbox?.review &&
       !compose.draft &&
       !compose.handoffThread &&
@@ -240,7 +260,9 @@ export function MailWorkspace({
     <SidebarProvider
       data-feedback-view={feedbackView}
       open={sidebarOpen}
-      onOpenChange={setSidebarOpen}
+      onOpenChange={(open) => {
+        if (!expanded) setSidebarOpen(open)
+      }}
       className="h-full"
       style={{ '--sidebar-width': '13.5rem' } as React.CSSProperties}
     >
@@ -262,9 +284,10 @@ export function MailWorkspace({
         }}
         composing={openingComposer}
         snoozeEnabled={snoozeEnabled}
+        obscured={expanded}
       />
       <SidebarInset className="min-w-0 overflow-hidden">
-        {!sidebarOpen && <div className="app-drag h-11 shrink-0" />}
+        {!sidebarOpen && <div className={expanded ? 'h-11 shrink-0' : 'app-drag h-11 shrink-0'} />}
         {view.kind === 'drafts' && !search ? (
           <DraftsView
             accountId={accountId}
@@ -295,6 +318,9 @@ export function MailWorkspace({
             onSelect={select}
             move={move}
             getFilterActions={getFilterActions}
+            expanded={expanded}
+            listRef={readerFocus.list}
+            readerRef={readerFocus.reader}
             readerToolbar={
               <ReaderToolbar
                 selected={selected}
@@ -302,6 +328,9 @@ export function MailWorkspace({
                 actions={actions}
                 filterActions={filterActions}
                 compose={compose}
+                expanded={expanded}
+                canExpand={readerFocus.canExpand}
+                onToggleFocus={readerFocus.toggle}
               />
             }
             reader={
@@ -311,7 +340,9 @@ export function MailWorkspace({
                 selectedAccountId={selected?.accountId}
                 accountId={accountId}
                 snoozeEnabled={snoozeEnabled}
-                scrollRef={readerScroll}
+                readerRef={readerFocus.reader}
+                scrollRef={readerFocus.scroll}
+                expanded={expanded}
               />
             }
           />
@@ -323,7 +354,10 @@ export function MailWorkspace({
           picker={organisePicker}
           labels={labels}
           onClose={() => organise.setPicker(null)}
-          focusFallback={() => searchInput.current?.focus()}
+          focusFallback={() => {
+            if (expanded) (readerFocus.scroll.current ?? readerFocus.reader.current)?.focus()
+            else searchInput.current?.focus()
+          }}
           run={organise.run}
         />
       )}
@@ -344,9 +378,22 @@ export function MailWorkspace({
         labels={labels}
         onView={goTo}
         onAccount={selectAccount}
-        onSearch={(text) => void runSearch(text)}
+        onSearch={(text) => {
+          collapse()
+          void runSearch(text)
+        }}
         onToggleTheme={onToggleTheme}
-        onCloseAutoFocus={restoreDialogFocus}
+        onCloseAutoFocus={(event) => {
+          const threadId = paletteReaderThread.current
+          paletteReaderThread.current = null
+          if (threadId !== null && threadId === selectedId && (expanded || readerFocus.canExpand)) {
+            // Capture the reading position after the palette releases pointer and focus handling.
+            event.preventDefault()
+            readerFocus.toggle(dialogs.paletteInvoker.current)
+          } else {
+            restoreDialogFocus(event)
+          }
+        }}
         actions={commandActions}
         appActions={appActions}
         dark={dark}

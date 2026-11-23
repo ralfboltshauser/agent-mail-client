@@ -179,6 +179,71 @@ function retry(description: string) {
   return act(async () => button.click())
 }
 
+it('expands the search reader in place and restores the selected row on return', async () => {
+  const first = { ...summary('First search hit'), matchSnippet: 'match' }
+  const second = { ...summary('Second search hit'), matchSnippet: 'match' }
+  const search = vi.fn(async () => [first, second])
+  const thread = vi.fn(async (id: string) => detail(id === first.id ? first : second))
+  const mailbox = await openMailbox({ search, thread })
+  await typeFilter('proof')
+  await press('Enter', searchInput())
+  await press('o', searchInput())
+  expect(document.querySelector('[data-focus-reader]')).toBeNull()
+  const list = listbox()
+  const row = selectedRow()
+  const heading = reader()
+  const scroll = heading?.closest('.overflow-y-auto')
+  const detailReads = thread.mock.calls.length
+  if (!list || !scroll) throw new Error('Expected a mounted list and reader')
+
+  list.focus()
+  await press('o', list)
+  expect(document.querySelector('[data-focus-reader]')?.contains(heading ?? null)).toBe(true)
+  expect(list.closest('[inert]')).not.toBeNull()
+  expect(document.activeElement).toBe(scroll)
+  await press('o', scroll, { repeat: true })
+  expect(document.querySelector('[data-focus-reader]')).not.toBeNull()
+  expect(thread).toHaveBeenCalledTimes(detailReads)
+
+  const refresh = deferred<ThreadWithMessages>()
+  thread.mockReturnValueOnce(refresh.promise)
+  await mailbox.changed()
+  await act(async () => refresh.reject(new Error('Detail unavailable')))
+  expect(document.querySelector('[data-focus-reader]')?.contains(heading ?? null)).toBe(true)
+  expect(reader()).toBe(heading)
+  expect(listbox()).toBe(list)
+  expect(selectedRow()).toBe(row)
+  await press('Escape', scroll)
+  await press('Escape', list, { repeat: true })
+  expect(document.querySelector('[data-focus-reader]')).toBeNull()
+  expect(searchInput().value).toBe('proof')
+  expect(document.activeElement).toBe(list)
+  expect(list.closest('[inert]')).toBeNull()
+  expect(search).toHaveBeenCalledTimes(1)
+
+  const nextThread = deferred<ThreadWithMessages>()
+  thread.mockReturnValueOnce(nextThread.promise)
+  await press('o', list)
+  await press('j', scroll)
+  expect(document.activeElement).toBe(document.querySelector('[data-focus-reader]'))
+  await act(async () => nextThread.resolve(detail(second)))
+  expect(document.querySelector('[data-focus-reader]')?.contains(reader())).toBe(true)
+  expect(reader()?.textContent).toBe(second.subject)
+  expect(document.activeElement).toBe(reader()?.closest('.overflow-y-auto'))
+  await press('/', reader()?.closest('.overflow-y-auto') ?? document.body)
+  expect(document.querySelector('[data-focus-reader]')).toBeNull()
+  expect(document.activeElement).toBe(searchInput())
+  expect(selectedRow()?.textContent).toContain(second.subject)
+
+  list.focus()
+  await press('o', list)
+  await press('g')
+  await press('o')
+  expect(document.querySelector('[data-focus-reader]')).toBeNull()
+  expect(document.body.textContent).toContain('Outbox')
+  expect(document.querySelector('input[placeholder="Filter mail"]')).toBeNull()
+})
+
 it.each(['resolves', 'rejects'] as const)(
   'keeps the notification thread selected when an earlier search %s',
   async (outcome) => {

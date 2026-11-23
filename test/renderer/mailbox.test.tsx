@@ -1,5 +1,5 @@
 import { act, fireEvent, screen, within } from '@testing-library/react'
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { deferred } from './adapter'
 import { commitCounts, commits, expectBudget } from './profile'
 import {
@@ -101,6 +101,51 @@ it.each(['immediate', 'staggered'] as const)(
     expectBudget(idleMailbox)
   },
 )
+
+it('keeps the focused reader and its mailbox stable during staggered no-op sync', async () => {
+  const adapter = await mount()
+  const before = mailboxNodes()
+  const scroll = before.heading.closest('.overflow-y-auto')
+  expect(scroll).not.toBeNull()
+  adapter.api.thread.mockClear()
+  fireEvent.keyDown(before.list, { key: 'o' })
+  expect(document.activeElement).toBe(scroll)
+  expect(before.list.closest('[inert]')).not.toBeNull()
+  expect(adapter.api.thread).not.toHaveBeenCalled()
+  expectBudget({ app: 0, workspace: 1, sidebar: 1, list: 1, reader: 1, composer: 0, rows: 0 })
+
+  commits.clear()
+  const release = adapter.staggerReads()
+  await act(async () => adapter.emitChanged())
+  for (const resolve of release()) {
+    await act(async () => resolve())
+    expect(document.activeElement).toBe(scroll)
+    expect(reader()).toBe(before.heading)
+  }
+  expectBudget(idleMailbox)
+
+  fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
+  expectContinuity(before)
+})
+
+it('hands focus from the command palette to the reader and back to the mailbox', async () => {
+  await mount()
+  const before = mailboxNodes()
+  const scroll = before.heading.closest('.overflow-y-auto')
+  expect(scroll).not.toBeNull()
+  const command = (name: string) => {
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'k', metaKey: true })
+    fireEvent.click(within(screen.getByRole('dialog')).getByText(name))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    act(() => vi.advanceTimersByTime(0))
+  }
+
+  command('Focus reader')
+  expect(before.list.closest('[inert]')).not.toBeNull()
+  expect(document.activeElement).toBe(scroll)
+  command('Back to mailbox')
+  expectContinuity(before)
+})
 
 it('applies one off-reader bucket change to the existing row', async () => {
   const adapter = await mount()
