@@ -77,6 +77,8 @@ it('checks the Engine once per burst and pulls no-op results without invalidatin
     expect(checkMail).toHaveBeenCalledOnce()
     const checking = checkMail.mock.results[0].value
     expect(loop.status.mailCheck).toBe('checking')
+    const startedAt = Date.now()
+    expect(loop.status.mailCheckStartedAt).toBe(startedAt)
     await loop.checkMail()
     expect(request).toHaveBeenCalledExactlyOnceWith('/v1/sync/check-mail', {
       method: 'POST',
@@ -84,9 +86,21 @@ it('checks the Engine once per burst and pulls no-op results without invalidatin
     })
     expect(get).not.toHaveBeenCalled()
 
+    await vi.advanceTimersByTimeAsync(12_000)
+    let finishPull!: () => void
+    get.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishPull = () => resolve({ changes: [], modseq: 7, more: false })
+      }),
+    )
     finish({ ok: true })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(loop.status.mailCheck).toBe('updating')
+    expect(loop.status.mailCheckStartedAt).toBe(startedAt)
+    finishPull()
     await checking
     expect(loop.status.mailCheck).toBeUndefined()
+    expect(loop.status.mailCheckStartedAt).toBeUndefined()
     expect(get).toHaveBeenCalledExactlyOnceWith('/v1/sync/changes?since=7&limit=2000', {
       signal: expect.any(AbortSignal),
     })
@@ -100,6 +114,7 @@ it('checks the Engine once per burst and pulls no-op results without invalidatin
     request.mockRejectedValueOnce(new Error('Engine unavailable'))
     await loop.checkMail()
     expect(loop.status.mailCheck).toBe('failed')
+    expect(loop.status.mailCheckStartedAt).toBeUndefined()
 
     await vi.advanceTimersByTimeAsync(5_000)
     await loop.checkMail()
