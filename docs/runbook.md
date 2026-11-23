@@ -137,6 +137,14 @@ systemctl status amc-engine
 journalctl -u amc-engine -f -o cat # local Engine service output
 ```
 
+After the Engine health check, `pnpm deploy:host` refreshes the AMC skills for
+the SSH login. Other users on Ubuntu can run `/usr/local/bin/amc skills install`
+in their own session. The shared CLI contains the skills, and installation
+requires neither an Engine connection nor pairing. If a skill was edited or
+another skill already uses either name, move it aside before retrying.
+If the skill install fails after deploy, the Engine release stays active.
+Retry just the skill install.
+
 
 For Desktop startup verification, find the latest live marker in the current local
 log after launching the new build.
