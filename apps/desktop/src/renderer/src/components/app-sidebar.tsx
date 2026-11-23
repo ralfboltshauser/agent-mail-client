@@ -33,7 +33,6 @@ import {
   SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
-  SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
   SidebarMenuBadge,
@@ -47,6 +46,7 @@ import { useReplicaSelector } from '@/hooks/use-amc'
 import { mailShortcuts, shortcutLabel } from '@/lib/mail-shortcuts'
 import { cn } from '@/lib/utils'
 import type { Counts, View } from '../../../shared/api'
+import { SidebarDisclosure } from './sidebar-disclosure'
 import { SyncIndicator } from './sync-indicator'
 import { SidebarTriage } from './triage-status'
 import { Kbd } from './ui/kbd'
@@ -238,7 +238,7 @@ export function AppSidebar({
           </SidebarGroupContent>
         </SidebarGroup>
 
-        <SidebarGroup>
+        <SidebarDisclosure title="Triage">
           <SidebarTriage accountId={accountId} />
           <SidebarGroupContent>
             <SidebarMenu className="gap-0.5">
@@ -260,11 +260,10 @@ export function AppSidebar({
               })}
             </SidebarMenu>
           </SidebarGroupContent>
-        </SidebarGroup>
+        </SidebarDisclosure>
 
         {folderLabels.length > 0 && (
-          <SidebarGroup>
-            <SidebarGroupLabel>Labels</SidebarGroupLabel>
+          <SidebarDisclosure title="Labels">
             <SidebarGroupContent>
               <SidebarMenu className="gap-0.5">
                 {folderLabels.map((label) => {
@@ -285,7 +284,7 @@ export function AppSidebar({
                 })}
               </SidebarMenu>
             </SidebarGroupContent>
-          </SidebarGroup>
+          </SidebarDisclosure>
         )}
       </SidebarContent>
 

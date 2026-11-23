@@ -2,7 +2,6 @@ import { CircleAlert } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
-import { SidebarGroupLabel } from '@/components/ui/sidebar'
 import { replicaStoreFor } from '@/data/replica-store'
 import { useReplicaSelector, useSyncField } from '@/hooks/use-amc'
 import { getAmc } from '@/lib/amc'
@@ -89,18 +88,13 @@ export function SidebarTriage({ accountId }: { accountId: string | null }) {
   }
 
   return (
-    <section aria-label="Triage" className="mx-2 mb-2 flex min-w-0 flex-col gap-1.5">
-      <div>
-        <SidebarGroupLabel asChild className="px-0 text-sidebar-foreground">
-          <h2>Triage</h2>
-        </SidebarGroupLabel>
-        {counts && (
-          <p className="flex flex-wrap gap-x-3 text-xs leading-4 text-muted-foreground tabular-nums">
-            <span>{counts.recent.toLocaleString()} new</span>
-            <span>{counts.older.toLocaleString()} older</span>
-          </p>
-        )}
-      </div>
+    <div className="mx-2 mb-2 flex min-w-0 flex-col gap-1.5">
+      {counts && (
+        <p className="flex flex-wrap gap-x-3 text-xs leading-4 text-muted-foreground tabular-nums">
+          <span>{counts.recent.toLocaleString()} new</span>
+          <span>{counts.older.toLocaleString()} older</span>
+        </p>
+      )}
       <div className="flex flex-wrap gap-1">
         <Button
           type="button"
@@ -126,7 +120,7 @@ export function SidebarTriage({ accountId }: { accountId: string | null }) {
         </Button>
       </div>
       <LastTriageRun status={triage} syncIsLive={syncIsLive} />
-    </section>
+    </div>
   )
 }
 

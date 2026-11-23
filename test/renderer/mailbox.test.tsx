@@ -78,6 +78,7 @@ it.each(['immediate', 'staggered'] as const)(
   'preserves mailbox nodes on a cloned no-op sync event with %s replies',
   async (timing) => {
     const adapter = await mount()
+    await openSidebarTriage()
     const before = mailboxNodes()
     const queries = [
       adapter.api.accounts,
@@ -215,6 +216,7 @@ it('applies one off-reader bucket change to the existing row', async () => {
 
 it('updates each count at its display site without committing the surrounding mailbox', async () => {
   const adapter = await mount()
+  await openSidebarTriage()
   const before = mailboxNodes()
   const inbox = screen.getByRole('heading', { name: 'Inbox' }).parentElement
   const later = screen.getByRole('button', { name: 'Later' }).closest('li')
@@ -231,6 +233,10 @@ it('updates each count at its display site without committing the surrounding ma
   expectContinuity(before)
   expectBudget(idleMailbox)
 })
+
+async function openSidebarTriage() {
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Triage' })))
+}
 
 it('commits only the indicator when an account reports a sync error', async () => {
   const adapter = await mount()
