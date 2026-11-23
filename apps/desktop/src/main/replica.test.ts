@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { TRIAGE_RECENT_WINDOW_MS } from '@amc/protocol'
+import { MessageDetail, TRIAGE_RECENT_WINDOW_MS } from '@amc/protocol'
 import { expect, it, vi } from 'vitest'
 import { Replica } from './replica'
 
@@ -102,6 +102,60 @@ it('triggers triage for new Inbox mail and recognizes synced triage grant assign
     replica.apply([upsert({ ...thread, lastMessageAt: 11, bucket })])
     expect(replica.triageAccount(null, arrivals, 'recent')).toBeUndefined()
     expect(replica.triageCounts(null)).toEqual({ recent: 0, older: 2 })
+  } finally {
+    replica.db.close()
+  }
+})
+
+it('keeps cached HTML through label changes and invalidates it when its known source changes', () => {
+  const replica = new Replica(':memory:')
+  const message = MessageDetail.parse({
+    id: 'm1',
+    threadId: 't1',
+    accountId: 'one',
+    rfcMessageId: null,
+    inReplyTo: null,
+    from: null,
+    to: [],
+    cc: [],
+    bcc: [],
+    replyTo: [],
+    subject: 'Synthetic message',
+    snippet: '',
+    sentAt: 0,
+    unread: false,
+    starred: false,
+    labelIds: [],
+    listUnsubscribe: null,
+    bodyText: 'Initial text',
+    hasHtml: true,
+    attachments: [],
+  })
+
+  try {
+    replica.put('message', message)
+    const source = replica.htmlSource(message.id)
+    replica.putHtml(message.id, '<p>Initial HTML</p>')
+    replica.put('message', { ...message, unread: true })
+    expect(replica.htmlSource(message.id)).toBe(source)
+    expect(replica.html(message.id)).toBe('<p>Initial HTML</p>')
+
+    replica.put('message', { ...message, bodyText: 'Updated text' })
+    expect(replica.htmlSource(message.id)).not.toBe(source)
+    expect(replica.html(message.id)).toBeNull()
+  } finally {
+    replica.db.close()
+  }
+})
+
+it('skips oversized cached HTML during preparation and keeps it available to the reader', () => {
+  const replica = new Replica(':memory:')
+  try {
+    const html = '<p>é</p>'
+    replica.putHtml('cached-message', html)
+    expect(replica.html('cached-message', html.length)).toBeNull()
+    expect(replica.html('cached-message', Buffer.byteLength(html))).toBe(html)
+    expect(replica.html('cached-message')).toBe(html)
   } finally {
     replica.db.close()
   }

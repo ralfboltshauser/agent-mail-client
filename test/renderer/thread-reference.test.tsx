@@ -104,11 +104,11 @@ it('leaves ordinary copy, editable controls, selection and composer shortcuts al
 it('copies the new selection after an older read resolves and reports clipboard failure', async () => {
   const writeText = mockClipboard()
   const adapter = await mount()
-  const previous = await adapter.api.thread('thread-2')
+  const previous = await adapter.api.thread('thread-7')
   const slow = deferred<typeof previous>()
   adapter.api.thread.mockImplementationOnce(() => slow.promise)
 
-  await act(async () => fireEvent.click(row('Sunday at the studio')))
+  await act(async () => fireEvent.click(row('Notes from the type review')))
   expect(screen.queryByRole('button', { name: label })).toBeNull()
   expect(await pressCopy(listbox())).toBe(false)
 

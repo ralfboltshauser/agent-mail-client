@@ -446,6 +446,7 @@ export function createMailFixture(scenario: string) {
       return { undoSendSeconds }
     },
     messageText: async () => null,
+    cachedMessageHtml: async () => null,
     messageHtml: async (id) => (htmlReader ? htmlReaderFixture(id) : null),
     inlineAttachment: async (id) =>
       htmlReader && id === readerImageAttachment.id ? readerImage : '',

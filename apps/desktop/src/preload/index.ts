@@ -167,6 +167,7 @@ const api: AmcApi = {
   sendSettings: invoke('sendSettings') as AmcApi['sendSettings'],
   saveSendSettings: invoke('saveSendSettings') as AmcApi['saveSendSettings'],
   messageText: invoke('messageText') as AmcApi['messageText'],
+  cachedMessageHtml: invoke('cachedMessageHtml') as AmcApi['cachedMessageHtml'],
   messageHtml: invoke('messageHtml') as AmcApi['messageHtml'],
   inlineAttachment: invoke('inlineAttachment') as AmcApi['inlineAttachment'],
   openAttachment: invoke('openAttachment') as AmcApi['openAttachment'],

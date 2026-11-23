@@ -85,12 +85,12 @@ it.each(['immediate', 'staggered'] as const)(
       adapter.api.labels,
       adapter.api.counts,
       adapter.api.threads,
-      adapter.api.thread,
       adapter.api.activeHandoff,
       adapter.api.triageCounts,
       adapter.api.organiseErrors,
     ]
     for (const query of queries) query.mockClear()
+    adapter.api.thread.mockClear()
     const release = timing === 'staggered' ? adapter.staggerReads() : undefined
     await act(async () => adapter.emitChanged())
     for (const resolve of release?.() ?? []) {
@@ -98,6 +98,7 @@ it.each(['immediate', 'staggered'] as const)(
       expectContinuity(before)
     }
     for (const query of queries) expect(query).toHaveBeenCalledTimes(1)
+    expect(adapter.api.thread.mock.calls).toEqual([['thread-1'], ['thread-2']])
     expectContinuity(before)
     expectBudget(idleMailbox)
   },
@@ -360,7 +361,7 @@ it('retains the selected thread and mounted Inbox through a same-pairing resnaps
     adapter.emitStatus({ phase: 'live', progress: null })
   })
   expect(adapter.api.threads).toHaveBeenCalledTimes(1)
-  expect(adapter.api.thread).toHaveBeenCalledExactlyOnceWith('thread-2')
+  expect(adapter.api.thread.mock.calls).toEqual([['thread-2'], ['thread-7']])
   expect(options()).toHaveLength(threadCount)
   expectContinuity(before, secondSubject)
   expectBudget({ app: 0, reader: 0, rows: 0 })
