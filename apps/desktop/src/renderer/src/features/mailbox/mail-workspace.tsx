@@ -1,5 +1,5 @@
 import type { Label } from '@amc/protocol'
-import { useEffect, useEffectEvent, useRef, useState } from 'react'
+import { useCallback, useEffect, useEffectEvent, useRef, useState } from 'react'
 import { AgentActivity } from '@/components/agent-activity'
 import { AppSidebar, systemViews } from '@/components/app-sidebar'
 import { CommandPalette } from '@/components/command-palette'
@@ -25,6 +25,7 @@ import {
   selectedThreadQuery,
 } from './mailbox-queries'
 import { ReaderToolbar } from './reader-toolbar'
+import { useCompactMailbox } from './use-compact-mailbox'
 import { useFilterActions } from './use-filter-actions'
 import { useInboxSections } from './use-inbox-sections'
 import { useMailCommands } from './use-mail-commands'
@@ -53,6 +54,11 @@ export function MailWorkspace({
   onToggleTheme: () => void
 }) {
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [sentTarget, setSentTarget] = useState<{
+    scope: string
+    id: string
+    accountId: string
+  } | null>(null)
   const snoozeEnabled = useSyncField((status) => status?.snoozeEnabled === true)
   const { accountId, setAccountId, view, setView, notification, setNotification } =
     useMailboxNavigation(snoozeEnabled)
@@ -84,13 +90,36 @@ export function MailWorkspace({
     hits: search?.hits ?? null,
     searching: search !== null,
   })
-  const notificationRow = !search && !filter ? notification : null
+  const notificationRow = !search && !filter ? (notification?.thread ?? null) : null
+  // A sent delivery can appear in Outbox before the Sent list has caught up.
+  const pendingSent =
+    sentTarget?.scope === key && !mailbox.ids?.includes(sentTarget.id) ? sentTarget : null
+  if (sentTarget !== pendingSent) setSentTarget(null)
   const sectioned = view.kind === 'inbox' && !search && !filter
   const inbox = useInboxSections({
     scope: key,
     storageKey: JSON.stringify(['amc-inbox-collapse-v1', engineUrl, accountId]),
   })
   const { focus: inboxFocus, openSender } = inbox
+  const notificationPresence = useReplicaSelector(
+    notificationRow ? mailbox.query : null,
+    ({ data }) => {
+      if (!notificationRow || !data) return 'unknown'
+      if (!data.summaries.has(notificationRow.id)) return 'missing'
+      return sectioned && !inbox.readIds(data)?.includes(notificationRow.id) ? 'hidden' : 'visible'
+    },
+  )
+  if (notification) {
+    // Keep explicitly opened rows accessible while their Inbox section is collapsed.
+    if (
+      notificationPresence === 'visible' ||
+      (notification.confirmed && notificationPresence === 'missing')
+    ) {
+      setNotification(null)
+    } else if (notificationPresence === 'hidden' && !notification.confirmed) {
+      setNotification({ ...notification, confirmed: true })
+    }
+  }
   const {
     selectedId,
     ids,
@@ -100,21 +129,23 @@ export function MailWorkspace({
   } = useThreadSelection(
     key,
     mailbox.ids,
-    notificationRow?.id,
+    notificationRow?.id ?? pendingSent?.id,
     sectioned ? mailbox.query : null,
     inbox,
   )
   const move = (delta: number) => {
     if (!sectioned || !inboxFocus.current?.move(delta)) moveSelection(delta)
   }
-  const selected = useReplicaSelector(mailbox.query, ({ data }) =>
+  const listed = useReplicaSelector(mailbox.query, ({ data }) =>
     selectedId === null
       ? undefined
       : (data?.summaries.get(selectedId) ??
         mailbox.searchRows?.summaries.get(selectedId) ??
         (notificationRow?.id === selectedId ? notificationRow : undefined)),
   )
-  const readerQuery = selectedThreadQuery(engineUrl, selected)
+  const selectedTarget = selectedId === pendingSent?.id ? pendingSent : null
+  const readerTarget = listed ?? selectedTarget ?? undefined
+  const readerQuery = selectedThreadQuery(engineUrl, readerTarget)
   const selectedDetail = useReplicaSelector(
     readerQuery,
     ({ data }) =>
@@ -124,6 +155,7 @@ export function MailWorkspace({
     (left, right) => left?.thread === right?.thread && left?.complete === right?.complete,
   )
   const activeThread = selectedDetail?.thread ?? null
+  const selected = listed ?? (selectedTarget && activeThread ? activeThread : undefined)
   const actions = useThreadActions({
     selected,
     activeThread,
@@ -143,12 +175,20 @@ export function MailWorkspace({
   const dialogs = useMailDialogs()
   const { rememberFocus, restoreDialogFocus, openSendSettings } = dialogs
   const ownView = !search && (view.kind === 'drafts' || view.kind === 'outbox')
+  const compact = useCompactMailbox()
+  const readerScope = inbox.senderId === null ? key : JSON.stringify([key, inbox.senderId])
   const readerFocus = useReaderFocus(
-    key,
+    readerScope,
     selectedId,
-    !!activeThread && !ownView && !openingComposer,
+    !!(compact ? selected : activeThread) && !ownView && !openingComposer,
+    compact,
   )
-  const { expanded, collapse } = readerFocus
+  const { expanded, collapse, open } = readerFocus
+  const openSelectedThread = useCallback(() => open(readerScope), [readerScope, open])
+  if (!readerFocus.visible) {
+    if (actions.bucketPickerOpen) setBucketPickerId(null)
+    if (pendingSent) setSentTarget(null)
+  }
   const paletteReaderThread = useRef<string | null>(null)
 
   const focusSearch = () => {
@@ -156,14 +196,25 @@ export function MailWorkspace({
     else searchInput.current?.focus()
   }
 
-  const goTo = (next: View, target?: string) => {
+  const goTo = (next: View) => {
     collapse()
     resetSearch(true)
     openSender(null)
     setBucketPickerId(null)
     setView(next)
     setNotification(null)
-    select(target ?? null, mailboxKey(accountId, next, ''))
+    setSentTarget(null)
+    select(null, mailboxKey(accountId, next, ''))
+  }
+
+  const openSentThread = (id: string, deliveryAccount: string) => {
+    const next = { kind: 'sent' } as const
+    const destination = mailboxKey(accountId, next, '')
+    goTo(next)
+    setSentTarget({ scope: destination, id, accountId: deliveryAccount })
+    select(id, destination)
+    open(destination)
+    void getAmc().syncNow()
   }
 
   const openMailSearch = useEffectEvent(
@@ -196,8 +247,10 @@ export function MailWorkspace({
       setBucketPickerId(null)
       setAccountId(null)
       setView(next)
-      setNotification(target)
-      setSelection({ key: mailboxKey(null, next, ''), id: target.id })
+      setNotification({ thread: target, confirmed: false })
+      const destination = mailboxKey(null, next, '')
+      setSelection({ key: destination, id: target.id })
+      open(destination)
     })
     return () => {
       removeSearch()
@@ -213,6 +266,7 @@ export function MailWorkspace({
     openSender,
     closeReview,
     collapse,
+    open,
   ])
 
   const selectAccount = (id: string | null) => {
@@ -326,10 +380,7 @@ export function MailWorkspace({
             accountId={accountId}
             onRestore={(id) => void openDraft(id)}
             onSettings={openSendSettings}
-            onThread={(id) => {
-              goTo({ kind: 'sent' }, id)
-              void getAmc().syncNow()
-            }}
+            onThread={openSentThread}
           />
         ) : (
           <MailPanes
@@ -339,13 +390,15 @@ export function MailWorkspace({
             mailSearch={mailSearch}
             mailbox={mailbox}
             inbox={sectioned ? inbox : undefined}
-            ids={ids}
+            ids={selectedTarget && !activeThread ? mailbox.ids : ids}
             selectedId={selectedId}
-            notification={notificationRow}
+            notification={notificationRow ?? (selectedTarget ? activeThread : null)}
             onSelect={select}
+            onOpenThread={openSelectedThread}
             move={move}
             getFilterActions={getFilterActions}
             expanded={expanded}
+            compact={compact}
             listRef={readerFocus.list}
             readerRef={readerFocus.reader}
             readerToolbar={
@@ -364,8 +417,8 @@ export function MailWorkspace({
             reader={
               <MailReader
                 engineUrl={engineUrl}
-                selectedId={selected?.id}
-                selectedAccountId={selected?.accountId}
+                selectedId={readerTarget?.id}
+                selectedAccountId={readerTarget?.accountId}
                 accountId={accountId}
                 snoozeEnabled={snoozeEnabled}
                 readerRef={readerFocus.reader}

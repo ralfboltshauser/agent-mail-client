@@ -46,7 +46,7 @@ export function OutboxView({
 }: {
   accountId: string | null
   onRestore: (id: string) => void
-  onThread: (id: string) => void
+  onThread: (id: string, accountId: string) => void
   onSettings: () => void
 }) {
   const { rows, error, refresh } = useDeliveryPoll(loadOutbox, 750)
@@ -93,7 +93,7 @@ const OutboxRow = memo(function OutboxRow({
   stale: boolean
   refresh: () => Promise<void>
   onRestore: (id: string) => void
-  onThread: (id: string) => void
+  onThread: (id: string, accountId: string) => void
 }) {
   const { threadId } = item
   return (
@@ -140,7 +140,7 @@ const OutboxRow = memo(function OutboxRow({
         </Button>
       )}
       {item.status === 'sent' && threadId && (
-        <Button size="sm" variant="ghost" onClick={() => onThread(threadId)}>
+        <Button size="sm" variant="ghost" onClick={() => onThread(threadId, item.accountId)}>
           View Thread
         </Button>
       )}

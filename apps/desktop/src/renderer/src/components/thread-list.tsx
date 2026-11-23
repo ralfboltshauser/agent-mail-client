@@ -35,6 +35,7 @@ interface Props {
   notification?: ThreadSummary | null
   selectedId: string | null
   onSelect: (id: string) => void
+  onOpenThread?: () => void
   self: Set<string>
   empty: React.ReactNode
   onMove: (delta: number) => void
@@ -51,6 +52,7 @@ export function ThreadList({
   notification,
   selectedId,
   onSelect,
+  onOpenThread,
   self,
   empty,
   onMove,
@@ -232,13 +234,15 @@ export function ThreadList({
       if (id === undefined) return
       onSelect(id)
       const sender = event.currentTarget.dataset.sender
-      if (sender && query) {
-        const card = replicaStoreFor(getAmc()).getQuery(query).data?.inbox?.cards.get(sender)
-        if (card && card.threadIds.length > 1) openSender?.(sender)
-      }
+      const card =
+        sender && query
+          ? replicaStoreFor(getAmc()).getQuery(query).data?.inbox?.cards.get(sender)
+          : undefined
+      if (card && card.threadIds.length > 1 && sender) openSender?.(sender)
+      else onOpenThread?.()
       focusList()
     },
-    [focusList, onSelect, openSender, query],
+    [focusList, onOpenThread, onSelect, openSender, query],
   )
 
   if (!sectioned && ids.length === 0) return empty

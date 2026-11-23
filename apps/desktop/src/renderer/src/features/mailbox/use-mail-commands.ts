@@ -96,7 +96,16 @@ export function useMailCommands({
     setShortcutsOpen,
     openSendSettings,
   } = dialogs
-  const { expanded, canExpand, reader, scroll: readerScroll, toggle, exit } = readerFocus
+  const {
+    expanded,
+    compact,
+    visible,
+    canExpand,
+    reader,
+    scroll: readerScroll,
+    toggle,
+    exit,
+  } = readerFocus
   const canHandOff = !ownView && !draft && !openingComposer && !!selected && !!activeThreadId
   const handOff = () => {
     if (canHandOff && selected) setHandoffThread(selected.id)
@@ -109,7 +118,7 @@ export function useMailCommands({
     ...(expanded || canExpand
       ? [
           {
-            name: expanded ? 'Back to mailbox' : 'Focus reader',
+            name: expanded ? 'Back to mailbox' : compact ? 'Open selected thread' : 'Focus reader',
             icon: expanded ? Minimize2 : Maximize2,
             shortcut: shortcutLabel(mailShortcuts.focusReader),
             run: queueReaderToggle,
@@ -146,12 +155,16 @@ export function useMailCommands({
       : []),
     ...(selected && !ownView
       ? [
-          {
-            name: 'Choose a Bucket',
-            icon: Layers,
-            shortcut: shortcutLabel(mailShortcuts.bucket),
-            run: () => setBucketPickerId(selected.id),
-          },
+          ...(visible
+            ? [
+                {
+                  name: 'Choose a Bucket',
+                  icon: Layers,
+                  shortcut: shortcutLabel(mailShortcuts.bucket),
+                  run: () => setBucketPickerId(selected.id),
+                },
+              ]
+            : []),
           ...BUCKETS.map((bucket, index) => ({
             name: `Move to Bucket: ${bucket}`,
             icon: Layers,
@@ -269,7 +282,7 @@ export function useMailCommands({
           }
         : {}),
       [mailShortcuts.bucket]: (event) => {
-        if (!event.repeat && selected && !ownView) setBucketPickerId(selected.id)
+        if (!event.repeat && selected && !ownView && visible) setBucketPickerId(selected.id)
       },
       ...Object.fromEntries(
         BUCKETS.map((bucket, index) => [

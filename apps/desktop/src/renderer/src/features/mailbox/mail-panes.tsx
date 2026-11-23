@@ -38,9 +38,11 @@ export function MailPanes({
   selectedId,
   notification,
   onSelect,
+  onOpenThread,
   move,
   readerToolbar,
   expanded,
+  compact,
   listRef,
   readerRef,
   getFilterActions,
@@ -56,9 +58,11 @@ export function MailPanes({
   selectedId: string | null
   notification: ThreadSummary | null
   onSelect: (id: string) => void
+  onOpenThread: () => void
   move: (delta: number) => void
   readerToolbar: ReactNode
   expanded: boolean
+  compact: boolean
   listRef: RefObject<HTMLDivElement | null>
   readerRef: RefObject<HTMLDivElement | null>
   getFilterActions: (thread: ThreadSummary) => FilterAction[]
@@ -82,12 +86,22 @@ export function MailPanes({
     ({ data }) => data?.find(({ id }) => id === accountId)?.address,
   )
   return (
-    <ResizablePanelGroup orientation="horizontal" className="h-full">
-      <ResizablePanel defaultSize="40%" minSize="25%" maxSize="60%">
+    <ResizablePanelGroup orientation="horizontal" className="relative h-full">
+      {/* Keep the split and the scroll container mounted across the breakpoint. */}
+      <ResizablePanel
+        defaultSize="40%"
+        minSize="25%"
+        maxSize="60%"
+        style={compact ? { overflow: 'visible' } : undefined}
+      >
         <div
           ref={listRef}
           inert={expanded}
-          className={cn('@container flex h-full flex-col', expanded && 'invisible')}
+          className={cn(
+            '@container flex h-full flex-col',
+            compact && 'absolute inset-0',
+            expanded && 'invisible',
+          )}
         >
           <header className="app-drag app-toolbar relative gap-2 px-3.5 @max-[250px]:grid @max-[250px]:h-auto @max-[250px]:grid-cols-[minmax(0,1fr)_auto] @max-[250px]:gap-y-1.5 @max-[250px]:py-2">
             <h2
@@ -138,6 +152,7 @@ export function MailPanes({
               notification={notification}
               selectedId={selectedId}
               onSelect={onSelect}
+              onOpenThread={onOpenThread}
               onMove={move}
               getFilterActions={getFilterActions}
               self={self}
@@ -184,20 +199,25 @@ export function MailPanes({
           )}
         </div>
       </ResizablePanel>
-      <ResizableHandle disabled={expanded} className={expanded ? 'invisible' : undefined} />
+      <ResizableHandle
+        disabled={expanded || compact}
+        className={compact ? 'hidden' : expanded ? 'invisible' : undefined}
+      />
       <ResizablePanel defaultSize="60%" minSize="35%">
-        <div
-          ref={readerRef}
-          tabIndex={-1}
-          data-focus-reader={expanded || undefined}
-          className={cn(
-            'flex h-full flex-col outline-none',
-            expanded && 'fixed inset-0 z-[15] bg-background',
-          )}
-        >
-          {readerToolbar}
-          {reader}
-        </div>
+        {(!compact || expanded) && (
+          <div
+            ref={readerRef}
+            tabIndex={-1}
+            data-focus-reader={expanded || undefined}
+            className={cn(
+              'flex h-full flex-col outline-none',
+              expanded && 'fixed inset-0 z-[15] bg-background',
+            )}
+          >
+            {readerToolbar}
+            {reader}
+          </div>
+        )}
       </ResizablePanel>
     </ResizablePanelGroup>
   )

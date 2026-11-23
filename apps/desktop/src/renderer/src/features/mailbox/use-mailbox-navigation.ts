@@ -19,7 +19,10 @@ export function mailboxKey(accountId: string | null, view: View, filter: string,
 export function useMailboxNavigation(snoozeEnabled: boolean) {
   const [accountId, setAccountId] = useState<string | null>(null)
   const [selectedView, setView] = useState<View>(INBOX)
-  const [notification, setNotification] = useState<ThreadSummary | null>(null)
+  const [notification, setNotification] = useState<{
+    thread: ThreadSummary
+    confirmed: boolean
+  } | null>(null)
   const view = !snoozeEnabled && selectedView.kind === 'snoozed' ? INBOX : selectedView
   if (view !== selectedView) setView(view)
   return { accountId, setAccountId, view, setView, notification, setNotification }
@@ -28,23 +31,25 @@ export function useMailboxNavigation(snoozeEnabled: boolean) {
 export function useThreadSelection(
   key: string,
   ids: readonly string[] | undefined,
-  notificationId: string | undefined,
+  pendingTargetId: string | undefined,
   inboxQuery: MailboxThreadQuery | null,
   inbox: InboxNavigation,
 ) {
   const [selection, setSelection] = useState<{ key: string; id: string | null }>({ key, id: null })
   const requestedId = selection.key === key ? selection.id : null
-  const includeNotification =
-    notificationId !== undefined && notificationId === requestedId && !ids?.includes(notificationId)
+  const includeTarget =
+    pendingTargetId !== undefined &&
+    pendingTargetId === requestedId &&
+    !ids?.includes(pendingTargetId)
   const orderedIds = useMemo(
-    () => (includeNotification ? [notificationId, ...(ids ?? [])] : ids),
-    [includeNotification, notificationId, ids],
+    () => (includeTarget ? [pendingTargetId, ...(ids ?? [])] : ids),
+    [includeTarget, pendingTargetId, ids],
   )
   const inboxSelected = useReplicaSelector(inboxQuery, ({ data }) => {
     const visible = inbox.readIds(data)
     if (
       !visible ||
-      (requestedId !== null && (requestedId === notificationId || visible.includes(requestedId)))
+      (requestedId !== null && (requestedId === pendingTargetId || visible.includes(requestedId)))
     ) {
       return requestedId
     }

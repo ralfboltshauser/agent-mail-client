@@ -1,16 +1,27 @@
 import { useCallback, useLayoutEffect, useRef, useState } from 'react'
 import { captureReadingPosition, restoreReadingPosition } from './reader-position'
 
-export function useReaderFocus(scope: string, selectedId: string | null, canExpand: boolean) {
-  const [expandedScope, setExpandedScope] = useState<string | null>(null)
-  const expanded = expandedScope === scope && selectedId !== null
-  if (expandedScope !== null && !expanded) setExpandedScope(null)
+export function useReaderFocus(
+  scope: string,
+  selectedId: string | null,
+  canExpand: boolean,
+  compact: boolean,
+) {
+  const [route, setRoute] = useState<{ scope: string; focus: boolean } | null>(null)
+  const current = route?.scope === scope && selectedId !== null ? route : null
+  if (route !== current) setRoute(null)
+  const expanded = current !== null && (compact || current.focus)
+  const visible = !compact || expanded
   const reader = useRef<HTMLDivElement>(null)
   const scroll = useRef<HTMLDivElement>(null)
   const list = useRef<HTMLDivElement>(null)
-  const invoker = useRef<{ element: HTMLElement | null; threadId: string | null } | null>(null)
+  const invoker = useRef<{
+    element: HTMLElement | null
+    scope: string
+    threadId: string | null
+  } | null>(null)
   const returnTo = useRef<HTMLElement | null>(null)
-  const wasExpanded = useRef(false)
+  const previousLayout = useRef({ expanded, compact })
   const readingPosition = useRef<{
     threadId: string | null
     position: NonNullable<ReturnType<typeof captureReadingPosition>>
@@ -21,7 +32,14 @@ export function useReaderFocus(scope: string, selectedId: string | null, canExpa
     readingPosition.current = position ? { threadId: selectedId, position } : null
   }
 
-  const collapse = useCallback(() => setExpandedScope(null), [])
+  const collapse = useCallback(() => setRoute(null), [])
+  const open = useCallback(
+    (destination: string) =>
+      setRoute((previous) =>
+        previous?.scope === destination ? previous : { scope: destination, focus: false },
+      ),
+    [],
+  )
   const exit = (target?: HTMLElement | null) => {
     rememberReadingPosition()
     returnTo.current = target ?? null
@@ -32,14 +50,16 @@ export function useReaderFocus(scope: string, selectedId: string | null, canExpa
       exit()
     } else if (canExpand) {
       rememberReadingPosition()
-      invoker.current = { element, threadId: selectedId }
-      setExpandedScope(scope)
+      invoker.current = { element, scope, threadId: selectedId }
+      setRoute({ scope, focus: !compact })
     }
   }
 
   useLayoutEffect(() => {
-    const changed = expanded !== wasExpanded.current
-    wasExpanded.current = expanded
+    const previous = previousLayout.current
+    const resized = compact !== previous.compact
+    const changed = expanded !== previous.expanded
+    previousLayout.current = { expanded, compact }
     const captured = changed ? readingPosition.current : null
     if (changed) readingPosition.current = null
     const stopRestoring =
@@ -48,16 +68,23 @@ export function useReaderFocus(scope: string, selectedId: string | null, canExpa
         : undefined
     if (expanded) {
       const target = scroll.current ?? reader.current
-      if (changed || document.activeElement === document.body) {
+      if (
+        document.activeElement === document.body ||
+        (changed && (!resized || !reader.current?.contains(document.activeElement)))
+      ) {
         target?.focus({ preventScroll: true })
       }
       return stopRestoring
     }
-    if (!changed) return
-    const trigger = invoker.current?.threadId === selectedId ? invoker.current.element : null
+    if (resized && visible && reader.current?.contains(document.activeElement)) return stopRestoring
+    if (!changed && (!resized || visible || document.activeElement !== document.body)) return
+    const trigger =
+      invoker.current?.scope === scope && invoker.current.threadId === selectedId
+        ? invoker.current.element
+        : null
     const target = returnTo.current ?? trigger
     if (target?.isConnected) target.focus({ preventScroll: true })
-    if (!target?.isConnected || document.activeElement === document.body) {
+    if (!target || document.activeElement !== target) {
       const fallback =
         list.current?.querySelector<HTMLElement>('[role="listbox"]') ??
         list.current?.querySelector<HTMLElement>('[data-mailbox-heading]')
@@ -66,7 +93,19 @@ export function useReaderFocus(scope: string, selectedId: string | null, canExpa
     invoker.current = null
     returnTo.current = null
     return stopRestoring
-  }, [expanded, selectedId])
+  }, [compact, expanded, scope, selectedId, visible])
 
-  return { expanded, canExpand, reader, scroll, list, toggle, exit, collapse }
+  return {
+    expanded,
+    visible,
+    compact,
+    canExpand,
+    reader,
+    scroll,
+    list,
+    toggle,
+    exit,
+    collapse,
+    open,
+  }
 }
