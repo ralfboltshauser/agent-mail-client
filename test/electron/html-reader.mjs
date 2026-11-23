@@ -38,6 +38,7 @@ async function main() {
       webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
     })
     const wc = win.webContents
+    wc.debugger.attach('1.3')
     const run = (fn, ...args) =>
       wc.executeJavaScript(`(${fn})(${args.map((arg) => JSON.stringify(arg)).join(',')})`)
     const origin = server.resolvedUrls.local[0]
