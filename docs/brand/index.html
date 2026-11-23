@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AMC Brand Guide</title>
+<style>
+  @font-face {
+    font-family: "Space Grotesk";
+    src: url("assets/space-grotesk.woff2") format("woff2");
+    font-weight: 300 700;
+    font-display: swap;
+  }
+  :root {
+    color-scheme: light dark;
+    --ink: #151515;
+    --paper: #f8f7f3;
+    --page: light-dark(var(--paper), var(--ink));
+    --text: light-dark(var(--ink), var(--paper));
+    --muted: light-dark(#575650, #b5b3ad);
+    --line: light-dark(#d7d4cc, #42413f);
+    --display: "Space Grotesk", system-ui, sans-serif;
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, system-ui, sans-serif;
+    --mono: "SF Mono", ui-monospace, Menlo, monospace;
+  }
+  :root:has(#light:checked) { color-scheme: light; }
+  :root:has(#dark:checked) { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--text); font: 15px/1.58 var(--sans); }
+  main { width: min(100% - 32px, 960px); margin: 0 auto 48px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-block: 18px; border-bottom: 1px solid var(--line); }
+  header strong { font-family: var(--display); font-size: 19px; }
+  fieldset { display: flex; align-items: center; gap: 8px; border: 0; margin: 0; padding: 0; font-size: 12px; }
+  legend { position: absolute; clip-path: inset(50%); }
+  label { white-space: nowrap; cursor: pointer; }
+  input { margin: 0 3px 0 0; vertical-align: -.15em; accent-color: var(--text); }
+  h1, h2, h3, p, figure { margin: 0; }
+  h1, h2, h3 { font-family: var(--display); letter-spacing: -.045em; }
+  h1 { font-size: clamp(44px, 9vw, 94px); line-height: .97; }
+  h2 { font-size: clamp(25px, 4vw, 40px); line-height: 1.06; }
+  h3 { font-size: 18px; line-height: 1.15; }
+  p + p { margin-top: 10px; }
+  a { color: inherit; text-underline-offset: .17em; }
+  a:focus-visible, input:focus-visible { outline: 2px solid Highlight; outline-offset: 4px; }
+  img { display: block; max-width: 100%; }
+  .intro { padding-block: clamp(28px, 6vw, 64px) 25px; }
+  .intro p { margin-top: 13px; max-width: 56ch; color: var(--muted); }
+  .plate { background: var(--surface); color: var(--on-surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .light { --surface: var(--paper); --on-surface: var(--ink); }
+  .dark { --surface: var(--ink); --on-surface: var(--paper); }
+  .grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
+  .lockup { display: grid; place-items: center; min-height: clamp(115px, 24vw, 230px); padding: clamp(12px, 4vw, 38px); }
+  .lockup img { width: min(100%, 290px); }
+  figcaption, .asset, .swatch, code { font-family: var(--mono); font-size: 12px; }
+  figcaption { padding: 9px 12px; border-top: 1px solid color-mix(in srgb, currentColor 25%, transparent); }
+  section { margin-top: 26px; padding-top: 23px; border-top: 1px solid var(--line); }
+  section h2 { margin-bottom: 12px; }
+  .logo-rules { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 22px; }
+  .logo-rules h3 { margin-bottom: 4px; }
+  .dock { display: flex; align-items: end; flex-wrap: wrap; gap: 15px; margin-top: 12px; padding: 12px 15px; background: #e3e2de; color: var(--ink); border-radius: 8px; }
+  .dock figure { display: grid; justify-items: center; }
+  .dock figcaption { padding: 3px 0 0; border: 0; }
+  .small-marks { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; align-self: center; margin-left: auto; font: 12px var(--mono); }
+  .small-marks span { display: flex; gap: 5px; align-items: center; white-space: nowrap; }
+  .specimen { padding: 13px; border: 1px solid var(--line); border-radius: 8px; }
+  .specimen p { margin-top: 6px; }
+  .display-sample { font: 700 clamp(24px, 5vw, 42px)/1 var(--display); letter-spacing: -.045em; }
+  .ui-sample { font: 600 17px/1.3 var(--sans); }
+  .swatch { padding: 12px 14px; }
+  .semantics { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 8px; margin: 12px 0; }
+  .meaning { border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+  .meaning strong { display: block; font-size: 13px; }
+  .meaning span { color: var(--muted); font-size: 12px; }
+  .meaning::before { content: ""; display: block; width: 22px; height: 4px; margin-bottom: 6px; border-radius: 2px; background: var(--cue); }
+  .examples { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+  .mail { background: var(--surface); color: var(--on-surface); padding: 12px; border-radius: 8px; border: 1px solid var(--line); }
+  .mail span { display: block; font-size: 12px; opacity: .8; margin-top: 3px; }
+  .mail b::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 7px; vertical-align: .1em; border-radius: 50%; background: var(--cue); }
+  .assets { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+  @media (max-width: 520px) {
+    .logo-rules { grid-template-columns: 1fr; }
+    .semantics { grid-template-columns: repeat(2, minmax(0,1fr)); }
+    .small-marks { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <strong>AMC</strong>
+    <fieldset>
+      <legend>Guide appearance</legend>
+      <label><input type="radio" name="theme" id="system" checked>System</label>
+      <label><input type="radio" name="theme" id="light">Light</label>
+      <label><input type="radio" name="theme" id="dark">Dark</label>
+    </fieldset>
+  </header>
+
+  <div class="intro">
+    <h1>Brand guide</h1>
+    <p>Agent Mail Client is keyboard-first mail you can work through with an agent. The Coarse Stencil mark turns the folds of a letter into a bold pixel M. Wide seams keep the three pieces legible on small surfaces.</p>
+  </div>
+
+  <div class="grid">
+    <figure class="plate light">
+      <div class="lockup"><img src="assets/lockup-ink.svg" alt="AMC logo in ink"></div>
+      <figcaption>Light · Ink on paper</figcaption>
+    </figure>
+    <figure class="plate dark">
+      <div class="lockup"><img src="assets/lockup-paper.svg" alt="AMC logo in paper"></div>
+      <figcaption>Dark · Paper on ink</figcaption>
+    </figure>
+  </div>
+
+  <section aria-labelledby="logo-heading">
+    <h2 id="logo-heading">Logo and app icon</h2>
+    <div class="logo-rules">
+      <div><h3>Horizontal lockup</h3><p>Use the symbol with the outlined AMC wordmark for project introductions and release material. Keep at least one quarter of the mark height clear around the lockup. Use the standard lockup at 100 px wide or larger.</p></div>
+      <div><h3>Symbol on its own</h3><p>Use the symbol for compact placements. Keep the three shapes upright and their seams open. Use the paper mark on dark backgrounds and the ink mark on light backgrounds.</p></div>
+    </div>
+    <div class="dock" aria-label="Packaged Dock artwork at sample sizes and menu bar glyph">
+      <figure><img src="../../apps/desktop/build/icon.svg" width="16" height="16" alt=""><figcaption>16 px</figcaption></figure>
+      <figure><img src="../../apps/desktop/build/icon.svg" width="32" height="32" alt=""><figcaption>32 px</figcaption></figure>
+      <figure><img src="../../apps/desktop/build/icon.svg" width="64" height="64" alt=""><figcaption>64 px</figcaption></figure>
+      <div class="small-marks">
+        <span><img src="../../apps/desktop/build/trayTemplate.png" width="18" height="18" alt="">Menu bar</span>
+        <span><img src="../../apps/desktop/src/renderer/src/assets/amc-mark.png" width="28" height="28" alt="">All Accounts</span>
+      </div>
+    </div>
+    <p class="asset">The Dock uses a paper mark on an ink tile. The menu bar and All Accounts mark take their color from their surroundings.</p>
+  </section>
+
+  <section aria-labelledby="type-heading">
+    <h2 id="type-heading">Typography</h2>
+    <div class="grid">
+      <div class="specimen">
+        <div class="display-sample">Agent Mail Client</div>
+        <p><strong>Space Grotesk 700</strong> for the wordmark and display headings. The lockups contain outlines and render without the font installed.</p>
+      </div>
+      <div class="specimen">
+        <div class="ui-sample">Draft ready to review</div>
+        <p><strong>System sans</strong> for app text and controls. Use <code>SF Mono</code> or the platform monospace for commands, shortcuts, and identifiers.</p>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="color-heading">
+    <h2 id="color-heading">Color</h2>
+    <div class="grid">
+      <div class="plate swatch dark">Ink · #151515</div>
+      <div class="plate swatch light">Paper · #F8F7F3</div>
+    </div>
+    <p style="margin-top:10px">Use ink and paper for brand artwork. In the app, take surfaces, text, borders, selection, and focus from the desktop theme. The samples below show what each hue communicates.</p>
+    <div class="semantics">
+      <div class="meaning" style="--cue:oklch(.55 .2 264)"><strong>Blue</strong><span>Unread, focus, selection, primary actions</span></div>
+      <div class="meaning" style="--cue:oklch(.696 .17 162)"><strong>Green</strong><span>Healthy sync, confirmed completion</span></div>
+      <div class="meaning" style="--cue:oklch(.769 .188 70)"><strong>Amber</strong><span>Needs review, warning</span></div>
+      <div class="meaning" style="--cue:oklch(.58 .22 27)"><strong>Red</strong><span>Failure, destructive action</span></div>
+    </div>
+    <p>Pair color with a label or a distinguishable state cue. Check text and focus contrast against the actual light and dark surfaces.</p>
+    <div class="examples">
+      <div class="mail light" style="--cue:oklch(.55 .2 264)"><b>Unread</b><span>Updated contract</span></div>
+      <div class="mail dark" style="--cue:oklch(.72 .15 264)"><b>Unread</b><span>Updated contract</span></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="voice-heading">
+    <h2 id="voice-heading">Name and voice</h2>
+    <p>Use <strong>Agent Mail Client (AMC)</strong> on first mention in public copy and <strong>AMC</strong> in compact labels. Write <code>amc</code> for the executable and <code>agent-mail-client</code> for the repository slug.</p>
+    <p>Say what happened and what the person can do next. “Draft ready to review” makes the handoff explicit. “Sync failed. Retry” gives the next action.</p>
+  </section>
+
+  <section aria-labelledby="assets-heading">
+    <h2 id="assets-heading">Assets</h2>
+    <div class="assets">
+      <a href="assets/lockup-ink.svg">Ink lockup</a>
+      <a href="assets/lockup-paper.svg">Paper lockup</a>
+      <a href="assets/mark.svg">Ink mark</a>
+      <a href="assets/mark-paper.svg">Paper mark</a>
+      <a href="../../apps/desktop/build/icon.svg">Dock artwork</a>
+      <a href="assets/OFL.txt">Font license</a>
+    </div>
+  </section>
+</main>
+</body>
+</html>
