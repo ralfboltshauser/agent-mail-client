@@ -1,4 +1,5 @@
 import { TriageFailure } from '@amc/cli/triage'
+import { createLogger, isCorrelationId } from '@amc/observability'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { AutoTriage } from './auto-triage'
 
@@ -9,7 +10,7 @@ function setup(
   run = vi.fn(async (_account: string, _signal: AbortSignal) => ({ assigned: 2, skipped: 1 })),
 ) {
   const onLowBattery = vi.fn(async () => false)
-  const log = vi.fn()
+  const sink = vi.fn<(line: string) => void>()
   const triage = new AutoTriage({
     enabled: true,
     lastRun: null,
@@ -18,11 +19,11 @@ function setup(
       account ?? (pending ? pending.values().next().value : 'one'),
     saveLastRun: vi.fn(),
     changed: vi.fn(),
-    log,
+    log: createLogger({ component: 'main', sink }),
   })
   triage.connect(run)
   triage.setAvailable(true)
-  return { triage, run, onLowBattery, log }
+  return { triage, run, onLowBattery, sink }
 }
 
 beforeEach(() => {
@@ -132,9 +133,20 @@ it('publishes a safe reason and logs its error class without the original messag
   const run = vi.fn(async () => {
     throw new TriageFailure('engine-offline', { cause })
   })
-  const { triage, log } = setup(run)
+  const { triage, sink } = setup(run)
   await triage.now('one')
   const message = 'Could not reach the Engine. Check the Engine connection and retry.'
   expect(triage.status.lastRun?.error).toBe(message)
-  expect(log).toHaveBeenCalledExactlyOnceWith(`Triage failed (TypeError): ${message}`)
+  expect(sink).toHaveBeenCalledOnce()
+  const line = sink.mock.calls[0]?.[0] ?? ''
+  const record = JSON.parse(line)
+  expect(record).toMatchObject({
+    event: 'triage.run.failed',
+    stage: 'run',
+    errorClass: 'TypeError',
+    reason: 'engine-offline',
+    msg: message,
+  })
+  expect(isCorrelationId(record.runId)).toBe(true)
+  expect(line).not.toContain(cause.message)
 })

@@ -28,7 +28,7 @@ import { readConfig, writeConfig } from './config.ts'
 import { addImapAccount } from './imap-signin.ts'
 import { loopbackSignIn } from './signin.ts'
 import { printOwnerAction, registerSmartInboxCommands } from './smart-inbox.ts'
-import { describeTriageFailure, runTriage } from './triage.ts'
+import { describeTriageFailure, runTriage, TriageFailure } from './triage.ts'
 
 declare const AMC_VERSION: string | undefined
 const VERSION = typeof AMC_VERSION === 'string' ? AMC_VERSION : 'dev'
@@ -376,6 +376,8 @@ const triage = program
         const { accounts } = await authed(config)<{ accounts: AccountSummary[] }>('/v1/accounts', {
           signal: controller.signal,
           redirect: 'error',
+        }).catch((cause: unknown) => {
+          throw triageCommandError(new TriageFailure('engine-prepare', { cause }))
         })
         if (accounts.length !== 1 || !accounts[0])
           throw new Error('Choose an Account with --account <id> (see amc accounts --json)')
@@ -389,15 +391,7 @@ const triage = program
         undefined,
         opts.recent === true,
       ).catch((error: unknown) => {
-        // The top-level debug reporter inspects nested Error causes.
-        const failures = error instanceof AggregateError ? error.errors : [error]
-        const message = failures
-          .map(describeTriageFailure)
-          .map(({ className, message }) =>
-            process.env.AMC_DEBUG === '1' ? `${className}: ${message}` : message,
-          )
-          .join('\n')
-        throw new Error(message)
+        throw triageCommandError(error)
       })
       if (!results) console.log('Triage is already running.')
       else if (!results.length) console.log('No untriaged Inbox Threads.')
@@ -407,6 +401,18 @@ const triage = program
       process.off('SIGTERM', interrupt)
     }
   })
+
+function triageCommandError(error: unknown) {
+  // The top-level debug reporter inspects nested Error causes.
+  const failures = error instanceof AggregateError ? error.errors : [error]
+  const message = failures
+    .map(describeTriageFailure)
+    .map(({ className, message }) =>
+      process.env.AMC_DEBUG === '1' ? `${className}: ${message}` : message,
+    )
+    .join('\n')
+  return new Error(message)
+}
 
 registerSmartInboxCommands(program, triage, requireConfig)
 

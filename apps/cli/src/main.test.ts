@@ -6,10 +6,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
+import { isCorrelationId, REQUEST_ID_HEADER } from '@amc/observability'
 import { expect, it } from 'vitest'
 
 it.each(['0', '1'])('reports a missing triage account with AMC_DEBUG=%s', async (debug) => {
+  let requestId: string | string[] | undefined
   const server = createServer((req, res) => {
+    requestId = req.headers[REQUEST_ID_HEADER]
     if (req.url !== '/v1/accounts') {
       res.writeHead(404).end('{}')
       return
@@ -38,38 +41,42 @@ it.each(['0', '1'])('reports a missing triage account with AMC_DEBUG=%s', async 
     const stderr = debug === '1' ? expect.stringMatching(/\n\s+at /) : `${message}\n`
     await expect(result).rejects.toMatchObject({ code: 1, stdout: '', stderr })
     await expect(result).rejects.toHaveProperty('stderr', expect.stringContaining(message))
+    expect(isCorrelationId(requestId)).toBe(true)
   } finally {
     server.close()
   }
 })
 
-it('keeps Engine error details out of triage debug output', async () => {
-  const privateDetail = 'synthetic-private-detail'
-  const server = createServer((req, res) => {
-    if (req.method === 'DELETE') {
-      res.writeHead(204).end()
-      return
-    }
-    res.writeHead(500, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ error: 'fixture', message: privateDetail }))
-  })
-  server.listen(0, '127.0.0.1')
-  try {
-    const run = await cliFor(server, { AMC_DEBUG: '1' })
-    const result = run('triage', '--account', 'a', '--dry-run')
-    await expect(result).rejects.toMatchObject({
-      code: 1,
-      stdout: '',
-      stderr: expect.stringContaining('The Engine could not prepare triage.'),
+it.each([[[]], [['--account', 'a']]])(
+  'keeps Engine error details out of triage debug output with account flags %j',
+  async (accountFlags) => {
+    const privateDetail = 'synthetic-private-detail'
+    const server = createServer((req, res) => {
+      if (req.method === 'DELETE') {
+        res.writeHead(204).end()
+        return
+      }
+      res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'fixture', message: privateDetail }))
     })
-    await expect(result).rejects.toHaveProperty(
-      'stderr',
-      expect.not.stringContaining(privateDetail),
-    )
-  } finally {
-    server.close()
-  }
-})
+    server.listen(0, '127.0.0.1')
+    try {
+      const run = await cliFor(server, { AMC_DEBUG: '1' })
+      const result = run('triage', ...accountFlags, '--dry-run')
+      await expect(result).rejects.toMatchObject({
+        code: 1,
+        stdout: '',
+        stderr: expect.stringContaining('The Engine could not prepare triage.'),
+      })
+      await expect(result).rejects.toHaveProperty(
+        'stderr',
+        expect.not.stringContaining(privateDetail),
+      )
+    } finally {
+      server.close()
+    }
+  },
+)
 
 it.each([
   ['triage', '--account', 'gmail', 'filtered'],

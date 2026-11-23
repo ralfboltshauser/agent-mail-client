@@ -1,4 +1,7 @@
 import { existsSync, statfsSync } from 'node:fs'
+import { createLogger as createObservabilityLogger, resolveLogLevel } from '@amc/observability'
+import { type RequestLogEnv, requestLogging } from '@amc/observability/hono'
+import { stackFilePaths, stdoutSink } from '@amc/observability/node'
 import type { Health, Me, PublicHealth, Scope } from '@amc/protocol'
 import { hasScope, PairRequest } from '@amc/protocol'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
@@ -35,7 +38,7 @@ import { triageHistoryRoutes } from './triage-history.ts'
 import { triageLeaseRoutes } from './triage-lease.ts'
 
 export interface AppEnv {
-  Variables: { principal: Principal }
+  Variables: RequestLogEnv['Variables'] & { principal: Principal }
 }
 
 export interface AppDeps {
@@ -69,6 +72,28 @@ export function createApp({
 }: AppDeps) {
   const app = new Hono<AppEnv>()
 
+  const routes = new Set(['unmatched'])
+  app.use(
+    '*',
+    requestLogging<AppEnv>(
+      createObservabilityLogger({
+        component: 'engine',
+        level: resolveLogLevel(process.env.AMC_LOG_LEVEL, config.logLevel),
+        sink: stdoutSink,
+        routes,
+        stackFiles: stackFilePaths([
+          [new URL(import.meta.url), 'engine'],
+          [new URL('./mail.ts', import.meta.url), 'http/mail'],
+          [new URL('./sync.ts', import.meta.url), 'http/sync'],
+          [new URL('../src/http/app.ts', import.meta.url), 'http/app'],
+          [new URL('../src/http/mail.ts', import.meta.url), 'http/mail'],
+          [new URL('../src/http/sync.ts', import.meta.url), 'http/sync'],
+        ]),
+      }),
+      new Set(['/health', '/v1/health', '/v1/sync/state', '/v1/sync/changes']),
+    ),
+  )
+
   app.onError((error, c) => {
     if (error instanceof SenderError)
       return c.json({ error: 'sender', message: error.message }, error.status)
@@ -77,7 +102,6 @@ export function createApp({
     if (error instanceof HTTPException) {
       return c.json({ error: error.message || 'error', message: error.message }, error.status)
     }
-    log.error({ err: error, path: c.req.path }, 'unhandled error')
     return c.json({ error: 'internal', message: 'Something went wrong in the Engine' }, 500)
   })
 
@@ -86,7 +110,6 @@ export function createApp({
     const login = listensOnLoopback(config) ? c.req.header('Tailscale-User-Login') : undefined
     if (login !== undefined && config.allowedTailscaleLogins.length > 0) {
       if (!config.allowedTailscaleLogins.includes(login)) {
-        log.warn({ login, path: c.req.path }, 'refused tailnet login')
         return c.json({ error: 'forbidden', message: 'This tailnet login may not use AMC' }, 403)
       }
     }
@@ -245,6 +268,7 @@ export function createApp({
     })
   }
   app.route('/v1', v1)
+  for (const route of app.routes) routes.add(route.path)
   app.notFound((c) => c.json({ error: 'not_found', message: 'No such route' }, 404))
   return app
 }

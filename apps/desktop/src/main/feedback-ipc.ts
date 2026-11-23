@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import type { EventFields } from '@amc/observability'
 import { app, type BrowserWindow, clipboard, type IpcMainEvent, ipcMain, shell } from 'electron'
 import { type FeedbackDraft, type FeedbackSendResult, feedbackView } from '../shared/feedback'
 import {
@@ -29,10 +30,13 @@ function validDraft(draft: FeedbackDraft) {
 export function registerFeedbackIpc(
   getWindow: () => BrowserWindow | null,
   openWindow: () => void,
-  log: (event: string) => void,
+  log: (stage: EventFields<'feedback.launch.failed'>['stage']) => void,
 ) {
-  function failed(stage: string, reason: string): FeedbackSendResult {
-    log(`feedback send failed: ${stage}`)
+  function failed(
+    stage: EventFields<'feedback.launch.failed'>['stage'],
+    reason: string,
+  ): FeedbackSendResult {
+    log(stage)
     return { opened: false, reason }
   }
 
@@ -69,7 +73,7 @@ export function registerFeedbackIpc(
   })
   ipcMain.handle('amc:feedbackCapture', async (event, view: unknown) => {
     if (!trusted(event) || !captureAllowed || capture || busy) {
-      log('feedback send failed: CaptureUnavailable')
+      log('CaptureUnavailable')
       throw new Error('AMC feedback is unavailable.')
     }
     captureAllowed = false
@@ -94,7 +98,7 @@ export function registerFeedbackIpc(
       }
       return { id }
     } catch {
-      log('feedback send failed: CaptureFailed')
+      log('CaptureFailed')
       throw new Error('AMC could not capture its window.')
     } finally {
       busy = false

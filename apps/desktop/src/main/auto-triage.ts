@@ -1,4 +1,5 @@
 import { describeTriageFailure, TriageFailure } from '@amc/cli/triage'
+import { type Logger, newRunId } from '@amc/observability'
 import type { TriageResult, TriageStatus } from '../shared/api'
 
 const DEBOUNCE = 2 * 60_000
@@ -15,7 +16,7 @@ interface TriageOptions {
   ) => string | undefined
   saveLastRun: (lastRun: TriageStatus['lastRun']) => void
   changed: (status: TriageStatus) => void
-  log: (event: string) => void
+  log: Logger
 }
 
 type Run = (accountId: string, signal: AbortSignal, recent: boolean) => Promise<TriageResult | null>
@@ -117,6 +118,7 @@ export class AutoTriage {
     const controller = new AbortController()
     this.#controller = controller
     const { signal } = controller
+    const log = this.#options.log.with({ runId: newRunId() })
     this.#active = Promise.resolve().then(async () => {
       try {
         const account = this.#options.accountForRun(
@@ -169,8 +171,8 @@ export class AutoTriage {
         } catch (error) {
           const failures = error instanceof AggregateError ? error.errors : [error]
           const diagnostics = failures.map(describeTriageFailure)
-          for (const { className, message } of diagnostics)
-            this.#options.log(`Triage failed (${className}): ${message}`)
+          for (const { className, reason } of diagnostics)
+            log.log('error', 'triage.run.failed', { stage: 'run', errorClass: className, reason })
           const message = signal.aborted
             ? new TriageFailure('interrupted').message
             : (diagnostics[0]?.message ?? new TriageFailure('unexpected').message)
@@ -180,8 +182,8 @@ export class AutoTriage {
           }
         }
       } catch (error) {
-        const { className, message } = describeTriageFailure(error)
-        this.#options.log(`Could not prepare triage (${className}): ${message}`)
+        const { className, reason } = describeTriageFailure(error)
+        log.log('error', 'triage.run.failed', { stage: 'prepare', errorClass: className, reason })
         this.#retryAt = Date.now() + COOLDOWN
         this.#skip('Could not prepare triage.')
       } finally {

@@ -100,7 +100,7 @@ describe('feedback IPC', () => {
       opened: false,
       reason: 'AMC could not find a local T3 connection.',
     })
-    expect(log).toHaveBeenCalledExactlyOnceWith('feedback send failed: LauncherUnavailable')
+    expect(log).toHaveBeenCalledExactlyOnceWith('LauncherUnavailable')
   })
 
   it('reports a launch failure without exposing prompt content or trying a second launcher', async () => {
@@ -112,7 +112,7 @@ describe('feedback IPC', () => {
     const result = await send()
     expect(result).toMatchObject({ opened: false, reason: expect.stringContaining('confirm') })
     expect(result.reason).not.toContain(draft.text)
-    expect(log).toHaveBeenCalledExactlyOnceWith('feedback send failed: LaunchFailed')
+    expect(log).toHaveBeenCalledExactlyOnceWith('LaunchFailed')
     expect(mocks.pairedLauncher).not.toHaveBeenCalled()
     expect(mocks.openExternal).not.toHaveBeenCalled()
   })
@@ -129,6 +129,6 @@ describe('feedback IPC', () => {
       reason: expect.stringContaining('created'),
     })
     expect(mocks.openExternal.mock.calls).toEqual([[link], ['t3code://']])
-    expect(log).toHaveBeenCalledExactlyOnceWith('feedback send failed: OpenFailed')
+    expect(log).toHaveBeenCalledExactlyOnceWith('OpenFailed')
   })
 })

@@ -2,5 +2,9 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "lib": ["ES2023", "DOM"], "rootDir": "src", "outDir": ".types" },
   "include": ["src"],
-  "references": [{ "path": "../../packages/protocol" }, { "path": "../../packages/composer" }]
+  "references": [
+    { "path": "../../packages/observability" },
+    { "path": "../../packages/protocol" },
+    { "path": "../../packages/composer" }
+  ]
 }

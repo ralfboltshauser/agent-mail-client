@@ -21,7 +21,7 @@ export default defineConfig({
   main: {
     plugins: [
       externalizeDepsPlugin({
-        exclude: ['@amc/cli', '@amc/protocol', '@modelcontextprotocol/sdk'],
+        exclude: ['@amc/cli', '@amc/observability', '@amc/protocol', '@modelcontextprotocol/sdk'],
       }),
     ],
     define: {

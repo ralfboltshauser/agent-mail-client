@@ -81,7 +81,7 @@ Deploy only what changed:
 - Desktop: quit AMC (`osascript -e 'quit app "AMC"'`, wait until the process is gone), `pnpm desktop:install`, `open -a ~/Applications/AMC.app`
 - CLI: `pnpm cli:install`
 
-Then verify the actual fix in the running app or CLI (computer use / CLI), on synthetic or `AMC-E2E-` data. Check `~/Library/Application Support/@amc/desktop/startup.log` reaches `Engine sync phase: live`. If deploy or verification fails, fix forward or revert — never leave the owner on a broken build.
+Then verify the actual fix in the running app or CLI (computer use / CLI), on synthetic or `AMC-E2E-` data. Check the new launch reaches `Engine sync phase: live` using the [Desktop startup check](../../../docs/runbook.md#everyday-commands). If deploy or verification fails, fix forward or revert — never leave the owner on a broken build.
 
 If a desktop re-pair is needed: `ssh ralfs-ubuntu 'sudo -n amc-engine pair --desktop'` then `open -a ~/Applications/AMC.app --args --engine-url=https://ralfs-ubuntu.tail4b5789.ts.net:4443 --pairing-code=CODE`. Never type passwords; escalate password prompts only.
 

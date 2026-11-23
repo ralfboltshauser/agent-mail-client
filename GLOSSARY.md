@@ -160,3 +160,17 @@ A versioned set of Preference rules for an Account. The active version is the ve
 **Shadow policy**:
 
 A Preference policy evaluated on arrivals to preview its judgments before activation.
+
+### Observability
+
+**Request ID**
+
+An opaque UUID joining one Engine HTTP request, its response, and the Client's local failure details.
+
+**Run ID**
+
+An opaque UUID shared by the stages and retries of a logical operation, such as a triage run or sync cycle.
+
+**Span**
+
+A timed operation within a Run, with start, finish and outcome records.
