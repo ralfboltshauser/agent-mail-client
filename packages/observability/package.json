@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./local-reader": "./src/local-reader.ts",
     "./node": "./src/node.ts",
     "./hono": "./src/hono.ts"
   },
