@@ -40,7 +40,7 @@ AMC, pass its query and account to `link search`. Use `--web` for T3 chat,
 then choose **Open in AMC** on the Engine page. Search links include the query
 in the URL. Copy them where that query can be shared.
 
-In AMC Desktop, open **Commands & Ask Agent** in the sidebar or press **⌘K**.
+In AMC Desktop, open **Search & Ask** in the sidebar or press **⌘K**.
 Type your question and select **Ask Agent in T3**. This requires the local
 T3 Code CLI, an active AMC project pointing at an AMC checkout, and the
 current AMC CLI installed via `pnpm cli:install`. Update the Engine and

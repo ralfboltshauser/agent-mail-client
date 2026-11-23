@@ -31,6 +31,8 @@ const cliCommands = [
   'draft.update',
   'draft.discard',
   'search',
+  'link.thread',
+  'link.search',
   'archive',
   'trash',
   'read',

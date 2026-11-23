@@ -946,7 +946,7 @@ function registerReadIpc() {
           input.trim(),
           accountId,
           () => engine === client,
-          shell.openExternal,
+          (url) => shell.openExternal(url),
         )
       } finally {
         askingAgent = false
