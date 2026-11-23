@@ -20,8 +20,8 @@ export function ShortcutsDialog({
   onCloseAutoFocus: (event: Event) => void
   snoozeEnabled: boolean
 }) {
-  const groups = [
-    {
+  const groups = {
+    navigate: {
       title: 'Navigate',
       keys: [
         ['Command palette', '⌘K'],
@@ -40,7 +40,7 @@ export function ShortcutsDialog({
         ['Switch accounts', '⌘0–9'],
       ],
     },
-    {
+    compose: {
       title: 'Compose',
       keys: [
         ['New message', 'C'],
@@ -57,7 +57,7 @@ export function ShortcutsDialog({
         ['Send in composer', '⌘↵'],
       ],
     },
-    {
+    triage: {
       title: 'Triage review',
       keys: [
         ['Accept sender', 'A'],
@@ -80,7 +80,7 @@ export function ShortcutsDialog({
         ['Exit and keep position', 'Esc'],
       ],
     },
-    {
+    organise: {
       title: 'Organise',
       keys: [
         ['Archive', 'E'],
@@ -96,8 +96,15 @@ export function ShortcutsDialog({
         ...BUCKETS.map((bucket, index) => [bucket, String(index + 1)]),
       ],
     },
-    { title: 'Go to', keys: systemViews(snoozeEnabled).map(({ title, keys }) => [title, keys]) },
-  ]
+    goTo: {
+      title: 'Go to',
+      keys: systemViews(snoozeEnabled).map(({ title, keys }) => [title, keys]),
+    },
+  }
+  const columns = {
+    left: [groups.navigate, groups.organise],
+    right: [groups.compose, groups.triage, groups.goTo],
+  }
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
@@ -110,24 +117,28 @@ export function ShortcutsDialog({
             Press the keys in order for shortcuts that start with G.
           </DialogDescription>
         </DialogHeader>
-        <div className="grid items-start gap-6 sm:grid-cols-2">
-          {groups.map(({ title, keys }) => (
-            <section key={title}>
-              <h3 className="mb-2 text-xs font-semibold text-muted-foreground">{title}</h3>
-              <dl className="divide-y divide-border">
-                {keys.map(([action, shortcut]) => (
-                  <div
-                    key={action}
-                    className="flex items-center justify-between gap-3 py-1.5 text-[13px]"
-                  >
-                    <dt>{action}</dt>
-                    <dd>
-                      <Kbd>{shortcut}</Kbd>
-                    </dd>
-                  </div>
-                ))}
-              </dl>
-            </section>
+        <div className="grid gap-6 sm:grid-cols-2">
+          {Object.entries(columns).map(([side, sections]) => (
+            <div key={side} className="flex flex-col gap-6">
+              {sections.map(({ title, keys }) => (
+                <section key={title}>
+                  <h3 className="mb-2 text-xs font-semibold text-muted-foreground">{title}</h3>
+                  <dl className="divide-y divide-border">
+                    {keys.map(([action, shortcut]) => (
+                      <div
+                        key={action}
+                        className="flex items-center justify-between gap-3 py-1.5 text-[13px]"
+                      >
+                        <dt>{action}</dt>
+                        <dd>
+                          <Kbd>{shortcut}</Kbd>
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+                </section>
+              ))}
+            </div>
           ))}
         </div>
       </DialogContent>
