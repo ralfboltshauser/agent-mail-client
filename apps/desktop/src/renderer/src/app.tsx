@@ -20,7 +20,7 @@ export function App() {
   const toggleTheme = useCallback(() => setTheme(dark ? 'light' : 'dark'), [dark, setTheme])
   useEffect(() => getAmc().onCopyDiagnostics(copyDiagnostics), [])
   return (
-    <TooltipProvider delayDuration={400}>
+    <TooltipProvider>
       {!gate.phase ? (
         <MailLoading label="Opening AMC" />
       ) : gate.phase === 'unpaired' ? (
