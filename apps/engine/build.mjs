@@ -27,6 +27,15 @@ const avatarWorker = await build({
   },
 })
 
+const purgeWorker = await build({
+  entryPoints: ['src/mail/triage/purge-worker.ts'],
+  bundle: true,
+  platform: 'node',
+  target: 'node22',
+  format: 'cjs',
+  write: false,
+})
+
 await build({
   entryPoints: ['src/main.ts'],
   outfile: 'dist/amc-engine.mjs',
@@ -38,6 +47,7 @@ await build({
   define: {
     AMC_VERSION: JSON.stringify(version),
     AMC_AVATAR_WORKER: JSON.stringify(avatarWorker.outputFiles[0].text),
+    AMC_PURGE_WORKER: JSON.stringify(purgeWorker.outputFiles[0].text),
     AMC_COMPOSER_SCRIPT: JSON.stringify(editor.outputFiles[0].text),
   },
   // Some dependencies still use require(); give the ESM bundle one.

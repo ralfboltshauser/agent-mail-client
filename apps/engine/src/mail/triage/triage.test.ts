@@ -314,7 +314,7 @@ it('upgrades v22 with existing Sender rules, corrections and working inverses', 
       FROM thread WHERE id = 'a:legacy';
       INSERT INTO owner_handled (thread_id, message_id, action_id) VALUES ('a:legacy', 'a:legacy', 'legacy-bucket');
     `)
-    expect(migrate(db)).toBe(23)
+    expect(migrate(db)).toBe(24)
     expect(queries.threadSummary('a:legacy')?.bucket?.bucket).toBe('Later')
     expect(senderActionStatus(db, 'legacy-sender')).toMatchObject({
       revision: 1,

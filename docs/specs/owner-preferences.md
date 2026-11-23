@@ -475,6 +475,32 @@ disable the Filter axis. A later arrival clears stale suggestion state.
    requests. Disclose that older snapshots retain deleted bytes until aged out or removed. SQLite purge must cover WAL/checkpoints and
    controlled vacuum. Prior owner exports and Harness processing are outside Engine erasure.
 
+### Phase 2 operations
+
+- Use **Settings → Privacy** to save a JSONL export or open Action history. Load private
+  history to view reasons and edit or forget a decision. CLI equivalents are
+  `amc triage history`, `amc triage export --output <new-file>` and
+  `amc triage forget <event-id> --confirm`. Use `--include-reasons` for an explicit opt-in.
+  Exports group shared reasons by their per-file action reference and contain only the
+  event record types available in this phase.
+- The bridge captures its source rows in migration 24 and commits bounded batches while
+  the Engine serves. History and the manifest report migration progress. Legacy records
+  without provable mailbox generation or arrival identity remain historical evidence,
+  with an unknown generation. Current Bucket and Sender state, revision fences, and
+  inverses stay with their existing operational stores.
+- Keep the Engine-owned, mode-0600 `owner-erasure.sqlite` beside the live database, outside
+  the nightly and pre-migration snapshot sets. Back it up separately and retain its latest
+  state when replacing an older database. Use `amc-engine restore <file>` so the Engine
+  applies the current erase ledger to the staged copy before publishing it. The Engine
+  refuses a missing or mismatched ledger when the current database or backup identifies
+  it. For a restore onto a new machine from a pre-v24 snapshot, restore the latest ledger
+  alongside it first. Those earlier snapshots cannot identify the ledger themselves.
+- Forget purges live SQLite pages and the WAL. Nightly snapshots retain erased bytes
+  according to the existing retention of 14 daily and eight older weekly copies.
+  Pre-migration copies, pre-restore copies and manually retained snapshots require
+  separate removal. Encrypt off-Host copies of the database and ledger. Existing exports
+  and data already processed by a Harness are outside Engine erasure.
+
 ## Phase 1 conformance for Filter out
 
 Inspected [Filter-out PR #179](https://github.com/ralfboltshauser/agent-mail-client/pull/179)

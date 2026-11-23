@@ -601,7 +601,6 @@ it.each([
 ])(
   'opens the inline $label with Shift, cancels with Esc, submits on Enter, and edits from history',
   async ({ key, label }) => {
-    vi.stubEnv('VITE_AMC_PRIVATE_TRIAGE_REASONS', '1')
     const { adapter, smart } = await fixture()
     await mount(adapter)
     await open()
@@ -632,7 +631,7 @@ it.each([
     )
 
     await click(within(review()).getByText('Action history (1)'))
-    await click(within(review()).getByRole('button', { name: 'Add reason' }))
+    await click(within(review()).getByRole('button', { name: 'View or edit reason' }))
     const edit = within(review()).getByRole('textbox', { name: 'Action reason' })
     expect((edit as HTMLInputElement).value).toBe('Synthetic note')
     expect(JSON.stringify(localStorage)).not.toContain('Synthetic note')
@@ -697,4 +696,105 @@ it('shows a count for the managed Filtered Label and restores the selected Threa
   expect(restoreFiltered).toHaveBeenCalledExactlyOnceWith(visible.id, expect.any(String))
   expect(screen.getByRole('button', { name: 'Filtered 0' })).toBeTruthy()
   expect(screen.queryByRole('button', { name: 'Restore to Inbox' })).toBeNull()
+})
+
+it('keeps a private inline reason after transport failure and retries the same action', async () => {
+  const { adapter, smart } = await fixture()
+  smart.reviewFilter.mockRejectedValueOnce(new Error('Synthetic transport failure'))
+  await mount(adapter)
+  await open()
+  await press('F', undefined, { shiftKey: true })
+  const input = within(review()).getByRole<HTMLInputElement>('textbox', {
+    name: 'Filter out reason',
+  })
+  fireEvent.change(input, { target: { value: 'Synthetic retry canary' } })
+  const submit = () => click(within(review()).getByRole('button', { name: 'Apply' }))
+  await submit()
+  expect(input.value).toBe('Synthetic retry canary')
+  expect(within(review()).getByText('Could not save the reason. Try again.')).toBeTruthy()
+  expect(JSON.stringify(localStorage)).not.toContain(input.value)
+  await submit()
+  expect(smart.reviewFilter).toHaveBeenCalledTimes(2)
+  expect(smart.reviewFilter.mock.calls[1][0]).toEqual(smart.reviewFilter.mock.calls[0][0])
+  expect(within(review()).queryByRole('textbox', { name: 'Filter out reason' })).toBeNull()
+})
+
+it('opens private history only on request, handles a failed read, and forgets after confirmation', async () => {
+  const { adapter, smart } = await fixture()
+  const event = {
+    id: 'fixture-event',
+    seq: 1,
+    accountId: 'studio',
+    generation: 1,
+    axis: 'filter',
+    kind: 'decision',
+    source: 'triage_key',
+    labelId: 'filter.filtered',
+    at: new Date(0).toISOString(),
+    actionId: 'fixture-action',
+    threadId: null,
+    targetEventId: null,
+    predictionId: null,
+    retracted: false,
+    reasonEditable: true,
+    reason: 'Private synthetic history',
+    reasonRevision: 'fixture-event',
+  }
+  const legacy = { imported: 0, skipped: 0, complete: true }
+  const delayed = deferred<Awaited<ReturnType<NonNullable<SmartInboxApi['triageHistory']>>>>()
+  const triageHistory = vi
+    .fn<NonNullable<SmartInboxApi['triageHistory']>>()
+    .mockRejectedValueOnce(new Error('Synthetic read failure'))
+    .mockReturnValueOnce(delayed.promise)
+    .mockResolvedValueOnce({ events: [], before: null, legacy, physicalPurge: 'pending' })
+    .mockResolvedValue({ events: [], before: null, legacy, physicalPurge: 'completed' })
+  const forgetTriageDecision = vi.fn<NonNullable<SmartInboxApi['forgetTriageDecision']>>(
+    async () => ({ physicalPurge: 'pending' }),
+  )
+  const exportTriageHistory = vi.fn<NonNullable<SmartInboxApi['exportTriageHistory']>>(
+    async () => true,
+  )
+  Object.assign(adapter.api, {
+    smartInbox: {
+      ...smart,
+      review: smart,
+      triageHistory,
+      forgetTriageDecision,
+      exportTriageHistory,
+    },
+  })
+  await mount(adapter)
+  await act(async () => adapter.emitOpenSettings())
+  const settings = within(screen.getByRole('dialog', { name: 'Settings' }))
+  await click(settings.getByRole('button', { name: 'Export triage history' }))
+  expect(exportTriageHistory).toHaveBeenLastCalledWith({ includeReasons: false })
+  await click(settings.getByRole('checkbox', { name: 'Include private reasons in this export' }))
+  await click(settings.getByRole('button', { name: 'Export triage history' }))
+  expect(exportTriageHistory).toHaveBeenLastCalledWith({ includeReasons: true })
+  expect(triageHistory).not.toHaveBeenCalled()
+
+  await click(settings.getByRole('button', { name: 'View or forget decisions' }))
+  const load = () => click(settings.getByRole('button', { name: 'Load private history' }))
+  await load()
+  expect(settings.getByRole('alert').textContent).toContain('Try again')
+  commits.clear()
+  await load()
+  expect(settings.getByText('Working…')).toBeTruthy()
+  expect(settings.queryByText(/No triage events/)).toBeNull()
+  await act(async () =>
+    delayed.resolve({ events: [event], before: null, legacy, physicalPurge: null }),
+  )
+  expectBudget({ workspace: 0, list: 0, reader: 0, reviewCard: 0 })
+  expect(settings.getByText(event.reason)).toBeTruthy()
+
+  await click(settings.getByRole('button', { name: 'Forget' }))
+  expect(forgetTriageDecision).not.toHaveBeenCalled()
+  await click(settings.getByRole('button', { name: 'Forget decision' }))
+  expect(forgetTriageDecision).toHaveBeenCalledExactlyOnceWith(event.id)
+  expect(settings.queryByText(event.reason)).toBeNull()
+  expect(settings.getByText('No triage events on this page.')).toBeTruthy()
+  expect(settings.getByText(/Forget done. Physical purge pending/)).toBeTruthy()
+  await click(settings.getByRole('button', { name: 'Refresh history' }))
+  expect(settings.getByText('Forget done. Physical purge completed.')).toBeTruthy()
+  expect(JSON.stringify(localStorage)).not.toContain(event.reason)
 })

@@ -14,7 +14,9 @@ import {
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { backupTo, type Db, schemaVersion } from './database.ts'
+import { ERASURE_LEDGER_FILE, erasureLedgerId, openErasureLedger } from '../mail/triage/erasure.ts'
+import { pendingPurgeEpoch, purgeErasure } from '../mail/triage/physical-purge.ts'
+import { backupTo, type Db, migrate, openDatabase, schemaVersion } from './database.ts'
 import { MIGRATIONS } from './migrations.ts'
 
 const NIGHTLY = /^amc-\d{8}\.db$/
@@ -159,6 +161,31 @@ function publishSnapshot(source: string, target: string, beforeRestoreSwap?: () 
     }
     prepareSnapshot(snapshot, beforeRestoreSwap !== undefined)
     chmodSync(snapshot, 0o600)
+    if (beforeRestoreSwap) {
+      const ledgerPath = join(dir, ERASURE_LEDGER_FILE)
+      let expectedId: string | undefined
+      if (existsSync(target)) {
+        const live = new DatabaseSync(target, { readOnly: true })
+        try {
+          const known = erasureLedgerId(live)
+          if (typeof known === 'string') expectedId = known
+        } finally {
+          live.close()
+        }
+      }
+      const db = openDatabase(snapshot)
+      try {
+        if (expectedId || existsSync(ledgerPath) || schemaVersion(db) >= 24) {
+          migrate(db)
+          openErasureLedger(db, ledgerPath, expectedId)()
+          const epoch = pendingPurgeEpoch(db)
+          if (epoch && !purgeErasure(db, epoch))
+            throw new Error('Could not purge the staged backup')
+        }
+      } finally {
+        db.close()
+      }
+    }
     syncFile(snapshot)
     beforeRestoreSwap?.()
     renameSync(snapshot, target)

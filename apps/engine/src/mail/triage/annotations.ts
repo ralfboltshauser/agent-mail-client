@@ -179,7 +179,7 @@ export function appendEvent(db: Db, item: Subject, event: Event) {
 }
 
 export function privateReasonsEnabled() {
-  return process.env.AMC_PRIVATE_TRIAGE_REASONS === '1'
+  return process.env.AMC_PRIVATE_TRIAGE_REASONS !== '0'
 }
 
 export function checkOwnerReason(reason?: string | null) {
@@ -188,7 +188,12 @@ export function checkOwnerReason(reason?: string | null) {
 }
 
 export function ownerReasonRetry(db: Db, id: string, reason?: string | null, retry = false) {
-  if (!retry) checkOwnerReason(reason)
+  if (!retry) {
+    // An older snapshot may predate the action while a Client still has its retry.
+    if (db.prepare('SELECT 1 FROM triage_forgotten_action WHERE id = ?').get(id))
+      throw new SenderError('Owner action ID was already used')
+    checkOwnerReason(reason)
+  }
   const digest = privateDigest(db, 'owner reason', [id, reason || null])
   if (!retry) {
     db.prepare('INSERT INTO triage_request_fingerprint VALUES (?, ?)').run(id, digest)
@@ -259,7 +264,7 @@ export function annotateUndo(db: Db, actionId: string) {
       message_id, arrival_key, input_revision, 'undo', source, taxonomy_version, ?, action_id, id,
       features_json, '{"version":1,"operation":"undo"}', 'undo:' || id
     FROM triage_event WHERE action_id = ? AND kind = 'decision'
-      AND account_generation = (SELECT mailbox_generation FROM account WHERE id = account_id)
+      AND (source = 'legacy' OR account_generation = (SELECT mailbox_generation FROM account WHERE id = account_id))
     ON CONFLICT(dedupe_key) DO NOTHING
   `).run(Date.now(), actionId)
 }
@@ -297,6 +302,8 @@ export function editOwnerReason(db: Db, actionId: string, input: OwnerActionReas
     const target = primaryDecision(db, actionId)
     if (!target) throw new SenderError('Owner action unavailable', 404)
     const dedupe = `reason:${input.editId}`
+    if (db.prepare('SELECT 1 FROM triage_forgotten WHERE id = ?').get(dedupe))
+      throw new SenderError('Reason edit ID was already used')
     const fingerprint = [actionId, input.expectedReasonRevision, input.reason]
     const digest = privateDigest(db, 'reason edit', fingerprint)
     const existing = db.prepare('SELECT id FROM triage_event WHERE dedupe_key = ?').get(dedupe)

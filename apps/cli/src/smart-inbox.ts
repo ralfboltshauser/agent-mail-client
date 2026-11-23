@@ -9,11 +9,14 @@ import {
   SenderDecision,
   type SenderList,
   SenderListQuery,
+  type TriageForgetResult,
+  type TriageHistoryPage,
+  TriageHistoryQuery,
   type TriageQueuePage,
   TriageQueueQuery,
 } from '@amc/protocol'
 import type { Command } from 'commander'
-import { authed } from './client.ts'
+import { authed, response } from './client.ts'
 import type { CliConfig } from './config.ts'
 
 async function readPrivateReason(path: string) {
@@ -62,6 +65,63 @@ export function registerSmartInboxCommands(
   triage: Command,
   config: () => CliConfig,
 ) {
+  triage
+    .command('history')
+    .description('List the owner decision log')
+    .option('--before <sequence>', 'continue before this sequence')
+    .option('--limit <n>', 'page size (1–100)')
+    .option('--include-reasons', 'explicitly show private reasons on stdout')
+    .action(async (_opts, command: Command) => {
+      const { account, before, limit, includeReasons } = command.optsWithGlobals()
+      const query = TriageHistoryQuery.parse({
+        accountId: account,
+        before,
+        limit,
+        includeReasons: includeReasons ? '1' : undefined,
+      })
+      const page = await authed(config())<TriageHistoryPage>(endpoint('/v1/triage/events', query))
+      console.log(JSON.stringify(page, null, 2))
+    })
+
+  triage
+    .command('export')
+    .description('Write an owner-preferences JSONL file')
+    .requiredOption('--output <path>', 'new local file to create')
+    .option('--include-reasons', 'include private reasons in the file')
+    .action(async (_opts, command: Command) => {
+      const { account, output, includeReasons = false } = command.optsWithGlobals()
+      const { engineUrl, token } = config()
+      const result = await response(engineUrl, '/v1/triage/events/export', {
+        method: 'POST',
+        redirect: 'error',
+        token,
+        body: { accountId: account, includeReasons },
+      })
+      if (!result.headers.get('Content-Type')?.startsWith('application/x-ndjson'))
+        throw new Error('Engine did not return an owner-preferences export')
+      await writeFile(output, Buffer.from(await result.arrayBuffer()), { flag: 'wx', mode: 0o600 })
+      console.log('Triage export saved.')
+    })
+
+  triage
+    .command('forget')
+    .description('Permanently erase a decision and its private learning data')
+    .argument('<event-id>')
+    .requiredOption('--confirm', 'confirm erasure')
+    .action(async (id: string) => {
+      const result = await authed(config())<TriageForgetResult | null>(
+        `/v1/triage/events/${encodeURIComponent(id)}`,
+        { method: 'DELETE', redirect: 'error' },
+      )
+      const status =
+        result?.physicalPurge === 'pending'
+          ? 'Forget done. Physical purge pending. Check amc triage history for updates.'
+          : result?.physicalPurge === 'completed'
+            ? 'Forget done. Physical purge completed.'
+            : 'Decision forgotten.'
+      console.log(`${status} Older backups and existing exports can still contain it.`)
+    })
+
   triage
     .command('queue')
     .description('List the owner review queue')
