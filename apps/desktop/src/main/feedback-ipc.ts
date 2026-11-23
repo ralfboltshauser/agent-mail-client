@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { app, type BrowserWindow, clipboard, type IpcMainEvent, ipcMain, shell } from 'electron'
-import { type FeedbackDraft, feedbackView } from '../shared/feedback'
+import { type FeedbackDraft, type FeedbackSendResult, feedbackView } from '../shared/feedback'
 import {
   type FeedbackContext,
   feedbackMessage,
@@ -8,13 +8,34 @@ import {
   launchFeedback,
   saveFeedbackCapture,
 } from './feedback'
-import { t3NavigationLink } from './handoff'
+import { type T3Launcher, t3NavigationLink } from './handoff'
 import { pairedFeedbackLauncher, savedT3Url } from './t3'
-import { cliLauncher, detectT3Cli } from './t3-cli'
+import { localT3Launcher } from './t3-cli'
 
 declare const AMC_REVISION: string
 
-export function registerFeedbackIpc(getWindow: () => BrowserWindow | null, openWindow: () => void) {
+async function feedbackLauncher(): Promise<T3Launcher | undefined> {
+  const local = await localT3Launcher()
+  if (local) return local
+  const address = savedT3Url()
+  if (address && ['localhost', '127.0.0.1', '[::1]'].includes(new URL(address).hostname))
+    return pairedFeedbackLauncher(address)
+}
+
+function validDraft(draft: FeedbackDraft) {
+  return typeof draft?.text === 'string' && typeof draft.markdown === 'string'
+}
+
+export function registerFeedbackIpc(
+  getWindow: () => BrowserWindow | null,
+  openWindow: () => void,
+  log: (event: string) => void,
+) {
+  function failed(stage: string, reason: string): FeedbackSendResult {
+    log(`feedback send failed: ${stage}`)
+    return { opened: false, reason }
+  }
+
   let ready = false
   let pending = false
   let captureAllowed = false
@@ -35,12 +56,6 @@ export function registerFeedbackIpc(getWindow: () => BrowserWindow | null, openW
     window.webContents.send('amc:feedbackOpen')
   }
 
-  async function localCliLauncher() {
-    const cli = await detectT3Cli()
-    if (!cli) throw new Error('No local T3 connection.')
-    return cliLauncher(cli)
-  }
-
   function active(event: Pick<IpcMainEvent, 'sender' | 'senderFrame'>, id: string) {
     if (!trusted(event) || !capture || capture.id !== id || busy)
       throw new Error('Open Send Feedback again to capture AMC.')
@@ -53,8 +68,10 @@ export function registerFeedbackIpc(getWindow: () => BrowserWindow | null, openW
     flushOpen()
   })
   ipcMain.handle('amc:feedbackCapture', async (event, view: unknown) => {
-    if (!trusted(event) || !captureAllowed || capture || busy)
+    if (!trusted(event) || !captureAllowed || capture || busy) {
+      log('feedback send failed: CaptureUnavailable')
       throw new Error('AMC feedback is unavailable.')
+    }
     captureAllowed = false
     const generation = rendererGeneration
     const at = new Date()
@@ -77,46 +94,52 @@ export function registerFeedbackIpc(getWindow: () => BrowserWindow | null, openW
       }
       return { id }
     } catch {
+      log('feedback send failed: CaptureFailed')
       throw new Error('AMC could not capture its window.')
     } finally {
       busy = false
     }
   })
   ipcMain.handle('amc:feedbackSend', async (event, id: string, draft: FeedbackDraft) => {
-    const current = active(event, id)
+    if (!trusted(event) || !capture || capture.id !== id || busy || !validDraft(draft))
+      return failed('InvalidSubmission', 'Open Send Feedback again to capture AMC.')
+    const current = capture
     busy = true
     try {
-      const address = savedT3Url()
-      const localMcp =
-        address && ['localhost', '127.0.0.1', '[::1]'].includes(new URL(address).hostname)
-      const launcher = localMcp
-        ? pairedFeedbackLauncher(address, localCliLauncher)
-        : await localCliLauncher()
+      const launcher = await feedbackLauncher().catch(() => undefined)
+      if (!launcher)
+        return failed('LauncherUnavailable', 'AMC could not find a local T3 connection.')
+
       const thread = await launchFeedback(
         launcher,
         feedbackProject,
-        id,
+        current.id,
         draft,
         current.context,
         current.path,
-      )
+      ).catch(() => null)
+      if (!thread)
+        return failed(
+          'LaunchFailed',
+          'T3 could not confirm the feedback thread. Check that T3 Code is running and the AMC project is available.',
+        )
+
       const link = thread.link && t3NavigationLink(thread.link)
       const target =
         link && /^t3code:\/\/threads\/[^/?#]+\/[^/?#]+$/.test(link) ? link : 't3code://'
-      const opened = await shell.openExternal(target).then(
-        () => true,
-        () =>
-          shell.openExternal('t3code://').then(
-            () => true,
-            () => false,
-          ),
-      )
-      return { opened }
-    } catch {
-      // T3 and filesystem errors may include a signed URL or parts of the feedback.
-      throw new Error(
-        'T3 Code could not confirm the feedback thread. Open T3 Code or check AMC’s pairing, or copy your feedback.',
-      )
+      try {
+        await shell.openExternal(target)
+      } catch {
+        try {
+          await shell.openExternal('t3code://')
+        } catch {
+          return failed(
+            'OpenFailed',
+            'The feedback thread was created, but AMC could not open T3 Code.',
+          )
+        }
+      }
+      return { opened: true } satisfies FeedbackSendResult
     } finally {
       busy = false
     }
@@ -126,6 +149,7 @@ export function registerFeedbackIpc(getWindow: () => BrowserWindow | null, openW
   })
   ipcMain.handle('amc:feedbackCopy', (event, id: string, draft: FeedbackDraft) => {
     const { context, path } = active(event, id)
+    if (!validDraft(draft)) throw new Error('Invalid feedback draft.')
     clipboard.writeText(feedbackMessage(draft, context, path))
     shell.showItemInFolder(path)
   })

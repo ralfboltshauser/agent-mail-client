@@ -1,6 +1,7 @@
 import { Agentation } from 'agentation'
 import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import { createPortal, flushSync } from 'react-dom'
+import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { getAmc } from '@/lib/amc'
 import { type FeedbackDraft, feedbackView } from '../../../../shared/feedback'
@@ -10,10 +11,9 @@ type Status =
   | 'reviewing'
   | 'capturing'
   | 'sending'
-  | 'capture-failed'
-  | 'sent'
   | 'failed'
   | 'copied'
+  | 'copied-with-screenshot'
 
 export default function FeedbackSession({
   scope,
@@ -27,12 +27,14 @@ export default function FeedbackSession({
   const note = useRef<HTMLTextAreaElement>(null)
   const closeButton = useRef<HTMLButtonElement>(null)
   const submitted = useRef<{ draft: FeedbackDraft; id?: string }>(null)
-  const [copyError, setCopyError] = useState(false)
+  const failureToast = useRef<string | number | undefined>(undefined)
+  const [failure, setFailure] = useState('')
   const showToolbar = status === 'annotating' || status === 'reviewing' || status === 'capturing'
   const busy = status === 'capturing' || status === 'sending'
 
   function close() {
     if (busy) return
+    if (failureToast.current !== undefined) toast.dismiss(failureToast.current)
     const id = submitted.current?.id
     if (id)
       void getAmc()
@@ -59,16 +61,29 @@ export default function FeedbackSession({
       const { id } = await api.capture(view)
       submission.id = id
       setStatus('sending')
-      const { opened } = await api.send(id, draft)
-      if (opened) {
-        void api.release(id).catch(() => {})
-        onClose()
-      } else {
-        setStatus('sent')
+      const result = await api.send(id, draft)
+      if (!result.opened) {
+        fail(result.reason)
+        return
       }
+      toast.success('Opened in T3')
+      void api.release(id).catch(() => {})
+      onClose()
     } catch {
-      setStatus(submission.id ? 'failed' : 'capture-failed')
+      fail(
+        submission.id
+          ? 'AMC could not reach its feedback service.'
+          : 'AMC could not capture the window.',
+      )
     }
+  }
+
+  function fail(reason: string) {
+    failureToast.current = toast.error(reason, {
+      action: { label: 'Copy feedback', onClick: () => void copy() },
+    })
+    setFailure(reason)
+    setStatus('failed')
   }
 
   function review(output: string) {
@@ -118,13 +133,17 @@ export default function FeedbackSession({
 
   async function copy() {
     const item = submitted.current
-    if (!item?.id) return
+    if (!item) return
     try {
-      await getAmc().feedback.copy(item.id, item.draft)
-      setCopyError(false)
-      setStatus('copied')
+      if (item.id) await getAmc().feedback.copy(item.id, item.draft)
+      else
+        await navigator.clipboard.writeText(
+          [item.draft.text, item.draft.markdown].filter(Boolean).join('\n\n'),
+        )
+      if (failureToast.current !== undefined) toast.dismiss(failureToast.current)
+      setStatus(item.id ? 'copied-with-screenshot' : 'copied')
     } catch {
-      setCopyError(true)
+      toast.error('AMC could not copy the feedback.')
     }
   }
 
@@ -167,23 +186,11 @@ export default function FeedbackSession({
             ) : (
               <>
                 {status === 'sending' && <output>Opening T3…</output>}
-                {status === 'capture-failed' && (
-                  <p role="alert">
-                    AMC could not capture the window. Reopen Send Feedback to try again.
-                  </p>
-                )}
-                {status === 'sent' && (
-                  <output>Feedback sent. Open T3 Code to find the new thread.</output>
-                )}
-                {status === 'failed' && (
-                  <p role="alert">
-                    T3 Code could not confirm the thread. Copy the feedback to use in T3.
-                  </p>
-                )}
-                {status === 'copied' && (
+                {status === 'failed' && <p role="alert">{failure}</p>}
+                {status === 'copied' && <output>Feedback copied.</output>}
+                {status === 'copied-with-screenshot' && (
                   <output>Feedback copied. The screenshot is in Finder.</output>
                 )}
-                {copyError && <p role="alert">AMC could not copy the feedback.</p>}
                 {!busy && (
                   <div className="flex justify-end gap-2">
                     {status === 'failed' && (

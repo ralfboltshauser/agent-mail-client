@@ -1,4 +1,4 @@
-import { act, fireEvent, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { rendererAdapter } from './adapter'
 import { expectBudget } from './profile'
@@ -72,6 +72,7 @@ describe('desktop feedback', () => {
 
     await waitFor(() => expect(adapter.api.feedback.send).toHaveBeenCalledTimes(1))
     expect(panel()).toBeNull()
+    expect(await screen.findByText('Opened in T3')).toBeTruthy()
     expect(adapter.api.feedback.capture).toHaveBeenCalledExactlyOnceWith('inbox')
     expect(adapter.api.feedback.send).toHaveBeenCalledExactlyOnceWith('renderer-fixture', {
       text: 'More room here',
@@ -82,7 +83,10 @@ describe('desktop feedback', () => {
 
   it('keeps the finished prompt in memory for offline Copy feedback', async () => {
     const adapter = rendererAdapter()
-    adapter.api.feedback.send.mockRejectedValueOnce(new Error('offline'))
+    adapter.api.feedback.send.mockResolvedValueOnce({
+      opened: false,
+      reason: 'AMC could not find a local T3 connection.',
+    })
     await mount(adapter)
     const store = vi.spyOn(localStorage, 'setItem')
     await openFeedback(adapter)
@@ -93,7 +97,14 @@ describe('desktop feedback', () => {
     expect(adapter.api.feedback.capture).not.toHaveBeenCalled()
     fireEvent.keyDown(window, { key: 'Enter', metaKey: true })
     await waitFor(() => expect(adapter.api.feedback.send).toHaveBeenCalledTimes(1))
-    fireEvent.click(await screen.findByRole('button', { name: 'Copy feedback' }))
+    const fallback = await screen.findByRole('region', { name: 'Send Feedback' })
+    expect(within(fallback).getByRole('button', { name: 'Copy feedback' })).toBeTruthy()
+    expect(screen.getByRole('alert').textContent).toBe('AMC could not find a local T3 connection.')
+    await waitFor(() =>
+      expect(screen.getAllByText('AMC could not find a local T3 connection.')).toHaveLength(2),
+    )
+    const notifications = screen.getByRole('region', { name: /Notifications/ })
+    fireEvent.click(within(notifications).getByRole('button', { name: 'Copy feedback' }))
 
     const draft = { text: 'Adjust spacing', markdown: '' }
     expect(adapter.api.feedback.send).toHaveBeenCalledExactlyOnceWith('renderer-fixture', draft)

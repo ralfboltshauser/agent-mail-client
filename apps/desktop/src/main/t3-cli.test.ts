@@ -118,22 +118,23 @@ it.each([false, true])(
 
     run.mockClear()
     const screenshot = '/tmp/synthetic feedback.png'
-    if (!supportsRuntimeMode) {
-      await expect(launcher.launch(request, screenshot)).rejects.toThrow()
-      expect(run).not.toHaveBeenCalled()
-      writeFileSync(
-        join(state, 'settings.json'),
-        JSON.stringify({
-          projectSettingsOverrides: { active: { defaultRuntimeMode: 'approval-required' } },
-        }),
-      )
-    }
-    await expect(launcher.launch(request, screenshot)).resolves.toEqual(launched)
+    const { runtimeMode: _runtimeMode, ...feedback } = request
+    await expect(launcher.launch(feedback, screenshot)).resolves.toEqual(launched)
     expect(run).toHaveBeenCalledExactlyOnceWith(
       executable,
-      expect.arrayContaining(['--', 'active', '-']),
-      `${request.message}
-Local screenshot: ${screenshot}`,
+      [
+        'thread',
+        'start',
+        '--base-dir',
+        baseDir,
+        '--json',
+        '--title',
+        request.title,
+        '--',
+        'active',
+        '-',
+      ],
+      `${request.message}\nLocal screenshot: ${screenshot}`,
     )
   },
 )
