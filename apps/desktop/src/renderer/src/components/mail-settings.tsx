@@ -1,6 +1,7 @@
 import { useEffect, useId, useState } from 'react'
 import { toast } from 'sonner'
 import { setLoadRemoteImagesAutomatically, useRemoteImages } from '@/data/remote-image-preferences'
+import { AccountAvatarSettings } from '@/features/sender-avatar/account-avatar-settings'
 import { getAmc } from '@/lib/amc'
 import { failureText } from '@/lib/failure'
 import type { NotificationSettings } from '../../../shared/api'
@@ -38,8 +39,9 @@ export function MailSettings({
           <DialogTitle>Settings</DialogTitle>
           <DialogDescription>Manage mail preferences and Mac notifications.</DialogDescription>
         </DialogHeader>
+        <AccountAvatarSettings />
         <form
-          className="grid gap-4"
+          className="grid gap-4 border-t pt-4"
           onSubmit={(event) => {
             event.preventDefault()
             if (saving) return

@@ -1,6 +1,8 @@
+import './dom'
 import { act, cleanup, render } from '@testing-library/react'
 import { Profiler } from 'react'
 import { expect, it, vi } from 'vitest'
+import { setAccountAvatarShape } from '../../apps/desktop/src/renderer/src/features/sender-avatar/account-avatar-shape'
 import { SenderAvatarCache } from '../../apps/desktop/src/renderer/src/features/sender-avatar/cache'
 import { avatarInitials } from '../../apps/desktop/src/renderer/src/features/sender-avatar/initials'
 import { SenderAvatar } from '../../apps/desktop/src/renderer/src/features/sender-avatar/sender-avatar'
@@ -107,6 +109,18 @@ it('batches mounted avatars and commits only consumers of the changed image', as
     expect(avatar.querySelector('img')?.getAttribute('src')).toBe(currentImage)
     expect(changed).toHaveBeenCalledTimes(1)
     expect(unchanged).not.toHaveBeenCalled()
+
+    const loadedImage = avatar.querySelector('img')
+    const callsBeforeShapeChange = resolve.mock.calls.length
+    act(() => setAccountAvatarShape('a', 'hexagon'))
+    expect(avatar.getAttribute('data-avatar-shape')).toBe('hexagon')
+    expect(avatar.style.clipPath).toMatch(/^polygon/)
+    expect(avatar.querySelector('img')).toBe(loadedImage)
+    expect(avatar.style.width).toBe('32px')
+    await act(async () => vi.advanceTimersByTimeAsync(16))
+    expect(resolve).toHaveBeenCalledTimes(callsBeforeShapeChange)
+    act(() => setAccountAvatarShape('a', 'circle'))
+    unchanged.mockClear()
 
     offline = true
     await act(async () => vi.advanceTimersByTimeAsync(60_000))

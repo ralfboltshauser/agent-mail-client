@@ -1,4 +1,5 @@
 import { type ComponentPropsWithRef, memo, useCallback, useSyncExternalStore } from 'react'
+import { avatarShapes, useAccountAvatarShape } from './account-avatar-shape'
 import { type SenderAvatarCache, senderAvatarCache } from './cache'
 import { avatarInitials } from './initials'
 
@@ -35,10 +36,12 @@ export const SenderAvatar = memo(function SenderAvatar({
   )
   const image = useSyncExternalStore(subscribe, snapshot, emptyImage)
   const fallback = avatarInitials(address, name)
+  const shape = useAccountAvatarShape(accountId)
   return (
     <span
       {...props}
       aria-hidden="true"
+      data-avatar-shape={shape}
       style={{
         ...style,
         width: size,
@@ -47,7 +50,7 @@ export const SenderAvatar = memo(function SenderAvatar({
         display: 'inline-grid',
         placeItems: 'center',
         overflow: 'hidden',
-        borderRadius: '50%',
+        ...avatarShapes[shape].style,
         color: 'white',
         backgroundColor: fallback.color,
         fontSize: Math.round(size * 0.4),
