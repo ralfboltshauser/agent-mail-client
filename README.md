@@ -1,4 +1,9 @@
-# agent-mail-client (AMC)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/assets/lockup-paper.svg">
+  <img src="docs/brand/assets/lockup-ink.svg" alt="AMC" width="168" height="48">
+</picture>
+
+# Agent Mail Client (AMC)
 
 An open-source, agent-native mail client for founders who live in their agents.
 
@@ -7,6 +12,8 @@ An open-source, agent-native mail client for founders who live in their agents.
 - **Trust by construction.** Agents cannot send mail unless you explicitly enable it; the send capability is not merely discouraged, it does not exist for them.
 
 Status: being built. See the [build plan](docs/plan.md), the [runbook](docs/runbook.md) and the `wayfinder:map` issue.
+
+The [brand guide](docs/brand/index.html) includes logo assets, typography, and light and dark usage. Open it locally for the interactive guide.
 
 ## Development
 
