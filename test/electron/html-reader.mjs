@@ -201,6 +201,7 @@ async function main() {
             const frame = await measure('probe-end')
             return (
               (!width || frame.width === width) &&
+              frame.zoom < 1 === frame.width < 780 &&
               frame.overflow === 0 &&
               !frame.hasHorizontalControl &&
               frame.finalLineVisible &&
@@ -210,7 +211,6 @@ async function main() {
           `thread ${thread} to fit at ${width ? `${width}px` : 'the reading pane width'}`,
         )
         assert.equal(fitted.endWidth, 780, 'fixed-width table keeps its layout')
-        assert.equal(fitted.zoom < 1, fitted.width < 780, 'scale only when needed')
         assert.ok(fitted.targetVisible, 'final column fits without scrolling')
         assert.equal((await measure('probe-code')).lines, 1, 'preformatted text keeps its line')
       }
