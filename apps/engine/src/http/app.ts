@@ -1,9 +1,9 @@
 import { existsSync, statfsSync } from 'node:fs'
 import { type RequestLogEnv, requestLogging } from '@amc/observability/hono'
 import type { Health, Me, PublicHealth, Scope } from '@amc/protocol'
-import { hasScope, PairRequest } from '@amc/protocol'
+import { hasScope, MCP_CLI_AGENT_PATH, MCP_CLI_OWNER_PATH, PairRequest } from '@amc/protocol'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
-import { Hono, type MiddlewareHandler } from 'hono'
+import { type Handler, Hono, type MiddlewareHandler } from 'hono'
 import { HTTPException } from 'hono/http-exception'
 import {
   authenticate,
@@ -250,9 +250,18 @@ export function createApp({
     v1.route('/', syncRoutes(mail, mutations, shutdownSignal, requestLog))
 
     // MCP over Streamable HTTP, stateless: one server per request, built from the token's scopes.
-    app.all('/mcp', requireAuth(db), async (c) => {
-      if (c.get('principal').kind === 'composer') return c.json({ error: 'forbidden' }, 403)
-      const server = buildMcpServer(c.get('principal'), {
+    const mcp: Handler<AppEnv> = async (c) => {
+      const principal = c.get('principal')
+      if (principal.kind === 'composer') return c.json({ error: 'forbidden' }, 403)
+      if (c.req.path === MCP_CLI_AGENT_PATH && principal.kind !== 'agent')
+        return c.json({ error: 'forbidden' }, 403)
+      if (
+        c.req.path === MCP_CLI_OWNER_PATH &&
+        principal.kind !== 'cli' &&
+        principal.kind !== 'desktop'
+      )
+        return c.json({ error: 'forbidden' }, 403)
+      const server = buildMcpServer(principal, {
         db,
         store: mail.store,
         queries: mail.queries,
@@ -265,7 +274,10 @@ export function createApp({
       })
       await server.connect(transport)
       return transport.handleRequest(c.req.raw)
-    })
+    }
+    app.all('/mcp', requireAuth(db), mcp)
+    app.all(MCP_CLI_AGENT_PATH, requireAuth(db), mcp)
+    app.all(MCP_CLI_OWNER_PATH, requireAuth(db), mcp)
   }
   app.route('/v1', v1)
   for (const route of app.routes) routes.add(route.path)

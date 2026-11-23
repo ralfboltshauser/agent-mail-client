@@ -24,10 +24,14 @@ import {
   type ThreadSummary,
 } from '@amc/protocol'
 import { Command, CommanderError } from 'commander'
+import { z } from 'zod'
 import { authed, request } from './client.ts'
 import { readConfig, writeConfig } from './config.ts'
 import { registerDiagnosticsCommands } from './diagnostics.ts'
+import { registerDraftCommands } from './drafts.ts'
 import { addImapAccount } from './imap-signin.ts'
+import { addThread, agentOrganize, registerMailCommands } from './mail-commands.ts'
+import { mailTool } from './mcp.ts'
 import { cliContext, cliFailure, closeClientLogs, retainFailureSource } from './observability.ts'
 import { loopbackSignIn } from './signin.ts'
 import { registerSkillCommands } from './skills.ts'
@@ -36,11 +40,39 @@ import { describeTriageFailure, runTriage, TriageFailure } from './triage.ts'
 
 declare const AMC_VERSION: string | undefined
 const VERSION = typeof AMC_VERSION === 'string' ? AMC_VERSION : 'dev'
+const BucketWriteResult = z.looseObject({ updated: z.boolean() })
+const scopedCommands = new Set([
+  'whoami',
+  'accounts',
+  'threads',
+  'thread',
+  'message',
+  'search',
+  'contacts',
+  'labels',
+  'archive',
+  'read',
+  'unread',
+  'star',
+  'mute',
+  'label',
+  'bucket',
+  'agent.status',
+  'triage.untriaged',
+  'senders.suggest',
+  'reply',
+  'draft.create',
+  'draft.list',
+  'draft.show',
+  'draft.update',
+  'draft.discard',
+])
 
 const program = new Command()
   .name('amc')
   .description('Agent Mail Client: work with your mail from the shell')
   .version(VERSION)
+  .option('--as-agent', 'use an explicit scoped agent grant from AMC_TOKEN')
   .exitOverride()
   .configureOutput({
     outputError: (message, write) =>
@@ -56,10 +88,18 @@ const program = new Command()
       names.unshift(parent.name())
     const context = cliContext.getStore()
     if (context) context.command = cliCommand(names.join('.'))
+    if (agentMode()) {
+      if (!process.env.AMC_TOKEN?.trim()) throw new Error('Agent mode requires AMC_TOKEN.')
+      if (!scopedCommands.has(names.join('.')))
+        throw new Error('This command is unavailable in agent mode.')
+    }
   })
+
+const agentMode = () => program.opts<{ asAgent?: boolean }>().asAgent === true
 
 registerDiagnosticsCommands(program, readConfig)
 registerSkillCommands(program)
+registerDraftCommands(program, requireConfig, agentMode)
 
 program
   .command('pair')
@@ -199,6 +239,17 @@ program
   .description('List Accounts and their sync state')
   .option('--json', 'print JSON')
   .action(async (opts: { json?: boolean }) => {
+    if (agentMode()) {
+      const accounts = await mailTool<Pick<AccountSummary, 'id' | 'address' | 'status'>[]>(
+        requireConfig(),
+        true,
+        'list_accounts',
+      )
+      if (opts.json) return printJson(accounts)
+      for (const account of accounts)
+        console.log(`${account.id}\t${account.address}\t${account.status}`)
+      return
+    }
     const { accounts } = await authed(requireConfig())<{ accounts: AccountSummary[] }>(
       '/v1/accounts',
     )
@@ -224,6 +275,8 @@ program
   .option('--all', 'all mail, not only the Inbox')
   .option('--unread', 'only unread')
   .option('--label <id>', 'only this Label id')
+  .option('--account <id>', 'Account ID')
+  .option('--before <cursor>', 'continue from the previous nextBefore value')
   .option('-n, --limit <n>', 'how many', '25')
   .option('--json', 'print JSON')
   .action(
@@ -231,13 +284,30 @@ program
       all?: boolean
       unread?: boolean
       label?: string
+      account?: string
+      before?: string
       limit: string
       json?: boolean
     }) => {
+      if (agentMode()) {
+        const list = await mailTool<ThreadList>(requireConfig(), true, 'list_threads', {
+          view: opts.all ? 'all' : 'inbox',
+          label_id: opts.label,
+          account_id: opts.account,
+          unread: opts.unread,
+          before: opts.before === undefined ? undefined : Number(opts.before),
+          limit: Number(opts.limit),
+        })
+        if (opts.json) return printJson(list)
+        printThreads(list.threads)
+        return
+      }
       const params = new URLSearchParams({ limit: opts.limit })
       if (opts.label) params.set('labelId', opts.label)
       else if (!opts.all) params.set('inbox', '1')
       if (opts.unread) params.set('unread', '1')
+      if (opts.account) params.set('accountId', opts.account)
+      if (opts.before) params.set('before', opts.before)
       const list = await authed(requireConfig())<ThreadList>(`/v1/threads?${params}`)
       if (opts.json) return printJson(list)
       printThreads(list.threads)
@@ -250,11 +320,15 @@ program
   .argument('<id>', 'Thread id')
   .option('--json', 'print JSON')
   .action(async (id: string, opts: { json?: boolean }) => {
-    const api = authed(requireConfig())
-    const t = await api<ThreadDetail>(`/v1/threads/${encodeURIComponent(id)}?deferBodies=1`)
+    const config = requireConfig()
+    const isAgent = agentMode()
+    const api = authed(config)
+    const t = isAgent
+      ? await mailTool<ThreadDetail>(config, true, 'get_thread', { thread_id: id })
+      : await api<ThreadDetail>(`/v1/threads/${encodeURIComponent(id)}?deferBodies=1`)
     if (!opts.json) console.log(`# ${t.subject || '(no subject)'}\n`)
     for (const m of t.messages) {
-      if (m.bodyText === null) {
+      if (!isAgent && m.bodyText === null) {
         const detail = await api<MessageDetail>(`/v1/messages/${encodeURIComponent(m.id)}`)
         m.bodyText = detail.bodyText
       }
@@ -278,17 +352,27 @@ program
   .command('search')
   .description('Search the entire history (from:, to:, subject: work)')
   .argument('<query...>', 'what to look for')
+  .option('--account <id>', 'Account ID')
   .option('-n, --limit <n>', 'how many', '20')
   .option('--json', 'print JSON')
-  .action(async (words: string[], opts: { limit: string; json?: boolean }) => {
-    const params = new URLSearchParams({ q: words.join(' '), limit: opts.limit })
-    const { hits } = await authed(requireConfig())<{ hits: SearchHit[] }>(`/v1/search?${params}`)
+  .action(async (words: string[], opts: { account?: string; limit: string; json?: boolean }) => {
+    const query = words.join(' ')
+    const params = new URLSearchParams({ q: query, limit: opts.limit })
+    if (opts.account) params.set('accountId', opts.account)
+    const config = requireConfig()
+    const hits = agentMode()
+      ? await mailTool<SearchHit[]>(config, true, 'search', {
+          query,
+          account_id: opts.account,
+          limit: Number(opts.limit),
+        })
+      : (await authed(config)<{ hits: SearchHit[] }>(`/v1/search?${params}`)).hits
     if (opts.json) return printJson(hits)
     if (hits.length === 0) return console.log('Nothing found.')
     printThreads(hits)
   })
 
-async function organise(action: OrganiseAction) {
+async function organise(action: OrganiseAction, json?: boolean) {
   const api = authed(requireConfig())
   const id = randomUUID()
   const post = (path: string, body: unknown) =>
@@ -299,6 +383,11 @@ async function organise(action: OrganiseAction) {
     result = (await post('/v1/mutations/status', { ids: [id] })).mutations[0]
   }
   if (!result) throw new Error(`Mutation status missing for ${id}`)
+  if (json) {
+    printJson(result)
+    if (result.status === 'failed' || result.status === 'partial') process.exitCode = 1
+    return
+  }
   if (result.status === 'failed') throw new Error(result.error ?? 'Organise writeback failed')
   if (result.status === 'partial') {
     printJson(result)
@@ -321,13 +410,29 @@ for (const kind of ['archive', 'trash', 'read', 'unread', 'star', 'mute', 'undo'
     .command(kind)
     .argument('<thread>', 'Thread id')
     .option('--remove', 'restore from Trash, remove the star or unmute')
-    .action((threadId: string, opts: { remove?: boolean }) => {
+    .option('--thread <id>', 'additional Thread ID for an agent batch, repeatable', addThread)
+    .option('--json', 'print JSON')
+    .action((threadId: string, opts: { remove?: boolean; thread?: string[]; json?: boolean }) => {
       if (opts.remove && !['trash', 'star', 'mute'].includes(kind))
         throw new Error(`--remove is not valid for ${kind}`)
-      if (kind === 'archive' || kind === 'undo') return organise({ kind, threadId })
+      if (agentMode()) {
+        if (kind === 'trash' || kind === 'undo' || (kind === 'mute' && opts.remove))
+          throw new Error('This operation is unavailable with an agent grant.')
+        const tool =
+          kind === 'read'
+            ? 'mark_read'
+            : kind === 'unread'
+              ? 'mark_unread'
+              : kind === 'star' && opts.remove
+                ? 'unstar'
+                : kind
+        return agentOrganize(requireConfig(), tool, [threadId, ...(opts.thread ?? [])], opts.json)
+      }
+      if (opts.thread?.length) throw new Error('Additional threads require --as-agent.')
+      if (kind === 'archive' || kind === 'undo') return organise({ kind, threadId }, opts.json)
       if (kind === 'read' || kind === 'unread')
-        return organise({ kind: 'read', threadId, value: kind === 'read' })
-      return organise({ kind, threadId, value: !opts.remove })
+        return organise({ kind: 'read', threadId, value: kind === 'read' }, opts.json)
+      return organise({ kind, threadId, value: !opts.remove }, opts.json)
     })
 }
 
@@ -336,8 +441,25 @@ program
   .argument('<thread>', 'Thread id')
   .argument('<label>', 'Label id or IMAP destination folder id')
   .option('--remove', 'remove the Label')
-  .action((threadId: string, labelId: string, opts: { remove?: boolean }) =>
-    organise({ kind: 'label', threadId, labelId, value: !opts.remove }),
+  .option('--thread <id>', 'additional Thread ID for an agent batch, repeatable', addThread)
+  .option('--json', 'print JSON')
+  .action(
+    (
+      threadId: string,
+      labelId: string,
+      opts: { remove?: boolean; thread?: string[]; json?: boolean },
+    ) => {
+      if (agentMode())
+        return agentOrganize(
+          requireConfig(),
+          opts.remove ? 'remove_label' : 'add_label',
+          [threadId, ...(opts.thread ?? [])],
+          opts.json,
+          labelId,
+        )
+      if (opts.thread?.length) throw new Error('Additional threads require --as-agent.')
+      return organise({ kind: 'label', threadId, labelId, value: !opts.remove }, opts.json)
+    },
   )
 
 program
@@ -347,16 +469,44 @@ program
   .option('--reason <text>', 'one-line reason', 'Set manually')
   .option('--review <revision>', 'record an owner correction at this Thread revision')
   .option('--action-id <id>', 'reuse this review action UUID on retry')
+  .option('--only-untriaged', 'skip if already triaged or outside the Inbox (agent only)')
+  .option('--json', 'print JSON')
   .action(
     async (
       threadId: string,
       value: string,
-      opts: { reason: string; review?: string; actionId?: string },
+      opts: {
+        reason: string
+        review?: string
+        actionId?: string
+        onlyUntriaged?: boolean
+        json?: boolean
+      },
     ) => {
       const bucket = Bucket.options.find((name) => name.toLowerCase() === value.toLowerCase())
       if (!bucket && value.toLowerCase() !== 'clear')
         throw new Error(`Choose ${Bucket.options.join(', ')}, or clear`)
       const input = { threadId, bucket: bucket ?? null, reason: opts.reason }
+      if (agentMode()) {
+        if (opts.review !== undefined || opts.actionId)
+          throw new Error('Owner review corrections are unavailable with an agent grant.')
+        const result = await mailTool(
+          requireConfig(),
+          true,
+          'set_bucket',
+          {
+            ...BucketInput.parse(input),
+            onlyUntriaged: opts.onlyUntriaged,
+          },
+          { write: true, result: BucketWriteResult },
+        )
+        if (opts.json) return printJson(result)
+        console.log(
+          result.updated ? (bucket ? `Moved to ${bucket}` : 'Bucket cleared') : 'Thread skipped.',
+        )
+        return
+      }
+      if (opts.onlyUntriaged) throw new Error('--only-untriaged requires --as-agent.')
       if (opts.review !== undefined) {
         if (!/^\d+$/.test(opts.review))
           throw new Error('Expected a Thread revision from amc triage queue')
@@ -375,7 +525,8 @@ program
       }
       if (opts.actionId) throw new Error('--action-id requires --review')
       const body = BucketInput.parse(input)
-      await authed(requireConfig())('/v1/bucket', { method: 'PUT', body })
+      const result = await authed(requireConfig())('/v1/bucket', { method: 'PUT', body })
+      if (opts.json) return printJson(result)
       console.log(bucket ? `Moved to ${bucket}` : 'Bucket cleared')
     },
   )
@@ -439,7 +590,7 @@ function triageCommandError(error: unknown) {
   return retainFailureSource(new Error(message), cause ?? failures[0])
 }
 
-registerSmartInboxCommands(program, triage, requireConfig)
+const senders = registerSmartInboxCommands(program, triage, requireConfig)
 
 program
   .command('mutation-status')
@@ -455,7 +606,7 @@ program
       process.exitCode = 1
   })
 
-const token = program.command('token').description('Tokens for Agents (MCP)')
+const token = program.command('token').description('Manage agent grants for MCP and the CLI')
 
 token
   .command('create')
@@ -498,6 +649,7 @@ token
     console.log(
       'Anything else: an MCP Streamable HTTP server at the URL above, with that Authorization header.',
     )
+    console.log('AMC CLI: supply the issued bearer in AMC_TOKEN and run amc --as-agent <command>.')
   })
 
 token
@@ -574,16 +726,27 @@ program
   .command('contacts')
   .description('Find people you have mailed with')
   .argument('<query>', 'part of a name or address')
-  .action(async (query: string) => {
-    const { contacts } = await authed(requireConfig())<{ contacts: Contact[] }>(
-      `/v1/contacts?q=${encodeURIComponent(query)}`,
-    )
+  .option('-n, --limit <n>', 'how many')
+  .option('--json', 'print JSON')
+  .action(async (query: string, opts: { limit?: string; json?: boolean }) => {
+    const config = requireConfig()
+    const params = new URLSearchParams({ q: query })
+    if (opts.limit !== undefined) params.set('limit', opts.limit)
+    const contacts = agentMode()
+      ? await mailTool<Contact[]>(config, true, 'search_contacts', {
+          query,
+          limit: opts.limit === undefined ? undefined : Number(opts.limit),
+        })
+      : (await authed(config)<{ contacts: Contact[] }>(`/v1/contacts?${params}`)).contacts
+    if (opts.json) return printJson(contacts)
     if (contacts.length === 0) return console.log('Nobody found.')
     for (const c of contacts)
       console.log(
         `${(c.name ?? '').padEnd(28)} ${c.address}  (${c.sentCount} sent, ${c.receivedCount} received)`,
       )
   })
+
+registerMailCommands(program, triage, senders, agent, requireConfig, agentMode, printThreads)
 
 function printThreads(threads: ThreadSummary[]) {
   if (threads.length === 0) return console.log('No Threads.')

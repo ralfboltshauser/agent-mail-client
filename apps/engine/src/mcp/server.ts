@@ -55,6 +55,8 @@ const toAddresses = (list: z.infer<typeof AddressInput>[] | undefined) =>
 
 const MAX_BODY = 20_000
 const MAX_THREAD_TEXT = 100_000
+const DraftRevision = z.number().int().nonnegative()
+const ReportMirror = z.boolean().optional().describe('Include current provider mirror status')
 
 function json(value: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(value, null, 1) }] }
@@ -485,6 +487,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
           subject: z.string().optional(),
           body: z.string().describe('Plain-text body'),
           reply_all: z.boolean().optional(),
+          report_mirror: ReportMirror,
         },
         annotations: { destructiveHint: false },
       },
@@ -510,10 +513,11 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
               principal.name,
             )
           }
+          const draft = agent
+            ? await draftAsAgent(db, agent, 'create_draft', a.thread_id ?? null, write)
+            : await write()
           return json(
-            agent
-              ? await draftAsAgent(db, agent, 'create_draft', a.thread_id ?? null, write)
-              : await write(),
+            a.report_mirror ? { ...draft, mirrorStatus: drafts.mirrorStatus(draft.id) } : draft,
           )
         } catch (error) {
           if (error instanceof DraftError) return withToolError(failure(error.message), error)
@@ -535,16 +539,10 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
           bcc: z.array(AddressInput).optional(),
           subject: z.string().optional(),
           body: z.string().optional(),
-          ...(agent
-            ? {
-                revision: z
-                  .number()
-                  .int()
-                  .nonnegative()
-                  .optional()
-                  .describe('Required for body edits. Use the revision returned by AMC.'),
-              }
-            : {}),
+          revision: DraftRevision.optional().describe(
+            'Required for Agent body edits. Pass the revision returned by AMC to check any edit.',
+          ),
+          report_mirror: ReportMirror,
         },
         annotations: { destructiveHint: false },
       },
@@ -572,19 +570,22 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
                 ...(a.body !== undefined ? { body: a.body } : {}),
               },
               principal.name,
-              agent ? a.revision : undefined,
+              a.revision,
             )
           }
+          const updated = agent
+            ? await draftAsAgent(
+                db,
+                agent,
+                'update_draft',
+                allowed ? (draft?.thread_id ?? null) : null,
+                write,
+              )
+            : await write()
           return json(
-            agent
-              ? await draftAsAgent(
-                  db,
-                  agent,
-                  'update_draft',
-                  allowed ? (draft?.thread_id ?? null) : null,
-                  write,
-                )
-              : await write(),
+            a.report_mirror
+              ? { ...updated, mirrorStatus: drafts.mirrorStatus(updated.id) }
+              : updated,
           )
         } catch (error) {
           if (error instanceof DraftError) return draftFailure(error, can('read'))
@@ -599,10 +600,17 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
         {
           description:
             'Discard a draft and remove the provider copy if it still matches what AMC last wrote.',
-          inputSchema: { draft_id: z.string() },
+          inputSchema: { draft_id: z.string(), revision: DraftRevision.optional() },
           annotations: { destructiveHint: true },
         },
-        async ({ draft_id }) => json(await drafts.delete(draft_id)),
+        async ({ draft_id, revision }) => {
+          try {
+            return json(await drafts.delete(draft_id, { expectedRevision: revision }))
+          } catch (error) {
+            if (error instanceof DraftError) return draftFailure(error, can('read'))
+            throw error
+          }
+        },
       )
   }
 
@@ -653,10 +661,11 @@ function registerHandoffTools(
       inputSchema: {
         draft_id: z.string(),
         body: z.string().max(MAX_BODY),
-        revision: z.number().int().nonnegative(),
+        revision: DraftRevision,
+        report_mirror: ReportMirror,
       },
     },
-    async ({ draft_id, body, revision }) => {
+    async ({ draft_id, body, revision, report_mirror }) => {
       const grant = handoffGrant(db, principal)
       try {
         const draft = await draftAsAgent(
@@ -669,7 +678,11 @@ function registerHandoffTools(
             return drafts.replaceComposeBody(draft_id, body, revision, principal.name)
           },
         )
-        return json({ body: 'body' in draft ? draft.body : undefined, revision: draft.revision })
+        return json({
+          body: 'body' in draft ? draft.body : undefined,
+          revision: draft.revision,
+          ...(report_mirror ? { id: draft_id, mirrorStatus: drafts.mirrorStatus(draft_id) } : {}),
+        })
       } catch (error) {
         if (error instanceof DraftError)
           return draftFailure(error, hasScope(principal.scopes, 'read'))

@@ -1,10 +1,24 @@
+import { execFile } from 'node:child_process'
+import { randomBytes, randomUUID } from 'node:crypto'
+import { once } from 'node:events'
+import { rm } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
 import { isCorrelationId, newRequestId, REQUEST_ID_HEADER } from '@amc/observability'
-import { type AgentAction, SCOPES, type Scope } from '@amc/protocol'
+import {
+  type AgentAction,
+  MCP_CLI_AGENT_PATH,
+  MCP_CLI_OWNER_PATH,
+  SCOPES,
+  type Scope,
+} from '@amc/protocol'
+import { serve } from '@hono/node-server'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { describe, expect, it, vi } from 'vitest'
+import { startHandoff } from '../auth/handoff.ts'
 import { authenticate, DAY_MS, issueToken, revokeToken } from '../auth/tokens.ts'
 import { BlobStore } from '../blobs.ts'
+import { Sealer } from '../crypto.ts'
 import { createApp } from '../http/app.ts'
 import { listAgentActions } from '../mail/agent-actions.ts'
 import { Drafts } from '../mail/drafts.ts'
@@ -15,6 +29,7 @@ import { FakeGmail } from '../providers/gmail/fake.ts'
 import { fromGmail } from '../providers/gmail/mapping.ts'
 import { toIncomingLabel } from '../providers/gmail/sync.ts'
 import { parseMessage } from '../providers/imap/mapping.ts'
+import { SyncManager } from '../sync/manager.ts'
 import { silentLog, tempDir, testConfig, testDb } from '../test-support.ts'
 import { buildMcpServer } from './server.ts'
 
@@ -23,7 +38,8 @@ function setup() {
   db.prepare(
     "INSERT INTO account (id, kind, address, credentials, created_at) VALUES ('a', 'gmail', 'owner@example.com', x'00', 0)",
   ).run()
-  const store = new MailStore(db, new BlobStore(tempDir()))
+  const blobs = new BlobStore(tempDir())
+  const store = new MailStore(db, blobs)
   const gmail = new FakeGmail()
   const incoming = gmail.add('m1', {
     subject: 'Dinner?',
@@ -33,7 +49,7 @@ function setup() {
   store.putMessage('a', ['owner@example.com'], fromGmail(incoming))
   const drafts = new Drafts(db, store, () => gmail)
   const mutations = new Mutations(store, () => gmail, silentLog)
-  return { db, store, gmail, drafts, mutations, queries: new MailQueries(db) }
+  return { db, store, blobs, gmail, drafts, mutations, queries: new MailQueries(db) }
 }
 
 async function connect(scopes: Scope[], deps = setup(), accountId?: string) {
@@ -75,6 +91,442 @@ const organizeTools = [
 ]
 
 const text = (result: unknown) => (result as { content: { text: string }[] }).content[0]?.text ?? ''
+
+it('maps every MCP tool to a CLI command or the triage runner', async () => {
+  const deps = setup()
+  const { db } = deps
+  const holder = `triage-${randomUUID()}`
+  const expiresAt = Date.now() + 60_000
+  db.prepare('INSERT INTO triage_lease (slot, holder, expires_at) VALUES (1, ?, ?)').run(
+    holder,
+    expiresAt,
+  )
+  const tokens = [
+    issueToken(db, { kind: 'cli', name: 'local', scopes: ['read', 'organize', 'draft'] }),
+    issueToken(db, {
+      kind: 'agent',
+      name: 'general',
+      scopes: ['read', 'organize', 'draft'],
+      expiresAt,
+    }),
+    issueToken(db, {
+      kind: 'agent',
+      name: holder,
+      scopes: ['read', 'organize'],
+      accountId: 'a',
+      expiresAt,
+    }),
+  ]
+  const coverage = {
+    whoami: 'whoami',
+    list_accounts: 'accounts',
+    list_threads: 'threads',
+    get_thread: 'thread',
+    get_message: 'message',
+    search: 'search',
+    search_contacts: 'contacts',
+    list_labels: 'labels',
+    list_untriaged: 'triage untriaged',
+    list_drafts: 'draft list',
+    read_draft: 'draft show',
+    create_draft: 'draft create or reply',
+    update_draft: 'draft update',
+    delete_draft: 'draft discard',
+    archive: 'archive',
+    mark_read: 'read',
+    mark_unread: 'unread',
+    star: 'star',
+    unstar: 'star --remove',
+    mute: 'mute',
+    add_label: 'label',
+    remove_label: 'label --remove',
+    organize_status: 'agent status',
+    set_bucket: 'bucket',
+    suggest_sender_rule: 'senders suggest',
+    submit_triage_prediction: 'internal to triage runner',
+  }
+  const discovered = new Set<string>()
+  try {
+    for (const token of tokens) {
+      const principal = authenticate(db, token.secret)
+      if (!principal) throw new Error('Fixture token rejected')
+      const server = buildMcpServer(principal, deps)
+      const [a, b] = InMemoryTransport.createLinkedPair()
+      const client = new Client({ name: 'test', version: '0' })
+      await Promise.all([server.connect(a), client.connect(b)])
+      try {
+        for (const { name } of (await client.listTools()).tools) discovered.add(name)
+      } finally {
+        await client.close()
+      }
+    }
+    expect([...discovered].sort()).toEqual(Object.keys(coverage).sort())
+  } finally {
+    db.close()
+  }
+})
+
+it('drives drafts and organize through the CLI with paired, scoped and handoff credentials', async () => {
+  const deps = setup()
+  const { db, drafts, gmail, mutations, store } = deps
+  db.exec(
+    "INSERT INTO account (id, kind, address, credentials, created_at) VALUES ('b', 'gmail', 'other@example.com', x'00', 0)",
+  )
+  store.putMessage('a', [], fromGmail(gmail.add('m2')))
+  store.putMessage('b', [], fromGmail(gmail.add('outside')))
+  const owner = issueToken(db, { kind: 'cli', name: 'mac', scopes: ['read', 'organize', 'draft'] })
+  const agent = (scopes: Scope[]) =>
+    issueToken(db, {
+      kind: 'agent',
+      name: 'shell-agent',
+      scopes,
+      accountId: 'a',
+      expiresAt: Date.now() + DAY_MS,
+    })
+  const scoped = agent(['read', 'organize', 'draft'])
+  const draftOnly = agent(['draft'])
+  const handoff = await startHandoff(db, drafts, 'a:t-m2', randomUUID())
+  const sealer = new Sealer(randomBytes(32))
+  const oauthClient = () => ({ clientId: 'synthetic', clientSecret: 'synthetic' })
+  const sync = new SyncManager({
+    db,
+    store,
+    sealer,
+    oauthClient,
+    log: silentLog,
+    gmailApi: () => gmail,
+  })
+  const app = createApp({
+    db,
+    config: testConfig(),
+    log: silentLog,
+    mutations,
+    mail: { ...deps, sealer, oauthClient, sync, log: silentLog },
+  })
+  const home = tempDir()
+  let oldEngine: 'always' | 'on-write' | undefined
+  let draftResponseFault:
+    | {
+        tool: 'create_draft' | 'update_draft' | 'delete_draft'
+        response: 'lost' | Record<string, unknown>
+      }
+    | undefined
+  vi.spyOn(mutations, 'kick').mockImplementation(() => {})
+  const listener = serve({
+    fetch: async (req) => {
+      const rpc =
+        req.method === 'POST' && (oldEngine || draftResponseFault)
+          ? ((await req.clone().json()) as { method: string; params?: { name?: string } })
+          : null
+      const path = new URL(req.url).pathname
+      const cliRoute = path === MCP_CLI_OWNER_PATH || path === MCP_CLI_AGENT_PATH
+      if (
+        cliRoute &&
+        (oldEngine === 'always' || (oldEngine === 'on-write' && rpc?.method === 'tools/call'))
+      )
+        return new Response(null, { status: 404 })
+      const response = await app.fetch(req)
+      if (
+        draftResponseFault &&
+        rpc?.method === 'tools/call' &&
+        rpc.params?.name === draftResponseFault.tool
+      ) {
+        if (draftResponseFault.response === 'lost') return new Response(null, { status: 502 })
+        const payload = (await response.json()) as {
+          result: { content: { type: string; text: string }[] }
+        }
+        payload.result.content = [
+          { type: 'text', text: JSON.stringify(draftResponseFault.response) },
+        ]
+        return Response.json(payload)
+      }
+      return response
+    },
+    hostname: '127.0.0.1',
+    port: 0,
+  })
+  const send = vi.spyOn(gmail, 'sendMessage')
+  try {
+    await once(listener, 'listening')
+    const address = listener.address()
+    if (!address || typeof address === 'string') throw new Error('Expected a TCP address')
+    const cli = (secret: string, args: string[], input?: string) =>
+      new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
+        const processHandle = execFile(
+          process.execPath,
+          [fileURLToPath(new URL('../../../cli/src/main.ts', import.meta.url)), ...args],
+          {
+            env: {
+              ...process.env,
+              AMC_ENGINE_URL: `http://127.0.0.1:${address.port}`,
+              AMC_TOKEN: secret,
+              AMC_DEBUG: '0',
+              XDG_STATE_HOME: home,
+              XDG_CONFIG_HOME: home,
+              HOME: home,
+            },
+            timeout: 5000,
+          },
+          (error, stdout, stderr) =>
+            resolve({ code: error ? Number(error.code) : 0, stdout, stderr }),
+        )
+        processHandle.stdin?.end(input)
+      })
+    const draftReply = ['reply', 'a:t-m1', '--body-file', '-', '--json']
+    const scopedReply = await cli(
+      scoped.secret,
+      ['--as-agent', ...draftReply],
+      'A synthetic reply.\n',
+    )
+    expect(scopedReply).toMatchObject({ code: 0, stderr: '' })
+    const reply = JSON.parse(scopedReply.stdout)
+    expect(reply).toMatchObject({
+      subject: 'Re: Dinner?',
+      lastAuthor: 'shell-agent',
+      mirrorStatus: 'mirrored',
+      body: 'A synthetic reply.\n',
+      to: [{ address: 'alice@example.com' }],
+    })
+    expect(
+      [...gmail.drafts.values()].some(({ raw }) => raw.includes('In-Reply-To: <m1@example.com>')),
+    ).toBe(true)
+
+    const ownerChange = await cli(owner.secret, [
+      'draft',
+      'update',
+      reply.id,
+      '--revision',
+      String(reply.revision),
+      '--subject',
+      'Reviewed',
+      '--json',
+    ])
+    expect(ownerChange).toMatchObject({ code: 0, stderr: '' })
+    const stale = await cli(scoped.secret, [
+      '--as-agent',
+      'draft',
+      'update',
+      reply.id,
+      '--revision',
+      String(reply.revision),
+      '--subject',
+      'Stale',
+    ])
+    expect(stale).toMatchObject({ code: 1, stderr: expect.stringContaining('The draft changed') })
+    expect(drafts.get(reply.id)?.subject).toBe('Reviewed')
+    oldEngine = 'on-write'
+    expect(
+      await cli(owner.secret, [
+        'draft',
+        'update',
+        reply.id,
+        '--revision',
+        String(reply.revision),
+        '--subject',
+        'Unchecked',
+      ]),
+    ).toMatchObject({ code: 1, stderr: expect.stringContaining('Engine version') })
+    oldEngine = 'always'
+    expect(
+      await cli(scoped.secret, ['--as-agent', ...draftReply], 'Unsupported Engine'),
+    ).toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining('Engine version'),
+    })
+    expect(drafts.get(reply.id)?.subject).toBe('Reviewed')
+    oldEngine = undefined
+
+    const receipt = JSON.parse(
+      (await cli(draftOnly.secret, ['--as-agent', ...draftReply], 'Draft only')).stdout,
+    )
+    expect(receipt).toEqual({
+      id: expect.any(String),
+      revision: expect.any(Number),
+      status: 'applied',
+      mirrorStatus: 'mirrored',
+    })
+    const show = await cli(draftOnly.secret, ['--as-agent', 'draft', 'show', receipt.id])
+    expect(show).toMatchObject({ code: 1, stdout: '' })
+    expect(await cli(owner.secret, ['--as-agent', ...draftReply], 'Must not save')).toMatchObject({
+      code: 1,
+      stdout: '',
+      stderr: expect.stringContaining('requires a valid scoped token'),
+    })
+    expect(await cli('', ['--as-agent', ...draftReply])).toMatchObject({
+      code: 1,
+      stdout: '',
+      stderr: expect.stringContaining('requires AMC_TOKEN'),
+    })
+    expect(
+      await cli(handoff.agentToken, ['--as-agent', 'thread', 'a:t-m1', '--json']),
+    ).toMatchObject({
+      code: 1,
+      stdout: '',
+    })
+    const current = JSON.parse(
+      (await cli(handoff.agentToken, ['--as-agent', 'draft', 'show', handoff.draftId, '--json']))
+        .stdout,
+    )
+    const changeHandoff = [
+      '--as-agent',
+      'draft',
+      'update',
+      handoff.draftId,
+      '--revision',
+      String(current.revision),
+    ]
+    expect(
+      await cli(handoff.agentToken, [...changeHandoff, '--subject', 'Disallowed']),
+    ).toMatchObject({ code: 1 })
+    expect(
+      await cli(handoff.agentToken, [...changeHandoff, '--body-file', '-'], 'Handoff body'),
+    ).toMatchObject({ code: 0 })
+    expect(drafts.get(handoff.draftId)?.body).toBe('Handoff body')
+    expect(
+      await cli(scoped.secret, [
+        '--as-agent',
+        'draft',
+        'discard',
+        reply.id,
+        '--revision',
+        String(reply.revision),
+      ]),
+    ).toMatchObject({ code: 1 })
+    expect(
+      await cli(owner.secret, ['draft', 'discard', reply.id, '--revision', String(reply.revision)]),
+    ).toMatchObject({ code: 1 })
+    expect(
+      await cli(owner.secret, [
+        'draft',
+        'discard',
+        reply.id,
+        '--revision',
+        String(JSON.parse(ownerChange.stdout).revision),
+      ]),
+    ).toMatchObject({ code: 0 })
+    expect(drafts.get(reply.id)).toBeNull()
+
+    expect(
+      JSON.parse((await cli(scoped.secret, ['--as-agent', 'message', 'a:m1', '--json'])).stdout),
+    ).toMatchObject({ id: 'a:m1', bodyText: 'Friday works?' })
+    expect(
+      JSON.parse(
+        (await cli(scoped.secret, ['--as-agent', 'threads', '--all', '--account', 'b', '--json']))
+          .stdout,
+      ).threads.map(({ accountId }: { accountId: string }) => accountId),
+    ).toEqual(['a', 'a'])
+    const newDraft = JSON.parse(
+      (
+        await cli(
+          scoped.secret,
+          [
+            '--as-agent',
+            'draft',
+            'create',
+            '--to',
+            'Reader <reader@example.com>',
+            '--body-file',
+            '-',
+            '--json',
+          ],
+          'New synthetic note',
+        )
+      ).stdout,
+    )
+    expect(newDraft).toMatchObject({
+      accountId: 'a',
+      to: [{ name: 'Reader', address: 'reader@example.com' }],
+    })
+    for (const failure of ['lost', {}] as const) {
+      draftResponseFault = { tool: 'create_draft', response: failure }
+      const before = drafts.list().length
+      expect(
+        await cli(scoped.secret, ['--as-agent', ...draftReply], 'Saved before response failure'),
+      ).toMatchObject({
+        code: 1,
+        stdout: '',
+        stderr: expect.stringContaining('Check AMC before retrying'),
+      })
+      expect(drafts.list()).toHaveLength(before + 1)
+    }
+    const unconfirmed = {
+      code: 1,
+      stdout: '',
+      stderr: expect.stringContaining('Check AMC before retrying'),
+    }
+    draftResponseFault = { tool: 'update_draft', response: { id: 'wrong-draft', revision: 1 } }
+    expect(
+      await cli(owner.secret, [
+        'draft',
+        'update',
+        newDraft.id,
+        '--revision',
+        String(newDraft.revision),
+        '--subject',
+        'Changed',
+      ]),
+    ).toMatchObject(unconfirmed)
+    const changed = drafts.get(newDraft.id)
+    expect(changed?.subject).toBe('Changed')
+    draftResponseFault = { tool: 'delete_draft', response: { absent: 'wrong-draft' } }
+    expect(
+      await cli(owner.secret, [
+        'draft',
+        'discard',
+        newDraft.id,
+        '--revision',
+        String(changed?.revision),
+      ]),
+    ).toMatchObject(unconfirmed)
+    expect(drafts.get(newDraft.id)).toBeNull()
+    draftResponseFault = undefined
+
+    const denied = await cli(scoped.secret, [
+      '--as-agent',
+      'star',
+      'a:t-m1',
+      '--thread',
+      'b:t-outside',
+      '--json',
+    ])
+    expect(denied).toMatchObject({ code: 1, stdout: '' })
+    expect(await gmail.getMessageLabels('m1')).not.toContain('STARRED')
+    const submitted = await cli(scoped.secret, [
+      '--as-agent',
+      'star',
+      'a:t-m1',
+      '--thread',
+      'a:t-m2',
+      '--json',
+    ])
+    expect(submitted).toMatchObject({ code: 0, stderr: '' })
+    const action = JSON.parse(submitted.stdout)
+    expect(action.status).toBe('pending')
+    await mutations.tick()
+    await mutations.tick()
+    const result = await cli(scoped.secret, ['--as-agent', 'agent', 'status', action.id, '--json'])
+    expect(result.code).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: 'applied',
+      threads: ['a:t-m1', 'a:t-m2'],
+    })
+    expect(listAgentActions(db, mutations).actions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tool: 'update_draft',
+          draftId: handoff.draftId,
+          status: 'applied',
+        }),
+        expect.objectContaining({ tool: 'create_draft', draftId: receipt.id, status: 'applied' }),
+      ]),
+    )
+    expect(send).not.toHaveBeenCalled()
+  } finally {
+    await new Promise<void>((resolve) => listener.close(() => resolve()))
+    db.close()
+    await rm(home, { recursive: true, force: true })
+  }
+}, 20_000)
 
 describe('MCP tools', () => {
   it('never exposes a way to send, for any combination of scopes (ADR 0001)', async () => {
@@ -325,6 +777,55 @@ describe('MCP tools', () => {
       db.close()
     }
   })
+
+  it.each(['create', 'update'])(
+    'returns the draft revision committed by %s during a concurrent edit',
+    async (mode) => {
+      const { db, drafts, gmail } = setup()
+      let releaseMirror: (() => void) | undefined
+      const paused = new Promise<void>((resolve) => {
+        releaseMirror = resolve
+      })
+      try {
+        const existing =
+          mode === 'update'
+            ? await drafts.create({ threadId: 'a:t-m1', body: 'Original' }, 'owner')
+            : null
+        const saveDraft = gmail.saveDraft.bind(gmail)
+        const mirror = vi.spyOn(gmail, 'saveDraft').mockImplementationOnce(async (input) => {
+          await paused
+          return saveDraft(input)
+        })
+        const change = existing
+          ? drafts.update(existing.id, { body: 'Agent text' }, 'agent', existing.revision)
+          : drafts.create({ threadId: 'a:t-m1', body: 'Agent text' }, 'agent')
+        await vi.waitFor(() => expect(mirror).toHaveBeenCalledOnce())
+        const committed = drafts.list()[0]
+        if (!committed) throw new Error('Expected the locally committed draft')
+        const owner = drafts.update(
+          committed.id,
+          { body: 'Owner text' },
+          'owner',
+          committed.revision,
+        )
+        releaseMirror?.()
+        const [receipt, latest] = await Promise.all([change, owner])
+        expect(receipt).toMatchObject({
+          id: committed.id,
+          body: 'Agent text',
+          revision: committed.revision,
+        })
+        expect(latest.body).toBe('Owner text')
+        expect(latest.revision).toBeGreaterThan(receipt.revision)
+        await expect(
+          drafts.update(receipt.id, { subject: 'Stale change' }, 'agent', receipt.revision),
+        ).rejects.toMatchObject({ status: 409, revision: latest.revision })
+      } finally {
+        releaseMirror?.()
+        db.close()
+      }
+    },
+  )
 
   it('uses the draft’s current From Account even when it is still linked to the original Thread', async () => {
     const deps = setup()

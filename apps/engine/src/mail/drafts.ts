@@ -252,6 +252,18 @@ export class Drafts {
     return row ? this.#toDraft(row) : null
   }
 
+  mirrorStatus(
+    id: string,
+  ): 'mirrored' | 'pending' | 'failed' | 'conflict' | 'provider-copy-left' | 'unavailable' {
+    const row = this.#row(id)
+    if (!row) return 'unavailable'
+    if (row.mirror_conflict) return 'conflict'
+    if (row.mirror_error) return 'failed'
+    if (row.mirror_dirty) return 'pending'
+    if (row.mirror_left) return 'provider-copy-left'
+    return row.provider_draft_id ? 'mirrored' : 'unavailable'
+  }
+
   list(
     options: { threadId?: string; accountId?: string; limit?: number; editable?: boolean } = {},
   ): VersionedDraft[] {
@@ -1333,26 +1345,26 @@ export class Drafts {
       }
       this.#store.recordChange('draft', id, 'upsert')
     })
+    const committed = this.get(id) as VersionedDraft
     if (!compose) await this.#push(id)
-    return this.get(id) as VersionedDraft
+    return committed
   }
 
   async update(
     id: string,
     patch: Omit<DraftInput, 'threadId' | 'accountId' | 'replyAll'>,
     author: string,
-    agentRevision?: number,
+    expectedRevision?: number,
   ): Promise<VersionedDraft> {
     const row = this.#row(id)
     if (!row) throw new DraftError(`No draft ${id}`)
     this.#checkEditable(id)
+    if (expectedRevision !== undefined && expectedRevision !== row.modseq)
+      throw new DraftRevisionConflict(row.body_text, row.modseq)
     const doc = draftDocument(row.yjs, row.body_text)
     if (patch.body !== undefined) {
-      if (agentRevision === undefined) replaceDraftContent(doc, patch.body)
-      else {
-        if (agentRevision !== row.modseq) throw new DraftRevisionConflict(row.body_text, row.modseq)
-        if (patch.body !== row.body_text) editDraftText(doc, patch.body)
-      }
+      if (expectedRevision === undefined) replaceDraftContent(doc, patch.body)
+      else if (patch.body !== row.body_text) editDraftText(doc, patch.body)
     }
     transaction(this.#db, () => {
       this.#db
@@ -1373,8 +1385,10 @@ export class Drafts {
         )
       this.#store.recordChange('draft', id, 'upsert')
     })
+    // A desktop edit can land while the provider request is in flight.
+    const committed = this.get(id) as VersionedDraft
     await this.#push(id)
-    return this.get(id) as VersionedDraft
+    return committed
   }
 
   async delete(
