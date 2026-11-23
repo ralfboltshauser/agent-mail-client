@@ -57,7 +57,8 @@ flowchart LR
 ```
 
 The Engine owns draft state, thread state, provider writeback, and audit.
-The CLI checks that the Engine advertises all requested fields before a
-revision-checked draft edit or discard. This check protects writes against older
-Engines that can ignore an unrecognized revision field. Existing paired reads
-and owner mutations retain their HTTP behavior and output shapes.
+Scoped commands and revision-checked owner writes use versioned MCP routes.
+The Engine checks the credential before dispatching, and an older Engine
+rejects those routes even if a rollback happens between discovery and the
+write. The CLI checks which draft fields the grant can edit. Existing paired
+reads and owner mutations retain their HTTP behavior and output shapes.

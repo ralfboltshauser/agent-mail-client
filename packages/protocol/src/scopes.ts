@@ -9,8 +9,9 @@ export type Scope = (typeof SCOPES)[number]
 export const TOKEN_KINDS = ['desktop', 'cli', 'agent', 'composer'] as const
 export type TokenKind = (typeof TOKEN_KINDS)[number]
 
-/** The Engine echoes this MCP header only after authenticating an Agent grant. */
-export const MCP_REQUIRE_AGENT_HEADER = 'AMC-Require-Agent'
+/** The versioned CLI routes enforce the requested credential kind before dispatch. */
+export const MCP_CLI_AGENT_PATH = '/mcp/cli/v1/agent'
+export const MCP_CLI_OWNER_PATH = '/mcp/cli/v1/owner'
 
 /**
  * Scopes each kind gets when paired. Only the desktop app can send: the CLI and every

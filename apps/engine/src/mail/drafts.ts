@@ -1345,8 +1345,9 @@ export class Drafts {
       }
       this.#store.recordChange('draft', id, 'upsert')
     })
+    const committed = this.get(id) as VersionedDraft
     if (!compose) await this.#push(id)
-    return this.get(id) as VersionedDraft
+    return committed
   }
 
   async update(
@@ -1384,8 +1385,10 @@ export class Drafts {
         )
       this.#store.recordChange('draft', id, 'upsert')
     })
+    // A desktop edit can land while the provider request is in flight.
+    const committed = this.get(id) as VersionedDraft
     await this.#push(id)
-    return this.get(id) as VersionedDraft
+    return committed
   }
 
   async delete(

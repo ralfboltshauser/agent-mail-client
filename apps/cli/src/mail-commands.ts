@@ -1,5 +1,6 @@
-import type { AgentAction, Label, ThreadSummary } from '@amc/protocol'
+import type { Label, ThreadSummary } from '@amc/protocol'
 import type { Command } from 'commander'
+import { z } from 'zod'
 import type { CliConfig } from './config.ts'
 import { mailTool } from './mcp.ts'
 
@@ -19,7 +20,14 @@ export function addThread(id: string, previous: string[] = []) {
 
 const printJson = (value: unknown) => console.log(JSON.stringify(value, null, 2))
 
-function printAction(action: AgentAction, json?: boolean) {
+const ActionReceipt = z.looseObject({
+  id: z.uuid(),
+  status: z.enum(['pending', 'applied', 'partial', 'failed', 'rejected']),
+  error: z.string().nullable(),
+})
+const SuggestionReceipt = z.looseObject({ actionId: z.uuid() })
+
+function printAction(action: z.infer<typeof ActionReceipt>, json?: boolean) {
   if (json) printJson(action)
   else {
     console.log(`${action.status} · agent action ${action.id}`)
@@ -39,12 +47,12 @@ export async function agentOrganize(
 ) {
   const ids = [...new Set(threads)]
   if (ids.length > 20) throw new Error('Pass at most 20 distinct threads per batch.')
-  const result = await mailTool<AgentAction>(
+  const result = await mailTool(
     config,
     true,
     tool,
     { thread_ids: ids, label_id: labelId },
-    { write: true },
+    { write: true, result: ActionReceipt },
   )
   printAction(result, json)
 }
@@ -123,7 +131,7 @@ export function registerMailCommands(
     .option('--json', 'print JSON')
     .action(async (id: string, opts: { decision: string; reason: string; json?: boolean }) => {
       if (!agent()) throw new Error('Sender suggestions require --as-agent.')
-      const result = await mailTool<unknown>(
+      const result = await mailTool(
         config(),
         true,
         'suggest_sender_rule',
@@ -132,7 +140,7 @@ export function registerMailCommands(
           decision: opts.decision,
           reason: opts.reason,
         },
-        { write: true },
+        { write: true, result: SuggestionReceipt },
       )
       if (opts.json) return printJson(result)
       console.log('Submitted sender suggestion for owner review.')
@@ -145,9 +153,13 @@ export function registerMailCommands(
     .option('--json', 'print JSON')
     .action(async (id: string, opts: { json?: boolean }) => {
       if (!agent()) throw new Error('Agent action status requires --as-agent.')
-      const result = await mailTool<AgentAction>(config(), true, 'organize_status', {
-        action_id: id,
-      })
+      const result = await mailTool(
+        config(),
+        true,
+        'organize_status',
+        { action_id: id },
+        { result: ActionReceipt },
+      )
       printAction(result, opts.json)
     })
 }

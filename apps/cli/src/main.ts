@@ -24,6 +24,7 @@ import {
   type ThreadSummary,
 } from '@amc/protocol'
 import { Command, CommanderError } from 'commander'
+import { z } from 'zod'
 import { authed, request } from './client.ts'
 import { readConfig, writeConfig } from './config.ts'
 import { registerDiagnosticsCommands } from './diagnostics.ts'
@@ -39,6 +40,7 @@ import { describeTriageFailure, runTriage, TriageFailure } from './triage.ts'
 
 declare const AMC_VERSION: string | undefined
 const VERSION = typeof AMC_VERSION === 'string' ? AMC_VERSION : 'dev'
+const BucketWriteResult = z.looseObject({ updated: z.boolean() })
 const scopedCommands = new Set([
   'whoami',
   'accounts',
@@ -488,7 +490,7 @@ program
       if (agentMode()) {
         if (opts.review !== undefined || opts.actionId)
           throw new Error('Owner review corrections are unavailable with an agent grant.')
-        const result = await mailTool<{ updated: boolean }>(
+        const result = await mailTool(
           requireConfig(),
           true,
           'set_bucket',
@@ -496,7 +498,7 @@ program
             ...BucketInput.parse(input),
             onlyUntriaged: opts.onlyUntriaged,
           },
-          { write: true },
+          { write: true, result: BucketWriteResult },
         )
         if (opts.json) return printJson(result)
         console.log(

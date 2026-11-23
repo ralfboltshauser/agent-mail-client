@@ -1,8 +1,11 @@
 import { type EventFields, RUN_ID_HEADER } from '@amc/observability'
 import { mcpClientObservability } from '@amc/observability/mcp-client'
-import { MCP_REQUIRE_AGENT_HEADER } from '@amc/protocol'
+import { MCP_CLI_AGENT_PATH, MCP_CLI_OWNER_PATH } from '@amc/protocol'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import {
+  StreamableHTTPClientTransport,
+  StreamableHTTPError,
+} from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { CliConfig } from './config.ts'
 import { cliContext, clientLog } from './observability.ts'
 
@@ -15,7 +18,7 @@ export async function mailTool<T>(
   agent: boolean,
   name: Tool,
   args: Record<string, unknown> = {},
-  options: { checked?: boolean; write?: boolean } = {},
+  options: { checked?: boolean; write?: boolean; result?: { parse(value: unknown): T } } = {},
 ): Promise<T> {
   const client = new Client({ name: 'amc-cli', version: '1' })
   const context = cliContext.getStore()
@@ -27,28 +30,16 @@ export async function mailTool<T>(
       if (context) context.requestId = requestId
     },
   )
-  const transport = new StreamableHTTPClientTransport(new URL('/mcp', config.engineUrl), {
+  const path = agent ? MCP_CLI_AGENT_PATH : options.checked ? MCP_CLI_OWNER_PATH : '/mcp'
+  const transport = new StreamableHTTPClientTransport(new URL(path, config.engineUrl), {
     requestInit: {
       headers: {
         Authorization: `Bearer ${config.token}`,
         ...(context?.runId ? { [RUN_ID_HEADER]: context.runId } : {}),
-        ...(agent ? { [MCP_REQUIRE_AGENT_HEADER]: '1' } : {}),
       },
       redirect: 'error',
     },
-    fetch: async (input, init) => {
-      const response = await observed.fetch(input, init)
-      if (agent && response.headers.get(MCP_REQUIRE_AGENT_HEADER) !== '1') {
-        await response.body?.cancel()
-        if (submitted && options.write && response.status !== 401 && response.status !== 403) {
-          throw new Error('The response did not verify the agent credential.')
-        }
-        throw new McpCommandError(
-          'Agent access requires a scoped token and an Engine that supports CLI agent mode.',
-        )
-      }
-      return response
-    },
+    fetch: observed.fetch,
   })
   try {
     await observed.call('transport', context?.runId, () => client.connect(transport, { signal }))
@@ -87,9 +78,20 @@ export async function mailTool<T>(
       throw new McpCommandError('The Engine rejected the operation.')
     }
     if (typeof text !== 'string') throw new Error('Missing result')
-    return JSON.parse(text) as T
+    const payload: unknown = JSON.parse(text)
+    return options.result ? options.result.parse(payload) : (payload as T)
   } catch (error) {
     if (error instanceof McpCommandError) throw error
+    if (error instanceof StreamableHTTPError) {
+      if (error.code === 404 && path !== '/mcp')
+        throw new McpCommandError('This Engine version does not support the requested CLI command.')
+      if (error.code === 401 || error.code === 403)
+        throw new McpCommandError(
+          agent
+            ? 'Agent access requires a valid scoped token.'
+            : 'The Engine rejected the credential.',
+        )
+    }
     if (submitted && options.write) {
       throw new McpCommandError(
         'The Engine did not confirm the write. Check AMC before retrying to avoid a duplicate change.',

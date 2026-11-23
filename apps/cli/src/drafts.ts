@@ -15,11 +15,22 @@ type DraftOptions = {
   json?: boolean
 }
 
-type DraftReceipt = {
-  id: string
-  revision: number
-  mirrorStatus?: string
-}
+const DraftId = z.string().min(1)
+const DraftReceipt = z.looseObject({
+  id: DraftId,
+  revision: z.number().int().nonnegative(),
+  mirrorStatus: z.string().optional(),
+})
+type DraftReceipt = z.infer<typeof DraftReceipt>
+
+const DiscardReceipt = z.union([
+  z.object({ absent: DraftId }),
+  z.object({
+    deleted: DraftId,
+    providerRemoved: z.enum(['Gmail', 'IMAP']).optional(),
+    warning: z.string().optional(),
+  }),
+])
 
 function addAddress(value: string, previous: (Address | null)[] = []) {
   if (value === '') return [...previous, null]
@@ -88,7 +99,7 @@ export function registerDraftCommands(
       agent(),
       'create_draft',
       { account_id: opts.account, ...(await fields(opts)), report_mirror: true },
-      { write: true },
+      { write: true, result: DraftReceipt },
     )
     printReceipt(result, opts.json)
   })
@@ -108,7 +119,7 @@ export function registerDraftCommands(
           reply_all: opts.replyAll,
           report_mirror: true,
         },
-        { write: true },
+        { write: true, result: DraftReceipt },
       )
       printReceipt(result, opts.json)
     })
@@ -153,7 +164,7 @@ export function registerDraftCommands(
         agent(),
         'update_draft',
         { draft_id: id, ...patch, revision: current, report_mirror: true },
-        { checked: true, write: true },
+        { checked: true, write: true, result: DraftReceipt },
       )
       printReceipt(result, opts.json)
     })
@@ -171,7 +182,7 @@ export function registerDraftCommands(
         false,
         'delete_draft',
         { draft_id: id, revision: revision(opts.revision) },
-        { checked: true, write: true },
+        { checked: true, write: true, result: DiscardReceipt },
       )
       if (opts.json) return printJson(result)
       console.log(
