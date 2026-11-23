@@ -13,7 +13,7 @@ editing, IPC latency, and frame timing require a separate Electron run.
 Run `pnpm test:html-reader` for the HTML message layout and input suite. It
 mounts the development renderer with synthetic mail in an isolated Electron
 profile and uses a loopback image endpoint to exercise AMC's request policy.
-On Linux CI it runs under Xvfb. On macOS, append
+CI runs it on macOS in both scrollbar modes. To run the same checks locally, append
 `-AppleShowScrollBars Always` or `-AppleShowScrollBars WhenScrolling` to check
 classic and overlay scrollbars without changing the system preference.
 
