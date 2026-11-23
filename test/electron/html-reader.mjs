@@ -23,6 +23,66 @@ const waitFor = async (probe, description) => {
   throw new Error(`Timed out waiting for ${description}`)
 }
 
+async function checkComposerKeyboard(wc, run) {
+  const press = async (key, windowsVirtualKeyCode, modifiers = 0) => {
+    for (const type of ['rawKeyDown', 'keyUp']) {
+      await wc.debugger.sendCommand('Input.dispatchKeyEvent', {
+        type,
+        key,
+        windowsVirtualKeyCode,
+        modifiers,
+      })
+    }
+  }
+  const focus = () => run(() => document.activeElement.name || document.activeElement.ariaLabel)
+  const expectFocus = (field) => waitFor(async () => (await focus()) === field, `${field} focus`)
+  await run(() => document.querySelector('[aria-label="Threads"]').focus())
+  await press('c', 67)
+  await expectFocus('to')
+  await wc.debugger.sendCommand('Input.insertText', { text: 'keyboard@example.test' })
+  await press('Tab', 9)
+  await expectFocus('subject')
+  assert.equal(await run(() => document.querySelector('[name="to"]').value), '')
+  assert.equal(
+    await run(() => Boolean(document.querySelector('[aria-label="Remove keyboard@example.test"]'))),
+    true,
+  )
+  await press('Tab', 9)
+  await expectFocus('Message body')
+  await press('Tab', 9, 8)
+  await expectFocus('subject')
+  await press('Tab', 9, 8)
+  await expectFocus('to')
+
+  const commandShift = 4 | 8
+  await press('B', 66, commandShift)
+  await expectFocus('bcc')
+  await press('Tab', 9, 8)
+  await expectFocus('cc')
+  await press('O', 79, commandShift)
+  await expectFocus('to')
+  await press('Tab', 9)
+  await expectFocus('cc')
+  await press('Tab', 9)
+  await expectFocus('bcc')
+  await press('Tab', 9)
+  await expectFocus('subject')
+  await press('E', 69, commandShift)
+  await expectFocus('from')
+  await press('S', 83, commandShift)
+  await expectFocus('subject')
+  await press('C', 67, commandShift)
+  await expectFocus('cc')
+  await press('M', 77, commandShift)
+  await expectFocus('Message body')
+  await press('Escape', 27)
+  await waitFor(
+    () => run(() => !document.querySelector('[role="dialog"]')),
+    'saved composer to close',
+  )
+  console.log('Composer keyboard navigation passed with native Tab and field shortcuts')
+}
+
 async function main() {
   let server
   let win
@@ -441,6 +501,7 @@ async function main() {
       'native sidebar wheel scrolling',
     )
     console.log(`Sidebar row kept its ${open.width}px width when Triage overflowed`)
+    await checkComposerKeyboard(wc, run)
 
     assert.equal(
       await run(() => {
@@ -472,6 +533,7 @@ async function main() {
         ),
       'reply composer for the focused HTML message',
     )
+    assert.equal(await run(() => document.activeElement.ariaLabel), 'Message body')
   } catch (error) {
     console.error(error)
     exitCode = 1
