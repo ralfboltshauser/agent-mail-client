@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import {
   linkSync,
   lstatSync,
@@ -10,11 +11,16 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import type { Command } from 'commander'
 
 declare const AMC_AGENT_SKILLS: Record<string, string> | undefined
-const marker = '\n<!-- Managed by the AMC CLI installer -->\n'
+const marker = /\n<!-- AMC-managed skill: ([a-f0-9]{64}) -->\n$/
+
+function managedContent(source: string): string {
+  const digest = createHash('sha256').update(source).digest('hex')
+  return `${source}\n<!-- AMC-managed skill: ${digest} -->\n`
+}
 
 function bundledSkills(): Record<string, string> {
   if (typeof AMC_AGENT_SKILLS !== 'undefined') return AMC_AGENT_SKILLS
@@ -27,22 +33,31 @@ function bundledSkills(): Record<string, string> {
 }
 
 export function installAgentSkills(home: string, claudeHome: string): string[] {
-  const roots = new Set([join(home, '.agents', 'skills'), join(claudeHome, 'skills')])
+  const uid = process.getuid?.()
+  const configs = new Set([join(home, '.agents'), resolve(claudeHome)])
+  const roots = [...configs].map((config) => join(config, 'skills'))
+  for (const path of [...configs, ...roots]) {
+    const info = lstatSync(path, { throwIfNoEntry: false })
+    if (info && (!info.isDirectory() || info.uid !== uid)) {
+      throw new Error(`Choose a skill directory owned by the current user: ${path}`)
+    }
+  }
   const skills = Object.entries(bundledSkills())
-  const files = [...roots].flatMap((root) =>
+  const files = roots.flatMap((root) =>
     skills.map(([name, source]) => {
       const folder = join(root, name)
       const path = join(folder, 'SKILL.md')
       const folderInfo = lstatSync(folder, { throwIfNoEntry: false })
-      if (folderInfo && !folderInfo.isDirectory()) {
+      if (folderInfo && (!folderInfo.isDirectory() || folderInfo.uid !== uid)) {
         throw new Error(`Move the existing skill folder aside and retry: ${folder}`)
       }
       const info = lstatSync(path, { throwIfNoEntry: false })
-      const previous = info?.isFile() ? readFileSync(path, 'utf8') : undefined
-      if (info && !previous?.endsWith(marker)) {
+      const previous = info?.isFile() && info.uid === uid ? readFileSync(path, 'utf8') : undefined
+      const original = previous?.replace(marker, '')
+      if (info && (original === undefined || previous !== managedContent(original))) {
         throw new Error(`Move the existing skill aside and retry: ${path}`)
       }
-      return { path, content: source + marker, previous }
+      return { path, content: managedContent(source), previous }
     }),
   )
 
@@ -61,7 +76,7 @@ export function installAgentSkills(home: string, claudeHome: string): string[] {
       rmSync(staging, { recursive: true, force: true })
     }
   }
-  return [...roots]
+  return roots
 }
 
 export function registerSkillCommands(program: Command): void {

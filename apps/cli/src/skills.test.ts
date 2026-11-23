@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import {
   lstatSync,
   mkdirSync,
@@ -42,10 +43,21 @@ it('installs both skills for both agents and preserves the private playbook on r
   }
 
   const current = readFileSync(codexSkill, 'utf8')
-  writeFileSync(codexSkill, current.replace('# Use AMC', '# Older version'))
+  const oldSource = '# Older version\n'
+  const digest = createHash('sha256').update(oldSource).digest('hex')
+  writeFileSync(codexSkill, `${oldSource}\n<!-- AMC-managed skill: ${digest} -->\n`)
   installAgentSkills(home, claudeHome)
   expect(readFileSync(codexSkill, 'utf8')).toBe(current)
   expect(readFileSync(playbook, 'utf8')).toBe('My private preferences')
+})
+
+it('keeps personal edits to an installed skill even when the installer footer remains', () => {
+  installAgentSkills(home, claudeHome)
+  const edited = readFileSync(codexSkill, 'utf8').replace('# Use AMC', '# My mail workflow')
+  writeFileSync(codexSkill, edited)
+
+  expect(() => installAgentSkills(home, claudeHome)).toThrow(codexSkill)
+  expect(readFileSync(codexSkill, 'utf8')).toBe(edited)
 })
 
 it('reports an unmanaged skill before writing any skills', () => {
@@ -65,4 +77,14 @@ it('preserves a symlink at a skill destination', () => {
   expect(() => installAgentSkills(home, claudeHome)).toThrow(codexSkill)
   expect(lstatSync(codexSkill).isSymbolicLink()).toBe(true)
   expect(lstatSync(linkTarget, { throwIfNoEntry: false })).toBeUndefined()
+})
+
+it('preserves a shared agent skills directory', () => {
+  const shared = join(home, 'shared')
+  mkdirSync(shared)
+  mkdirSync(join(home, '.agents'))
+  symlinkSync(shared, join(home, '.agents', 'skills'))
+
+  expect(() => installAgentSkills(home, claudeHome)).toThrow('owned by the current user')
+  expect(lstatSync(join(shared, 'use-amc'), { throwIfNoEntry: false })).toBeUndefined()
 })
