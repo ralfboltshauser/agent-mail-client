@@ -22,6 +22,7 @@ import { OperationStatus } from '../db/diagnostics.ts'
 import type { Logger } from '../log.ts'
 import { fromGmail } from '../providers/gmail/mapping.ts'
 import type { GmailApi, GmailDraft } from '../providers/gmail/types.ts'
+import { imapDraftRevisionSql } from '../providers/imap/locations.ts'
 import { parseMessage } from '../providers/imap/mapping.ts'
 import type { ImapProvider } from '../providers/imap/provider.ts'
 import {
@@ -79,6 +80,7 @@ interface DraftRow {
 
 export interface DraftMirror {
   imap?: true
+  draftIdAt?: ImapProvider['draftId']
   saveDraft(
     input: Parameters<GmailApi['saveDraft']>[0],
   ): Promise<GmailDraft & { sourceHash?: string }>
@@ -398,6 +400,52 @@ export class Drafts {
   openCompose(id: string): ComposeDraft | null {
     this.#checkEditable(id)
     return this.compose(id)
+  }
+
+  openComposeByMessage(messageId: string, imapRevision?: string): ComposeDraft | null {
+    const message = this.#db
+      .prepare(
+        `SELECT m.account_id, m.provider_id, a.kind, ${imapDraftRevisionSql} AS imap_revision
+         FROM message m JOIN account a ON a.id = m.account_id
+         WHERE m.id = ? AND m.account_id || ':DRAFT' IN (SELECT value FROM json_each(m.label_ids))`,
+      )
+      .get(messageId) as
+      | { account_id: string; provider_id: string; kind: string; imap_revision: string | null }
+      | undefined
+    if (!message) return null
+    const account = message.account_id
+    if (message.kind === 'imap') {
+      if (!imapRevision || imapRevision !== message.imap_revision) return null
+      // The replica can merge byte-identical IMAP copies into one message card.
+      const locations = this.#db
+        .prepare(
+          `SELECT path_key, uid, validity, source_blob, verified FROM imap_location
+           WHERE message_id = ? AND account_id = ? AND label_id = ? LIMIT 2`,
+        )
+        .all(messageId, account, `${account}:DRAFT`) as {
+        path_key: string
+        uid: number
+        validity: string
+        source_blob: string | null
+        verified: number
+      }[]
+      const location = locations[0]
+      if (!location?.verified || locations.length !== 1) return null
+      const providerId = this.#api(account)?.draftIdAt?.(
+        decodeURIComponent(location.path_key),
+        location.uid,
+        location.validity,
+      )
+      const draft = providerId && this.#providerDraft(account, providerId)
+      return draft && location.source_blob && location.source_blob === draft.mirror_hash
+        ? this.openCompose(draft.id)
+        : null
+    }
+    const matches = this.#db
+      .prepare('SELECT id FROM draft WHERE account_id = ? AND provider_message_id = ? LIMIT 2')
+      .all(account, message.provider_id) as { id: string }[]
+    const draft = matches[0]
+    return draft && matches.length === 1 ? this.openCompose(draft.id) : null
   }
 
   replaceComposeBody(id: string, text: string, revision: number, author: string): ComposeDraft {

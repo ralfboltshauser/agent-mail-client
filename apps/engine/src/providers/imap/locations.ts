@@ -23,6 +23,12 @@ export interface MessageLocation extends Location {
 
 export const PAGE = 32
 
+// Both readers use the same identity for the exact IMAP draft copy.
+export const imapDraftRevisionSql = `(
+  SELECT a.mailbox_generation || ':' || m.imap_fingerprint FROM account a
+  WHERE a.id = m.account_id AND a.kind = 'imap'
+)`
+
 export class ImapLocations {
   readonly #threads: ImapThreads
 

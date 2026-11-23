@@ -345,6 +345,8 @@ export function MailWorkspace({
                 readerRef={readerFocus.reader}
                 scrollRef={readerFocus.scroll}
                 expanded={expanded}
+                onEditDraft={compose.openDraftByMessage}
+                draftEditingDisabled={Boolean(compose.draft || openingComposer)}
               />
             }
           />

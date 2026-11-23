@@ -239,6 +239,8 @@ export const MailReader = memo(function MailReader({
   readerRef,
   scrollRef,
   expanded,
+  onEditDraft,
+  draftEditingDisabled,
 }: {
   engineUrl: string | null
   selectedId: string | undefined
@@ -248,6 +250,8 @@ export const MailReader = memo(function MailReader({
   readerRef: RefObject<HTMLDivElement | null>
   scrollRef: React.RefObject<HTMLDivElement | null>
   expanded: boolean
+  onEditDraft: (messageId: string, imapRevision?: string) => void
+  draftEditingDisabled: boolean
 }) {
   const query = selectedThreadQuery(
     engineUrl,
@@ -294,6 +298,8 @@ export const MailReader = memo(function MailReader({
           labelNames={labelNames}
           scrollRef={scrollRef}
           expanded={expanded}
+          onEditDraft={onEditDraft}
+          draftEditingDisabled={draftEditingDisabled}
         />
       </div>
     </>

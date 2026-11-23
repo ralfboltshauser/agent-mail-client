@@ -378,8 +378,9 @@ it('republishes accepted Sender threads once when upgrading an existing v24 data
     const mail = db.prepare('SELECT * FROM message').all()
     const existingModseq = db.prepare('SELECT max(modseq) AS seq FROM change_log').get()?.seq
     const changes = db.prepare('SELECT entity, entity_id, op FROM change_log WHERE modseq > ?')
-    expect(migrate(db)).toBe(25)
-    expect(migrate(db)).toBe(25)
+    const latest = MIGRATIONS.at(-1)?.version
+    expect(migrate(db)).toBe(latest)
+    expect(migrate(db)).toBe(latest)
     expect(changes.all(existingModseq ?? 0)).toEqual([
       { entity: 'thread', entity_id: accepted, op: 'upsert' },
     ])
@@ -426,7 +427,7 @@ it('upgrades v22 with existing Sender rules, corrections and working inverses', 
       FROM thread WHERE id = 'a:legacy';
       INSERT INTO owner_handled (thread_id, message_id, action_id) VALUES ('a:legacy', 'a:legacy', 'legacy-bucket');
     `)
-    expect(migrate(db)).toBe(25)
+    expect(migrate(db)).toBe(MIGRATIONS.at(-1)?.version)
     expect(queries.threadSummary('a:legacy')?.bucket?.bucket).toBe('Later')
     expect(senderActionStatus(db, 'legacy-sender')).toMatchObject({
       revision: 1,

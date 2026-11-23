@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite'
 import type { ComposePatch } from '@amc/protocol'
 import { expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
-import { LocalDraftUpdates } from './draft-updates'
+import { DraftRecoveryPending, LocalDraftUpdates } from './draft-updates'
 import { Replica } from './replica'
 
 it('persists a pending body change through an offline flush and replays it on restart', async () => {
@@ -52,6 +52,29 @@ it('clears staged updates for a discarded draft while keeping other drafts', asy
       '/v1/compose/drafts/kept',
       expect.objectContaining({ method: 'PUT', body: patch }),
     )
+  } finally {
+    replica.db.close()
+  }
+})
+
+it('keeps a draft closed while its staged changes cannot be replayed and retries that draft alone', async () => {
+  const replica = new Replica(':memory:')
+  try {
+    const updates = replica.draftUpdates
+    const patch = { baseRevision: 3, update: 'AAA=' }
+    updates.stage('opening', patch)
+    updates.stage('other', patch)
+    const request = vi.fn().mockRejectedValueOnce(new Error('Offline')).mockResolvedValue(undefined)
+    await expect(updates.recover({ request }, 'opening')).rejects.toBeInstanceOf(
+      DraftRecoveryPending,
+    )
+    await expect(updates.recover({ request }, 'opening')).resolves.toBe(true)
+    await expect(updates.recover({ request }, 'opening')).resolves.toBe(false)
+    expect(request.mock.calls.map(([path]) => path)).toEqual([
+      '/v1/compose/drafts/opening',
+      '/v1/compose/drafts/opening',
+    ])
+    await expect(updates.recover({ request }, 'other')).resolves.toBe(true)
   } finally {
     replica.db.close()
   }

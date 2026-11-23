@@ -13,6 +13,7 @@ function inlineMessageIds(
       .filter(
         (message, index) =>
           previous?.has(message.id) ||
+          message.labelIds.includes(`${message.accountId}:DRAFT`) ||
           message.unread ||
           index === messages.length - 1 ||
           (!seen?.has(message.id) && message.bodyText !== null),
@@ -21,7 +22,15 @@ function inlineMessageIds(
   )
 }
 
-export function ThreadMessages({ messages }: { messages: ReplicaThreadMessage[] }) {
+export function ThreadMessages({
+  messages,
+  onEditDraft,
+  draftEditingDisabled,
+}: {
+  messages: ReplicaThreadMessage[]
+  onEditDraft?: (messageId: string, imapRevision?: string) => void
+  draftEditingDisabled?: boolean
+}) {
   const [layout, setLayout] = useState(() => ({
     messages,
     inline: inlineMessageIds(messages),
@@ -39,7 +48,15 @@ export function ThreadMessages({ messages }: { messages: ReplicaThreadMessage[] 
   }
 
   function renderMessage(message: ReplicaThreadMessage, defaultOpen = false) {
-    return <Message key={message.id} message={message} defaultOpen={defaultOpen} />
+    return (
+      <Message
+        key={message.id}
+        message={message}
+        defaultOpen={defaultOpen}
+        onEditDraft={onEditDraft}
+        draftEditingDisabled={draftEditingDisabled}
+      />
+    )
   }
 
   const rows: ReactNode[] = []

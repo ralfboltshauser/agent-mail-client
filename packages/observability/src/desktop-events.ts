@@ -74,6 +74,7 @@ const ipcChannels = [
   'amc:cancelHandoff',
   'amc:cancelSend',
   'amc:composeDraft',
+  'amc:composeDraftByMessage',
   'amc:composeDrafts',
   'amc:composeImage',
   'amc:contacts',

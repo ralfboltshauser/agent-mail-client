@@ -3,6 +3,7 @@ import {
   type ComposeStart,
   DRAFT_MISSING,
   type SendRequest,
+  THREAD_DRAFT_UNAVAILABLE,
 } from '@amc/protocol'
 import { type Context, Hono } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
@@ -126,6 +127,11 @@ export function composeRoutes(deps: MailDeps, outbox: Outbox, composerOrigin?: s
     ),
   )
   r.get('/drafts', (c) => c.json({ drafts: deps.drafts.list({ limit: 200, editable: true }) }))
+  r.get('/drafts/by-message/:id', (c) => {
+    const draft = deps.drafts.openComposeByMessage(c.req.param('id'), c.req.query('imapRevision'))
+    if (!draft) throw new HTTPException(404, { message: THREAD_DRAFT_UNAVAILABLE })
+    return c.json(draft)
+  })
   r.get('/drafts/:id', (c) => {
     const draft = deps.drafts.openCompose(c.req.param('id'))
     if (!draft) throw new HTTPException(404, { message: DRAFT_MISSING })

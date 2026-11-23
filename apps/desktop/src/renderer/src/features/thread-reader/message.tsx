@@ -1,6 +1,7 @@
 import { ChevronDown, FileText, Paperclip } from 'lucide-react'
 import { useState } from 'react'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { getAmc } from '@/lib/amc'
 import { fileSize, fullDate, hueFor, initials, listDate, personName } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -10,17 +11,27 @@ import { MessageContent } from './message-content'
 export function Message({
   message: m,
   defaultOpen,
+  onEditDraft,
+  draftEditingDisabled,
 }: {
   message: ReplicaThreadMessage
   defaultOpen: boolean
+  onEditDraft?: (messageId: string, imapRevision?: string) => void
+  draftEditingDisabled?: boolean
 }) {
   const [{ open, visited }, setExpansion] = useState({ open: defaultOpen, visited: defaultOpen })
-  const isDraft = m.labelIds.some((label) => label.endsWith(':DRAFT'))
+  const isDraft = m.labelIds.includes(`${m.accountId}:DRAFT`)
   const files = m.attachments.filter((attachment) => !attachment.inline)
   const hue = hueFor(m.from?.address ?? '')
 
   return (
-    <div className={cn('rounded-lg border bg-card', isDraft && 'border-dashed border-primary/50')}>
+    <div
+      className={cn(
+        'rounded-lg border bg-card',
+        isDraft && 'border-dashed border-primary/50',
+        isDraft && onEditDraft && 'grid grid-cols-[minmax(0,1fr)_auto] items-start',
+      )}
+    >
       <button
         type="button"
         className="flex w-full items-start gap-3 rounded-lg px-4 py-3.5 text-left hover:bg-muted/45"
@@ -59,7 +70,21 @@ export function Message({
           className={cn('mt-0.5 size-3.5 shrink-0 text-muted-foreground', open && 'rotate-180')}
         />
       </button>
-      <div hidden={!open} className="px-4 pt-2 pb-5 sm:pl-[3.75rem]">
+      {isDraft && onEditDraft && (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="mt-2.5 mr-3 shrink-0 aria-disabled:opacity-50"
+          aria-disabled={draftEditingDisabled}
+          onClick={() => {
+            if (!draftEditingDisabled) onEditDraft(m.id, m.imapDraftRevision)
+          }}
+        >
+          Edit draft
+        </Button>
+      )}
+      <div hidden={!open} className="col-span-full px-4 pt-2 pb-5 sm:pl-[3.75rem]">
         {visited && <MessageContent message={m} />}
         {open && m.bodySearchTruncated && (
           <p className="mt-2 text-xs text-muted-foreground">

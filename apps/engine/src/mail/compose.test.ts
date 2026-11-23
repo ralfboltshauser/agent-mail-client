@@ -15,6 +15,8 @@ import { FakeGmail } from '../providers/gmail/fake.ts'
 import { fromGmail } from '../providers/gmail/mapping.ts'
 import type { GmailPart } from '../providers/gmail/types.ts'
 import { FakeImap } from '../providers/imap/fake.ts'
+import { ImapLocations } from '../providers/imap/locations.ts'
+import { parseMessage } from '../providers/imap/mapping.ts'
 import { draftSourceHash, ImapProvider, SmtpRejection } from '../providers/imap/provider.ts'
 import { silentLog, tempDir, testConfig, testDb } from '../test-support.ts'
 import { gmailDelivery, imapDelivery, imapDraftMirror, publishSent } from './delivery.ts'
@@ -263,6 +265,56 @@ it('keeps both versions when Gmail changes a draft with pending AMC edits', asyn
 })
 
 const reader = [{ name: null, address: 'reviewed@example.test' }]
+
+it('opens the exact Gmail draft in a thread without creating another draft', async () => {
+  const { account, call, db, drafts, gmail, store } = setup()
+  try {
+    const threadId = 'shared-thread'
+    const open = (messageId: string) =>
+      call(`/drafts/by-message/${encodeURIComponent(`${account}:${messageId}`)}`)
+    const add = async (text: string) => {
+      const remote = await gmail.saveDraft({
+        threadId,
+        raw: await buildMessage({
+          from: { name: null, address: gmail.address },
+          to: reader,
+          cc: [],
+          bcc: [],
+          subject: 'Same subject',
+          text,
+        }),
+      })
+      store.putMessage(
+        account,
+        [gmail.address],
+        fromGmail(fixture(await gmail.getMessage(remote.message.id))),
+      )
+      return remote.message.id
+    }
+    const first = await add('First draft')
+    const second = await add('Second draft')
+    expect((await open(second)).status).toBe(404)
+
+    await drafts.pullGmail(account, gmail)
+    const response = await open(second)
+    expect(response.status).toBe(200)
+    const draft = (await response.json()) as ComposeDraft
+    expect(draft.body).toBe('Second draft')
+    expect(await (await open(first)).json()).toMatchObject({ body: 'First draft' })
+    expect(drafts.list()).toHaveLength(2)
+
+    const queued = await call('/outbox', 'POST', {
+      id: 'send-exact-draft',
+      draftId: draft.id,
+      revision: draft.revision,
+    })
+    expect(queued.status).toBe(202)
+    expect((await open(second)).status).toBe(404)
+    expect(await (await open(first)).json()).toMatchObject({ body: 'First draft' })
+  } finally {
+    db.close()
+  }
+})
 
 it('imports a Gmail draft and accepts deletion of the unchanged provider copy', async () => {
   const { account, db, drafts, gmail } = setup()
@@ -829,7 +881,7 @@ function imapDraftSetup() {
   fake.capabilities.set('UIDPLUS', true)
   const credentials = draftCredentials()
   let provider = new ImapProvider(credentials, () => fake.client)
-  const { db, store, drafts, outbox, call, advance } = setup({
+  const { db, store, queries, drafts, outbox, call, advance } = setup({
     mirror: () => imapDraftMirror(provider),
     delivery: () => imapDelivery(provider),
   })
@@ -856,6 +908,8 @@ function imapDraftSetup() {
   return {
     account,
     addPlainDraft,
+    store,
+    queries,
     db,
     drafts,
     fake,
@@ -867,6 +921,69 @@ function imapDraftSetup() {
     advance,
   }
 }
+
+it('opens a verified IMAP draft and rejects ambiguous locations and pre-relink cards', async () => {
+  const { account, addPlainDraft, call, db, drafts, folder, provider, queries, store, relink } =
+    imapDraftSetup()
+  try {
+    const uid = addPlainDraft('IMAP draft')
+    const location = fixture((await provider.listDrafts())[0])
+    const hash = store.blobs.put(fixture(folder.messages.get(uid)).source)
+    const item = { uid, seq: 1 }
+    const incoming = await parseMessage(
+      location.folder,
+      location.uidValidity,
+      item,
+      store.blobs,
+      hash,
+    )
+    const locations = new ImapLocations(store, account, 'owner-imap@example.com')
+    locations.put(location.folder, location.uidValidity, item, incoming, hash)
+    await drafts.pullImap(account, provider)
+
+    const messageId = `${account}:${incoming.providerId}`
+    const revision = fixture(queries.message(messageId)?.imapDraftRevision)
+    const open = (observed = revision) =>
+      call(
+        `/drafts/by-message/${encodeURIComponent(messageId)}?${new URLSearchParams({ imapRevision: observed })}`,
+      )
+    expect(await (await open()).json()).toMatchObject({
+      body: 'IMAP draft',
+      id: drafts.list()[0]?.id,
+    })
+    locations.put(location.folder, location.uidValidity, { ...item, uid: uid + 1 }, incoming, hash)
+    expect((await open()).status).toBe(404)
+    locations.remove(location.folder.path, location.uidValidity, uid + 1)
+    db.prepare('UPDATE imap_location SET verified = 0 WHERE message_id = ?').run(messageId)
+    expect((await open()).status).toBe(404)
+    db.prepare('UPDATE imap_location SET verified = 1 WHERE message_id = ?').run(messageId)
+    const replacement = new FakeImap()
+    const newFolder = replacement.addFolder('Drafts', '\\Drafts')
+    const newProvider = relink(replacement)
+    expect((await open()).status).toBe(404)
+    const newUid = replacement.add('Drafts', 'Subject: Replacement', 'Different draft', ['\\Draft'])
+    const newLocation = fixture((await newProvider.listDrafts())[0])
+    expect(newUid).toBe(uid)
+    expect(newLocation.uidValidity).toBe(location.uidValidity)
+    const newHash = store.blobs.put(fixture(newFolder.messages.get(newUid)).source)
+    const newMessage = await parseMessage(
+      newLocation.folder,
+      newLocation.uidValidity,
+      item,
+      store.blobs,
+      newHash,
+    )
+    expect(newMessage.providerId).toBe(incoming.providerId)
+    locations.put(newLocation.folder, newLocation.uidValidity, item, newMessage, newHash)
+    await drafts.pullImap(account, newProvider)
+    expect((await open()).status).toBe(404)
+    expect(
+      await (await open(fixture(queries.message(messageId)?.imapDraftRevision))).json(),
+    ).toMatchObject({ body: 'Different draft' })
+  } finally {
+    db.close()
+  }
+})
 
 const draftOwner: Principal = {
   tokenId: 'desktop',

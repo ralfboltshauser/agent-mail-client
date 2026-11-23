@@ -10,8 +10,8 @@ export function deferred<T>() {
   return { promise, resolve }
 }
 
-export function rendererAdapter() {
-  const fixture = createMailFixture('inbox')
+export function rendererAdapter(scenario = 'inbox') {
+  const fixture = createMailFixture(scenario)
   const diagnosticsListeners = new Set<() => void>()
   const feedbackListeners = new Set<() => void>()
   const settingsListeners = new Set<() => void>()
@@ -55,6 +55,7 @@ export function rendererAdapter() {
     triageCounts: read(fixture.api.triageCounts),
     organiseErrors: read(fixture.api.organiseErrors),
     composeDraft: read(fixture.api.composeDraft),
+    composeDraftByMessage: read(fixture.api.composeDraftByMessage),
     saveCompose: read(fixture.api.saveCompose),
     startCompose: read(fixture.api.startCompose),
     status: read(fixture.api.status),
