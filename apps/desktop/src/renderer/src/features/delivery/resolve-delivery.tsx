@@ -9,6 +9,7 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog'
 import { getAmc } from '@/lib/amc'
+import { failureText } from '@/lib/failure'
 
 export function ResolveDelivery({
   id,
@@ -34,7 +35,7 @@ export function ResolveDelivery({
         onRestore(draftId)
       }
     } catch (cause) {
-      toast.error((cause as Error).message)
+      toast.error('Could not resolve delivery', { description: failureText(cause) })
     } finally {
       setPending(false)
     }

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
+import { newRunId, type RunId } from '@amc/observability'
 import {
   type AccountSummary,
   actionLabels,
@@ -16,7 +17,9 @@ import {
   type ThreadSummary,
 } from '@amc/protocol'
 import type { OrganiseNotice, ReviewOrganiseStatus } from '../shared/api'
+import { failureDetails, formatFailure, readFailure } from '../shared/failure'
 import { type EngineClient, EngineError } from './engine'
+import { failureScope, knownFailure, mainLog, rememberFailure } from './observability'
 import type { Replica } from './replica'
 
 type Patch = { labels: Record<string, LabelPatch>; muted?: boolean; snoozedUntil?: number | null }
@@ -157,6 +160,31 @@ interface ReviewMutation {
   messageId?: string
 }
 
+function organiseFailure(
+  stage: 'queue' | 'submit' | 'status' | 'pull',
+  err: unknown,
+  runId = newRunId(),
+) {
+  const original = knownFailure(err)
+  mainLog.log(
+    'error',
+    'desktop.organise.failed',
+    { stage, err },
+    {
+      ...(original && failureScope(original)),
+      runId,
+    },
+  )
+  return rememberFailure(err, failureDetails(err, runId, 'Run'))
+}
+
+function organiseDetails(error: string) {
+  // Existing databases can contain a provider message in this column.
+  const details = readFailure(new Error(error))
+  if (details && error === formatFailure(details)) return error
+  return formatFailure(organiseFailure('status', new EngineError(0, 'error', error)))
+}
+
 export class LocalOrganise {
   readonly replica: Replica
 
@@ -180,7 +208,10 @@ export class LocalOrganise {
       | Pick<QueueRow, 'status' | 'error'>
       | undefined
     return row
-      ? { status: row.status === 'unsent' ? 'pending' : row.status, error: row.error }
+      ? {
+          status: row.status === 'unsent' ? 'pending' : row.status,
+          error: row.error === null ? null : organiseDetails(row.error),
+        }
       : null
   }
 
@@ -350,9 +381,14 @@ export class LocalOrganise {
     ).map((row) => row.id)
   }
 
-  resolve(results: MutationResult[]): void {
+  resolve(results: MutationResult[], runId = newRunId(), cause?: unknown): void {
     this.replica.transaction(() => {
       for (const result of results) {
+        const failure = result.error
+          ? formatFailure(
+              organiseFailure('status', cause ?? new EngineError(0, 'error', result.error), runId),
+            )
+          : null
         this.#db
           .prepare(
             'UPDATE organise_queue SET status = ?, modseq = ?, error = ?, superseded = ?, messages = ? WHERE id = ?',
@@ -360,7 +396,7 @@ export class LocalOrganise {
           .run(
             result.status,
             result.modseq,
-            result.error,
+            failure,
             JSON.stringify(result.superseded ?? []),
             result.messages ? JSON.stringify(result.messages) : null,
             result.id,
@@ -397,7 +433,20 @@ export class LocalOrganise {
     const failures = rows.map((row): OrganiseNotice => {
       if (row.message === null)
         return { id: row.id, message: 'No IMAP flags changed', quiet: true, updateOnly: true }
-      if (row.status !== 'partial' || !row.messages) return { id: row.id, message: row.message }
+      const description = organiseDetails(row.message)
+      if (row.status !== 'partial' || !row.messages) {
+        const uncertain =
+          row.messages &&
+          (JSON.parse(row.messages) as NonNullable<MutationResult['messages']>).some(
+            (item) => item.status === 'uncertain',
+          )
+        const { action } = JSON.parse(row.request) as MutationRequest
+        const message =
+          uncertain && action.kind === 'trash'
+            ? 'A change to Trash may have been applied'
+            : 'Could not organise mail'
+        return { id: row.id, message, description }
+      }
       const outcomes = JSON.parse(row.messages) as NonNullable<MutationResult['messages']>
       const { action } = JSON.parse(row.request) as MutationRequest
       const trash = action.kind === 'trash' ? `${row.thread_id?.split(':')[0]}:TRASH` : null
@@ -423,9 +472,11 @@ export class LocalOrganise {
       const accountId = row.thread_id?.split(':')[0]
       const imap = accountId && this.#account(accountId)?.kind === 'imap'
       const verb = action.kind === 'archive' ? 'Archived' : 'Changed'
-      let message = row.message
+      let message = outcomes.some((item) => trash && item.uncertainLabels?.includes(trash))
+        ? 'A change to Trash may have been applied'
+        : 'Some changes could not be applied'
       if (trash && total) {
-        const detail = failed && !uncertain && !imap ? `${failed} couldn't be changed` : row.message
+        const detail = failed && !uncertain && !imap ? `${failed} couldn't be changed` : message
         message = `${verb} ${applied} of ${total}. ${detail}`
       } else if (failed && !uncertain && !imap) {
         message = `${verb} ${applied} of ${total}. ${failed} couldn't be changed`
@@ -433,6 +484,7 @@ export class LocalOrganise {
       return {
         id: row.id,
         message,
+        description,
         undo:
           row.thread_id && !row.undo_of && outcomes.some((item) => item.appliedLabels.length)
             ? { kind: 'undo', threadId: row.thread_id, mutationId: row.id }
@@ -454,7 +506,13 @@ export class LocalOrganise {
       .all(this.replica.modseq ?? -1) as { id: string; error: string | null }[]
     return [
       ...failures,
-      ...internal,
+      ...internal.map(({ id, message }) => ({
+        id,
+        message: message.startsWith('The Engine rejected this pairing')
+          ? 'The Engine rejected this pairing'
+          : 'Could not organise mail',
+        description: organiseDetails(message),
+      })),
       ...conflicts.map(({ id, error }) => ({
         id: error ? `${id}:superseded` : id,
         message: 'Changed elsewhere, left as is',
@@ -468,7 +526,10 @@ export class LocalOrganise {
       if (failure.error)
         this.#db
           .prepare('INSERT OR IGNORE INTO organise_notice VALUES (?, ?)')
-          .run(failure.id, failure.error)
+          .run(
+            failure.id,
+            formatFailure(organiseFailure('status', new EngineError(0, 'error', failure.error))),
+          )
     }
   }
 
@@ -488,7 +549,8 @@ export class OrganiseSync extends EventEmitter<{ changed: [] }> {
   #running = false
   #retryAt = 0
   #failures = 0
-  #refusal: string | null = null
+  #refusal: Error | null = null
+  #failedRun: RunId | undefined
 
   constructor(local: LocalOrganise, engine: EngineClient, pull: () => Promise<void>) {
     super()
@@ -518,25 +580,24 @@ export class OrganiseSync extends EventEmitter<{ changed: [] }> {
     )
       throw new Error('Snooze is disabled on this Engine')
     const action = OrganiseAction.parse(input)
-    if (this.#refusal) throw new Error(this.#refusal)
+    if (this.#refusal) throw this.#refusal
     return this.#local.enqueue(action, review)
   }
 
   async flush(): Promise<void> {
     const signal = this.#controller.signal
-    if (
-      signal.aborted ||
-      this.#refusal ||
-      this.#running ||
-      Date.now() < this.#retryAt ||
-      this.#local.replica.modseq === null
-    )
-      return
-    const pending = this.#local.pending()
-    let request = this.#local.unsent()
-    if (!request && !pending.length) return
+    if (signal.aborted || this.#refusal || this.#running || Date.now() < this.#retryAt) return
     this.#running = true
+    const runId = newRunId()
+    let stage: 'queue' | 'submit' | 'status' | 'pull' = 'queue'
+    let pending: string[] = []
+    let request: MutationRequest | null = null
     try {
+      if (this.#local.replica.modseq === null) return
+      pending = this.#local.pending()
+      request = this.#local.unsent()
+      if (!request && !pending.length && !this.#failedRun) return
+      mainLog.log('debug', 'desktop.organise.started', {}, { runId })
       const post = async (path: string, body: unknown) =>
         MutationResponse.parse(
           await this.#engine.request(path, {
@@ -547,6 +608,7 @@ export class OrganiseSync extends EventEmitter<{ changed: [] }> {
         )
       // FIFO preserves your intent across a disconnect. Submit one at a time so a deleted
       // Thread cannot reject the newer actions on other Threads.
+      stage = 'submit'
       while (request && !signal.aborted) {
         const reviewed =
           'reviewedInboxMessageIds' in request.action && request.action.reviewedInboxMessageIds
@@ -555,46 +617,67 @@ export class OrganiseSync extends EventEmitter<{ changed: [] }> {
         try {
           const res = await post(path, { mutations: [request] })
           if (signal.aborted) return
-          this.#local.resolve(res.mutations)
+          this.#local.resolve(res.mutations, runId)
         } catch (error) {
           if (signal.aborted) return
           if (!(error instanceof EngineError)) throw error
           const needsUpdate = reviewed && error.status === 404
           if (!needsUpdate && ![400, 409].includes(error.status)) throw error
-          this.#local.resolve([
-            {
-              id: request.id,
-              threadId: request.action.threadId ?? '',
-              modseq: 0,
-              status: 'failed',
-              error: needsUpdate
-                ? 'Update the Engine to organise reviewed Inbox messages.'
-                : error.message,
-            },
-          ])
+          this.#local.resolve(
+            [
+              {
+                id: request.id,
+                threadId: request.action.threadId ?? '',
+                modseq: 0,
+                status: 'failed',
+                error: needsUpdate
+                  ? 'Update the Engine to organise reviewed Inbox messages.'
+                  : 'The Engine refused this change',
+              },
+            ],
+            runId,
+            error,
+          )
         }
         this.emit('changed')
         request = this.#local.unsent()
       }
+      stage = 'status'
       if (pending.length) {
         const res = await post('/v1/mutations/status', { ids: pending })
         if (signal.aborted) return
-        this.#local.resolve(res.mutations)
+        this.#local.resolve(res.mutations, runId)
         if (res.mutations.some((row) => row.status !== 'pending' || row.error)) this.emit('changed')
+      }
+      stage = 'pull'
+      await this.#pull()
+      if (this.#failedRun) {
+        mainLog.log('info', 'desktop.organise.recovered', {}, { runId: this.#failedRun })
+        this.#failedRun = undefined
       }
       this.#failures = 0
       this.#retryAt = 0
-      await this.#pull()
     } catch (error) {
       if (signal.aborted) return
-      if (error instanceof EngineError && (error.status === 401 || error.status === 403)) {
-        this.#refusal =
-          error.status === 401
-            ? 'The Engine rejected this pairing. Pair this Mac again to organise mail.'
-            : `The Engine refused Organise. ${error.message}`
-        this.#local.refusePending(this.#refusal, request?.id ?? pending[0])
-        this.emit('changed')
-        return
+      if (
+        stage !== 'pull' &&
+        error instanceof EngineError &&
+        (error.status === 401 || error.status === 403)
+      ) {
+        const details = organiseFailure(stage, error, runId)
+        this.#refusal = new Error('The Engine refused Organise')
+        rememberFailure(this.#refusal, details)
+        try {
+          this.#local.refusePending(formatFailure(details), request?.id ?? pending[0])
+          this.emit('changed')
+        } catch (err) {
+          organiseFailure('queue', err, runId)
+          this.#refusal = null
+        }
+        if (this.#refusal) return
+      } else if (!this.#failedRun) {
+        this.#failedRun = runId
+        organiseFailure(stage, error, runId)
       }
       this.#retryAt = Date.now() + Math.min(30_000, 1000 * 2 ** this.#failures++)
     } finally {

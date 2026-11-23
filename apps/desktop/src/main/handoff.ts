@@ -1,9 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
+import { newRunId } from '@amc/observability'
 import type { ComposeDraft } from '@amc/protocol'
 import type { ActiveHandoff, T3Project } from '../shared/api'
+import { failureDetails } from '../shared/failure'
 import { composeDraftPath } from './draft-updates'
 import { type EngineClient, EngineError } from './engine'
+import { failureScope, knownFailure, mainLog, rememberFailure } from './observability'
 
 export interface T3Launch {
   projectId: string
@@ -31,6 +34,7 @@ export function t3NavigationLink(value: string): string | null {
     }
     return url.protocol === 't3code:' || url.protocol === 'https:' ? url.href : null
   } catch {
+    // Malformed or unsupported T3 links have no navigation target.
     return null
   }
 }
@@ -87,10 +91,28 @@ export class Handoff {
       db.exec('ALTER TABLE pending_handoff ADD COLUMN launch TEXT')
   }
 
+  async #observe<T>(stage: 'launch' | 'recover' | 'end', work: () => Promise<T>): Promise<T> {
+    const runId = newRunId()
+    const log = mainLog.with({ runId })
+    log.log('debug', 'handoff.started', { stage })
+    try {
+      const value = stage === 'launch' ? await log.span('handoff', work) : await work()
+      log.log('info', 'handoff.finished', { stage })
+      return value
+    } catch (err) {
+      const details = knownFailure(err)
+      log.log('error', 'handoff.failed', { stage, err }, details && failureScope(details))
+      rememberFailure(err, failureDetails(err, runId, 'Run'))
+      throw err
+    }
+  }
+
   recover(engine: EngineClient): Promise<void> {
     const existing = this.#recovering.get(engine.baseUrl)
     if (existing) return existing
-    const recovering = this.#recover(engine).finally(() => this.#recovering.delete(engine.baseUrl))
+    const recovering = this.#observe('recover', () => this.#recover(engine)).finally(() =>
+      this.#recovering.delete(engine.baseUrl),
+    )
     this.#recovering.set(engine.baseUrl, recovering)
     return recovering
   }
@@ -127,8 +149,10 @@ export class Handoff {
   }
 
   async end(engine: EngineClient, id: string): Promise<void> {
-    await engine.request(`/v1/compose/handoff/${encodeURIComponent(id)}`, { method: 'DELETE' })
-    this.#forget(id)
+    await this.#observe('end', async () => {
+      await engine.request(`/v1/compose/handoff/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      this.#forget(id)
+    })
   }
 
   async launch(
@@ -141,9 +165,9 @@ export class Handoff {
     const target = JSON.stringify([engine.baseUrl, launcher.key, projectId, threadId])
     const pending = this.#pending.get(target)
     if (pending) return pending
-    const task = this.#launch(engine, projectId, threadId, launcher, target).finally(() =>
-      this.#pending.delete(target),
-    )
+    const task = this.#observe('launch', () =>
+      this.#launch(engine, projectId, threadId, launcher, target),
+    ).finally(() => this.#pending.delete(target))
     this.#pending.set(target, task)
     return task
   }

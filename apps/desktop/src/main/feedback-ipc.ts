@@ -1,14 +1,10 @@
-import { join } from 'node:path'
 import {
-  createLogger,
   type EventFields,
   type Logger,
   newRunId,
   type RunId,
-  resolveLogLevel,
   sanitizeError,
 } from '@amc/observability'
-import { activeFileSink, macLogDirectory, stackFilePaths } from '@amc/observability/node'
 import { app, type BrowserWindow, clipboard, type IpcMainEvent, ipcMain, shell } from 'electron'
 import { type FeedbackDraft, type FeedbackSendResult, feedbackView } from '../shared/feedback'
 import {
@@ -42,30 +38,11 @@ function validDraft(draft: FeedbackDraft) {
 
 type Stage = EventFields<'feedback.launch.failed'>['stage']
 
-function desktopLogDirectory() {
-  const profile = app.getPath('userData')
-  return profile === join(app.getPath('appData'), '@amc', 'desktop')
-    ? macLogDirectory()
-    : join(profile, 'logs')
-}
-
-function feedbackLog() {
-  return createLogger({
-    component: 'main',
-    level: resolveLogLevel(process.env.AMC_LOG_LEVEL),
-    sink: (line) => activeFileSink(join(desktopLogDirectory(), 'main.log'))?.(line),
-    stackFiles: stackFilePaths([
-      [new URL(import.meta.url), 'desktop/feedback'],
-      [new URL('./feedback.ts', import.meta.url), 'desktop/feedback'],
-    ]),
-  })
-}
-
 export function registerFeedbackIpc(
   getWindow: () => BrowserWindow | null,
   openWindow: () => void,
-  log: (stage: Stage) => void,
-  logger: Logger = feedbackLog(),
+  logDirectory: string,
+  logger: Logger,
 ) {
   let ready = false
   let pending = false
@@ -140,7 +117,7 @@ export function registerFeedbackIpc(
   })
   ipcMain.handle('amc:feedbackCapture', async (event, view: unknown) => {
     if (!trusted(event) || !captureAllowed || capture || busy) {
-      log('CaptureUnavailable')
+      logger.log('warn', 'feedback.launch.failed', { stage: 'CaptureUnavailable' })
       throw new Error('AMC feedback is unavailable.')
     }
     captureAllowed = false
@@ -153,17 +130,15 @@ export function registerFeedbackIpc(
       if (image.isEmpty() || generation !== rendererGeneration || !trusted(event))
         throw new Error('Window capture is unavailable.')
       const path = saveFeedbackCapture(app.getPath('userData'), image.toPNG(), at)
-      const excerpt = await saveFeedbackExcerpt(path, desktopLogDirectory(), at).catch(
-        (error: unknown) => {
-          logger.log(
-            'warn',
-            'feedback.capture.failed',
-            { stage: 'ExcerptFailed', err: error },
-            { runId: id },
-          )
-          return undefined
-        },
-      )
+      const excerpt = await saveFeedbackExcerpt(path, logDirectory, at).catch((error: unknown) => {
+        logger.log(
+          'warn',
+          'feedback.capture.failed',
+          { stage: 'ExcerptFailed', err: error },
+          { runId: id },
+        )
+        return undefined
+      })
       if (generation !== rendererGeneration || !trusted(event)) {
         removeFeedbackCapture(path)
         throw new Error('Window capture is unavailable.')
@@ -182,7 +157,6 @@ export function registerFeedbackIpc(
       }
       return { id }
     } catch (error) {
-      log('CaptureFailed')
       logger.log(
         'warn',
         'feedback.capture.failed',
@@ -199,7 +173,7 @@ export function registerFeedbackIpc(
   ipcMain.handle('amc:feedbackSend', async (event, id: string, draft: FeedbackDraft) => {
     expireCapture()
     if (!trusted(event) || !capture || capture.id !== id || busy || !validDraft(draft)) {
-      log('InvalidSubmission')
+      logger.log('warn', 'feedback.launch.failed', { stage: 'InvalidSubmission' })
       return {
         opened: false,
         reason: 'Open Send Feedback again to capture AMC.',
@@ -224,7 +198,6 @@ export function registerFeedbackIpc(
       )
     }
     const failed = (reason: string, error: unknown = new Error(reason)): FeedbackSendResult => {
-      if (stage !== 'Opened') log(stage)
       finish(error)
       return {
         opened: false,

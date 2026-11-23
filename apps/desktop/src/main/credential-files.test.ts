@@ -69,7 +69,11 @@ it('reports a corrupt current pairing as a read error', () => {
   mkdirSync(dir)
   writeFileSync(join(dir, 'pairing.json'), JSON.stringify({ engineUrl }))
 
-  expect(loadPairing()).toEqual({ state: 'read-error', engineUrl })
+  expect(loadPairing()).toMatchObject({
+    state: 'read-error',
+    engineUrl,
+    failure: { errorClass: 'TypeError', kind: 'Request' },
+  })
 })
 
 it('archives encrypted T3 credentials and loads a new T3 connection from the private directory', () => {

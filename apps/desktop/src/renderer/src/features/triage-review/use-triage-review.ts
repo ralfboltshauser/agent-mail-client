@@ -1,6 +1,7 @@
 import type { OutboxItem } from '@amc/protocol'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { getAmc } from '@/lib/amc'
+import { recordCaughtFailure } from '@/lib/failure'
 import { ReviewStore } from './store'
 
 export function useTriageReview(accountId: string | null) {
@@ -11,7 +12,7 @@ export function useTriageReview(accountId: string | null) {
 
   useEffect(() => {
     if (!getAmc().smartInbox?.review) return
-    void store.restore().catch(() => {})
+    void store.restore().catch(recordCaughtFailure)
     const timer = setInterval(() => void store.poll(), 2000)
     const unsubscribe = getAmc().onChanged(() => store.replicaChanged())
     return () => {

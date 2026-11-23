@@ -6,7 +6,9 @@ import { SidebarGroupLabel } from '@/components/ui/sidebar'
 import { replicaStoreFor } from '@/data/replica-store'
 import { useReplicaSelector, useSyncField } from '@/hooks/use-amc'
 import { getAmc } from '@/lib/amc'
+import { failureText } from '@/lib/failure'
 import type { TriageStatus } from '../../../shared/api'
+import { formatFailure } from '../../../shared/failure'
 
 export function useTriageStatus() {
   const [status, setStatus] = useState<TriageStatus>()
@@ -22,7 +24,13 @@ export function useTriageStatus() {
       .then((initial) => {
         if (current && !received) setStatus(initial)
       })
-      .catch(() => {})
+      .catch((error: unknown) => {
+        if (current && !received)
+          toast.error('Could not load triage status', {
+            id: 'triage-status',
+            description: failureText(error),
+          })
+      })
     return () => {
       current = false
       unsubscribe()
@@ -42,8 +50,10 @@ export function AutoTriageSetting() {
         onChange={(event) => {
           void getAmc()
             .setAutoTriage(event.target.checked)
-            .catch(() => {
-              toast.error('Could not save the auto-triage setting.')
+            .catch((error: unknown) => {
+              toast.error('Could not save the auto-triage setting', {
+                description: failureText(error),
+              })
             })
         }}
       />
@@ -71,7 +81,11 @@ export function SidebarTriage({ accountId }: { accountId: string | null }) {
   const syncIsLive = useSyncField((status) => status?.phase === 'live')
   const disabled = !syncIsLive || !triage || triage.running
   const runTriage = (scope: 'recent' | 'account') => {
-    void api.triageNow(accountId, scope).catch(() => toast.error('Could not start triage.'))
+    void api
+      .triageNow(accountId, scope)
+      .catch((error: unknown) =>
+        toast.error('Could not start triage', { description: failureText(error) }),
+      )
   }
 
   return (
@@ -177,7 +191,10 @@ function LastTriageRun({
           </summary>
           <div className="mt-1 space-y-0.5 text-foreground">
             <p className="text-muted-foreground">Last run {timestamp}</p>
-            <p className="select-text">{error}</p>
+            <p>{error}</p>
+            {last?.failure && (
+              <p className="select-text break-all font-mono">{formatFailure(last.failure)}</p>
+            )}
           </div>
         </details>
       )}

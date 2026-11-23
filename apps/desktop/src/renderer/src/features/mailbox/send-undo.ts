@@ -1,6 +1,7 @@
 import { ORIGINAL_DRAFT_LEFT, type OutboxItem } from '@amc/protocol'
 import { toast } from 'sonner'
 import { getAmc } from '@/lib/amc'
+import { failureText } from '@/lib/failure'
 
 export function showQueuedSend(
   item: OutboxItem,
@@ -53,7 +54,9 @@ export function showQueuedSend(
             onCancelled()
             toast.success('Send cancelled. Draft saved.')
           })
-          .catch((cause: Error) => toast.error(cause.message))
+          .catch((cause: Error) =>
+            toast.error('Could not undo send', { description: failureText(cause) }),
+          )
       },
     },
   })

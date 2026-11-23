@@ -143,7 +143,7 @@ it('keeps queued rows stable and disables cancellation until refresh succeeds', 
 
   outbox.mockRejectedValueOnce(new Error('Engine unavailable'))
   await advance(750)
-  expect(container.querySelector('[role="alert"]')?.textContent).toContain('Engine unavailable')
+  expect(container.querySelector('[role="alert"]')?.textContent).toMatch(/Error · Request /)
   expect(container.querySelector('article')).toBe(row)
   expect(button('Cancel send')).toBe(cancel)
   expect(cancel?.disabled).toBe(true)
@@ -226,7 +226,7 @@ it('reports a rejected cancel and refreshes after a poll already in flight', asy
 
   await click('Cancel send')
   expect(notify).toHaveBeenCalledWith('Could not cancel send', {
-    description: 'Send can no longer be cancelled',
+    description: expect.stringMatching(/^Error · Request /),
   })
   expect(button('Cancel send')?.disabled).toBe(true)
   expect(outbox).toHaveBeenCalledTimes(2)
@@ -334,7 +334,7 @@ it('retains focused draft rows and skips commits for equal replies and repeated 
   composeDrafts.mockRejectedValueOnce(new Error('Drafts unavailable'))
   await advance(1500)
   const alert = container.querySelector('[role="alert"]')
-  expect(alert?.textContent).toContain('Drafts unavailable')
+  expect(alert?.textContent).toMatch(/Error · Request /)
   expect(commits).toHaveBeenCalledTimes(1)
 
   commits.mockClear()
@@ -373,12 +373,12 @@ it('waits for a slow poll and recovers from an initial failure without a false e
   expect(composeDrafts).toHaveBeenCalledOnce()
   expect(container.textContent).toContain('Loading drafts')
   await act(async () => rejectSlow(new Error('Drafts unavailable')))
-  expect(container.textContent).toContain('Drafts unavailable')
+  expect(container.textContent).toMatch(/Error · Request /)
   expect(container.textContent).not.toContain('No saved drafts')
   await advance(1500)
-  expect(container.textContent).toContain('Drafts unavailable')
+  expect(container.textContent).toMatch(/Error · Request /)
   expect(container.textContent).not.toContain('No saved drafts')
   await advance(1500)
   expect(container.textContent).toContain('No saved drafts')
-  expect(container.textContent).not.toContain('Drafts unavailable')
+  expect(container.textContent).not.toMatch(/Error · Request /)
 })

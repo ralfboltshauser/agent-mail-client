@@ -1,3 +1,4 @@
+import type { Level, RendererLogReport, triageErrorClasses } from '@amc/observability'
 import type {
   AccountSummary,
   AdoptScreenedDestination,
@@ -30,6 +31,7 @@ import type {
   TriageQueueRequest,
   VersionedDraft,
 } from '@amc/protocol'
+import type { FailureDetails } from './failure'
 
 import type { FeedbackApi } from './feedback'
 
@@ -90,6 +92,10 @@ export interface SyncStatus {
   snoozeEnabled?: boolean
   healthWarnings?: string[]
   healthRefreshFailed?: boolean
+  healthFailure?: FailureDetails
+  accountFailures?: Record<string, FailureDetails>
+  failure?: FailureDetails
+  mailCheckFailure?: FailureDetails
   mailCheck?: 'checking' | 'failed'
   engineUrl: string | null
   /** Bootstrap progress, 0..1. */
@@ -102,6 +108,7 @@ export interface SyncStatus {
 export interface OrganiseNotice {
   id: string
   message: string
+  description?: string
   quiet?: boolean
   updateOnly?: boolean
   undo?: Extract<OrganiseAction, { kind: 'undo' }>
@@ -146,6 +153,9 @@ export interface TriageStatus {
     at: number
     result: TriageResult | null
     error: string | null
+    failure?: Omit<FailureDetails, 'errorClass'> & {
+      errorClass: FailureDetails['errorClass'] | (typeof triageErrorClasses)[number]
+    }
   } | null
   notice: string | null
 }
@@ -196,7 +206,15 @@ export interface SmartInboxApi {
   ): Promise<DesktopSenderAvatarResults>
 }
 
+export interface DesktopLogSettings {
+  debug: boolean
+  effectiveLevel: Level
+}
+
 export interface AmcApi {
+  reportFailure?(report: RendererLogReport): void
+  logSettings?(): Promise<DesktopLogSettings>
+  setDebugLogging?(enabled: boolean): Promise<DesktopLogSettings>
   feedback: FeedbackApi
   smartInbox?: SmartInboxApi
   notificationSettings(): Promise<NotificationSettings>

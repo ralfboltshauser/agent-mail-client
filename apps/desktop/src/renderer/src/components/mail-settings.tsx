@@ -2,7 +2,9 @@ import { useEffect, useId, useState } from 'react'
 import { toast } from 'sonner'
 import { setLoadRemoteImagesAutomatically, useRemoteImages } from '@/data/remote-image-preferences'
 import { getAmc } from '@/lib/amc'
+import { failureText } from '@/lib/failure'
 import type { NotificationSettings } from '../../../shared/api'
+import { DebugLoggingSetting } from './debug-logging-setting'
 import { TriagePrivacy } from './triage-privacy'
 import { AutoTriageSetting } from './triage-status'
 import { Button } from './ui/button'
@@ -48,7 +50,7 @@ export function MailSettings({
                 toast.success('Undo send settings saved')
               })
               .catch((cause: Error) => {
-                toast.error('Could not save settings', { description: cause.message })
+                toast.error('Could not save settings', { description: failureText(cause) })
               })
               .finally(() => setSaving(false))
           }}
@@ -81,6 +83,7 @@ export function MailSettings({
         </div>
         <PrivacyPreferences />
         <NotificationPreferences />
+        <DebugLoggingSetting />
       </DialogContent>
     </Dialog>
   )
@@ -120,7 +123,7 @@ function NotificationPreferences() {
       .notificationSettings()
       .then(setSettings)
       .catch((error: Error) => {
-        setLoadError(error.message)
+        setLoadError(failureText(error))
       })
   }, [])
 
@@ -144,7 +147,7 @@ function NotificationPreferences() {
           .saveNotificationSettings(settings)
           .then(() => toast.success('Notification settings saved'))
           .catch((error: Error) => {
-            toast.error('Could not save notifications', { description: error.message })
+            toast.error('Could not save notifications', { description: failureText(error) })
           })
           .finally(() => setSaving(false))
       }}

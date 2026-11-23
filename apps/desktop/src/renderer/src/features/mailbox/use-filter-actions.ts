@@ -2,6 +2,7 @@ import type { Label, ThreadSummary } from '@amc/protocol'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { getAmc } from '@/lib/amc'
+import { failureText, recordCaughtFailure } from '@/lib/failure'
 import { reviewError } from '../triage-review/model'
 import type { MailboxAccount } from './mailbox-queries'
 
@@ -50,7 +51,8 @@ export function useFilterActions(accounts: MailboxAccount[], labels: Label[]) {
             finish(threadId)
             if (status === 'applied') toast(move.applied, { id: actionId })
             else toast.error(error ?? move.failed, { id: actionId })
-          } catch {
+          } catch (error) {
+            recordCaughtFailure(error)
             // The Engine can be temporarily unreachable while a queued move settles.
           }
         }),
@@ -93,7 +95,8 @@ export function useFilterActions(accounts: MailboxAccount[], labels: Label[]) {
                 else if (undo?.status === 'pending') toast('Undo queued', { id: actionId })
                 else toast.error(undo?.error ?? 'Could not undo this move')
               },
-              () => toast.error('Could not confirm Undo'),
+              (error: unknown) =>
+                toast.error('Could not confirm Undo', { description: failureText(error) }),
             )
           },
         },

@@ -1,5 +1,6 @@
 import { toast } from 'sonner'
 import { getAmc } from '@/lib/amc'
+import { recordCaughtFailure } from '@/lib/failure'
 import type { ReviewApi, SmartInboxApi } from '../../../../shared/api'
 import {
   canUndo,
@@ -87,7 +88,8 @@ export class ReviewStore {
       saveReview(this.#saved)
       if (this.#view.storageError) this.#publish({ storageError: false })
       return true
-    } catch {
+    } catch (error) {
+      recordCaughtFailure(error)
       this.#publish({ storageError: true })
       return false
     }
@@ -155,7 +157,8 @@ export class ReviewStore {
     try {
       if (this.#view.finished) await this.refresh()
       else await this.#checkQueue(generation, 'append')
-    } catch {
+    } catch (error) {
+      recordCaughtFailure(error)
       // Keep the current card usable. A later change or the end of the review retries.
     } finally {
       if (this.#syncing === generation) this.#syncing = null
@@ -345,7 +348,7 @@ export class ReviewStore {
         if (preview && generation === this.#read && replicaVersion === this.#replicaVersion)
           this.#next = { batch, index, preview }
       })
-      .catch(() => {})
+      .catch(recordCaughtFailure)
   }
 
   #update(action: ReviewAction, patch: Partial<ReviewAction>, requireStorage = false) {
@@ -739,7 +742,8 @@ export class ReviewStore {
           }
         }),
       )
-    } catch {
+    } catch (error) {
+      recordCaughtFailure(error)
       // A queued action stays pending while the Engine is unreachable.
     } finally {
       this.#polling = false

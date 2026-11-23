@@ -91,10 +91,15 @@ function pairingGate(status: SyncStatus | null) {
   if (!status) return { phase: undefined }
   switch (status.phase) {
     case 'unpaired':
-      return { phase: status.phase, engineUrl: status.engineUrl, error: status.error }
+      return {
+        phase: status.phase,
+        engineUrl: status.engineUrl,
+        error: status.error,
+        failure: status.failure,
+      }
     case 'restoring-pairing':
     case 'pairing-read-error':
-      return { phase: status.phase }
+      return { phase: status.phase, failure: status.failure }
     default:
       return { phase: 'paired' as const, engineUrl: status.engineUrl }
   }
@@ -102,7 +107,10 @@ function pairingGate(status: SyncStatus | null) {
 
 type PairingGate = ReturnType<typeof pairingGate>
 const sameGate = (left: PairingGate, right: PairingGate) =>
-  left.phase === right.phase && left.engineUrl === right.engineUrl && left.error === right.error
+  left.phase === right.phase &&
+  left.engineUrl === right.engineUrl &&
+  left.error === right.error &&
+  left.failure?.id === right.failure?.id
 
 export function usePairingGate() {
   return useSyncField(pairingGate, sameGate)

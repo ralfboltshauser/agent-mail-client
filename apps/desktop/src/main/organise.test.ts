@@ -265,7 +265,12 @@ describe('desktop Organise outbox', () => {
       replica.organise.rebuild()
       const action = { kind: 'undo', mutationId: id, threadId: THREAD.id } as const
       expect(replica.organise.errors()).toEqual([
-        { id, message: "Archived 3 of 4. 1 couldn't be changed", undo: action },
+        {
+          id,
+          message: "Archived 3 of 4. 1 couldn't be changed",
+          description: expect.stringMatching(/^EngineError · Run /),
+          undo: action,
+        },
       ])
       expect(replica.organise.errors()).toEqual([])
       const undo = replica.organise.enqueue(action)
@@ -390,7 +395,11 @@ describe('desktop Organise outbox', () => {
       expect(replica.organise.unsent()).toBeNull()
       expect(replica.organise.pending()).toEqual([])
       expect(replica.organise.errors()).toEqual([
-        { id: expect.any(String), message: expect.stringMatching(/pair|refused/i) },
+        {
+          id: expect.any(String),
+          message: 'Could not organise mail',
+          description: expect.stringMatching(/^EngineError · Run /),
+        },
       ])
       await sync.flush()
       expect(request).toHaveBeenCalledTimes(1)
@@ -435,7 +444,13 @@ describe('desktop Organise outbox', () => {
       replica.modseq = 30
       replica.organise.rebuild()
       expect(replica.counts(null).inboxUnread).toBe(1)
-      expect(replica.organise.errors()).toEqual([{ id, message: 'Gmail refused' }])
+      expect(replica.organise.errors()).toEqual([
+        {
+          id,
+          message: 'Could not organise mail',
+          description: expect.stringMatching(/^EngineError · Run /),
+        },
+      ])
       expect(replica.organise.errors()).toEqual([])
     } finally {
       replica.db.close()
@@ -484,7 +499,7 @@ it('describes Trash that succeeded for both messages even when one marker cleanu
   }
 })
 
-it('reports an uncertain Trash without an Undo or a Changed elsewhere notice', () => {
+it.each(['failed', 'partial'] as const)('reports an uncertain Trash on a %s move', (status) => {
   const replica = new Replica(':memory:')
   try {
     seed(replica)
@@ -495,7 +510,7 @@ it('reports an uncertain Trash without an Undo or a Changed elsewhere notice', (
           {
             id,
             threadId: THREAD.id,
-            status: 'failed',
+            status,
             modseq: 10,
             error: 'A change to Trash may have been applied. Gmail refused the change (HTTP 403)',
             superseded: [],
@@ -510,20 +525,28 @@ it('reports an uncertain Trash without an Undo or a Changed elsewhere notice', (
               },
               {
                 messageId: 'account:2',
-                status: 'failed',
-                appliedLabels: [],
+                status: status === 'partial' ? 'applied' : 'failed',
+                appliedLabels: status === 'partial' ? ['account:TRASH'] : [],
                 supersededLabels: [],
-                failedLabels: ['account:TRASH'],
+                failedLabels: status === 'partial' ? [] : ['account:TRASH'],
               },
             ],
           },
         ],
       }).mutations,
     )
+    replica.modseq = 10
     expect(replica.organise.errors()).toEqual([
       {
         id,
-        message: 'A change to Trash may have been applied. Gmail refused the change (HTTP 403)',
+        message:
+          status === 'partial'
+            ? 'Changed 1 of 2. A change to Trash may have been applied'
+            : 'A change to Trash may have been applied',
+        ...(status === 'partial' && {
+          undo: { kind: 'undo', threadId: THREAD.id, mutationId: id },
+        }),
+        description: expect.stringMatching(/^EngineError · Run /),
       },
     ])
   } finally {

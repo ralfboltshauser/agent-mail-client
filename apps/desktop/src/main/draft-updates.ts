@@ -1,6 +1,8 @@
 import type { DatabaseSync } from 'node:sqlite'
+import { newRunId } from '@amc/observability'
 import type { ComposePatch } from '@amc/protocol'
 import type { EngineClient } from './engine'
+import { failureScope, knownFailure, mainLog } from './observability'
 
 export function composeDraftPath(id: string): string {
   return `/v1/compose/drafts/${encodeURIComponent(id)}`
@@ -8,6 +10,7 @@ export function composeDraftPath(id: string): string {
 
 export class LocalDraftUpdates {
   #flush: Promise<void> | null = null
+  #failed = false
 
   readonly #db: DatabaseSync
 
@@ -56,28 +59,36 @@ export class LocalDraftUpdates {
   }
 
   async #send(engine: Pick<EngineClient, 'request'>): Promise<void> {
-    const updates = this.#db.prepare('SELECT * FROM draft_update').all() as {
-      id: string
-      revision: number
-      body: string
-      fields: string | null
-    }[]
-    const signal = AbortSignal.timeout(3_000)
-    await Promise.all(
-      updates.map(async ({ id, revision, body, fields }) => {
-        try {
+    const runId = newRunId()
+    const stage = 'draft-replay'
+    const log = mainLog.with({ runId })
+    try {
+      const updates = this.#db.prepare('SELECT * FROM draft_update').all() as {
+        id: string
+        revision: number
+        body: string
+        fields: string | null
+      }[]
+      if (!updates.length) return
+      log.log('debug', 'desktop.operation.started', { stage })
+      const signal = AbortSignal.timeout(3_000)
+      const results = await Promise.allSettled(
+        updates.map(async ({ id, revision, body, fields }) => {
           const patch: ComposePatch = { baseRevision: revision, update: body }
           if (fields !== null) patch.fields = JSON.parse(fields)
-          await engine.request(composeDraftPath(id), {
-            method: 'PUT',
-            body: patch,
-            signal,
-          })
+          await engine.request(composeDraftPath(id), { method: 'PUT', body: patch, signal })
           this.acknowledge(id, patch)
-        } catch {
-          // Keep unacknowledged updates in the replica for the next flush.
-        }
-      }),
-    )
+        }),
+      )
+      // Keep unacknowledged updates in the replica for the next flush.
+      const failed = results.find((result) => result.status === 'rejected')
+      if (failed) throw failed.reason
+      log.log(this.#failed ? 'info' : 'debug', 'desktop.operation.finished', { stage })
+      this.#failed = false
+    } catch (err) {
+      const details = knownFailure(err)
+      log.log('error', 'desktop.operation.failed', { stage, err }, details && failureScope(details))
+      this.#failed = true
+    }
   }
 }

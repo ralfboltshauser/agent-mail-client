@@ -10,6 +10,7 @@ import {
   newRunId,
   REQUEST_ID_HEADER,
   type RequestId,
+  RUN_ID_HEADER,
   type RunId,
 } from '@amc/observability'
 import { mcpClientObservability } from '@amc/observability/mcp-client'
@@ -40,6 +41,7 @@ import { cliContext, clientLog, cliFailure } from './observability.ts'
 import { runClaude } from './triage-claude.ts'
 import { TriageFailure, type TriageFailureReason } from './triage-errors.ts'
 
+export { closeClientLogs } from './observability.ts'
 export { ClaudeAuthError } from './triage-claude.ts'
 export { describeTriageFailure, TriageFailure } from './triage-errors.ts'
 
@@ -145,14 +147,16 @@ export async function withTriageGrant<T>(
   cleanupTimeout?: number,
   admittedRunId?: RunId,
 ): Promise<T | null> {
-  if (!cliContext.getStore()) {
+  const context = cliContext.getStore()
+  if (!context || (admittedRunId && context.runId !== admittedRunId)) {
     return cliContext.run({ command: 'triage', runId: admittedRunId ?? newRunId() }, () =>
       withTriageGrant(config, accountId, dryRun, signal, run, cleanupTimeout),
     )
   }
   signal.throwIfAborted()
   const api = authed(config)
-  const runId = cliContext.getStore()?.runId ?? newRunId()
+  context.runId ??= newRunId()
+  const runId = context.runId
   const name = `triage-${runId}`
   const options = () => ({
     signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
@@ -238,10 +242,19 @@ export async function triageWithGrant(
   harness: TriageHarness = runClaude,
   runId?: RunId,
 ) {
-  const run = () => triageWithGrantInScope(config, dryRun, recent, signal, harness)
-  return cliContext.getStore()
-    ? run()
-    : cliContext.run({ command: 'triage', runId: runId ?? newRunId() }, run)
+  const context = cliContext.getStore()
+  if (context && (!runId || context.runId === runId)) {
+    context.runId ??= newRunId()
+    return triageWithGrantInScope(config, dryRun, recent, signal, harness, context.runId)
+  }
+  const id = runId ?? newRunId()
+  return cliContext.run({ command: 'triage', runId: id }, () =>
+    clientLog('cli')
+      .with({ runId: id })
+      .span('triage.run', () =>
+        triageWithGrantInScope(config, dryRun, recent, signal, harness, id),
+      ),
+  )
 }
 
 async function triageWithGrantInScope(
@@ -250,9 +263,9 @@ async function triageWithGrantInScope(
   recent: boolean,
   signal: AbortSignal,
   harness: TriageHarness,
+  runId: RunId,
 ) {
   const client = new Client({ name: 'amc-triage', version: '1' })
-  const runId = cliContext.getStore()?.runId ?? newRunId()
   const transport = mcpClientObservability(
     () => clientLog('mcp'),
     (requestId) => {
@@ -267,7 +280,7 @@ async function triageWithGrantInScope(
         client.connect(
           new StreamableHTTPClientTransport(new URL('/mcp', config.engineUrl), {
             requestInit: {
-              headers: { Authorization: `Bearer ${config.token}` },
+              headers: { Authorization: `Bearer ${config.token}`, [RUN_ID_HEADER]: runId },
               redirect: 'error',
             },
             fetch: transport.fetch,

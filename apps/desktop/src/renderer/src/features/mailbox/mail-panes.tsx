@@ -98,7 +98,11 @@ export function MailPanes({
           </header>
           {search
             ? search.failed && (
-                <RefreshError retry={() => void runSearch(search.text)} retryLabel="Retry search">
+                <RefreshError
+                  retry={() => void runSearch(search.text)}
+                  retryLabel="Retry search"
+                  failure={search.failure}
+                >
                   Could not search all mail
                 </RefreshError>
               )
@@ -187,10 +191,11 @@ function ThreadQueryError({
   query: MailboxThreadQuery | null
   initial?: boolean
 }) {
-  const failed = useReplicaSelector(query, queryFailed)
-  if (failed)
+  const failure = useReplicaSelector(query, (snapshot) => snapshot.failure)
+  if (failure)
     return (
       <RefreshError
+        failure={failure}
         retry={() => {
           if (query) void replicaStoreFor(getAmc()).refresh(query)
         }}
@@ -205,16 +210,19 @@ function RefreshError({
   children,
   retry,
   retryLabel = 'Retry',
+  failure,
 }: {
   children: ReactNode
   retry: () => void
   retryLabel?: string
+  failure?: string
 }) {
   return (
     <div className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-1">
-      <p role="alert" className="truncate text-xs text-destructive">
-        {children}
-      </p>
+      <div role="alert" className="min-w-0 text-xs text-destructive">
+        <p>{children}</p>
+        {failure && <p className="select-text break-all text-muted-foreground">{failure}</p>}
+      </div>
       <Button variant="outline" size="sm" className="shrink-0" onClick={retry}>
         {retryLabel}
       </Button>
@@ -247,10 +255,15 @@ export const MailReader = memo(function MailReader({
       ? { id: selectedId, accountId: selectedAccountId }
       : undefined,
   )
-  const { data, failed } = useReplicaSelector(
+  const { data, failed, failure } = useReplicaSelector(
     query,
-    (snapshot) => ({ data: snapshot.data, failed: queryFailed(snapshot) }),
-    (left, right) => left.data === right.data && left.failed === right.failed,
+    (snapshot) => ({
+      data: snapshot.data,
+      failed: queryFailed(snapshot),
+      failure: snapshot.failure,
+    }),
+    (left, right) =>
+      left.data === right.data && left.failed === right.failed && left.failure === right.failure,
   )
   const hasData = data != null
   useLayoutEffect(() => {
@@ -266,7 +279,11 @@ export const MailReader = memo(function MailReader({
   const labelNames = useMemo(() => new Map(labels?.map(({ id, name }) => [id, name])), [labels])
   return (
     <>
-      {data && failed && <RefreshError retry={refresh}>Could not refresh this thread</RefreshError>}
+      {failed && (
+        <RefreshError retry={refresh} failure={failure}>
+          {data ? 'Could not refresh this thread' : 'Could not load this thread'}
+        </RefreshError>
+      )}
       <div className="min-h-0 flex-1">
         <ThreadView
           data={data ?? null}

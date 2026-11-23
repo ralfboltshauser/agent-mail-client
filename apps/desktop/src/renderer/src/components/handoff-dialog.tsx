@@ -1,6 +1,7 @@
 import type { ComposeDraft } from '@amc/protocol'
 import { useCallback, useEffect, useId, useState } from 'react'
 import { getAmc } from '@/lib/amc'
+import { failureText } from '@/lib/failure'
 import type { T3Project, T3RuntimeMode } from '../../../shared/api'
 import { Button } from './ui/button'
 import {
@@ -50,7 +51,7 @@ export function HandoffDialog({
       setProjects(known)
       setProjectId(known.find((project) => project.id === previous)?.id ?? known[0]?.id ?? '')
     } catch (cause) {
-      setError((cause as Error).message)
+      setError(failureText(cause))
     } finally {
       setBusy(false)
     }
@@ -65,7 +66,7 @@ export function HandoffDialog({
         if (setup.kind === 'cli') return load(null)
         if (setup.address) return load(setup.address)
       })
-      .catch((cause: Error) => setError(cause.message))
+      .catch((cause: Error) => setError(failureText(cause)))
   }, [load])
 
   const launch = async () => {
@@ -78,7 +79,7 @@ export function HandoffDialog({
       localStorage.setItem('amc-handoff-project', projectId)
       onDraft(draft)
     } catch (cause) {
-      setError((cause as Error).message)
+      setError(failureText(cause))
     } finally {
       setBusy(false)
     }
@@ -91,7 +92,7 @@ export function HandoffDialog({
       try {
         await getAmc().cancelHandoff(launchAddress, projectId, threadId)
       } catch (cause) {
-        setError((cause as Error).message)
+        setError(failureText(cause))
         setBusy(false)
         return
       }

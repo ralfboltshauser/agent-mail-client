@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react'
 import { toast } from 'sonner'
+import { failureText, recordCaughtFailure } from '@/lib/failure'
 
 const storageKey = 'amc.remote-images.v1'
 
@@ -27,7 +28,8 @@ function readPreferences(): Preferences {
         }
       }
     }
-  } catch {
+  } catch (error) {
+    recordCaughtFailure(error)
     return defaults
   }
   return preferences
@@ -36,8 +38,8 @@ function readPreferences(): Preferences {
 function savePreferences(next: Preferences) {
   try {
     localStorage.setItem(storageKey, JSON.stringify(next))
-  } catch {
-    toast.error('Could not save remote image preferences')
+  } catch (error) {
+    toast.error('Could not save remote image preferences', { description: failureText(error) })
     return
   }
   for (const listener of listeners) listener()

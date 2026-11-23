@@ -1,7 +1,7 @@
-import { fetchWithRequestId, type RequestId } from '@amc/observability'
+import { fetchWithRequestId, type RequestId, RUN_ID_HEADER } from '@amc/observability'
 import type { ApiError } from '@amc/protocol'
 import type { CliConfig } from './config.ts'
-import { cliFailure, cliRequestId } from './observability.ts'
+import { cliContext, cliFailure, cliRequestId } from './observability.ts'
 
 type RequestOptions = {
   method?: string
@@ -39,6 +39,7 @@ export async function response(
 ): Promise<Response> {
   const url = new URL(path, engineUrl)
   const requestId = cliRequestId()
+  const runId = cliContext.getStore()?.runId
   let res: Response
   try {
     res = await fetchWithRequestId(
@@ -48,6 +49,7 @@ export async function response(
         signal: init.signal,
         redirect: init.redirect ?? 'follow',
         headers: {
+          ...(runId ? { [RUN_ID_HEADER]: runId } : {}),
           ...(init.token ? { Authorization: `Bearer ${init.token}` } : {}),
           ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
         },

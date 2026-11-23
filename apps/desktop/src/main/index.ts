@@ -2,8 +2,17 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { writeFile } from 'node:fs/promises'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createLogger, resolveLogLevel } from '@amc/observability'
-import { macLogDirectory, rotatingFileSink } from '@amc/observability/node'
+import { pathToFileURL } from 'node:url'
+import { closeClientLogs } from '@amc/cli/triage'
+import {
+  fetchWithRequestId,
+  isCorrelationId,
+  newRequestId,
+  RENDERER_LOG_CHANNEL,
+  triageErrorClasses,
+  triageFailureMessages,
+} from '@amc/observability'
+import { macLogDirectory } from '@amc/observability/node'
 import type {
   ComposeDraft,
   ComposePatch,
@@ -18,9 +27,12 @@ import {
   AdoptScreenedDestination,
   BucketInput,
   BucketReviewInput,
+  DRAFT_CHANGED,
+  DRAFT_MISSING,
   type FilteredPage,
   FilterReviewInput,
   InboxFilterTarget,
+  MIRROR_CHANGED,
   MutationRequest,
   OwnerActionReasonInput,
   SenderAvatarResolve,
@@ -34,6 +46,7 @@ import {
   app,
   BrowserWindow,
   dialog,
+  type IpcMainInvokeEvent,
   ipcMain,
   Menu,
   MenuItem,
@@ -43,11 +56,13 @@ import {
   shell,
 } from 'electron'
 import type { SyncStatus, ThreadQuery, TriageStatus } from '../shared/api'
+import { failureDetails, formatFailure, validFailure } from '../shared/failure'
 import { feedbackAccelerator } from '../shared/feedback'
+import { projectActionFailures } from './action-failures'
 import { clearPairing, loadPairing, savePairing } from './auth'
 import { AutoTriage } from './auto-triage'
 import { composeDraftPath } from './draft-updates'
-import { EngineClient, EngineError } from './engine'
+import { carryRequest, EngineClient, EngineError } from './engine'
 import { registerFeedbackIpc } from './feedback-ipc'
 import { Handoff, t3NavigationLink } from './handoff'
 import { handleMailRefreshKey, mailboxViewMenu } from './mail-menu'
@@ -57,9 +72,20 @@ import {
   NewMailNotifications,
   parseNotificationSettings,
 } from './notifications'
+import {
+  configureDesktopLogs,
+  type DesktopIpcChannel,
+  desktopLogger,
+  ipcError,
+  mainLog,
+  operationFailure,
+  rendererLog,
+  startupMarkerLog,
+} from './observability'
 import { OrganiseSync } from './organise'
 import { createQuitHandler } from './quit'
 import { loadRenderer } from './renderer-load'
+import { limitRendererReports, ownMainFrame } from './renderer-reporting'
 import { Replica } from './replica'
 import { resolveSenderAvatars } from './sender-avatars'
 import { SyncLoop } from './sync'
@@ -69,6 +95,7 @@ import { createTray } from './tray'
 import { onLowBattery, runTriageProcess } from './triage-process'
 
 let window: BrowserWindow | null = null
+let rendererUrl: string | undefined
 let replica: Replica | null = null
 let engine: EngineClient | null = null
 let sync: SyncLoop | null = null
@@ -106,8 +133,24 @@ const triageRunFile = () => join(app.getPath('userData'), 'triage-run.json')
 function loadLastTriageRun(): TriageStatus['lastRun'] {
   try {
     const run = JSON.parse(readFileSync(triageRunFile(), 'utf8')) as TriageStatus['lastRun']
-    return Number.isFinite(run?.at) ? run : null
-  } catch {
+    if (!run || !Number.isFinite(run.at)) return null
+    const error =
+      typeof run.error === 'string'
+        ? (Object.values(triageFailureMessages).find((message) => message === run.error) ??
+          triageFailureMessages.unexpected)
+        : null
+    const failure =
+      validFailure(run.failure) ||
+      (run.failure?.kind === 'Run' &&
+        isCorrelationId(run.failure.id) &&
+        triageErrorClasses.some((errorClass) => errorClass === run.failure?.errorClass))
+        ? run.failure
+        : undefined
+    const diagnostic =
+      error && !failure ? operationFailure('triage-read', new Error(error)) : failure
+    return { at: run.at, result: run.result, error, failure: diagnostic }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') operationFailure('triage-read', error)
     return null
   }
 }
@@ -125,7 +168,12 @@ function restoreSavedPairing() {
     connect(pairing.engineUrl, pairing.token)
   } else if (pairing.state === 'read-error') {
     mainLog.log('warn', 'desktop.startup.pairing', { stage: 'unreadable' })
-    setStartupStatus({ ...UNPAIRED, phase: 'pairing-read-error', engineUrl: pairing.engineUrl })
+    setStartupStatus({
+      ...UNPAIRED,
+      phase: 'pairing-read-error',
+      engineUrl: pairing.engineUrl,
+      failure: pairing.failure,
+    })
   } else {
     setStartupStatus({ ...UNPAIRED, engineUrl: pairing.engineUrl })
   }
@@ -136,8 +184,16 @@ function broadcast(channel: string, payload?: unknown) {
 }
 
 function openReplica(): Replica {
-  replica ??= new Replica(join(app.getPath('userData'), 'replica.db'))
-  return replica
+  if (replica) return replica
+  try {
+    mainLog.log('debug', 'desktop.operation.started', { stage: 'replica-open' })
+    replica = new Replica(join(app.getPath('userData'), 'replica.db'))
+    mainLog.log('debug', 'desktop.operation.finished', { stage: 'replica-open' })
+    return replica
+  } catch (error) {
+    operationFailure('replica-open', error)
+    throw error
+  }
 }
 
 function refreshTray() {
@@ -165,8 +221,8 @@ function createOrganise(client: EngineClient, loop?: SyncLoop) {
 function connect(engineUrl: string, token: string) {
   engine = new EngineClient(engineUrl, token)
   recoverHandoffs(engine)
-  triage.connect((accountId, signal, recent) =>
-    runTriageProcess({ engineUrl, token }, accountId, recent, signal, quittingTriage.signal),
+  triage.connect((accountId, signal, recent, runId) =>
+    runTriageProcess({ engineUrl, token }, accountId, recent, signal, quittingTriage.signal, runId),
   )
   if (existsSync(pauseFile())) {
     organise = createOrganise(engine)
@@ -251,7 +307,7 @@ function toggleSync() {
     if (sync) writeFileSync(pauseFile(), '')
     else rmSync(pauseFile(), { force: true })
   } catch (error) {
-    console.error('Could not save the AMC sync preference', error)
+    operationFailure('sync-preference', error)
     return
   }
   if (sync) {
@@ -269,9 +325,52 @@ function requireEngine(): EngineClient {
   return engine
 }
 
+const safeEngineHints = new Set([
+  DRAFT_CHANGED,
+  DRAFT_MISSING,
+  MIRROR_CHANGED,
+  'The recipients, subject or attachments may have changed. Reopen the draft to review them.',
+  'Triage queue changed. Start a fresh snapshot.',
+  'Owner action unavailable',
+  'The sender rule changed while saving the decision. Choose Accept or Block again.',
+])
+
+class ReviewRejection extends Error {
+  readonly original: EngineError
+
+  constructor(original: EngineError) {
+    super('Review rejected')
+    this.original = original
+  }
+}
+
+function handle<Args extends unknown[], Result>(
+  channel: DesktopIpcChannel,
+  listener: (event: IpcMainInvokeEvent, ...args: Args) => Result,
+) {
+  ipcMain.handle(channel, async (event, ...args: Args) => {
+    if (!ownMainFrame(event, window?.webContents, rendererUrl)) throw new Error('IPC denied')
+    try {
+      return projectActionFailures(channel, await listener(event, ...args))
+    } catch (error) {
+      if (error instanceof ReviewRejection) {
+        const hint = safeEngineHints.has(error.original.message)
+          ? error.original.message
+          : 'The Engine refused this change.'
+        throw ipcError(channel, error.original, `Review rejected: ${hint}`)
+      }
+      const hint =
+        error instanceof EngineError && safeEngineHints.has(error.message)
+          ? error.message
+          : undefined
+      throw ipcError(channel, error, hint)
+    }
+  })
+}
+
 function registerIpc() {
-  ipcMain.handle('amc:notificationSettings', () => notificationSettings)
-  ipcMain.handle('amc:saveNotificationSettings', (_event, input: unknown) => {
+  handle('amc:notificationSettings', () => notificationSettings)
+  handle('amc:saveNotificationSettings', (_event, input: unknown) => {
     const settings = parseNotificationSettings(input)
     const path = notificationSettingsFile()
     writeFileSync(`${path}.tmp`, JSON.stringify(settings), { mode: 0o600 })
@@ -285,18 +384,18 @@ function registerIpc() {
     openPendingThread()
     openPendingSettings()
   })
-  ipcMain.handle('amc:triageStatus', () => triage.status)
-  ipcMain.handle('amc:setAutoTriage', (_e, enabled: unknown) => {
+  handle('amc:triageStatus', () => triage.status)
+  handle('amc:setAutoTriage', (_e, enabled: unknown) => {
     if (typeof enabled !== 'boolean') throw new Error('Invalid auto-triage setting')
     if (enabled) rmSync(triageOffFile(), { force: true })
     else writeFileSync(triageOffFile(), '')
     triage.setEnabled(enabled)
   })
-  ipcMain.handle('amc:triageCounts', (_e, accountId: unknown) => {
+  handle('amc:triageCounts', (_e, accountId: unknown) => {
     if (accountId !== null && typeof accountId !== 'string') throw new Error('Invalid Account')
     return openReplica().triageCounts(accountId)
   })
-  ipcMain.handle('amc:triageNow', async (_e, accountId: unknown, scope: unknown) => {
+  handle('amc:triageNow', async (_e, accountId: unknown, scope: unknown) => {
     if (accountId !== null && typeof accountId !== 'string') throw new Error('Invalid Account')
     if (scope === 'recent') return triage.now(accountId)
     if (scope !== 'account') throw new Error('Invalid triage scope')
@@ -318,11 +417,11 @@ function registerIpc() {
     })
     if (response === 1 && engine === connection) await triage.now(account, false)
   })
-  ipcMain.handle('amc:pair', (_e, engineUrl: string, code: string) => pair(engineUrl, code))
-  ipcMain.handle('amc:retrySavedPairing', () => {
+  handle('amc:pair', (_e, engineUrl: string, code: string) => pair(engineUrl, code))
+  handle('amc:retrySavedPairing', () => {
     if (startupStatus.phase === 'pairing-read-error') return restoreSavedPairing()
   })
-  ipcMain.handle('amc:unpair', () => {
+  handle('amc:unpair', () => {
     stopSync()
     organise = null
     pausedStatus = null
@@ -346,13 +445,13 @@ function registerIpc() {
   }
   const reportReviewRejection = (error: unknown): never => {
     if (error instanceof EngineError && [400, 403, 404, 409, 422].includes(error.status))
-      throw new Error(`Review rejected: ${error.message}`)
+      throw new ReviewRejection(error)
     throw error
   }
-  ipcMain.handle('amc:listSenders', (_event, query: unknown) =>
+  handle('amc:listSenders', (_event, query: unknown) =>
     requireEngine().get(`/v1/senders?${queryString(SenderListQuery.parse(query))}`),
   )
-  ipcMain.handle('amc:decideSender', (_event, input: unknown) =>
+  handle('amc:decideSender', (_event, input: unknown) =>
     requireEngine()
       .request('/v1/senders/decisions', {
         method: 'POST',
@@ -369,8 +468,8 @@ function registerIpc() {
         signal: AbortSignal.timeout(10_000),
       })
       .catch(reportReviewRejection)
-  ipcMain.handle('amc:reviewFilter', (_event, input: unknown) => submitFilter(input))
-  ipcMain.handle('amc:filterThread', async (_event, threadId: string, clientActionId: string) => {
+  handle('amc:reviewFilter', (_event, input: unknown) => submitFilter(input))
+  handle('amc:filterThread', async (_event, threadId: string, clientActionId: string) => {
     const engine = requireEngine()
     const localIds = openReplica().inboxFilterMessageIds(threadId)
     if (!localIds.length) throw new Error('There are no eligible Inbox messages to filter')
@@ -389,7 +488,7 @@ function registerIpc() {
       target.messageIds.length !== localIds.length ||
       localIds.some((id, index) => id !== target.messageIds[index])
     ) {
-      void sync?.pull().catch(() => {})
+      sync?.pullInBackground()
       throw new Error('The Inbox messages changed. Refresh the Thread and try again.')
     }
     return submitFilter({
@@ -401,33 +500,29 @@ function registerIpc() {
       source: 'thread-action',
     })
   })
-  ipcMain.handle(
-    'amc:restoreFiltered',
-    async (_event, threadId: string, clientActionId: string) => {
-      const engine = requireEngine()
-      const params = queryString({ threadId, limit: 1 })
-      const page = await engine.get<FilteredPage>(`/v1/filtered?${params}`, {
-        signal: AbortSignal.timeout(10_000),
-      })
-      const thread = page.threads[0]
-      if (!thread || requireEngine() !== engine)
-        throw new Error('Thread is unavailable in Filtered')
-      return submitFilter({
-        threadId,
-        clientActionId,
-        expectedRevision: thread.revision,
-        decision: 'filter.keep',
-      })
-    },
-  )
-  ipcMain.handle('amc:editOwnerReason', (_event, actionId: string, input: unknown) =>
+  handle('amc:restoreFiltered', async (_event, threadId: string, clientActionId: string) => {
+    const engine = requireEngine()
+    const params = queryString({ threadId, limit: 1 })
+    const page = await engine.get<FilteredPage>(`/v1/filtered?${params}`, {
+      signal: AbortSignal.timeout(10_000),
+    })
+    const thread = page.threads[0]
+    if (!thread || requireEngine() !== engine) throw new Error('Thread is unavailable in Filtered')
+    return submitFilter({
+      threadId,
+      clientActionId,
+      expectedRevision: thread.revision,
+      decision: 'filter.keep',
+    })
+  })
+  handle('amc:editOwnerReason', (_event, actionId: string, input: unknown) =>
     requireEngine().request(`/v1/owner-actions/${encodeURIComponent(actionId)}/reason`, {
       method: 'PUT',
       body: OwnerActionReasonInput.parse(input),
       signal: AbortSignal.timeout(10_000),
     }),
   )
-  ipcMain.handle('amc:adoptScreenedDestination', (_event, input: unknown) => {
+  handle('amc:adoptScreenedDestination', (_event, input: unknown) => {
     const { destination, ...body } = AdoptScreenedDestination.parse(input)
     return requireEngine().request(
       destination === 'filtered'
@@ -439,7 +534,7 @@ function registerIpc() {
       },
     )
   })
-  ipcMain.handle('amc:ownerAction', (_event, id: string, includeReason?: boolean) =>
+  handle('amc:ownerAction', (_event, id: string, includeReason?: boolean) =>
     requireEngine().get(
       `/v1/owner-actions/${encodeURIComponent(id)}${includeReason ? '?includeReason=1' : ''}`,
       {
@@ -447,26 +542,26 @@ function registerIpc() {
       },
     ),
   )
-  ipcMain.handle('amc:undoOwnerAction', (_event, id: string) =>
+  handle('amc:undoOwnerAction', (_event, id: string) =>
     requireEngine().request(`/v1/owner-actions/${encodeURIComponent(id)}/undo`, {
       method: 'POST',
       signal: AbortSignal.timeout(10_000),
     }),
   )
-  ipcMain.handle('amc:triageHistory', (_event, query: unknown) => {
+  handle('amc:triageHistory', (_event, query: unknown) => {
     const params = queryString(TriageHistoryQuery.parse(query))
     return requireEngine().get(`/v1/triage/events?${params}`, {
       signal: AbortSignal.timeout(10_000),
     })
   })
-  ipcMain.handle('amc:forgetTriageDecision', (_event, id: string) =>
+  handle('amc:forgetTriageDecision', (_event, id: string) =>
     requireEngine().request(`/v1/triage/events/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       redirect: 'error',
       signal: AbortSignal.timeout(10_000),
     }),
   )
-  ipcMain.handle('amc:exportTriageHistory', async (_event, input: unknown) => {
+  handle('amc:exportTriageHistory', async (_event, input: unknown) => {
     const engine = requireEngine()
     const body = TriageExportInput.parse(input)
     const { filePath } = await dialog.showSaveDialog({
@@ -489,13 +584,13 @@ function registerIpc() {
     })
     return true
   })
-  ipcMain.handle('amc:triageQueue', (_event, query: unknown) => {
+  handle('amc:triageQueue', (_event, query: unknown) => {
     return requireEngine().get(`/v1/triage/queue?${queryString(TriageQueueQuery.parse(query))}`, {
       signal: AbortSignal.timeout(10_000),
     })
   })
-  ipcMain.handle('amc:reviewPairing', () => requireEngine().pairingScope)
-  ipcMain.handle('amc:reviewBucket', async (_event, input: unknown) => {
+  handle('amc:reviewPairing', () => requireEngine().pairingScope)
+  handle('amc:reviewBucket', async (_event, input: unknown) => {
     const loop = sync
     const result = await requireEngine()
       .request('/v1/bucket', {
@@ -504,36 +599,33 @@ function registerIpc() {
         signal: AbortSignal.timeout(10_000),
       })
       .catch(reportReviewRejection)
-    void loop?.pull().catch(() => {})
+    loop?.pullInBackground()
     return result
   })
-  ipcMain.handle('amc:reviewOrganiseStatus', (_event, id: string) => {
+  handle('amc:reviewOrganiseStatus', (_event, id: string) => {
     requireEngine()
     return openReplica().organise.reviewStatus(id)
   })
-  ipcMain.handle(
-    'amc:reviewOrganise',
-    (_event, input: unknown, id: unknown, messageId?: string) => {
-      if (!organise) throw new Error('Pair with the Engine first')
-      const parsed = MutationRequest.parse({ id, action: input })
-      const action = parsed.action
-      if (action.kind !== 'archive' && action.kind !== 'snooze' && action.kind !== 'undo')
-        throw new Error('Invalid triage Organise action')
-      const queued = organise.enqueue(action, (sync?.status ?? pausedStatus)?.snoozeEnabled, {
-        id: parsed.id,
-        messageId,
-      })
-      refreshMail()
-      if (sync) void organise.flush()
-      return queued
-    },
-  )
-  ipcMain.handle('amc:resolveSenderAvatars', async (_event, input: unknown, known: unknown) => {
+  handle('amc:reviewOrganise', (_event, input: unknown, id: unknown, messageId?: string) => {
+    if (!organise) throw new Error('Pair with the Engine first')
+    const parsed = MutationRequest.parse({ id, action: input })
+    const action = parsed.action
+    if (action.kind !== 'archive' && action.kind !== 'snooze' && action.kind !== 'undo')
+      throw new Error('Invalid triage Organise action')
+    const queued = organise.enqueue(action, (sync?.status ?? pausedStatus)?.snoozeEnabled, {
+      id: parsed.id,
+      messageId,
+    })
+    refreshMail()
+    if (sync) void organise.flush()
+    return queued
+  })
+  handle('amc:resolveSenderAvatars', async (_event, input: unknown, known: unknown) => {
     const connection = requireEngine()
     const result = await resolveSenderAvatars(connection, SenderAvatarResolve.parse(input), known)
     return connection === engine ? result : { rows: [] }
   })
-  ipcMain.handle('amc:setBucket', async (_event, input: unknown) => {
+  handle('amc:setBucket', async (_event, input: unknown) => {
     const body = BucketInput.parse(input)
     const loop = sync
     if (!loop) throw new Error('Resume sync to move Threads between Buckets')
@@ -542,54 +634,63 @@ function registerIpc() {
       body,
       signal: AbortSignal.timeout(10_000),
     })
-    void loop.pull().catch(() => {}) // The normal sync loop retries if this pull fails.
+    loop.pullInBackground() // The normal sync loop retries if this pull fails.
   })
-  ipcMain.handle('amc:organise', (_event, input: unknown) => {
+  handle('amc:organise', (_event, input: unknown) => {
     if (!organise) throw new Error('Pair with the Engine first')
     const id = organise.enqueue(input, (sync?.status ?? pausedStatus)?.snoozeEnabled)
     refreshMail()
     if (sync) void organise.flush()
     return id
   })
-  ipcMain.handle('amc:organiseErrors', () => openReplica().organise.errors())
+  handle('amc:organiseErrors', () => openReplica().organise.errors())
   registerReadIpc()
   registerComposeIpc()
 }
 
 async function pair(engineUrl: string, code: string) {
-  const url = new URL(engineUrl).origin
-  const res = await fetch(new URL('/v1/auth/pair', url), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ code, deviceName: `${hostname()} (desktop)` }),
-  }).catch((error: Error) => {
-    throw new Error(`Cannot reach the Engine at ${url}: ${error.message}`)
-  })
-  const body = (await res.json().catch(() => ({}))) as Partial<PairResponse> & {
-    message?: string
+  const requestId = newRequestId()
+  mainLog.log('info', 'desktop.operation.started', { stage: 'pairing-request' }, { requestId })
+  try {
+    const url = new URL(engineUrl).origin
+    const res = await fetchWithRequestId(
+      new URL('/v1/auth/pair', url),
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, deviceName: `${hostname()} (desktop)` }),
+      },
+      requestId,
+    )
+    if (!res.ok) throw new EngineError(res.status, 'error', 'Pairing failed')
+    const body = (await res.json()) as Partial<PairResponse>
+    if (typeof body?.token !== 'string' || !body.token || body.kind !== 'desktop') {
+      throw new TypeError('Invalid desktop pairing response')
+    }
+    const previousUrl = engine?.baseUrl ?? startupStatus.engineUrl
+    savePairing(url, body.token)
+    stopSync()
+    if (previousUrl !== url) {
+      pendingThreadId = null
+      const db = openReplica()
+      db.transaction(() => {
+        db.clear()
+        db.organise.clear()
+        db.draftUpdates.clear()
+      })
+      broadcast('amc:changed')
+    }
+    connect(url, body.token)
+    mainLog.log('info', 'desktop.operation.finished', { stage: 'pairing-request' }, { requestId })
+  } catch (error) {
+    operationFailure('pairing-request', error, failureDetails(error, requestId, 'Request'))
+    throw error
   }
-  if (!res.ok || !body.token) throw new Error(body.message ?? 'Pairing failed')
-  if (body.kind !== 'desktop')
-    throw new Error('That code is for the CLI. Run `sudo amc-engine pair --desktop` on the Host.')
-  const previousUrl = engine?.baseUrl ?? startupStatus.engineUrl
-  savePairing(url, body.token)
-  stopSync()
-  if (previousUrl !== url) {
-    pendingThreadId = null
-    const db = openReplica()
-    db.transaction(() => {
-      db.clear()
-      db.organise.clear()
-      db.draftUpdates.clear()
-    })
-    broadcast('amc:changed')
-  }
-  connect(url, body.token)
 }
 
 function registerComposeIpc() {
   handoff = new Handoff(openReplica().db)
-  ipcMain.handle('amc:t3Setup', async () => ({
+  handle('amc:t3Setup', async () => ({
     kind: (await localT3Launcher()) ? 'cli' : 'mcp',
     address: savedT3Url(),
   }))
@@ -599,58 +700,54 @@ function registerComposeIpc() {
     if (!local) throw new Error('AMC could not find the local T3 CLI.')
     return local
   }
-  ipcMain.handle('amc:t3Projects', async (_e, address: string | null) =>
+  handle('amc:t3Projects', async (_e, address: string | null) =>
     (await launcher(address)).projects(),
   )
-  ipcMain.handle(
-    'amc:handoff',
-    async (_e, address: string | null, projectId: string, threadId: string) => {
-      await draftRecovery
-      try {
-        const { draft, thread } = await handoff.launch(
-          requireEngine(),
-          projectId,
-          threadId,
-          await launcher(address),
-        )
-        const link = thread.link && t3NavigationLink(thread.link)
-        if (link) void shell.openExternal(link).catch(() => {})
-        return draft
-      } finally {
-        broadcast('amc:changed')
-      }
-    },
-  )
-  ipcMain.handle(
+  handle('amc:handoff', async (_e, address: string | null, projectId: string, threadId: string) => {
+    await draftRecovery
+    try {
+      const { draft, thread } = await handoff.launch(
+        requireEngine(),
+        projectId,
+        threadId,
+        await launcher(address),
+      )
+      const link = thread.link && t3NavigationLink(thread.link)
+      if (link)
+        void shell.openExternal(link).catch((error) => operationFailure('external-link', error))
+      return draft
+    } finally {
+      broadcast('amc:changed')
+    }
+  })
+  handle(
     'amc:cancelHandoff',
     async (_e, address: string | null, projectId: string, threadId: string) => {
       await handoff.cancel(requireEngine(), projectId, threadId, await launcher(address))
       broadcast('amc:changed')
     },
   )
-  ipcMain.handle('amc:activeHandoff', (_e, threadId: string) =>
-    handoff.active(requireEngine(), threadId),
-  )
-  ipcMain.handle('amc:endHandoff', async (_e, id: string) => {
+  handle('amc:activeHandoff', (_e, threadId: string) => handoff.active(requireEngine(), threadId))
+  handle('amc:endHandoff', async (_e, id: string) => {
     await handoff.end(requireEngine(), id)
     broadcast('amc:changed')
   })
   const compose = '/v1/compose'
   const draftPath = composeDraftPath
   const signaturePath = (id: string) => `${compose}/signature/${encodeURIComponent(id)}`
-  ipcMain.handle('amc:startCompose', (_e, body: ComposeStart) =>
+  handle('amc:startCompose', (_e, body: ComposeStart) =>
     requireEngine().request(`${compose}/drafts`, { method: 'POST', body }),
   )
-  ipcMain.handle(
+  handle(
     'amc:composeDrafts',
     async () =>
       (await requireEngine().get<{ drafts: VersionedDraft[] }>(`${compose}/drafts`)).drafts,
   )
-  ipcMain.handle('amc:composeDraft', async (_e, id: string) => {
+  handle('amc:composeDraft', async (_e, id: string) => {
     await draftRecovery
     return requireEngine().get(draftPath(id), { signal: AbortSignal.timeout(15_000) })
   })
-  ipcMain.handle('amc:discardDraft', async (_e, id: string, revision: number) => {
+  handle('amc:discardDraft', async (_e, id: string, revision: number) => {
     const client = requireEngine()
     // Older Engines reject this route instead of discarding without a revision check.
     const result = await client.request<DiscardDraftResult>(`${draftPath(id)}/discard`, {
@@ -659,19 +756,23 @@ function registerComposeIpc() {
     })
     if (engine === client) {
       openReplica().draftUpdates.discard(id)
-      void sync?.pull().catch(() => {}) // Normal sync retries if this pull fails.
+      sync?.pullInBackground() // Normal sync retries if this pull fails.
     }
     return result
   })
   ipcMain.on('amc:stageComposeBody', (event, id: string, patch: ComposePatch) => {
+    if (!ownMainFrame(event, window?.webContents, rendererUrl)) {
+      event.returnValue = 'IPC denied'
+      return
+    }
     try {
       openReplica().draftUpdates.stage(id, patch)
       event.returnValue = null
-    } catch {
-      event.returnValue = 'Could not save the draft locally'
+    } catch (error) {
+      event.returnValue = ipcError('amc:stageComposeBody', error).message
     }
   })
-  ipcMain.handle('amc:saveCompose', async (_e, id: string, body: ComposePatch) => {
+  handle('amc:saveCompose', async (_e, id: string, body: ComposePatch) => {
     const saved = await requireEngine().request<ComposeDraft>(draftPath(id), {
       method: 'PUT',
       body,
@@ -680,7 +781,7 @@ function registerComposeIpc() {
     openReplica().draftUpdates.acknowledge(id, body)
     return saved
   })
-  ipcMain.handle(
+  handle(
     'amc:addComposeAttachment',
     (_e, id: string, filename: string, mimeType: string, bytes: Uint8Array, inline?: boolean) =>
       requireEngine().request(`${draftPath(id)}/attachments`, {
@@ -688,10 +789,10 @@ function registerComposeIpc() {
         body: { filename, mimeType, inline, content: Buffer.from(bytes).toString('base64') },
       }),
   )
-  ipcMain.handle('amc:composeImage', (_e, id: string, contentId: string) =>
+  handle('amc:composeImage', (_e, id: string, contentId: string) =>
     requireEngine().get(`${draftPath(id)}/inline?cid=${encodeURIComponent(contentId)}`),
   )
-  ipcMain.handle('amc:sendDraft', async (_e, body: SendRequest) => {
+  handle('amc:sendDraft', async (_e, body: SendRequest) => {
     const item = await requireEngine().request<OutboxItem>(`${compose}/outbox`, {
       method: 'POST',
       body,
@@ -704,39 +805,39 @@ function registerComposeIpc() {
     }
     return item
   })
-  ipcMain.handle(
-    'amc:outbox',
-    async () => (await requireEngine().get<{ items: OutboxItem[] }>(`${compose}/outbox`)).items,
-  )
-  ipcMain.handle('amc:resolveSend', (_e, id: string, action: 'check' | 'reopen') =>
+  handle('amc:outbox', async () => {
+    const result = await requireEngine().get<{ items: OutboxItem[] }>(`${compose}/outbox`)
+    return carryRequest(result.items, result)
+  })
+  handle('amc:resolveSend', (_e, id: string, action: 'check' | 'reopen') =>
     requireEngine().request(`${compose}/outbox/${encodeURIComponent(id)}/resolve`, {
       method: 'POST',
       body: { action },
     }),
   )
-  ipcMain.handle('amc:cancelSend', async (_e, id: string) => {
+  handle('amc:cancelSend', async (_e, id: string) => {
     await requireEngine().request(`${compose}/outbox/${encodeURIComponent(id)}/cancel`, {
       method: 'POST',
     })
   })
-  ipcMain.handle('amc:signature', (_e, id: string) => requireEngine().get(signaturePath(id)))
-  ipcMain.handle('amc:saveSignature', (_e, id: string, signature: string) =>
+  handle('amc:signature', (_e, id: string) => requireEngine().get(signaturePath(id)))
+  handle('amc:saveSignature', (_e, id: string, signature: string) =>
     requireEngine().request(signaturePath(id), { method: 'PUT', body: { signature } }),
   )
-  ipcMain.handle('amc:sendSettings', () => requireEngine().get(`${compose}/settings`))
-  ipcMain.handle('amc:saveSendSettings', (_e, undoSendSeconds: number) =>
+  handle('amc:sendSettings', () => requireEngine().get(`${compose}/settings`))
+  handle('amc:saveSendSettings', (_e, undoSendSeconds: number) =>
     requireEngine().request(`${compose}/settings`, { method: 'PUT', body: { undoSendSeconds } }),
   )
 }
 
 function registerReadIpc() {
-  ipcMain.handle('amc:agentActivity', (_e, before: unknown) => {
+  handle('amc:agentActivity', (_e, before: unknown) => {
     if (before === undefined) return requireEngine().get('/v1/agent/log')
     if (typeof before !== 'number' || !Number.isSafeInteger(before) || before <= 0)
       throw new Error('Invalid activity cursor')
     return requireEngine().get(`/v1/agent/log?before=${before}`)
   })
-  ipcMain.handle('amc:undoAgentAction', async (_e, id: unknown) => {
+  handle('amc:undoAgentAction', async (_e, id: unknown) => {
     if (typeof id !== 'string') throw new Error('Invalid action ID')
     await requireEngine().request(`/v1/agent/log/${encodeURIComponent(id)}/undo`, {
       method: 'POST',
@@ -744,19 +845,19 @@ function registerReadIpc() {
     void sync?.pull()
   })
 
-  ipcMain.handle('amc:status', () => sync?.status ?? pausedStatus ?? startupStatus)
-  ipcMain.handle('amc:syncNow', () => sync?.pull())
+  handle('amc:status', () => sync?.status ?? pausedStatus ?? startupStatus)
+  handle('amc:syncNow', () => sync?.pull())
 
-  ipcMain.handle('amc:accounts', () => openReplica().accounts())
-  ipcMain.handle('amc:labels', (_e, accountId: string | null) => openReplica().labels(accountId))
-  ipcMain.handle('amc:counts', (_e, accountId: string | null) => openReplica().counts(accountId))
-  ipcMain.handle('amc:threads', (_e, query: ThreadQuery) => openReplica().threads(query))
-  ipcMain.handle('amc:thread', (_e, id: string) => openReplica().thread(id))
-  ipcMain.handle('amc:summaries', (_e, ids: string[]) => openReplica().summaries(ids))
-  ipcMain.handle('amc:filter', (_e, text: string, accountId: string | null) =>
+  handle('amc:accounts', () => openReplica().accounts())
+  handle('amc:labels', (_e, accountId: string | null) => openReplica().labels(accountId))
+  handle('amc:counts', (_e, accountId: string | null) => openReplica().counts(accountId))
+  handle('amc:threads', (_e, query: ThreadQuery) => openReplica().threads(query))
+  handle('amc:thread', (_e, id: string) => openReplica().thread(id))
+  handle('amc:summaries', (_e, ids: string[]) => openReplica().summaries(ids))
+  handle('amc:filter', (_e, text: string, accountId: string | null) =>
     openReplica().filter(text, accountId),
   )
-  ipcMain.handle('amc:search', async (_e, text: string, accountId: string | null) => {
+  handle('amc:search', async (_e, text: string, accountId: string | null) => {
     const params = new URLSearchParams({
       q: text,
       limit: '50',
@@ -764,15 +865,15 @@ function registerReadIpc() {
     })
     return (await requireEngine().get<{ hits: unknown[] }>(`/v1/search?${params}`)).hits
   })
-  ipcMain.handle('amc:contacts', async (_e, text: string) => {
+  handle('amc:contacts', async (_e, text: string) => {
     return (
       await requireEngine().get<{ contacts: unknown[] }>(
         `/v1/contacts?q=${encodeURIComponent(text)}`,
       )
     ).contacts
   })
-  ipcMain.handle('amc:messageText', (_e, messageId: string) => openReplica().messageText(messageId))
-  ipcMain.handle('amc:messageHtml', async (_e, messageId: string) => {
+  handle('amc:messageText', (_e, messageId: string) => openReplica().messageText(messageId))
+  handle('amc:messageHtml', async (_e, messageId: string) => {
     const cached = openReplica().html(messageId)
     if (cached !== null) return cached
     try {
@@ -786,19 +887,19 @@ function registerReadIpc() {
       throw error
     }
   })
-  ipcMain.handle('amc:inlineAttachment', async (_e, attachmentId: string) => {
+  handle('amc:inlineAttachment', async (_e, attachmentId: string) => {
     const data = await requireEngine().bytes(`/v1/attachments/${encodeURIComponent(attachmentId)}`)
     return data.toString('base64')
   })
-  ipcMain.handle('amc:openAttachment', async (_e, attachmentId: string, filename: string) => {
+  handle('amc:openAttachment', async (_e, attachmentId: string, filename: string) => {
     const data = await requireEngine().bytes(`/v1/attachments/${encodeURIComponent(attachmentId)}`)
     const dir = join(tmpdir(), 'amc-attachments', attachmentId.replace(/[^\w.-]/g, '_'))
     mkdirSync(dir, { recursive: true })
     const path = join(dir, filename.replace(/[/\\]/g, '_') || 'attachment')
     writeFileSync(path, data)
-    await shell.openPath(path)
+    if (await shell.openPath(path)) throw new Error('Could not open attachment')
   })
-  ipcMain.handle('amc:openExternal', async (_e, url: string) => {
+  handle('amc:openExternal', async (_e, url: string) => {
     const parsed = new URL(url)
     if (!['http:', 'https:', 'mailto:'].includes(parsed.protocol))
       throw new Error('Refusing to open that link')
@@ -854,7 +955,9 @@ function createWindow() {
   current.once('ready-to-show', () => current.show())
   // Never let the app window navigate away or open windows; links go to the browser.
   current.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^(https?|mailto):/.test(url)) void shell.openExternal(url)
+    if (/^(https?|mailto):/.test(url)) {
+      void shell.openExternal(url).catch((error) => operationFailure('external-link', error))
+    }
     return { action: 'deny' }
   })
   current.webContents.on('will-navigate', (event, url) => {
@@ -864,17 +967,17 @@ function createWindow() {
     if (!event.isMainFrame && event.url !== 'about:srcdoc') event.preventDefault()
   })
   const devUrl = app.isPackaged ? undefined : process.env.ELECTRON_RENDERER_URL
+  const entry = join(import.meta.dirname, '../renderer/index.html')
+  rendererUrl = devUrl ? new URL(devUrl).href : pathToFileURL(entry).href
   loadRenderer(
     current,
-    () =>
-      devUrl
-        ? current.loadURL(devUrl)
-        : current.loadFile(join(import.meta.dirname, '../renderer/index.html')),
-    async (reload) => {
+    () => (devUrl ? current.loadURL(devUrl) : current.loadFile(entry)),
+    async (reload, details) => {
       current.show()
       const { response } = await dialog.showMessageBox(current, {
         type: 'error',
-        message: 'AMC is starting…',
+        message: 'AMC couldn’t load.',
+        detail: formatFailure(details),
         buttons: ['Reload', 'Close'],
         cancelId: 1,
       })
@@ -960,109 +1063,107 @@ const defaultProfile = join(app.getPath('appData'), '@amc', 'desktop')
 const profile = customProfile || defaultProfile
 mkdirSync(profile, { recursive: true })
 app.setPath('userData', profile)
-const mainLogSink = rotatingFileSink(
-  join(profile === defaultProfile ? macLogDirectory() : join(profile, 'logs'), 'main.log'),
-)
-const mainLog = createLogger({
-  component: 'main',
-  level: resolveLogLevel(process.env.AMC_LOG_LEVEL),
-  sink: mainLogSink,
-})
-const startupMarkerLog = createLogger({ component: 'main', sink: mainLogSink })
-
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
-  app.on('second-instance', openWindow)
-  app.whenReady().then(() => {
-    protectRemoteImageRequests(session.defaultSession)
-    feedback = registerFeedbackIpc(
-      () => window,
-      openWindow,
-      (stage) => {
-        mainLog.log('warn', 'feedback.launch.failed', { stage })
-      },
-    )
-    buildMenu()
-    triage = new AutoTriage({
-      enabled: !existsSync(triageOffFile()),
-      lastRun: loadLastTriageRun(),
-      onLowBattery,
-      accountForRun: (accountId, pending, recent) =>
-        openReplica().triageAccount(accountId, pending, recent ? 'recent' : 'account'),
-      log: mainLog,
-      saveLastRun: (run) => {
-        try {
-          const path = triageRunFile()
-          writeFileSync(`${path}.tmp`, JSON.stringify(run), { mode: 0o600 })
-          renameSync(`${path}.tmp`, path)
-        } catch {
-          console.error('Could not save the last AMC triage result')
-        }
-      },
-      changed: (status) => broadcast('amc:triageStatus', status),
-    })
-    registerIpc()
-    openReplica()
-    const packagedMac = process.platform === 'darwin' && app.isPackaged
-    const loginItem = packagedMac && !customProfile
-    const settingsPath = notificationSettingsFile()
-    if (existsSync(settingsPath)) {
-      try {
-        notificationSettings = parseNotificationSettings(
-          JSON.parse(readFileSync(settingsPath, 'utf8')),
-        )
-      } catch (error) {
-        console.error('Could not load the AMC notification settings', error)
-      }
-    }
-    if (process.platform === 'darwin') {
-      tray = createTray(openWindow, openSettings, feedback.open, toggleSync, loginItem)
-      if (Notification.isSupported()) {
-        // Keep Electron's JavaScript wrappers alive while their alerts can be clicked.
-        const active = new Set<Notification>()
-        notifications = new NewMailNotifications(
-          openReplica(),
-          () => notificationSettings,
-          ({ threadId, ...options }) => {
-            const source = engine
-            const notification = new Notification(options)
-            active.add(notification)
-            const release = () => active.delete(notification)
-            notification.once('close', release)
-            notification.once('click', () => {
-              release()
-              if (engine !== source) return
-              pendingThreadId = threadId
-              openWindow()
-              openPendingThread()
-            })
-            notification.once('failed', (_event, error) => {
-              release()
-              console.error('Could not show an AMC notification', error)
-            })
-            notification.show()
-          },
-        )
-      }
-    }
-    refreshTray()
-    restoreSavedPairing()
-    if (startupStatus.phase === 'unpaired') {
-      // Scriptable first run: --engine-url=… --pairing-code=…
-      const arg = (name: string) =>
-        process.argv.find((a) => a.startsWith(`--${name}=`))?.split('=')[1]
-      const url = arg('engine-url')
-      const code = arg('pairing-code')
-      if (url && code)
-        void pair(url, code).catch((error: Error) =>
-          console.error(`Pairing failed: ${error.message}`),
-        )
-    }
-    if (!loginItem || !app.getLoginItemSettings().wasOpenedAtLogin) createWindow()
-    app.on('activate', openWindow)
-    app.on('browser-window-focus', refreshTray)
+  const logDirectory = profile === defaultProfile ? macLogDirectory() : join(profile, 'logs')
+  const settings = configureDesktopLogs(logDirectory, profile, import.meta.url)
+  const report = limitRendererReports(() => rendererLog)
+  ipcMain.handle(RENDERER_LOG_CHANNEL, (event, payload: unknown) => {
+    if (ownMainFrame(event, window?.webContents, rendererUrl)) report(payload)
   })
+  handle('amc:logSettings', settings.read)
+  handle('amc:setDebugLogging', (_event, enabled: unknown) => settings.write(enabled))
+  app.on('second-instance', openWindow)
+  void app
+    .whenReady()
+    .then(() => {
+      protectRemoteImageRequests(session.defaultSession)
+      feedback = registerFeedbackIpc(() => window, openWindow, logDirectory, desktopLogger)
+      buildMenu()
+      triage = new AutoTriage({
+        enabled: !existsSync(triageOffFile()),
+        lastRun: loadLastTriageRun(),
+        onLowBattery,
+        accountForRun: (accountId, pending, recent) =>
+          openReplica().triageAccount(accountId, pending, recent ? 'recent' : 'account'),
+        log: desktopLogger,
+        saveLastRun: (run) => {
+          try {
+            const path = triageRunFile()
+            writeFileSync(`${path}.tmp`, JSON.stringify(run), { mode: 0o600 })
+            renameSync(`${path}.tmp`, path)
+          } catch (error) {
+            operationFailure('triage-write', error)
+          }
+        },
+        changed: (status) => broadcast('amc:triageStatus', status),
+      })
+      registerIpc()
+      openReplica()
+      const packagedMac = process.platform === 'darwin' && app.isPackaged
+      const loginItem = packagedMac && !customProfile
+      const settingsPath = notificationSettingsFile()
+      if (existsSync(settingsPath)) {
+        try {
+          notificationSettings = parseNotificationSettings(
+            JSON.parse(readFileSync(settingsPath, 'utf8')),
+          )
+        } catch (error) {
+          operationFailure('notification-settings', error)
+        }
+      }
+      if (process.platform === 'darwin') {
+        tray = createTray(openWindow, openSettings, feedback.open, toggleSync, loginItem)
+        if (Notification.isSupported()) {
+          // Keep Electron's JavaScript wrappers alive while their alerts can be clicked.
+          const active = new Set<Notification>()
+          notifications = new NewMailNotifications(
+            openReplica(),
+            () => notificationSettings,
+            ({ threadId, ...options }) => {
+              const source = engine
+              const notification = new Notification(options)
+              active.add(notification)
+              const release = () => active.delete(notification)
+              notification.once('close', release)
+              notification.once('click', () => {
+                release()
+                if (engine !== source) return
+                pendingThreadId = threadId
+                openWindow()
+                openPendingThread()
+              })
+              notification.once('failed', (_event, error) => {
+                release()
+                operationFailure('notification-show', new Error(String(error)))
+              })
+              notification.show()
+            },
+          )
+        }
+      }
+      refreshTray()
+      restoreSavedPairing()
+      if (startupStatus.phase === 'unpaired') {
+        // Scriptable first run: --engine-url=… --pairing-code=…
+        const arg = (name: string) =>
+          process.argv.find((a) => a.startsWith(`--${name}=`))?.split('=')[1]
+        const url = arg('engine-url')
+        const code = arg('pairing-code')
+        if (url && code)
+          void pair(url, code).catch(() => {
+            /* pair records its failure before rejecting. */
+          })
+      }
+      if (!loginItem || !app.getLoginItemSettings().wasOpenedAtLogin) createWindow()
+      app.on('activate', openWindow)
+      app.on('browser-window-focus', refreshTray)
+    })
+    .catch((error) => {
+      operationFailure('startup', error)
+      app.quit()
+    })
   app.on(
     'before-quit',
     createQuitHandler(
@@ -1072,7 +1173,9 @@ if (!app.requestSingleInstanceLock()) {
         if (changedTimer) clearTimeout(changedTimer)
         return Promise.allSettled([
           flushDrafts(),
-          Promise.resolve(stoppingTriage).finally(() => mainLogSink.close()),
+          Promise.resolve(stoppingTriage).finally(() =>
+            Promise.all([settings.close(), closeClientLogs()]),
+          ),
         ])
       },
       // The replica already has each staged edit. Exit even if the Engine or triage stalls.

@@ -105,14 +105,16 @@ const OutboxRow = memo(function OutboxRow({
           !stale && <QueuedDeliveryLabel sendAt={item.sendAt} />
         ) : (
           <p className="mt-1 text-xs">
-            {item.detail === SEND_ACCOUNT_UNAVAILABLE
+            {item.detail?.split('\n')[0] === SEND_ACCOUNT_UNAVAILABLE
               ? SEND_NEEDS_SIGN_IN
               : statusText[item.status]}
           </p>
         )}
         {stale && <p className="mt-1 text-xs text-muted-foreground">Delivery status is stale</p>}
         {item.detail && (
-          <p className="mt-1 max-w-prose text-xs text-muted-foreground">{item.detail}</p>
+          <p className="mt-1 max-w-prose select-text whitespace-pre-line text-xs text-muted-foreground">
+            {item.detail}
+          </p>
         )}
         {item.status === 'uncertain' && (
           <p className="mt-1 break-all font-mono text-xs text-muted-foreground">{item.messageId}</p>

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { DRAFT_POLL_INTERVAL, isMissingDraft } from '@/features/composer/draft-availability'
 import { getAmc } from '@/lib/amc'
+import { failureText } from '@/lib/failure'
 import { showQueuedSend } from './send-undo'
 
 export function useMailCompose(
@@ -51,7 +52,7 @@ export function useMailCompose(
       if (isMissingDraft(cause)) {
         setMinimised((current) => (current?.id === id ? null : current))
       }
-      toast.error((cause as Error).message)
+      toast.error('Could not open draft', { description: failureText(cause) })
     } finally {
       opening.current = false
       setOpeningComposer(false)
@@ -77,7 +78,7 @@ export function useMailCompose(
       setDraft(next)
       return next
     } catch (cause) {
-      toast.error((cause as Error).message)
+      toast.error('Could not open draft', { description: failureText(cause) })
     } finally {
       opening.current = false
       setOpeningComposer(false)

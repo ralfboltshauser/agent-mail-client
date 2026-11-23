@@ -11,6 +11,7 @@ import {
 import { newRunId } from './ids.ts'
 
 export { cliCommand } from './client-events.ts'
+export { rendererFailureSources } from './desktop-events.ts'
 export {
   type ErrorClass,
   type ErrorCode,
@@ -34,6 +35,7 @@ export {
   newRunId,
   REQUEST_ID_HEADER,
   type RequestId,
+  RUN_ID_HEADER,
   type RunId,
 } from './ids.ts'
 

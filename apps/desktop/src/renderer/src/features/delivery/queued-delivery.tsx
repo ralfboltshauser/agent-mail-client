@@ -2,6 +2,7 @@ import { useCallback, useState, useSyncExternalStore } from 'react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { getAmc } from '@/lib/amc'
+import { failureText } from '@/lib/failure'
 
 function useDeadline(deadline: number) {
   const subscribe = useCallback(
@@ -65,7 +66,7 @@ export function CancelQueuedDelivery({
       await getAmc().cancelSend(id)
     } catch (cause) {
       toast.error('Could not cancel send', {
-        description: cause instanceof Error ? cause.message : undefined,
+        description: failureText(cause),
       })
       await refresh()
       setCancelling(false)

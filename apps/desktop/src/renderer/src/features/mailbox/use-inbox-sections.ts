@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { shareReply } from '@/data/share-reply'
 import { INBOX_SECTIONS, type InboxSection, type ThreadIndex } from '@/data/thread-queries'
+import { recordCaughtFailure } from '@/lib/failure'
 
 export const UPDATES_PREVIEW = 3
 const NO_IDS: readonly string[] = []
@@ -27,7 +28,9 @@ function readPreferences(key: string): CollapsePreferences {
         true,
       ]),
     )
-  } catch {
+  } catch (error) {
+    recordCaughtFailure(error)
+
     return {}
   }
 }
@@ -119,7 +122,9 @@ export function useInboxSections({ scope, storageKey }: { scope: string; storage
     if (!preferences.dirty) return
     try {
       localStorage.setItem(preferences.storageKey, JSON.stringify(preferences.value))
-    } catch {
+    } catch (error) {
+      recordCaughtFailure(error)
+
       // Disclosures still work when local storage is unavailable.
     }
   }, [preferences])

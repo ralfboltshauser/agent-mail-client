@@ -61,12 +61,11 @@ async function captureFeedback() {
     }),
   }
   const event = { sender, senderFrame: sender.mainFrame }
-  const log = vi.fn()
   const events: string[] = []
   const feedback = registerFeedbackIpc(
     () => ({ webContents: sender }) as unknown as BrowserWindow,
     vi.fn(),
-    log,
+    '/tmp/fixture/logs',
     createLogger({ component: 'main', sink: (line) => events.push(line) }),
   )
   mocks.on.mock.calls.find(([channel]) => channel === 'amc:feedbackReady')?.[1](event)
@@ -75,7 +74,6 @@ async function captureFeedback() {
     mocks.handle.mock.calls.find(([channel]) => channel === `amc:feedback${name}`)?.[1]
   const { id } = await handler('Capture')(event, 'setup')
   return {
-    log,
     events,
     feedback,
     send: (captureId: string = id) => handler('Send')(event, captureId, draft),
@@ -88,7 +86,7 @@ describe('feedback IPC', () => {
     const launch = vi.fn().mockResolvedValue({ threadId: 'test-thread', link })
     mocks.localLauncher.mockResolvedValue({ launch })
     mocks.savedUrl.mockReturnValue('http://localhost:3773/mcp')
-    const { log, send } = await captureFeedback()
+    const { events, send } = await captureFeedback()
 
     await expect(send()).resolves.toEqual({ opened: true })
     expect(launch).toHaveBeenCalledExactlyOnceWith(
@@ -102,7 +100,11 @@ describe('feedback IPC', () => {
     expect(launch.mock.calls[0][0]).not.toHaveProperty('runtimeMode')
     expect(mocks.pairedLauncher).not.toHaveBeenCalled()
     expect(mocks.openExternal).toHaveBeenCalledExactlyOnceWith(link)
-    expect(log).not.toHaveBeenCalled()
+    expect(mocks.saveExcerpt).toHaveBeenCalledWith(path, '/tmp/fixture/logs', expect.any(Date))
+    expect(events.map((event) => JSON.parse(event).event)).toEqual([
+      'feedback.launch.started',
+      'feedback.launch.finished',
+    ])
   })
 
   it('uses the saved local pairing when the CLI is unavailable', async () => {
@@ -117,7 +119,7 @@ describe('feedback IPC', () => {
   })
 
   it('reports a missing launcher and logs only a failure class', async () => {
-    const { log, send } = await captureFeedback()
+    const { events, send } = await captureFeedback()
 
     await expect(send()).resolves.toEqual({
       opened: false,
@@ -125,19 +127,20 @@ describe('feedback IPC', () => {
         'AMC could not find a local T3 connection. Details: Error · run ',
       ),
     })
-    expect(log).toHaveBeenCalledExactlyOnceWith('LauncherUnavailable')
+    expect(events.map((event) => JSON.parse(event))).toContainEqual(
+      expect.objectContaining({ event: 'feedback.launch.finished', stage: 'LauncherUnavailable' }),
+    )
   })
 
   it('reports a launch failure without exposing prompt content or trying a second launcher', async () => {
     mocks.localLauncher.mockResolvedValue({
       launch: vi.fn().mockRejectedValue(new Error(draft.text)),
     })
-    const { log, events, send } = await captureFeedback()
+    const { events, send } = await captureFeedback()
 
     const result = await send()
     expect(result).toMatchObject({ opened: false, reason: expect.stringContaining('confirm') })
     expect(result.reason).not.toContain(draft.text)
-    expect(log).toHaveBeenCalledExactlyOnceWith('LaunchFailed')
     const [started, finished] = events.map((event) => JSON.parse(event))
     expect(started).toMatchObject({ event: 'feedback.launch.started' })
     expect(isCorrelationId(started.runId)).toBe(true)
@@ -191,13 +194,15 @@ describe('feedback IPC', () => {
       launch: vi.fn().mockResolvedValue({ threadId: 'test-thread', link }),
     })
     mocks.openExternal.mockRejectedValue(new Error('fixture'))
-    const { log, send } = await captureFeedback()
+    const { events, send } = await captureFeedback()
 
     await expect(send()).resolves.toMatchObject({
       opened: false,
       reason: expect.stringContaining('created'),
     })
     expect(mocks.openExternal.mock.calls).toEqual([[link], ['t3code://']])
-    expect(log).toHaveBeenCalledExactlyOnceWith('OpenFailed')
+    expect(events.map((event) => JSON.parse(event))).toContainEqual(
+      expect.objectContaining({ event: 'feedback.launch.finished', stage: 'OpenFailed' }),
+    )
   })
 })

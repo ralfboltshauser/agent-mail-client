@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { failureText } from '@/lib/failure'
 
 export function ReasonInput({
   label,
@@ -15,7 +16,7 @@ export function ReasonInput({
   const input = useRef<HTMLInputElement>(null)
   const submitting = useRef(false)
   const [busy, setBusy] = useState(false)
-  const [failed, setFailed] = useState(false)
+  const [failure, setFailure] = useState<string>()
   useEffect(() => input.current?.focus({ preventScroll: true }), [])
   return (
     <form
@@ -32,11 +33,11 @@ export function ReasonInput({
         if (submitting.current || !input.current) return
         submitting.current = true
         setBusy(true)
-        setFailed(false)
+        setFailure(undefined)
         try {
           await onSave(input.current.value.trim())
-        } catch {
-          setFailed(true)
+        } catch (error) {
+          setFailure(failureText(error))
         } finally {
           submitting.current = false
           setBusy(false)
@@ -61,9 +62,10 @@ export function ReasonInput({
           Cancel
         </Button>
       </div>
-      {failed && (
+      {failure && (
         <p className="text-destructive" role="alert">
-          Could not save the reason. Try again.
+          <span>Could not save the reason. Try again.</span>
+          <span className="block select-text">{failure}</span>
         </p>
       )}
     </form>

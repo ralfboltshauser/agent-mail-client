@@ -1,21 +1,43 @@
 import type { BrowserWindow } from 'electron'
+import type { FailureDetails } from '../shared/failure'
+import { failureScope, mainLog, operationFailure } from './observability'
 
 export function loadRenderer(
   window: BrowserWindow,
   load: () => Promise<void>,
-  showError: (reload: () => void) => Promise<void>,
+  showError: (reload: () => void, details: FailureDetails) => Promise<void>,
 ): void {
-  const reload = () => {
-    if (window.isDestroyed()) return
-    // Electron reports navigation failures through did-fail-load.
-    void load().catch(() => {})
-  }
   let retried = false
   let scheduled = false
   let reporting = false
-  const recover = (reason: string) => {
+  let failed: FailureDetails | undefined
+  let attempt = 0
+
+  const reload = () => {
+    if (window.isDestroyed()) return
+    const current = ++attempt
+    mainLog.log('debug', 'desktop.operation.started', { stage: 'renderer-load' })
+    void load().then(
+      () => {
+        if (current !== attempt || scheduled || reporting || !failed) return
+        mainLog.log(
+          'info',
+          'desktop.operation.finished',
+          { stage: 'renderer-load' },
+          failureScope(failed),
+        )
+        failed = undefined
+      },
+      (error: unknown) => {
+        // Electron also emits did-fail-load. The recovery gate deduplicates the two reports.
+        if (current === attempt) recover('renderer-load', error)
+      },
+    )
+  }
+
+  const recover = (stage: 'renderer-load' | 'renderer-crash', err: unknown) => {
     if (scheduled || reporting || window.isDestroyed()) return
-    console.error(`AMC renderer failed: ${reason}`)
+    failed = operationFailure(stage, err)
     if (!retried) {
       retried = true
       scheduled = true
@@ -30,13 +52,18 @@ export function loadRenderer(
     void showError(() => {
       reporting = false
       reload()
-    }).catch((error: unknown) => console.error('Could not show renderer load error', error))
+    }, failed).catch((error: unknown) => {
+      reporting = false
+      operationFailure('renderer-dialog', error)
+    })
   }
-  window.webContents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
-    if (isMainFrame && code !== -3) recover(`${description} (${code})`)
+
+  window.webContents.on('did-fail-load', (_event, code, _description, _url, isMainFrame) => {
+    if (isMainFrame && code !== -3)
+      recover('renderer-load', new Error('Renderer navigation failed'))
   })
-  window.webContents.on('render-process-gone', (_event, details) => {
-    recover(`${details.reason} (${details.exitCode})`)
+  window.webContents.on('render-process-gone', () => {
+    recover('renderer-crash', new Error('Renderer process exited'))
   })
   reload()
 }

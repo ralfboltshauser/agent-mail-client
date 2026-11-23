@@ -1,4 +1,5 @@
 import { EventEmitter, once } from 'node:events'
+import { isCorrelationId, newRunId, REQUEST_ID_HEADER, RUN_ID_HEADER } from '@amc/observability'
 import { afterEach, expect, it, vi } from 'vitest'
 import { onLowBattery, runTriageProcess } from './triage-process'
 
@@ -9,6 +10,10 @@ const { fork, isOnBatteryPower, execFile } = vi.hoisted(() => ({
 }))
 vi.mock('electron', () => ({ utilityProcess: { fork }, powerMonitor: { isOnBatteryPower } }))
 vi.mock('node:child_process', () => ({ execFile }))
+vi.mock('@amc/observability/node', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@amc/observability/node')>()),
+  rotatingFileSink: () => Object.assign(() => {}, { close: async () => {} }),
+}))
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -28,15 +33,23 @@ it.each(['crash', 'timeout', 'quit'])('revokes the named grant after worker %s',
   })
   const spawned = once(child, 'spawn')
   const calls: string[] = []
+  const requests = new Set<string>()
+  const runId = newRunId()
   let holder: string | undefined
   vi.stubGlobal('fetch', async (url: URL, init: RequestInit) => {
     const call = `${init.method} ${url.pathname}`
     calls.push(call)
+    const headers = new Headers(init.headers)
+    expect(headers.get(RUN_ID_HEADER)).toBe(runId)
+    const requestId = headers.get(REQUEST_ID_HEADER)
+    expect(isCorrelationId(requestId)).toBe(true)
+    if (requestId) requests.add(requestId)
     const body = init.body ? JSON.parse(String(init.body)) : undefined
     expect(new Headers(init.headers).get('Authorization')).toBe('Bearer owner')
     switch (call) {
       case 'POST /v1/triage/lease':
         holder = body.holder
+        expect(holder).toBe(`triage-${runId}`)
         return Response.json({ granted: true })
       case 'POST /v1/tokens':
         expect(body.name).toBe(holder)
@@ -64,6 +77,7 @@ it.each(['crash', 'timeout', 'quit'])('revokes the named grant after worker %s',
     true,
     new AbortController().signal,
     quit.signal,
+    runId,
   )
   const stopped = expect(result).rejects.toMatchObject({
     reason: { crash: 'worker-exit', timeout: 'timeout', quit: 'interrupted' }[exit],
@@ -74,11 +88,13 @@ it.each(['crash', 'timeout', 'quit'])('revokes the named grant after worker %s',
     engineUrl: 'http://engine.invalid',
     token: 'scoped',
     recent: true,
+    runId,
   })
   if (exit === 'crash') child.emit('exit', 1)
   if (exit === 'timeout') await vi.advanceTimersByTimeAsync(180_000)
   if (exit === 'quit') quit.abort()
   await stopped
+  expect(requests.size).toBe(calls.length)
   expect(calls).toEqual([
     'POST /v1/triage/lease',
     'POST /v1/tokens',
@@ -137,7 +153,10 @@ it('preserves a safe worker failure across the process boundary', async () => {
     signal,
   )
   await spawned
-  child.emit('message', { failure: { reason: 'agent-missing', className: 'ClaudeAuthError' } })
+  child.emit('message', {
+    runId: child.postMessage.mock.calls[0]?.[0].runId,
+    failure: { reason: 'agent-missing', className: 'ClaudeAuthError' },
+  })
   await expect(result).rejects.toMatchObject({
     reason: 'agent-missing',
     message: expect.stringContaining('Claude Code was not found'),

@@ -1,4 +1,5 @@
 export const REQUEST_ID_HEADER = 'x-amc-request-id'
+export const RUN_ID_HEADER = 'x-amc-run-id'
 
 declare const requestIdBrand: unique symbol
 declare const runIdBrand: unique symbol

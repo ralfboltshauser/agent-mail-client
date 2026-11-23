@@ -60,6 +60,33 @@ describe('doctor warnings', () => {
     ])
   })
 
+  it('keeps Desktop warning categories while withholding private health fields', () => {
+    expect(
+      doctorWarnings(
+        {
+          lastBackup: null,
+          accounts: [
+            {
+              ...account,
+              address: 'canary@example.invalid',
+              status: 'auth_expired',
+              syncLagSeconds: 901,
+              lastError: 'Synthetic Canary Subject and Body',
+            },
+          ],
+          disks: [{ ...disk, path: '/synthetic/canary', freeBytes: 9 }],
+        },
+        now,
+        'private',
+      ),
+    ).toEqual([
+      'No valid nightly backup found.',
+      'An Account is more than 15 minutes behind on sync.',
+      'An Account needs sign-in again.',
+      'An Engine disk has less than 10% space free.',
+    ])
+  })
+
   it('warns when no backup exists and accepts health data from an older Engine', () => {
     expect(doctorWarnings({ lastBackup: null, disks: [] }, now)).toEqual([
       'No valid nightly backup found.',

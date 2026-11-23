@@ -24,6 +24,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { getAmc } from '@/lib/amc'
+import { failureText, recordCaughtFailure } from '@/lib/failure'
 
 type Picker = {
   kind: 'labels' | 'snooze'
@@ -54,11 +55,7 @@ const run = async (action: OrganiseAction, description: string) => {
         },
       })
   } catch (error) {
-    const message =
-      error instanceof Error
-        ? error.message.replace(/^Error invoking remote method '[^']+': Error: /, '')
-        : 'Could not organise this Thread'
-    toast.error(message)
+    toast.error('Could not organise this Thread', { description: failureText(error) })
   }
 }
 export { run as runOrganise }
@@ -77,14 +74,15 @@ export function OrganiseNotices() {
             else if (notice.undo) {
               const undo = notice.undo
               toast.error(notice.message, {
+                description: notice.description,
                 id: notice.id,
                 duration: 7000,
                 action: { label: 'Undo', onClick: () => void run(undo, '') },
               })
-            } else toast.error(notice.message, { id: notice.id })
+            } else toast.error(notice.message, { description: notice.description, id: notice.id })
           }
         })
-        .catch(() => {})
+        .catch(recordCaughtFailure)
     }
     showErrors()
     return getAmc().onChanged(showErrors)

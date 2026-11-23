@@ -12,6 +12,7 @@ import {
   newRunId,
   REQUEST_ID_HEADER,
   type RendererLogReport,
+  RUN_ID_HEADER,
   resolveLogLevel,
   sanitizeError,
   sanitizeErrorMessage,
@@ -304,12 +305,19 @@ describe('request correlation', () => {
     app.onError((_error, c) => c.text('failed', 500))
     for (const route of app.routes) routes.add(route.path)
     const requestId = newRequestId()
+    const runId = newRunId()
     const ok = await app.request(`/item/${canaries[0]}?secret=${canaries[1]}`, {
-      headers: { [REQUEST_ID_HEADER]: requestId, Authorization: `Bearer ${canaries[2]}` },
+      headers: {
+        [REQUEST_ID_HEADER]: requestId,
+        [RUN_ID_HEADER]: runId,
+        Authorization: `Bearer ${canaries[2]}`,
+      },
     })
     expect(await ok.text()).toBe(requestId)
     expect(ok.headers.get(REQUEST_ID_HEADER)).toBe(requestId)
-    const fail = await app.request('/failure', { headers: { [REQUEST_ID_HEADER]: secret } })
+    const fail = await app.request('/failure', {
+      headers: { [REQUEST_ID_HEADER]: secret, [RUN_ID_HEADER]: secret },
+    })
     const replacement = fail.headers.get(REQUEST_ID_HEADER)
     expect(isCorrelationId(replacement)).toBe(true)
     expect(fail.status).toBe(500)
@@ -321,6 +329,7 @@ describe('request correlation', () => {
         status: 200,
         route: '/item/:id',
         requestId,
+        runId,
       }),
       expect.objectContaining({
         level: 'error',
