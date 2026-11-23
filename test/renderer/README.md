@@ -10,6 +10,13 @@ fake timers. For body input the test makes the DOM change that a browser would
 make and lets ProseMirror's mutation observer handle it. Browser layout, native
 editing, IPC latency, and frame timing require a separate Electron run.
 
+Run `pnpm test:html-reader` for the HTML message layout and input suite. It
+mounts the development renderer with synthetic mail in an isolated Electron
+profile and uses a loopback image endpoint to exercise AMC's request policy.
+CI runs it on macOS in both scrollbar modes. To run the same checks locally, append
+`-AppleShowScrollBars Always` or `-AppleShowScrollBars WhenScrolling` to check
+classic and overlay scrollbars without changing the system preference.
+
 ## Adding a budget
 
 1. Mount and settle the production entry point before clearing the commit ledger.
