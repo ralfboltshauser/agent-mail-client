@@ -91,6 +91,7 @@ const ipcChannels = [
   'amc:labels',
   'amc:listSenders',
   'amc:logSettings',
+  'amc:cachedMessageHtml',
   'amc:messageHtml',
   'amc:messageText',
   'amc:notificationSettings',

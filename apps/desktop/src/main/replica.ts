@@ -31,6 +31,9 @@ const RECENT_DELIVERY = `(
   FROM message WHERE message.thread_id = thread.id
 ) BETWEEN :cutoff AND :now`
 
+const HTML_SOURCE =
+  "json_array(json_extract(data, '$.bodyRevision'), json_extract(data, '$.hasHtml'), json_extract(data, '$.attachments'))"
+
 const THREAD_LIST_COLUMNS = `data, (
   SELECT json_object('messageId', m.id, 'from', json_extract(m.data, '$.from'))
   FROM message m WHERE m.thread_id = effective_thread.id
@@ -242,6 +245,16 @@ export class Replica {
       case 'message': {
         const m = row as MessageDetail
         const { body, data } = splitMessage(m)
+        // Read/unread and Label updates can keep the cached HTML. Changes to the
+        // available body identity must discard it before the new metadata is visible.
+        this.db
+          .prepare(
+            `DELETE FROM html WHERE message_id = ? AND EXISTS (
+            SELECT 1 FROM message WHERE id = html.message_id AND ${HTML_SOURCE}
+              IS NOT json_array(json_extract(?, '$.bodyRevision'), json_extract(?, '$.hasHtml'), json_extract(?, '$.attachments'))
+          )`,
+          )
+          .run(m.id, data, data, data)
         this.db
           .prepare(
             'INSERT OR REPLACE INTO message (id, thread_id, sent_at, data, body_text) VALUES (?, ?, ?, ?, ?)',
@@ -527,6 +540,13 @@ export class Replica {
       | { html: string }
       | undefined
     return row?.html ?? null
+  }
+
+  htmlSource(messageId: string): string | undefined {
+    const row = this.db
+      .prepare(`SELECT ${HTML_SOURCE} AS source FROM message WHERE id = ?`)
+      .get(messageId) as { source: string } | undefined
+    return row?.source
   }
 
   putHtml(messageId: string, html: string): void {

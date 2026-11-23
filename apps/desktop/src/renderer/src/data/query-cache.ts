@@ -68,6 +68,10 @@ export class QueryCache {
     return this.#entry(query)?.snapshot ?? FIRST_LOAD
   }
 
+  isActive<T>(query: ReplicaQuery<T>): boolean {
+    return this.#entry(query)?.active !== undefined
+  }
+
   subscribe<T>(query: ReplicaQuery<T>, listener: Listener): () => void {
     const entry = this.#entry(query) ?? this.#create(query)
     if (!entry.active) {

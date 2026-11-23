@@ -6,6 +6,7 @@ import { createRoot } from 'react-dom/client'
 import { expect, it, vi } from 'vitest'
 import { Replica } from '../../../main/replica'
 import type { ReplicaThreadMessage, ThreadWithMessages } from '../../../shared/api'
+import { createFixture } from '../dev/mail-fixture'
 import { ThreadView } from './thread-view'
 
 function deferred<T>() {
@@ -21,7 +22,7 @@ it('loads and refreshes a complete deferred body while its message stays expande
   const root = createRoot(document.body)
   const longBody = 'Long message text. '.repeat(20_000)
   const messageText = vi.fn(async (id: string) => replica.messageText(id))
-  vi.stubGlobal('amc', { messageText })
+  vi.stubGlobal('amc', { ...createFixture('inbox'), messageText })
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
 
   const scrollRef = createRef<HTMLDivElement>()
@@ -138,7 +139,7 @@ it('loads and refreshes a complete deferred body while its message stays expande
 
     await act(async () => newest.resolve(`${longBody}Updated 1`))
     await act(async () => stale.resolve('Stale revision'))
-    expect(body.textContent).toContain(`${longBody}Updated 1`)
+    await vi.waitFor(() => expect(body.textContent?.endsWith('Updated 1')).toBe(true))
 
     // Unread promotion pulls a message out of the older group and makes text eager.
     replica.put(
@@ -170,7 +171,7 @@ it('loads and refreshes a complete deferred body while its message stays expande
     )
     expect(retry).toBeDefined()
     await act(async () => retry?.click())
-    expect(document.body.textContent).toContain('Recovered body')
+    await vi.waitFor(() => expect(document.body.textContent).toContain('Recovered body'))
   } finally {
     await act(async () => root.unmount())
     vi.unstubAllGlobals()
@@ -205,7 +206,7 @@ it('deduplicates slow inline bodies and retains iframe height and consent across
     .mockReturnValueOnce(firstInline.promise)
     .mockReturnValueOnce(nextInline.promise)
   const openExternal = vi.fn()
-  vi.stubGlobal('amc', { messageHtml, inlineAttachment, openExternal })
+  vi.stubGlobal('amc', { ...createFixture('inbox'), messageHtml, inlineAttachment, openExternal })
 
   const root = createRoot(document.body)
   const scrollRef = createRef<HTMLDivElement>()

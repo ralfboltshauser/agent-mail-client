@@ -1,5 +1,6 @@
 import { type ReactNode, useState } from 'react'
 import type { ReplicaThreadMessage } from '../../../../shared/api'
+import { initiallyOpen } from './body-queries'
 import { Message } from './message'
 
 function inlineMessageIds(
@@ -46,7 +47,7 @@ export function ThreadMessages({ messages }: { messages: ReplicaThreadMessage[] 
     const first = group[0]
     if (!first) continue
     if (layout.inline.has(first.id)) {
-      rows.push(renderMessage(first, first.unread || index === messages.length - 1))
+      rows.push(renderMessage(first, initiallyOpen(first, index, messages.length)))
       continue
     }
     const shown = group.some((message) => revealed.has(message.id))

@@ -277,6 +277,7 @@ export interface AmcApi {
   sendSettings(): Promise<{ undoSendSeconds: number }>
   saveSendSettings(undoSendSeconds: number): Promise<{ undoSendSeconds: number }>
   messageText(messageId: string): Promise<string | null>
+  cachedMessageHtml(messageId: string): Promise<string | null>
   messageHtml(messageId: string): Promise<string | null>
   inlineAttachment(attachmentId: string): Promise<string>
   openAttachment(attachmentId: string, filename: string): Promise<void>
