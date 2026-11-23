@@ -225,7 +225,6 @@
   }
 
   .mail-row[aria-selected="true"] {
-    box-shadow: inset 2px 0 var(--unread);
     border-bottom-color: transparent;
   }
 
@@ -243,6 +242,18 @@
   :is(button, a, input, textarea, select, [contenteditable], [tabindex], summary):focus-visible {
     outline: 2px solid var(--ring);
     outline-offset: 1px;
+  }
+}
+
+@layer utilities {
+  @media (forced-colors: none) {
+    .mail-list[data-active-row-visible]:focus-visible {
+      outline: none;
+    }
+
+    .mail-list[data-active-row-visible]:focus-visible .mail-row[aria-selected="true"] {
+      background-color: color-mix(in oklch, var(--accent), var(--ring) 16%);
+    }
   }
 }
 
