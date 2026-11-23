@@ -990,6 +990,7 @@ if (!app.requestSingleInstanceLock()) {
       onLowBattery,
       accountForRun: (accountId, pending, recent) =>
         openReplica().triageAccount(accountId, pending, recent ? 'recent' : 'account'),
+      log: mainLog,
       saveLastRun: (run) => {
         try {
           const path = triageRunFile()
@@ -1069,7 +1070,10 @@ if (!app.requestSingleInstanceLock()) {
         quittingTriage.abort()
         const stoppingTriage = stopSync()
         if (changedTimer) clearTimeout(changedTimer)
-        return Promise.allSettled([flushDrafts(), stoppingTriage, mainLogSink.close()])
+        return Promise.allSettled([
+          flushDrafts(),
+          Promise.resolve(stoppingTriage).finally(() => mainLogSink.close()),
+        ])
       },
       // The replica already has each staged edit. Exit even if the Engine or triage stalls.
       () => app.exit(0),

@@ -1,4 +1,9 @@
 import { errorClasses } from './errors.ts'
+import {
+  type TriageFailureReason,
+  triageErrorClasses,
+  triageFailureMessages,
+} from './triage-diagnostics.ts'
 
 const syncPhases = [
   'unpaired',
@@ -17,6 +22,15 @@ export const desktopEvents = {
   'desktop.sync.phase': {
     fields: { phase: syncPhases },
     message: (fields: Readonly<Record<string, unknown>>) => `Engine sync phase: ${fields.phase}`,
+  },
+  'triage.run.failed': {
+    fields: {
+      stage: ['prepare', 'run'],
+      errorClass: triageErrorClasses,
+      reason: Object.keys(triageFailureMessages) as TriageFailureReason[],
+    },
+    message: (fields: Readonly<Record<string, unknown>>) =>
+      triageFailureMessages[fields.reason as TriageFailureReason],
   },
   'renderer.failure': {
     fields: {

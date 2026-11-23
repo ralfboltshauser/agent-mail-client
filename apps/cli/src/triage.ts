@@ -11,16 +11,26 @@ import {
   TriageOutputs,
 } from '@amc/protocol'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import {
+  StreamableHTTPClientTransport,
+  StreamableHTTPError,
+} from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
-import { type CallToolResult, CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js'
+import {
+  type CallToolResult,
+  CallToolResultSchema,
+  ErrorCode,
+  McpError,
+} from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { authed, EngineError } from './client.ts'
 import type { CliConfig } from './config.ts'
 import { runClaude } from './triage-claude.ts'
+import { TriageFailure, type TriageFailureReason } from './triage-errors.ts'
 
 export { ClaudeAuthError } from './triage-claude.ts'
+export { describeTriageFailure, TriageFailure } from './triage-errors.ts'
 
 declare const AMC_TRIAGE_PROMPT: string | undefined
 const BATCH_SIZE = 20
@@ -126,16 +136,33 @@ export async function withTriageGrant<T>(
   signal.throwIfAborted()
   const api = authed(config)
   const name = `triage-${randomUUID()}`
-  const options = {
+  const options = () => ({
     signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
     redirect: 'error' as const,
-  }
-  const { granted } = await api<{ granted: boolean }>('/v1/triage/lease', {
-    ...options,
-    method: 'POST',
-    body: { holder: name },
   })
-  if (!granted) return null
+  // Reserve part of the shutdown budget for release even if revocation stalls.
+  const releaseTimeout = cleanupTimeout === undefined ? 10_000 : Math.ceil(cleanupTimeout / 3)
+  const release = () =>
+    api('/v1/triage/lease', {
+      method: 'DELETE',
+      body: { holder: name },
+      signal: AbortSignal.timeout(releaseTimeout),
+      redirect: 'error',
+    }).catch(() => {
+      // If release fails, the Engine expires the lease after ten minutes.
+    })
+  try {
+    const { granted } = z
+      .object({ granted: z.boolean() })
+      .parse(
+        await api('/v1/triage/lease', { ...options(), method: 'POST', body: { holder: name } }),
+      )
+    if (!granted) return null
+  } catch (error) {
+    // A lost response can leave our lease held. DELETE matches only this run's holder.
+    await release()
+    throw engineFailure(error, 'engine-prepare')
+  }
 
   let mintAttempted = false
   let id: string | undefined
@@ -144,7 +171,7 @@ export async function withTriageGrant<T>(
     signal.throwIfAborted()
     mintAttempted = true
     const grant = await api<{ id: string; token: string }>('/v1/tokens', {
-      ...options,
+      ...options(),
       method: 'POST',
       body: {
         name,
@@ -152,6 +179,8 @@ export async function withTriageGrant<T>(
         scopes: dryRun ? ['read'] : ['read', 'organize'],
         expiresInMinutes: 5,
       },
+    }).catch((error: unknown) => {
+      throw engineFailure(error, 'engine-prepare')
     })
     id = grant.id
     signal.throwIfAborted()
@@ -160,27 +189,23 @@ export async function withTriageGrant<T>(
     runError = error
     throw error
   } finally {
-    const cleanup = cleanupTimeout === undefined ? undefined : AbortSignal.timeout(cleanupTimeout)
+    const cleanup =
+      cleanupTimeout === undefined
+        ? undefined
+        : AbortSignal.timeout(cleanupTimeout - releaseTimeout)
     try {
       if (mintAttempted) {
         // Desktop resolves the run's unique name using the owner's token, after the worker exits.
         await revokeTriageGrant(api, name, cleanup ? undefined : id, cleanup).catch(
           (error: unknown) => {
-            const message = `Could not revoke grant ${name}. It expires five minutes after minting.`
-            if (runError) throw new AggregateError([runError, error], message)
-            throw new Error(message, { cause: error })
+            const failure = new TriageFailure('engine-cleanup', { cause: error })
+            if (runError) throw new AggregateError([runError, failure], failure.message)
+            throw failure
           },
         )
       }
     } finally {
-      await api('/v1/triage/lease', {
-        method: 'DELETE',
-        body: { holder: name },
-        signal: cleanup ?? AbortSignal.timeout(10_000),
-        redirect: 'error',
-      }).catch(() => {
-        // If release fails, the Engine expires the lease after ten minutes.
-      })
+      await release()
     }
   }
 }
@@ -195,25 +220,43 @@ export async function triageWithGrant(
   const client = new Client({ name: 'amc-triage', version: '1' })
   try {
     signal.throwIfAborted()
-    await client.connect(
-      new StreamableHTTPClientTransport(new URL('/mcp', config.engineUrl), {
-        requestInit: { headers: { Authorization: `Bearer ${config.token}` }, redirect: 'error' },
-      }),
-      { signal },
-    )
+    await client
+      .connect(
+        new StreamableHTTPClientTransport(new URL('/mcp', config.engineUrl), {
+          requestInit: { headers: { Authorization: `Bearer ${config.token}` }, redirect: 'error' },
+        }),
+        { signal },
+      )
+      .catch((error: unknown) => {
+        throw engineFailure(error, 'engine-read', signal)
+      })
     const call = (name: string, args: Record<string, unknown> = {}) =>
       client
         .callTool({ name, arguments: args }, CallToolResultSchema, { signal })
         .then((result) => CallToolResultSchema.parse(result))
-    const listing = TriageBatch.parse(
-      toolJson(
-        await call('list_untriaged', {
-          limit: BATCH_SIZE,
-          reviewContext: true,
-          decisionLogVersion: 1,
-          ...(recent ? { recent } : {}),
-        }),
-      ),
+
+    const readResult = async <T>(
+      schema: z.ZodType<T>,
+      name: string,
+      args: Record<string, unknown>,
+      fallback: TriageFailureReason,
+    ) => {
+      try {
+        return schema.parse(toolJson(await call(name, args)))
+      } catch (error) {
+        throw engineFailure(error, fallback, signal)
+      }
+    }
+    const listing = await readResult(
+      TriageBatch,
+      'list_untriaged',
+      {
+        limit: BATCH_SIZE,
+        reviewContext: true,
+        decisionLogVersion: 1,
+        ...(recent ? { recent } : {}),
+      },
+      'engine-read',
     )
     const batch = Array.isArray(listing) ? listing : listing.threads
     const context = !Array.isArray(listing) && 'decisionLogVersion' in listing ? listing : undefined
@@ -259,14 +302,16 @@ export async function triageWithGrant(
         },
       })
       signal.throwIfAborted()
-      const { decisions } = (context ? ModelDecisions : LegacyDecisions).parse(proposal)
+      const parsed = (context ? ModelDecisions : LegacyDecisions).safeParse(proposal)
+      if (!parsed.success) throw new TriageFailure('agent-output', { cause: parsed.error })
+      const { decisions } = parsed.data
       const chosen = new Set(decisions.map((decision) => decision.threadId))
       if (
         decisions.length !== ids.size ||
         chosen.size !== ids.size ||
         [...chosen].some((id) => !ids.has(id))
       )
-        throw new Error('Triage must return one decision for each Thread in the batch')
+        throw new TriageFailure('agent-output')
       if (dryRun) return decisions
 
       const results = []
@@ -274,51 +319,47 @@ export async function triageWithGrant(
         if (context && 'protection' in decision) {
           const { threadId, ...outputs } = decision
           const ref = context.refs.find((item) => item.threadId === threadId)
-          if (!ref) throw new Error('Missing captured triage input')
+          if (!ref) throw new TriageFailure('engine-read')
           const { exampleIds: _, ...input } = ref
-          const result = z
-            .object({
+          const result = await readResult(
+            z.object({
               outcomes: z.array(
                 z.object({ axis: z.string(), eventId: z.string(), projection: z.string() }),
               ),
-            })
-            .parse(
-              toolJson(
-                await call('submit_triage_prediction', {
-                  receipt: context.receipt,
-                  runId: context.runId,
-                  input,
-                  outputs,
-                  producer: {
-                    harnessId: harness === runClaude ? 'claude' : 'custom',
-                    modelId,
-                    adapterVersion: 'triage-broker-v1',
-                    promptVersion,
-                  },
-                }),
-              ),
-            )
-          results.push({ ...decision, outcomes: result.outcomes })
+            }),
+            'submit_triage_prediction',
+            {
+              receipt: context.receipt,
+              runId: context.runId,
+              input,
+              outputs,
+              producer: {
+                harnessId: harness === runClaude ? 'claude' : 'custom',
+                modelId,
+                adapterVersion: 'triage-broker-v1',
+                promptVersion,
+              },
+            },
+            'engine-write',
+          )
+          const updated = result.outcomes.some(
+            ({ axis, projection }) => axis === 'bucket' && projection === 'applied',
+          )
+          results.push({ ...decision, updated, outcomes: result.outcomes })
           continue
         }
         if (!('reason' in decision)) throw new Error('Missing legacy Bucket assignment')
         const { confidence, ...assignment } = decision
         const inputRevision = revisions.get(decision.threadId)
-        const result = z.object({ updated: z.boolean(), reason: z.string().optional() }).parse(
-          toolJson(
-            await call('set_bucket', {
-              ...assignment,
-              onlyUntriaged: true,
-              ...(inputRevision === undefined
-                ? {}
-                : {
-                    triage: {
-                      inputRevision,
-                      confidence,
-                    },
-                  }),
-            }),
-          ),
+        const result = await readResult(
+          z.object({ updated: z.boolean(), reason: z.string().optional() }),
+          'set_bucket',
+          {
+            ...assignment,
+            onlyUntriaged: true,
+            ...(inputRevision === undefined ? {} : { triage: { inputRevision, confidence } }),
+          },
+          'engine-write',
         )
         results.push({
           ...decision,
@@ -333,6 +374,28 @@ export async function triageWithGrant(
   } finally {
     await client.close()
   }
+}
+
+function engineFailure(error: unknown, fallback: TriageFailureReason, signal?: AbortSignal) {
+  const cause = error instanceof EngineError ? error.cause : error
+  const status =
+    error instanceof EngineError
+      ? error.status
+      : error instanceof StreamableHTTPError
+        ? error.code
+        : undefined
+  if (
+    (signal?.aborted && signal.reason?.name === 'TimeoutError') ||
+    (cause instanceof Error && cause.name === 'TimeoutError') ||
+    (error instanceof McpError && error.code === ErrorCode.RequestTimeout) ||
+    status === 408 ||
+    status === 504
+  )
+    return new TriageFailure('engine-timeout', { cause: error })
+  if (status === 401 || status === 403) return new TriageFailure('engine-access', { cause: error })
+  if (status === 0 || error instanceof TypeError)
+    return new TriageFailure('engine-offline', { cause: error })
+  return new TriageFailure(fallback, { cause: error })
 }
 
 async function revokeTriageGrant(

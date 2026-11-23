@@ -35,6 +35,12 @@ export {
   type RunId,
 } from './ids.ts'
 
+export {
+  type TriageFailureReason,
+  triageErrorClasses,
+  triageFailureMessages,
+} from './triage-diagnostics.ts'
+
 const levels = ['debug', 'info', 'warn', 'error'] as const
 export type Level = (typeof levels)[number]
 export type Component = 'engine' | 'main' | 'renderer' | 'cli' | 'mcp'

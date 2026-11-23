@@ -1,3 +1,5 @@
+import { describeTriageFailure, TriageFailure } from '@amc/cli/triage'
+import { type Logger, newRunId } from '@amc/observability'
 import type { TriageResult, TriageStatus } from '../shared/api'
 
 const DEBOUNCE = 2 * 60_000
@@ -14,6 +16,7 @@ interface TriageOptions {
   ) => string | undefined
   saveLastRun: (lastRun: TriageStatus['lastRun']) => void
   changed: (status: TriageStatus) => void
+  log: Logger
 }
 
 type Run = (accountId: string, signal: AbortSignal, recent: boolean) => Promise<TriageResult | null>
@@ -115,6 +118,7 @@ export class AutoTriage {
     const controller = new AbortController()
     this.#controller = controller
     const { signal } = controller
+    const log = this.#options.log.with({ runId: newRunId() })
     this.#active = Promise.resolve().then(async () => {
       try {
         const account = this.#options.accountForRun(
@@ -165,17 +169,21 @@ export class AutoTriage {
             for (const [id, accountId] of pending) this.#pending.set(id, accountId)
           }
         } catch (error) {
+          const failures = error instanceof AggregateError ? error.errors : [error]
+          const diagnostics = failures.map(describeTriageFailure)
+          for (const { className, reason } of diagnostics)
+            log.log('error', 'triage.run.failed', { stage: 'run', errorClass: className, reason })
           const message = signal.aborted
-            ? 'Triage was interrupted.'
-            : error instanceof TriageWorkerError
-              ? error.message
-              : 'Triage failed.'
+            ? new TriageFailure('interrupted').message
+            : (diagnostics[0]?.message ?? new TriageFailure('unexpected').message)
           this.#record({ at, result: null, error: message })
           if (signal.aborted && this.#run === run && this.#enabled) {
             for (const [id, accountId] of pending) this.#pending.set(id, accountId)
           }
         }
-      } catch {
+      } catch (error) {
+        const { className, reason } = describeTriageFailure(error)
+        log.log('error', 'triage.run.failed', { stage: 'prepare', errorClass: className, reason })
         this.#retryAt = Date.now() + COOLDOWN
         this.#skip('Could not prepare triage.')
       } finally {
@@ -199,5 +207,3 @@ export class AutoTriage {
     this.#publish()
   }
 }
-
-export class TriageWorkerError extends Error {}

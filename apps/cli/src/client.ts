@@ -14,8 +14,15 @@ export class EngineError extends Error {
   readonly code: string
   readonly requestId?: RequestId
 
-  constructor(status: number, code: string, message: string, requestId?: RequestId) {
-    super(message)
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    requestId?: RequestId,
+    options?: ErrorOptions,
+  ) {
+    super(message, options)
+    this.name = 'EngineError'
     this.status = status
     this.code = code
     this.requestId = requestId
@@ -51,6 +58,7 @@ export async function response(
       'unreachable',
       `Cannot reach the Engine at ${url.origin}: ${(error as Error).message}`,
       requestId,
+      { cause: error },
     )
   }
   if (!res.ok) {

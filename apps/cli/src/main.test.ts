@@ -47,6 +47,37 @@ it.each(['0', '1'])('reports a missing triage account with AMC_DEBUG=%s', async 
   }
 })
 
+it.each([[[]], [['--account', 'a']]])(
+  'keeps Engine error details out of triage debug output with account flags %j',
+  async (accountFlags) => {
+    const privateDetail = 'synthetic-private-detail'
+    const server = createServer((req, res) => {
+      if (req.method === 'DELETE') {
+        res.writeHead(204).end()
+        return
+      }
+      res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'fixture', message: privateDetail }))
+    })
+    server.listen(0, '127.0.0.1')
+    try {
+      const run = await cliFor(server, { AMC_DEBUG: '1' })
+      const result = run('triage', ...accountFlags, '--dry-run')
+      await expect(result).rejects.toMatchObject({
+        code: 1,
+        stdout: '',
+        stderr: expect.stringContaining('The Engine could not prepare triage.'),
+      })
+      await expect(result).rejects.toHaveProperty(
+        'stderr',
+        expect.not.stringContaining(privateDetail),
+      )
+    } finally {
+      server.close()
+    }
+  },
+)
+
 it.each([
   ['triage', '--account', 'gmail', 'filtered'],
   ['triage', 'filtered', '--account', 'gmail'],
@@ -371,7 +402,7 @@ it('uses only Engine avatar metadata and writes a ready fixture PNG on request',
   }
 })
 
-async function cliFor(server: ReturnType<typeof createServer>) {
+async function cliFor(server: ReturnType<typeof createServer>, env: NodeJS.ProcessEnv = {}) {
   await once(server, 'listening')
   const address = server.address()
   if (!address || typeof address === 'string') throw new Error('Expected a TCP address')
@@ -384,6 +415,7 @@ async function cliFor(server: ReturnType<typeof createServer>) {
           ...process.env,
           AMC_ENGINE_URL: `http://127.0.0.1:${address.port}`,
           AMC_TOKEN: 'fixture',
+          ...env,
         },
       },
     )

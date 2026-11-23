@@ -1,6 +1,12 @@
-import { useEffect, useLayoutEffect, useRef } from 'react'
+import { type RefObject, useEffect, useLayoutEffect, useRef } from 'react'
 
 export type HotkeyMap = Record<string, (event: KeyboardEvent) => void>
+const MESSAGE_KEYDOWN = 'amc:message-keydown'
+const messageKeys = new Set(['o', 'escape', 'j', 'k', 'space', '/', 'mod+f', 'mod+k'])
+
+export function dispatchMessageKeydown(frame: HTMLIFrameElement, event: KeyboardEvent) {
+  frame.dispatchEvent(new CustomEvent(MESSAGE_KEYDOWN, { bubbles: true, detail: event }))
+}
 
 function isTyping(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null
@@ -11,7 +17,11 @@ function isTyping(target: EventTarget | null): boolean {
  * Global keyboard shortcuts. Keys look like "j", "shift+3", "mod+k" (mod = ⌘), and
  * two-key sequences like "g i". Plain keys are ignored while typing; "mod+…" and "escape" are not.
  */
-export function useHotkeys(map: HotkeyMap, enabled = true): void {
+export function useHotkeys(
+  map: HotkeyMap,
+  enabled = true,
+  messageRoot?: RefObject<HTMLElement | null>,
+): void {
   const mapRef = useRef(map)
   useLayoutEffect(() => {
     mapRef.current = map
@@ -20,15 +30,14 @@ export function useHotkeys(map: HotkeyMap, enabled = true): void {
     if (!enabled) return
     let pending: string | null = null
     let pendingTimer: number | undefined
-    const onKey = (event: KeyboardEvent) => {
-      const inOverlay =
-        event.target instanceof Element && event.target.closest('[role="dialog"], [role="menu"]')
+    const handleKey = (event: KeyboardEvent, fromMessage: boolean) => {
+      const target = event.target as Element | null
+      const inOverlay = target?.closest?.('[role="dialog"], [role="menu"]')
       if (event.isComposing || event.keyCode === 229 || event.defaultPrevented || inOverlay) return
       const key = event.key === ' ' ? 'space' : event.key.toLowerCase()
       if (
         key === 'space' &&
-        event.target instanceof Element &&
-        event.target.closest('button, a, summary, [role="button"], [role="menuitem"]')
+        target?.closest?.('button, a, summary, [role="button"], [role="menuitem"]')
       )
         return
       const combo = [
@@ -44,17 +53,19 @@ export function useHotkeys(map: HotkeyMap, enabled = true): void {
       if (typing && !combo.startsWith('mod+') && combo !== 'escape') return
 
       const handlers = mapRef.current
+      const available = (command: string) =>
+        !fromMessage || command.startsWith('g ') || messageKeys.has(command)
       if (pending) {
         const seq = `${pending} ${combo}`
         pending = null
         window.clearTimeout(pendingTimer)
-        if (handlers[seq]) {
+        if (available(seq) && handlers[seq]) {
           event.preventDefault()
           handlers[seq](event)
           return
         }
       }
-      if (Object.keys(handlers).some((k) => k.startsWith(`${combo} `))) {
+      if (Object.keys(handlers).some((k) => k.startsWith(`${combo} `) && available(k))) {
         pending = combo
         pendingTimer = window.setTimeout(() => {
           pending = null
@@ -63,15 +74,26 @@ export function useHotkeys(map: HotkeyMap, enabled = true): void {
         return
       }
       const handler = handlers[combo]
-      if (handler) {
+      if (handler && available(combo)) {
         event.preventDefault()
         handler(event)
       }
     }
+    const onKey = (event: KeyboardEvent) => handleKey(event, false)
+    const onMessageKey = (event: Event) => {
+      if (
+        event.target instanceof HTMLIFrameElement &&
+        messageRoot?.current?.contains(event.target)
+      ) {
+        handleKey((event as CustomEvent<KeyboardEvent>).detail, true)
+      }
+    }
     window.addEventListener('keydown', onKey)
+    if (messageRoot) window.addEventListener(MESSAGE_KEYDOWN, onMessageKey)
     return () => {
       window.clearTimeout(pendingTimer)
       window.removeEventListener('keydown', onKey)
+      if (messageRoot) window.removeEventListener(MESSAGE_KEYDOWN, onMessageKey)
     }
-  }, [enabled])
+  }, [enabled, messageRoot])
 }

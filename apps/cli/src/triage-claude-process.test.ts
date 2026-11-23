@@ -73,7 +73,7 @@ it.each(['normal', 'unexpected', 'cancel'])(
     if (mode === 'normal') {
       await expect(result).resolves.toEqual({ decisions: [] })
     } else if (mode === 'unexpected') {
-      await expect(result).rejects.toThrow('unexpected tool inventory')
+      await expect(result).rejects.toMatchObject({ reason: 'agent-tools' })
     } else {
       await expect(result).rejects.toBe(cancelled)
     }

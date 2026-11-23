@@ -1,9 +1,8 @@
 import { execFile } from 'node:child_process'
 import { join } from 'node:path'
-import { withTriageGrant } from '@amc/cli/triage'
+import { TriageFailure, withTriageGrant } from '@amc/cli/triage'
 import { powerMonitor, utilityProcess } from 'electron'
 import type { TriageResult } from '../shared/api'
-import { TriageWorkerError } from './auto-triage'
 import type { TriageWorkerReply, TriageWorkerRequest } from './triage-worker'
 
 export function runTriageProcess(
@@ -20,12 +19,7 @@ export function runTriageProcess(
     AbortSignal.any([signal, quitting]),
     (grant) => runWorker({ ...grant, recent }, signal, quitting),
     3_000,
-  ).catch((error: unknown) => {
-    if (error instanceof TriageWorkerError || signal.aborted) throw error
-    throw new TriageWorkerError('The Engine could not prepare or clean up triage.', {
-      cause: error,
-    })
-  })
+  )
 }
 
 function runWorker(
@@ -36,17 +30,29 @@ function runWorker(
   signal.throwIfAborted()
   quitting.throwIfAborted()
   return new Promise((resolve, reject) => {
-    const child = utilityProcess.fork(join(import.meta.dirname, 'triage-worker.js'), [], {
-      serviceName: 'AMC Triage',
-      stdio: 'ignore',
-    })
+    let child: ReturnType<typeof utilityProcess.fork>
+    try {
+      child = utilityProcess.fork(join(import.meta.dirname, 'triage-worker.js'), [], {
+        serviceName: 'AMC Triage',
+        stdio: 'ignore',
+      })
+    } catch (error) {
+      reject(new TriageFailure('worker-start', { cause: error }))
+      return
+    }
     let reply: TriageWorkerReply | undefined
     const abort = () => child.postMessage('abort')
     const kill = () => child.kill()
-    const timeout = setTimeout(kill, 180_000)
+    let timedOut = false
+    let spawned = false
+    const timeout = setTimeout(() => {
+      timedOut = true
+      kill()
+    }, 180_000)
     quitting.addEventListener('abort', kill, { once: true })
     signal.addEventListener('abort', abort, { once: true })
     child.once('spawn', () => {
+      spawned = true
       if (signal.aborted || quitting.aborted) child.kill()
       else child.postMessage(request)
     })
@@ -58,13 +64,14 @@ function runWorker(
       clearTimeout(timeout)
       signal.removeEventListener('abort', abort)
       quitting.removeEventListener('abort', kill)
-      if (signal.aborted) reject(signal.reason)
-      else if (typeof reply === 'object') resolve(reply)
-      else if (reply === 'auth')
-        reject(new TriageWorkerError('Sign in to Claude Code with a Claude.ai subscription.'))
-      else if (reply === 'failed')
-        reject(new TriageWorkerError('Claude Code or the Engine could not complete triage.'))
-      else reject(new TriageWorkerError('The triage process stopped before returning a result.'))
+      if (signal.aborted || quitting.aborted) reject(new TriageFailure('interrupted'))
+      else if (reply && 'failure' in reply) {
+        const cause = new Error()
+        cause.name = reply.failure.className
+        reject(new TriageFailure(reply.failure.reason, { cause }))
+      } else if (reply) resolve(reply)
+      else if (timedOut) reject(new TriageFailure('timeout'))
+      else reject(new TriageFailure(spawned ? 'worker-exit' : 'worker-start'))
     })
   })
 }

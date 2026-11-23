@@ -3,6 +3,7 @@ import { CircleAlert, MailOpen, Star } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { ThreadMessages } from '@/features/thread-reader/thread-messages'
 import { fullDate } from '@/lib/format'
+import { cn } from '@/lib/utils'
 import type { ThreadWithMessages } from '../../../shared/api'
 import { MailLoading, MailState } from './mail-state'
 import { Button } from './ui/button'
@@ -16,6 +17,7 @@ interface Props {
   snoozeEnabled: boolean
   labelNames: Map<string, string>
   scrollRef: React.RefObject<HTMLDivElement | null>
+  expanded?: boolean
 }
 
 const HIDDEN_LABELS = /:(INBOX|UNREAD|STARRED|IMPORTANT|SENT|DRAFT|CATEGORY_\w+)$/
@@ -28,6 +30,7 @@ export function ThreadView({
   snoozeEnabled,
   labelNames,
   scrollRef,
+  expanded = false,
 }: Props) {
   if (!data && unavailable) {
     return (
@@ -54,10 +57,19 @@ export function ThreadView({
     .map((id) => labelNames.get(id) ?? id.split(':').pop() ?? id)
 
   return (
-    <div ref={scrollRef} className="h-full overflow-y-auto">
-      <div className="mx-auto max-w-[48rem] px-6 pt-7 pb-16 xl:px-8">
-        <div className="mb-3 flex items-start gap-3">
-          <h1 className="flex-1 select-text text-[24px] font-semibold leading-tight tracking-[-0.035em]">
+    <div
+      ref={scrollRef}
+      tabIndex={expanded ? -1 : undefined}
+      className="h-full overflow-y-auto outline-none"
+    >
+      <div className={cn('mx-auto max-w-[48rem] px-6 pb-16 xl:px-8', expanded ? 'pt-12' : 'pt-7')}>
+        <div className={cn('flex items-start gap-3', expanded ? 'mb-5' : 'mb-3')}>
+          <h1
+            className={cn(
+              'min-w-0 flex-1 select-text wrap-anywhere font-semibold leading-tight tracking-[-0.035em]',
+              expanded ? 'text-[32px]' : 'text-[24px]',
+            )}
+          >
             {thread.subject || '(no subject)'}
           </h1>
           {thread.starred && <Star className="mt-1.5 size-4 shrink-0 fill-current text-star" />}
