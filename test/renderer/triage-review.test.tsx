@@ -691,6 +691,27 @@ it.each(['list', 'reader'] as const)(
   },
 )
 
+it('leaves ! available for typing in the search and composer fields', async () => {
+  const { adapter, smart, result } = await fixture()
+  const filterThread = vi.fn(async (_id: string, actionId: string) => result(actionId))
+  Object.assign(adapter.api, { smartInbox: { ...smart, review: smart, filterThread } })
+  await mount(adapter)
+
+  const typeBang = async (field: HTMLElement) => {
+    field.focus()
+    await act(async () => {
+      expect(fireEvent.keyDown(field, { key: '!', code: 'Digit1', shiftKey: true })).toBe(true)
+    })
+  }
+  await typeBang(screen.getByRole('textbox', { name: /Filter mail or press Enter/ }))
+  await press('f', listbox(), { code: 'KeyF' })
+  const composer = screen.getByRole('dialog', { name: 'Compose' })
+  await typeBang(within(composer).getByRole('textbox', { name: 'Subject' }))
+  await typeBang(within(composer).getByRole('textbox', { name: 'Message body' }))
+
+  expect(filterThread).not.toHaveBeenCalled()
+})
+
 it('offers Filter out in the toolbar and targets the right-clicked Inbox row', async () => {
   const { adapter, smart, result } = await fixture()
   const filterThread = vi.fn(async (_id: string, actionId: string) => result(actionId))

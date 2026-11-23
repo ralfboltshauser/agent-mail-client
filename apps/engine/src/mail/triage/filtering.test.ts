@@ -18,7 +18,7 @@ import { MailQueries } from '../queries.ts'
 import { MailStore } from '../store.ts'
 import { editOwnerReason, messageFeatures } from './annotations.ts'
 import { readEffective } from './examples.ts'
-import { filterActions, listFiltered, reviewFilter } from './filtering.ts'
+import { filterActions, inboxFilterTarget, listFiltered, reviewFilter } from './filtering.ts'
 import { threadInput } from './input.ts'
 import { prepareContext, setModelBucket, submitPrediction } from './model.ts'
 import { triageQueue } from './queue.ts'
@@ -674,17 +674,53 @@ it('previews the exact Inbox Filter targets and rejects a write after a new arri
     )
     expect(response.status).toBe(200)
     const target = await response.json()
-    expect(target).toEqual({ revision: threadInput(db, threadId)?.modseq, messageIds: ['a:one'] })
+    expect(target).toEqual({
+      revision: threadInput(db, threadId)?.modseq,
+      messageIds: ['a:one'],
+      digest: expect.stringMatching(/^[a-f0-9]{64}$/),
+    })
     put('two', { threadId: 'thread', labels: ['INBOX'] })
     expect(() =>
       reviewFilter(store, principal, {
         threadId,
         expectedRevision: target.revision,
+        expectedInboxTarget: target.digest,
         clientActionId: randomUUID(),
         decision: 'filter.filtered',
         source: 'thread-action',
       }),
     ).toThrow('The Thread changed. Refresh and retry.')
+    expect(db.prepare('SELECT id FROM owner_action').all()).toEqual([])
+  } finally {
+    db.close()
+  }
+})
+
+it('rejects a changed provider Inbox target even when the Thread revision is unchanged', () => {
+  const { db, store, queue, principal, put } = fixture()
+  try {
+    const threadId = put('hidden', { threadId: 'thread', labels: ['INBOX'] })
+    queue.submit(principal.tokenId, [{ id: randomUUID(), action: { kind: 'archive', threadId } }])
+    store.setMessageLabels('a', 'hidden', [], '5000')
+    put('visible', { threadId: 'thread', labels: ['INBOX'] })
+    const target = inboxFilterTarget(db, threadId)
+    expect(target.messageIds).toEqual(['a:visible'])
+
+    store.setMessageLabels('a', 'hidden', ['INBOX'], '5001')
+    expect(inboxFilterTarget(db, threadId)).toMatchObject({
+      revision: target.revision,
+      messageIds: ['a:hidden', 'a:visible'],
+    })
+    expect(() =>
+      reviewFilter(store, principal, {
+        threadId,
+        expectedRevision: target.revision,
+        expectedInboxTarget: target.digest,
+        clientActionId: randomUUID(),
+        decision: 'filter.filtered',
+        source: 'thread-action',
+      }),
+    ).toThrow('The exact Inbox messages changed. Refresh and retry.')
     expect(db.prepare('SELECT id FROM owner_action').all()).toEqual([])
   } finally {
     db.close()

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { FilteredPage, FilterReviewInput } from '@amc/protocol'
 import type { Principal } from '../../auth/tokens.ts'
 import { type Db, transaction } from '../../db/database.ts'
@@ -28,12 +29,17 @@ function matchingMessages(db: Db, threadId: string, source: string) {
     .all(threadId, source) as { id: string }[]
 }
 
+function inboxTargetDigest(messageIds: string[]) {
+  return createHash('sha256').update(JSON.stringify(messageIds)).digest('hex')
+}
+
 export function inboxFilterTarget(db: Db, threadId: string) {
   const thread = threadInput(db, threadId)
   if (!thread?.in_inbox) throw new SenderError('The Thread is no longer in Inbox', 404)
   const messages = matchingMessages(db, threadId, labelId(thread.account_id, 'INBOX'))
   if (!messages.length) throw new SenderError('There are no eligible Inbox messages to filter', 409)
-  return { revision: thread.modseq, messageIds: messages.map(({ id }) => id).sort() }
+  const messageIds = messages.map(({ id }) => id).sort()
+  return { revision: thread.modseq, messageIds, digest: inboxTargetDigest(messageIds) }
 }
 
 function filterAction(db: Db, id: string) {
@@ -132,6 +138,14 @@ export function reviewFilter(store: MailStore, principal: Principal, input: Filt
       throw new SenderError('The displayed Filter suggestion changed. Refresh and retry.')
     const source = sourceLabel(db, thread.account_id, input.decision === 'filter.keep')
     const available = source ? matchingMessages(db, input.threadId, source) : []
+    // Provider membership can change without a Thread revision when a pending move
+    // masks a provider update in the replica's projected labels.
+    if (
+      input.expectedInboxTarget &&
+      (input.decision !== 'filter.filtered' ||
+        input.expectedInboxTarget !== inboxTargetDigest(available.map(({ id }) => id).sort()))
+    )
+      throw new SenderError('The exact Inbox messages changed. Refresh and retry.')
     const messages = input.messageIds
       ? available.filter(({ id }) => input.messageIds?.includes(id))
       : available
