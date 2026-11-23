@@ -104,7 +104,7 @@ it.each(['immediate', 'staggered'] as const)(
   },
 )
 
-it('shows Bucket context and action without replacing the selected Thread or message', async () => {
+it('shows sections for the selected Bucket without replacing the Thread or message', async () => {
   const adapter = await mount()
   const before = mailboxNodes()
   const scroll = before.heading.closest<HTMLElement>('.overflow-y-auto')
@@ -115,8 +115,10 @@ it('shows Bucket context and action without replacing the selected Thread or mes
   const body = view.getByText(/Could you approve the warm grey/)
   const context = 'The printer sent a proof for Field Notes.'
   const action = 'Approve the warm grey by Thursday.'
-  const updateReason = (reason: string) =>
-    act(async () => adapter.api.setBucket({ threadId: 'thread-1', bucket: 'Reply', reason }))
+  const setBucket = (
+    bucket: Parameters<typeof adapter.api.setBucket>[0]['bucket'],
+    reason: string,
+  ) => act(async () => adapter.api.setBucket({ threadId: 'thread-1', bucket, reason }))
 
   expect(
     view.getByText('Mina needs your approval on the print proof before Thursday.'),
@@ -124,7 +126,8 @@ it('shows Bucket context and action without replacing the selected Thread or mes
   expect(view.queryByRole('term')).toBeNull()
   scroll.scrollTop = 48
 
-  await updateReason(`Context: ${context} | Action: ${action}`)
+  const structured = `Context: ${context} | Action: ${action}`
+  await setBucket('Reply', structured)
   expect(view.getByText('Reply')).toBeTruthy()
   expect(view.getAllByRole('term').map((term) => term.textContent)).toEqual(['Context', 'Action'])
   const contextText = view.getByText(context, { selector: 'dd' })
@@ -141,16 +144,43 @@ it('shows Bucket context and action without replacing the selected Thread or mes
   expect(view.getByText(action)).toBe(actionText)
   expectBudget(idleMailbox)
 
-  await updateReason(`Context: ${context}`)
+  await setBucket('Reply', `Context: ${context}`)
   expect(view.getAllByRole('term').map((term) => term.textContent)).toEqual(['Context'])
   expect(view.getByText(context)).toBe(contextText)
 
   for (const reason of ['See the note. Action: compare the samples.', 'Context: Proof | Action:']) {
-    await updateReason(reason)
+    await setBucket('Reply', reason)
     expect(view.getByText(reason, { selector: 'p' })).toBeTruthy()
     expect(view.queryByRole('term')).toBeNull()
   }
   expectContinuity(before)
+
+  for (const bucket of ['Update', 'Later', 'When I have time'] as const) {
+    await setBucket(bucket, structured)
+    expect(view.getByText(bucket)).toBeTruthy()
+    expect(view.getByText(context, { selector: 'p' })).toBeTruthy()
+    expect(view.queryByText(action)).toBeNull()
+    expect(view.queryByRole('term')).toBeNull()
+  }
+  await setBucket('Update', `Context: ${context}`)
+  expect(view.getByText(context, { selector: 'p' })).toBeTruthy()
+  await setBucket('Update', 'The printer moved delivery to Friday.')
+  expect(view.getByText('The printer moved delivery to Friday.', { selector: 'p' })).toBeTruthy()
+
+  await setBucket('Follow-up', structured)
+  expect(view.getAllByRole('term').map((term) => term.textContent)).toEqual([
+    'Context',
+    'Next step',
+  ])
+  expect(view.getByText(action, { selector: 'dd' })).toBeTruthy()
+
+  await setBucket('Action', structured)
+  expect(view.getAllByRole('term').map((term) => term.textContent)).toEqual(['Context', 'Action'])
+  expect(view.getByText(action, { selector: 'dd' })).toBeTruthy()
+  expect(listbox()).toBe(before.list)
+  expect(document.activeElement).toBe(before.list)
+  expect(reader(firstSubject)).toBe(before.heading)
+  expect(selected()).toBe(row(firstSubject))
   expect(message()).toBe(messageButton)
   expect(scroll.scrollTop).toBe(48)
 })

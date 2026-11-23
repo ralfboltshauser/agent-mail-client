@@ -211,7 +211,7 @@ export function AppSidebar({
         </ActionHint>
       </SidebarHeader>
 
-      <SidebarContent className="gap-0">
+      <SidebarContent>
         <SidebarGroup>
           <SidebarGroupContent>
             <SidebarMenu className="gap-0.5">

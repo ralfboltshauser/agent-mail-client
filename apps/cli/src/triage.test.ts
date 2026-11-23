@@ -303,8 +303,8 @@ describe('amc triage', () => {
     const reason = 'Context: The print shop needs a decision. | Action: Approve the proof.'
     fixture({ modern: true, expectedReason: reason })
     const results = await runTriage(config, 'a', false, signal(), async ({ prompt }) => {
-      expect(prompt).toContain('`Context: … | Action: …`')
-      expect(prompt).toContain('use only `Context: …`')
+      expect(prompt).toMatch(/For Update, Later, and\s+When I have time, use only `Context: …`/)
+      expect(prompt).toMatch(/For Reply, Action,\s+and Follow-up, use `Context: … \| Action: …`/)
       expect(prompt).not.toContain('Synthetic example')
       expect(prompt).not.toContain('Synthetic owner preference')
       expect(prompt).not.toContain('"chosen":"Later"')
@@ -338,8 +338,12 @@ describe('amc triage', () => {
         protection: 'billing',
       }
       const result = await runTriage(config, 'a', dryRun, signal(), async (request) => {
-        expect(request.prompt).toContain('`Context: … | Action: …`')
-        expect(request.prompt).toContain('use only `Context: …`')
+        expect(request.prompt).toMatch(
+          /For Update, Later, and\s+When I have time, use only `Context: …`/,
+        )
+        expect(request.prompt).toMatch(
+          /For Reply, Action,\s+and Follow-up, use `Context: … \| Action: …`/,
+        )
         expect(request.prompt).toContain('"fixture-event"')
         expect(request.prompt).toContain('"filter.keep"')
         expect(request.prompt).not.toContain('Synthetic private canary')
