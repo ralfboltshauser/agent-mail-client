@@ -1,3 +1,4 @@
+import { isCorrelationId, newRequestId, REQUEST_ID_HEADER } from '@amc/observability'
 import { type AgentAction, SCOPES, type Scope } from '@amc/protocol'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
@@ -722,3 +723,68 @@ it('requires both a paired owner kind and owner scope for Smart Inbox HTTP route
     db.close()
   }
 })
+
+it.each([false, true])(
+  'correlates a failed MCP tool with its Engine request (client ID %s)',
+  async (providedId) => {
+    const deps = setup()
+    const token = issueToken(deps.db, {
+      kind: 'agent',
+      name: 'synthetic',
+      scopes: ['read'],
+      expiresAt: Date.now() + DAY_MS,
+    })
+    const app = createApp({
+      db: deps.db,
+      config: testConfig(),
+      log: silentLog,
+      mail: deps as never,
+    })
+    const canary = 'Synthetic Subject synthetic@example.test https://synthetic.invalid/path'
+    const requestId = providedId ? newRequestId() : undefined
+    const records: string[] = []
+    const write = process.stdout.write.bind(process.stdout)
+    const spy = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation((value, ...args: unknown[]) => {
+        const line = String(value)
+        if (line.includes('"event":"mcp.tool.failed"')) {
+          records.push(line)
+          return true
+        }
+        return Reflect.apply(write, process.stdout, [value, ...args])
+      })
+    try {
+      const response = await app.request('/mcp', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token.secret}`,
+          Accept: 'application/json, text/event-stream',
+          'Content-Type': 'application/json',
+          ...(requestId ? { [REQUEST_ID_HEADER]: requestId } : {}),
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'get_thread', arguments: { thread_id: canary } },
+        }),
+      })
+      expect(response.status).toBe(200)
+      expect(await response.json()).toMatchObject({ result: { isError: true } })
+      const returned = response.headers.get(REQUEST_ID_HEADER)
+      expect(isCorrelationId(returned)).toBe(true)
+      if (requestId) expect(returned).toBe(requestId)
+      expect(records).toHaveLength(1)
+      expect(JSON.parse(records[0] ?? '')).toMatchObject({
+        event: 'mcp.tool.failed',
+        operation: 'engine-tool',
+        tool: 'get_thread',
+        requestId: returned,
+      })
+      expect(records[0]).not.toContain(canary)
+    } finally {
+      spy.mockRestore()
+    }
+  },
+)

@@ -4,6 +4,16 @@ import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { setTimeout as delay } from 'node:timers/promises'
 import {
+  type EventFields,
+  isCorrelationId,
+  newRequestId,
+  newRunId,
+  REQUEST_ID_HEADER,
+  type RequestId,
+  type RunId,
+} from '@amc/observability'
+import { mcpClientObservability } from '@amc/observability/mcp-client'
+import {
   Bucket,
   BucketConfidence,
   BucketInput,
@@ -26,6 +36,7 @@ import {
 import { z } from 'zod'
 import { authed, EngineError } from './client.ts'
 import type { CliConfig } from './config.ts'
+import { cliContext, clientLog, cliFailure } from './observability.ts'
 import { runClaude } from './triage-claude.ts'
 import { TriageFailure, type TriageFailureReason } from './triage-errors.ts'
 
@@ -130,12 +141,19 @@ export async function withTriageGrant<T>(
   accountId: string,
   dryRun: boolean,
   signal: AbortSignal,
-  run: (grant: CliConfig) => Promise<T>,
+  run: (grant: CliConfig, runId: RunId) => Promise<T>,
   cleanupTimeout?: number,
+  admittedRunId?: RunId,
 ): Promise<T | null> {
+  if (!cliContext.getStore()) {
+    return cliContext.run({ command: 'triage', runId: admittedRunId ?? newRunId() }, () =>
+      withTriageGrant(config, accountId, dryRun, signal, run, cleanupTimeout),
+    )
+  }
   signal.throwIfAborted()
   const api = authed(config)
-  const name = `triage-${randomUUID()}`
+  const runId = cliContext.getStore()?.runId ?? newRunId()
+  const name = `triage-${runId}`
   const options = () => ({
     signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
     redirect: 'error' as const,
@@ -148,8 +166,9 @@ export async function withTriageGrant<T>(
       body: { holder: name },
       signal: AbortSignal.timeout(releaseTimeout),
       redirect: 'error',
-    }).catch(() => {
-      // If release fails, the Engine expires the lease after ten minutes.
+    }).catch((error: unknown) => {
+      // The Engine expires a lease we could not release after ten minutes.
+      cliFailure('lease-release', error)
     })
   try {
     const { granted } = z
@@ -184,7 +203,7 @@ export async function withTriageGrant<T>(
     })
     id = grant.id
     signal.throwIfAborted()
-    return await run({ engineUrl: config.engineUrl, token: grant.token })
+    return await run({ engineUrl: config.engineUrl, token: grant.token }, runId)
   } catch (error) {
     runError = error
     throw error
@@ -198,6 +217,7 @@ export async function withTriageGrant<T>(
         // Desktop resolves the run's unique name using the owner's token, after the worker exits.
         await revokeTriageGrant(api, name, cleanup ? undefined : id, cleanup).catch(
           (error: unknown) => {
+            cliFailure('grant-revoke', error)
             const failure = new TriageFailure('engine-cleanup', { cause: error })
             if (runError) throw new AggregateError([runError, failure], failure.message)
             throw failure
@@ -216,28 +236,65 @@ export async function triageWithGrant(
   recent: boolean,
   signal: AbortSignal,
   harness: TriageHarness = runClaude,
+  runId?: RunId,
+) {
+  const run = () => triageWithGrantInScope(config, dryRun, recent, signal, harness)
+  return cliContext.getStore()
+    ? run()
+    : cliContext.run({ command: 'triage', runId: runId ?? newRunId() }, run)
+}
+
+async function triageWithGrantInScope(
+  config: CliConfig,
+  dryRun: boolean,
+  recent: boolean,
+  signal: AbortSignal,
+  harness: TriageHarness,
 ) {
   const client = new Client({ name: 'amc-triage', version: '1' })
+  const runId = cliContext.getStore()?.runId ?? newRunId()
+  const transport = mcpClientObservability(
+    () => clientLog('mcp'),
+    (requestId) => {
+      const context = cliContext.getStore()
+      if (context) context.requestId = requestId
+    },
+  )
   try {
     signal.throwIfAborted()
-    await client
-      .connect(
-        new StreamableHTTPClientTransport(new URL('/mcp', config.engineUrl), {
-          requestInit: { headers: { Authorization: `Bearer ${config.token}` }, redirect: 'error' },
-        }),
-        { signal },
+    await transport
+      .call('transport', runId, () =>
+        client.connect(
+          new StreamableHTTPClientTransport(new URL('/mcp', config.engineUrl), {
+            requestInit: {
+              headers: { Authorization: `Bearer ${config.token}` },
+              redirect: 'error',
+            },
+            fetch: transport.fetch,
+          }),
+          { signal },
+        ),
       )
       .catch((error: unknown) => {
         throw engineFailure(error, 'engine-read', signal)
       })
-    const call = (name: string, args: Record<string, unknown> = {}) =>
-      client
-        .callTool({ name, arguments: args }, CallToolResultSchema, { signal })
-        .then((result) => CallToolResultSchema.parse(result))
+    type Tool = EventFields<'mcp.tool.failed'>['tool']
+    const call = async (name: Tool, args: Record<string, unknown> = {}) => {
+      const { result } = await transport.call(
+        name,
+        runId,
+        async () =>
+          CallToolResultSchema.parse(
+            await client.callTool({ name, arguments: args }, CallToolResultSchema, { signal }),
+          ),
+        (result) => result.isError === true,
+      )
+      return result
+    }
 
     const readResult = async <T>(
       schema: z.ZodType<T>,
-      name: string,
+      name: Tool,
       args: Record<string, unknown>,
       fallback: TriageFailureReason,
     ) => {
@@ -280,6 +337,7 @@ export async function triageWithGrant(
       ids,
       (threadId) => call('get_thread', { thread_id: threadId }),
       signal,
+      runId,
     )
     try {
       const schema = context ? triageJsonSchema : legacySchema
@@ -441,6 +499,7 @@ async function startForwarder(
   ids: Set<string>,
   getThread: (id: string) => Promise<CallToolResult>,
   signal: AbortSignal,
+  runId: RunId,
 ) {
   const bearer = randomUUID()
   let allowReads!: () => void
@@ -464,6 +523,34 @@ async function startForwarder(
       res.writeHead(405).end()
       return
     }
+    const inbound = req.headers[REQUEST_ID_HEADER]
+    const requestId = isCorrelationId(inbound) ? (inbound as RequestId) : newRequestId()
+    res.setHeader(REQUEST_ID_HEADER, requestId)
+    const log = (tool: EventFields<'mcp.tool.failed'>['tool'], err: unknown, rejected = false) =>
+      clientLog('mcp').log(
+        'warn',
+        'mcp.tool.failed',
+        {
+          operation: 'triage-tool',
+          tool,
+          status: rejected ? 'rejected' : 'failed',
+          err,
+        },
+        { requestId, runId },
+      )
+    const observed = async (
+      tool: 'list_untriaged' | 'get_thread',
+      action: () => Promise<CallToolResult>,
+    ) => {
+      try {
+        const result = await action()
+        if (result.isError) log(tool, new Error('MCP tool rejected the request'), true)
+        return result
+      } catch (error) {
+        log(tool, error)
+        throw error
+      }
+    }
     const mcp = new McpServer({ name: 'amc', version: '1' })
     mcp.registerTool(
       'list_untriaged',
@@ -471,10 +558,11 @@ async function startForwarder(
         description: 'List the current batch of untriaged Inbox Threads.',
         annotations: { readOnlyHint: true },
       },
-      async () => {
-        await verifyInventory()
-        return { content: [{ type: 'text', text: JSON.stringify(batch) }] }
-      },
+      () =>
+        observed('list_untriaged', async () => {
+          await verifyInventory()
+          return { content: [{ type: 'text', text: JSON.stringify(batch) }] }
+        }),
     )
     mcp.registerTool(
       'get_thread',
@@ -483,24 +571,26 @@ async function startForwarder(
         inputSchema: { thread_id: z.string() },
         annotations: { readOnlyHint: true },
       },
-      async ({ thread_id }) => {
-        if (!ids.has(thread_id))
-          return {
-            isError: true,
-            content: [{ type: 'text', text: 'Thread is outside this batch' }],
-          }
-        await verifyInventory()
-        return getThread(thread_id)
-      },
+      ({ thread_id }) =>
+        observed('get_thread', async () => {
+          if (!ids.has(thread_id))
+            return {
+              isError: true,
+              content: [{ type: 'text', text: 'Thread is outside this batch' }],
+            }
+          await verifyInventory()
+          return getThread(thread_id)
+        }),
     )
     const transport = new StreamableHTTPServerTransport({ enableJsonResponse: true })
     res.once('close', () => {
-      void mcp.close()
+      void mcp.close().catch((error: unknown) => log('transport', error))
     })
     try {
       await mcp.connect(transport)
       await transport.handleRequest(req, res)
-    } catch {
+    } catch (error) {
+      log('transport', error)
       if (!res.headersSent) res.writeHead(500)
       res.end()
     }

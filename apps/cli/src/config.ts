@@ -2,6 +2,7 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
+import { cliFailure } from './observability.ts'
 
 const CliConfig = z.object({ engineUrl: z.string().url(), token: z.string() })
 export type CliConfig = z.infer<typeof CliConfig>
@@ -16,8 +17,12 @@ export function readConfig(): CliConfig | null {
   const fromEnv = { engineUrl: process.env.AMC_ENGINE_URL, token: process.env.AMC_TOKEN }
   let fromFile: Partial<CliConfig> = {}
   try {
-    fromFile = JSON.parse(readFileSync(configPath(), 'utf8'))
-  } catch {}
+    const parsed = JSON.parse(readFileSync(configPath(), 'utf8'))
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) fromFile = parsed
+    else cliFailure('config', new TypeError('Invalid CLI configuration'))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') cliFailure('config', error)
+  }
   const merged = CliConfig.safeParse({
     engineUrl: fromEnv.engineUrl ?? fromFile.engineUrl,
     token: fromEnv.token ?? fromFile.token,

@@ -1,6 +1,7 @@
-import { fetchWithRequestId, newRequestId, type RequestId } from '@amc/observability'
+import { fetchWithRequestId, type RequestId } from '@amc/observability'
 import type { ApiError } from '@amc/protocol'
 import type { CliConfig } from './config.ts'
+import { cliFailure, cliRequestId } from './observability.ts'
 
 type RequestOptions = {
   method?: string
@@ -29,13 +30,15 @@ export class EngineError extends Error {
   }
 }
 
+const responseIds = new WeakMap<Response, RequestId>()
+
 export async function response(
   engineUrl: string,
   path: string,
   init: RequestOptions & { token?: string } = {},
 ): Promise<Response> {
   const url = new URL(path, engineUrl)
-  const requestId = newRequestId()
+  const requestId = cliRequestId()
   let res: Response
   try {
     res = await fetchWithRequestId(
@@ -62,14 +65,19 @@ export async function response(
     )
   }
   if (!res.ok) {
-    const err = (await res.json().catch(() => ({}))) as Partial<ApiError>
+    const err = (await res.json().catch((error: unknown) => {
+      cliFailure('engine-response', error)
+      return {}
+    })) as Partial<ApiError> | null
     throw new EngineError(
       res.status,
-      err.error ?? 'error',
-      err.message ?? res.statusText,
+      err?.error ?? 'error',
+      err?.message ?? res.statusText,
       requestId,
     )
   }
+  // Retain our outbound ID for failures while parsing a successful response.
+  responseIds.set(res, requestId)
   return res
 }
 
@@ -79,8 +87,14 @@ export async function request<T>(
   init: RequestOptions & { token?: string } = {},
 ): Promise<T> {
   const res = await response(engineUrl, path, init)
-  const body = await res.text()
-  return (body ? JSON.parse(body) : null) as T
+  try {
+    const body = await res.text()
+    return (body ? JSON.parse(body) : null) as T
+  } catch (cause) {
+    throw new EngineError(502, 'internal', 'Invalid Engine response.', responseIds.get(res), {
+      cause,
+    })
+  }
 }
 
 export function authed(config: CliConfig) {

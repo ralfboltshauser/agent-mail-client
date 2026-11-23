@@ -11,7 +11,13 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { feedbackMessage, launchFeedback, saveFeedbackCapture } from './feedback'
+import {
+  feedbackCaptureLifetimeMs,
+  feedbackMessage,
+  launchFeedback,
+  saveFeedbackCapture,
+  saveFeedbackExcerpt,
+} from './feedback'
 import type { T3Launch } from './handoff'
 import { launchT3Feedback } from './t3'
 
@@ -55,6 +61,40 @@ describe('feedback captures', () => {
     expect(readdirSync(directory).sort()).toEqual(
       [...captures.slice(3).map((path) => path.split('/').at(-1)), 'other.png'].sort(),
     )
+  })
+
+  it('stores only projected log metadata and expires excerpts with screenshots', async () => {
+    const screenshot = saveFeedbackCapture(root, Buffer.from('synthetic'), context.at)
+    const logDir = join(root, 'logs')
+    mkdirSync(logDir)
+    const canary = 'synthetic-owner-reason example@example.test https://canary.invalid/path'
+    writeFileSync(
+      join(logDir, 'main.log'),
+      [
+        `{ malformed ${canary}`,
+        JSON.stringify({
+          ts: context.at.toISOString(),
+          component: 'main',
+          level: 'warn',
+          event: 'feedback.launch.failed',
+          stage: 'LaunchFailed',
+          msg: canary,
+          ownerReason: canary,
+        }),
+        '',
+      ].join('\n'),
+    )
+    const excerpt = await saveFeedbackExcerpt(screenshot, logDir, context.at)
+    expect(statSync(excerpt).mode & 0o777).toBe(0o600)
+    const text = readFileSync(excerpt, 'utf8')
+    expect(text).toContain('feedback.launch.failed')
+    expect(text).not.toContain(canary)
+    saveFeedbackCapture(
+      root,
+      Buffer.from('synthetic'),
+      new Date(context.at.getTime() + feedbackCaptureLifetimeMs),
+    )
+    expect(readdirSync(join(root, 'feedback'))).toHaveLength(1)
   })
 
   it('passes Agentation markdown verbatim and only includes allowlisted window context', () => {

@@ -1,3 +1,4 @@
+import { isCorrelationId } from '@amc/observability'
 import { Agentation } from 'agentation'
 import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import { createPortal, flushSync } from 'react-dom'
@@ -39,7 +40,9 @@ export default function FeedbackSession({
     if (id)
       void getAmc()
         .feedback.release(id)
-        .catch(() => {})
+        .catch(() => {
+          // Main expires abandoned captures on the next feedback session.
+        })
     onClose()
   }
 
@@ -67,12 +70,20 @@ export default function FeedbackSession({
         return
       }
       toast.success('Opened in T3')
-      void api.release(id).catch(() => {})
+      void api.release(id).catch(() => {
+        // The launched thread can still read retained artifacts.
+      })
       onClose()
-    } catch {
+    } catch (error) {
+      if (submission.id) {
+        fail(`AMC could not reach its feedback service. Details: run ${submission.id}`)
+        return
+      }
+      const message = error instanceof Error ? error.message : ''
+      const run = /· run ([0-9a-f-]{36})$/.exec(message)?.[1]
       fail(
-        submission.id
-          ? 'AMC could not reach its feedback service.'
+        isCorrelationId(run)
+          ? `AMC could not capture the window. Details: run ${run}`
           : 'AMC could not capture the window.',
       )
     }

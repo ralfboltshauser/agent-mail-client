@@ -24,6 +24,19 @@ interface LogRecord {
   [key: string]: unknown
 }
 
+const diagnosticRoutes: ReadonlySet<string> = new Set([
+  '/health',
+  '/mcp',
+  '/v1/diagnostics',
+  '/v1/health',
+  '/v1/me',
+  '/v1/sync/changes',
+  '/v1/sync/state',
+  '/v1/triage/lease',
+  '/v1/triage/queue',
+  'unmatched',
+])
+
 const maxLineBytes = 16 * 1024
 const dayMs = 86_400_000
 export const recentLogWindowMs = dayMs
@@ -46,9 +59,8 @@ export function projectLogLine(line: string): LogRecord | undefined {
         const error = projectStoredError(field)
         if (error) fields[key] = error
       } else if (rule === 'route') {
-        // The reader has no trusted Hono registration table. Use the catalog's
-        // fallback so a forged route cannot turn into a persisted URL or path.
-        fields[key] = 'unmatched'
+        // The journal reader only knows these registered diagnostic routes.
+        fields[key] = validField(rule, field, diagnosticRoutes) ? field : 'unmatched'
       } else {
         if (!validField(rule, field)) return
         fields[key] = field

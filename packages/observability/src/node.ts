@@ -1,12 +1,73 @@
 import { constants } from 'node:fs'
-import { lstat, mkdir, open, rename, unlink } from 'node:fs/promises'
+import { chmod, lstat, mkdir, open, rename, unlink } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
+import { setTimeout as wait } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import type { OwnStackFiles } from './errors.ts'
 import type { Sink } from './index.ts'
 
 export const macLogDirectory = () => join(homedir(), 'Library', 'Logs', 'AMC')
+
+export function cliLogDirectory() {
+  if (process.platform === 'darwin') return macLogDirectory()
+  const state = process.env.XDG_STATE_HOME
+  return join(
+    state && isAbsolute(state) ? state : join(homedir(), '.local', 'state'),
+    'amc',
+    'logs',
+  )
+}
+
+const activeFileSinks = new Map<string, Sink>()
+export const activeFileSink = (path: string): Sink | undefined => activeFileSinks.get(path)
+
+const pendingFileLocks = new Map<string, Promise<void>>()
+
+async function coordinateFile(path: string, task: () => Promise<void>) {
+  const previous = pendingFileLocks.get(path) ?? Promise.resolve()
+  const current = previous.catch(() => {}).then(() => withFileLock(path, task))
+  pendingFileLocks.set(path, current)
+  try {
+    await current
+  } finally {
+    if (pendingFileLocks.get(path) === current) pendingFileLocks.delete(path)
+  }
+}
+
+async function withFileLock(path: string, task: () => Promise<void>) {
+  const lockPath = `${path}.lock`
+  const flags = constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK
+  const lock = await open(lockPath, flags, 0o600)
+  try {
+    if (!(await lock.stat()).isFile()) return
+    await lock.chmod(0o600)
+  } finally {
+    await lock.close()
+  }
+  // A SQLite RESERVED lock is an OS advisory lock. SQLite releases it even if
+  // the owning process dies. This empty coordination file stores no records.
+  const { DatabaseSync } = await import('node:sqlite')
+  const db = new DatabaseSync(lockPath)
+  try {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        db.exec('BEGIN IMMEDIATE')
+        break
+      } catch (error) {
+        if ((error as { errcode?: number }).errcode !== 5 || attempt === 20) throw error
+        await wait(25)
+      }
+    }
+    try {
+      await task()
+    } finally {
+      db.exec('ROLLBACK')
+    }
+  } finally {
+    db.close()
+  }
+}
 
 export function stackFilePaths(entries: ReadonlyArray<readonly [URL, string]>): OwnStackFiles {
   const files = new Map<string, string>()
@@ -34,12 +95,18 @@ interface RotationOptions {
   maxBytes?: number
   maxFiles?: number
   retentionMs?: number
+  coordinate?: boolean
 }
 
 /** One writer per file. Maintenance and writes share a bounded asynchronous queue. */
 export function rotatingFileSink(
   path: string,
-  { maxBytes = 10 * 1024 * 1024, maxFiles = 5, retentionMs = 14 * dayMs }: RotationOptions = {},
+  {
+    maxBytes = 10 * 1024 * 1024,
+    maxFiles = 5,
+    retentionMs = 14 * dayMs,
+    coordinate = false,
+  }: RotationOptions = {},
 ): Sink & { close(): Promise<void> } {
   if (![maxBytes, maxFiles, retentionMs].every((value) => Number.isSafeInteger(value) && value > 0))
     throw new RangeError('Invalid AMC log rotation options')
@@ -58,7 +125,14 @@ export function rotatingFileSink(
     pending++
     pendingBytes += bytes
     tail = tail
-      .then(task)
+      .then(async () => {
+        if (!coordinate) return task()
+        const directory = dirname(path)
+        await mkdir(directory, { recursive: true, mode: 0o700 })
+        if (!(await lstat(directory)).isDirectory()) return
+        await chmod(directory, 0o700)
+        await coordinateFile(path, task)
+      })
       .catch(() => {
         // A failed write or prune must not prevent subsequent attempts.
         nextPrune = 0
@@ -129,9 +203,11 @@ export function rotatingFileSink(
     maintenance ??= setInterval(() => enqueue(() => prune(Date.now())), pruneInterval).unref()
   }
 
+  activeFileSinks.set(path, write)
   return Object.assign(write, {
     close: () => {
       closed = true
+      if (activeFileSinks.get(path) === write) activeFileSinks.delete(path)
       clearInterval(maintenance)
       return tail
     },

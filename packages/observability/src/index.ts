@@ -10,6 +10,7 @@ import {
 } from './events.ts'
 import { newRunId } from './ids.ts'
 
+export { cliCommand } from './client-events.ts'
 export {
   type ErrorClass,
   type ErrorCode,
