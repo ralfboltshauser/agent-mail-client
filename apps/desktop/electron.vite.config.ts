@@ -44,6 +44,8 @@ export default defineConfig({
     build: { rollupOptions: { output: { format: 'cjs', entryFileNames: '[name].cjs' } } },
   },
   renderer: {
+    // Agentation reads React component names from the built renderer.
+    build: { rolldownOptions: { output: { keepNames: true } } },
     resolve: { alias: { '@': resolve('src/renderer/src') } },
     plugins: [
       react(),

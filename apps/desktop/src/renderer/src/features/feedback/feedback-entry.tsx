@@ -1,57 +1,30 @@
-import { lazy, Suspense, useEffect, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { getAmc } from '@/lib/amc'
-import { type FeedbackCapture, feedbackView } from '../../../../shared/feedback'
 
-const FeedbackDialog = lazy(() => import('./feedback-dialog'))
+const FeedbackSession = lazy(() => import('./feedback-session'))
 
 export function FeedbackEntry() {
-  const [session, setSession] = useState<{
-    capture: FeedbackCapture | null
-    scope: Element | null
-  } | null>(null)
-  const opening = useRef(false)
-  const invoker = useRef<HTMLElement | null>(null)
+  const [invoker, setInvoker] = useState<HTMLElement | null>(null)
 
   useEffect(
     () =>
       getAmc().feedback.onOpen(() => {
-        if (opening.current) return
-        opening.current = true
-        invoker.current =
-          document.activeElement instanceof HTMLElement ? document.activeElement : null
-        // Keep focus and accessibility inside any existing Radix modal's scope.
-        const scope = invoker.current?.closest('[role="dialog"]') ?? null
-        const view = feedbackView(
-          document.querySelector('[data-feedback-view]')?.getAttribute('data-feedback-view'),
-        )
-        void getAmc()
-          .feedback.capture(view, { width: innerWidth, height: innerHeight })
-          .then(
-            (capture) => setSession({ capture, scope }),
-            () => setSession({ capture: null, scope }),
-          )
+        const focus = document.activeElement
+        setInvoker((current) => current ?? (focus instanceof HTMLElement ? focus : document.body))
       }),
     [],
   )
 
-  if (!session) return null
-  const { scope } = session
-  const dialog = (
+  if (!invoker) return null
+  return (
     <Suspense>
-      <FeedbackDialog
-        capture={session.capture}
+      <FeedbackSession
+        scope={invoker.closest<HTMLElement>('[role="dialog"]') ?? document.body}
         onClose={() => {
-          setSession(null)
-          opening.current = false
-          invoker.current?.focus({ preventScroll: true })
-          if (session.capture)
-            void getAmc()
-              .feedback.release(session.capture.id)
-              .catch(() => {})
+          setInvoker(null)
+          invoker.focus({ preventScroll: true })
         }}
       />
     </Suspense>
   )
-  return scope ? createPortal(dialog, scope) : dialog
 }

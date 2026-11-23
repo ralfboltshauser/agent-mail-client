@@ -32,7 +32,7 @@ const request: T3Launch = {
   workspaceStrategy: { type: 'root' },
   message: 'Synthetic feedback',
 }
-const empty = { text: '', annotations: [] }
+const empty = { text: '', markdown: '' }
 let root: string
 
 beforeEach(() => {
@@ -57,24 +57,18 @@ describe('feedback captures', () => {
     )
   })
 
-  it('uses only allowed context fields and never emits a raw view or extra annotation fields', () => {
-    const annotation = {
-      selector: 'html > body > button',
-      component: 'Button',
-      bounds: { x: 1, y: 2, width: 3, height: 4 },
-      note: 'Add spacing',
-      subject: 'private subject',
-    }
+  it('passes Agentation markdown verbatim and only includes allowlisted window context', () => {
+    const markdown = '## AMC\ndiv > button\n**Selected text:** Fixture\n**Feedback:** Add spacing'
     const message = feedbackMessage(
-      { text: ' ', annotations: [annotation] },
+      { text: 'General note', markdown },
       {
         ...context,
         view: 'search with private data',
         ...{ address: 'private address', body: 'private body', sender: 'private sender' },
       },
     )
-    expect(message).toContain('(owner will add details)')
-    expect(message).toContain('"marker":1')
+    expect(message).toContain('General note')
+    expect(message).toContain(markdown)
     expect(message).toContain(
       'Context: AMC 0.1.0 abc123, view unknown, window 1360×860, 2026-11-22T20:00:00.000Z',
     )

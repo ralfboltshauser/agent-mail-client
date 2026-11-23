@@ -36,22 +36,16 @@ export interface FeedbackContext {
 }
 
 export function feedbackMessage(draft: FeedbackDraft, context: FeedbackContext, path?: string) {
-  const annotations = draft.annotations.map(({ selector, component, bounds, note }, index) => ({
-    marker: index + 1,
-    selector,
-    component,
-    bounds: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
-    note,
-  }))
   const text = draft.text.trim()
+  const markdown = draft.markdown.trim()
   return [
     'AMC feedback — use the amc-feedback skill (.agents/skills/amc-feedback/SKILL.md).',
-    text || '(owner will add details)',
-    ...(!text && !annotations.length ? ['Wait for the owner to add details.'] : []),
-    `Annotations: ${JSON.stringify(annotations)}`,
+    ...(text ? [text] : []),
+    ...(markdown ? [markdown] : []),
+    ...(!text && !markdown ? ['Wait for the owner to add details.'] : []),
     `Context: AMC ${context.version}, view ${feedbackView(context.view)}, window ${context.width}×${context.height}, ${context.at.toISOString()}`,
     ...(path ? [`Local screenshot: ${path}`] : []),
-  ].join('\n')
+  ].join('\n\n')
 }
 
 export function launchFeedback(

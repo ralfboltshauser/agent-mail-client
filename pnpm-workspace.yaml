@@ -6,4 +6,5 @@ onlyBuiltDependencies:
   - esbuild
 
 patchedDependencies:
+  agentation@3.1.2: patches/agentation@3.1.2.patch
   mailparser@3.15.0: patches/mailparser@3.15.0.patch

@@ -184,7 +184,7 @@ export function createMailFixture(scenario: string) {
   const api: AmcApi = {
     feedback: {
       onOpen: () => () => {},
-      capture: async () => ({ id: 'fixture', width: 1360, height: 860 }),
+      capture: async () => ({ id: 'fixture' }),
       send: async () => ({ opened: true }),
       release: async () => {},
       copy: async () => {},
