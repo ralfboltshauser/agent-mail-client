@@ -505,7 +505,7 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
           if (fail(error)) return
           backoff = Math.min(backoff * 2, 5 * 60_000)
           pollIntervalMs = backoff
-          await manual.wait((wake) => sleep(backoff, AbortSignal.any([signal, wake])))
+          await manual.backoff(() => sleep(backoff, signal))
           continue
         }
         if (!notified) {
@@ -541,7 +541,7 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
         } catch (error) {
           manual.take()?.(false)
           if (fail(error)) return
-          await manual.wait((wake) => sleep(30_000, AbortSignal.any([signal, wake])))
+          await manual.backoff(() => sleep(30_000, signal))
         }
       }
       if (isCurrent()) {
@@ -732,7 +732,7 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
               controller.abort()
               return
             }
-            await manual.wait((wake) => sleep(retryMs, AbortSignal.any([signal, wake])))
+            await manual.backoff(() => sleep(retryMs, signal))
             retryMs = Math.min(retryMs * 2, 5 * 60_000)
           }
         }

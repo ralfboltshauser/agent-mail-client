@@ -672,7 +672,9 @@ it('backs off repeated early IDLE disconnects and resets after a stable minute',
   })
   try {
     expect((await call('/v1/accounts/imap', admin, login)).status).toBe(200)
-    await vi.advanceTimersByTimeAsync(14_999)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(await (await call('/v1/sync/check-mail', admin, {})).json()).toEqual({ ok: false })
+    await vi.advanceTimersByTimeAsync(4_999)
     expect(attempts).toEqual([0, 5_000])
     stayConnected = true
     await vi.advanceTimersByTimeAsync(62_001)

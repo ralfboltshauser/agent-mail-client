@@ -3,6 +3,7 @@ export class ManualPoll {
   readonly #signal: AbortSignal
   #pending?: (ok: boolean) => void
   #waiting?: AbortController
+  #backingOff = false
 
   constructor(signal: AbortSignal) {
     this.#signal = signal
@@ -10,7 +11,7 @@ export class ManualPoll {
 
   request(): Promise<boolean> {
     const signal = this.#signal
-    if (signal.aborted) return Promise.resolve(false)
+    if (signal.aborted || this.#backingOff) return Promise.resolve(false)
     return new Promise((resolve) => {
       const abort = () => {
         this.#pending = undefined
@@ -30,6 +31,17 @@ export class ManualPoll {
     const finish = this.#pending
     this.#pending = undefined
     return finish
+  }
+
+  /** Provider retry delays cannot be interrupted by an owner request. */
+  async backoff(wait: () => Promise<unknown>): Promise<void> {
+    this.#backingOff = true
+    this.take()?.(false)
+    try {
+      await wait()
+    } finally {
+      this.#backingOff = false
+    }
   }
 
   async wait(wait: (wake: AbortSignal) => Promise<unknown>): Promise<void> {

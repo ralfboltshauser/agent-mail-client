@@ -4,6 +4,7 @@ import { BlobStore } from '../blobs.ts'
 import { Sealer } from '../crypto.ts'
 import { MailStore } from '../mail/store.ts'
 import { FakeGmail } from '../providers/gmail/fake.ts'
+import { GmailHttpError } from '../providers/gmail/http.ts'
 import type { GmailPubSub } from '../providers/gmail/pubsub.ts'
 import type { GmailApi, GmailHistoryList } from '../providers/gmail/types.ts'
 import { silentLog, tempDir, testDb } from '../test-support.ts'
@@ -112,6 +113,24 @@ describe('Gmail Pub/Sub sync', () => {
       expect(otherHistory).toHaveBeenCalledTimes(2)
     },
   )
+
+  it('does not interrupt Gmail quota backoff with another manual check', async () => {
+    fixture = setup(false)
+    const { sync, owner } = fixture
+    await fixture.start()
+    const history = vi
+      .spyOn(owner, 'history')
+      .mockRejectedValueOnce(new GmailHttpError(429, 'rateLimitExceeded', 'quota'))
+
+    expect(await sync.checkMail()).toBe(false)
+    expect(history).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(await sync.checkMail()).toBe(false)
+    await vi.advanceTimersByTimeAsync(24_999)
+    expect(history).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(history).toHaveBeenCalledTimes(2)
+  })
 
   it('starts a watch per Gmail account and renews both daily', async () => {
     fixture = setup()
