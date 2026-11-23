@@ -1,5 +1,5 @@
 import type { Label } from '@amc/protocol'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import { AgentActivity } from '@/components/agent-activity'
 import { AppSidebar, systemViews } from '@/components/app-sidebar'
 import { CommandPalette } from '@/components/command-palette'
@@ -11,7 +11,7 @@ import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
 import { shareReply } from '@/data/share-reply'
 import { useReplicaSelector, useSyncField } from '@/hooks/use-amc'
 import { getAmc } from '@/lib/amc'
-import type { View } from '../../../../shared/api'
+import type { MailLinkSearch, View } from '../../../../shared/api'
 import { useMailSearch } from '../search/use-mail-search'
 import { TriageReview } from '../triage-review/triage-review'
 import { useTriageReview } from '../triage-review/use-triage-review'
@@ -160,33 +160,52 @@ export function MailWorkspace({
     select(target ?? null, mailboxKey(accountId, next, ''))
   }
 
+  const openMailSearch = useEffectEvent(({ query, accountId: target }: MailLinkSearch) => {
+    collapse()
+    closeReview(false)
+    resetSearch(true)
+    openSender(null)
+    setBucketPickerId(null)
+    setNotification(null)
+    setAccountId(target)
+    const next = { kind: 'all' } as const
+    setView(next)
+    setSelection({ key: mailboxKey(target, next, '', query.trim()), id: null })
+    void runSearch(query, target)
+  })
+
+  // Install the search listener before onOpenThread announces navigation readiness.
   // Notification targets can be opened before they have arrived in the list query.
-  useEffect(
-    () =>
-      getAmc().onOpenThread((target) => {
-        collapse()
-        closeReview(false)
-        const next = target.inInbox ? INBOX : { kind: 'all' as const }
-        resetSearch(true)
-        openSender(null)
-        setBucketPickerId(null)
-        setAccountId(null)
-        setView(next)
-        setNotification(target)
-        setSelection({ key: mailboxKey(null, next, ''), id: target.id })
-      }),
-    [
-      resetSearch,
-      setAccountId,
-      setView,
-      setNotification,
-      setBucketPickerId,
-      setSelection,
-      openSender,
-      closeReview,
-      collapse,
-    ],
-  )
+  // biome-ignore lint/correctness/useExhaustiveDependencies: React Effect Events are intentionally excluded from effect dependencies.
+  useEffect(() => {
+    const removeSearch = getAmc().onOpenMailSearch((target) => openMailSearch(target))
+    const removeThread = getAmc().onOpenThread((target) => {
+      collapse()
+      closeReview(false)
+      const next = target.inInbox ? INBOX : { kind: 'all' as const }
+      resetSearch(true)
+      openSender(null)
+      setBucketPickerId(null)
+      setAccountId(null)
+      setView(next)
+      setNotification(target)
+      setSelection({ key: mailboxKey(null, next, ''), id: target.id })
+    })
+    return () => {
+      removeSearch()
+      removeThread()
+    }
+  }, [
+    resetSearch,
+    setAccountId,
+    setView,
+    setNotification,
+    setBucketPickerId,
+    setSelection,
+    openSender,
+    closeReview,
+    collapse,
+  ])
 
   const selectAccount = (id: string | null) => {
     collapse()
@@ -389,6 +408,7 @@ export function MailWorkspace({
         labels={labels}
         onView={goTo}
         onAccount={selectAccount}
+        accountId={accountId}
         onSearch={(text) => {
           collapse()
           void runSearch(text)

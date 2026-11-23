@@ -31,6 +31,7 @@ import { diagnosticsRoutes } from './diagnostics.ts'
 import { filteredRoutes } from './filtered.ts'
 import { readJson } from './json.ts'
 import { type MailDeps, mailRoutes } from './mail.ts'
+import { mailLinkRoutes } from './mail-link.ts'
 import { mutationRoutes } from './mutations.ts'
 import { type OwnerActionHandler, ownerActionRoutes, senderRoutes } from './senders.ts'
 import { syncRoutes } from './sync.ts'
@@ -111,6 +112,7 @@ export function createApp({
     await next()
   })
 
+  app.route('/', mailLinkRoutes())
   app.get('/health', (c) => c.json({ ok: true, version: VERSION } satisfies PublicHealth))
 
   app.post('/v1/auth/pair', async (c) => {

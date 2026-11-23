@@ -30,7 +30,7 @@ export function SearchInput({
   }
 
   const addField = (field: string) => {
-    const query = text.trim().replace(/(?:^|\s)(?:from|to|cc|subject):$/i, '')
+    const query = text.trim().replace(/(?:^|\s)(?:from|to|cc|subject|after|before):$/i, '')
     changeFilter(query ? `${query} ${field}` : field)
     input.current?.focus()
   }

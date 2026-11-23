@@ -1,5 +1,7 @@
 import { mkdirSync } from 'node:fs'
+import { runInNewContext } from 'node:vm'
 import { isCorrelationId, newRequestId, REQUEST_ID_HEADER } from '@amc/observability'
+import { mailLink, mailWebLink } from '@amc/protocol'
 import { describe, expect, it } from 'vitest'
 import { createPairingCode, DAY_MS, issueToken } from '../auth/tokens.ts'
 import { MIGRATIONS } from '../db/migrations.ts'
@@ -21,6 +23,37 @@ describe('HTTP API', () => {
     expect(res.headers.get(REQUEST_ID_HEADER)).toBe(requestId)
     expect(res.status).toBe(200)
     expect(await res.json()).toMatchObject({ ok: true })
+  })
+
+  it('turns only an AMC fragment into a native link without loading mail', async () => {
+    const { app } = setup()
+    const target = {
+      kind: 'search',
+      query: 'subject:"A + B" from:alice@example.test',
+      accountId: 'a',
+    } as const
+    const url = new URL(mailWebLink('https://engine.example.test', target))
+    const response = await app.request(url.pathname)
+    expect(response.status).toBe(200)
+    expect(response.headers.get('Referrer-Policy')).toBe('no-referrer')
+    expect(response.headers.get('Content-Security-Policy')).toContain("default-src 'none'")
+    const html = await response.text()
+    expect(html).not.toContain(target.query)
+    const script = /<script nonce="[^"]+">([\s\S]+)<\/script>/.exec(html)?.[1] ?? ''
+    const render = (hash: string) => {
+      const open = { hidden: true, href: '' }
+      const message = { textContent: '' }
+      runInNewContext(script, {
+        location: { hash },
+        document: { getElementById: (id: string) => (id === 'open' ? open : message) },
+      })
+      return open
+    }
+    expect(render(url.hash)).toEqual({ hidden: false, href: mailLink(target) })
+    expect(render(`#${encodeURIComponent('javascript:alert(1)')}`)).toEqual({
+      hidden: true,
+      href: '',
+    })
   })
 
   it('requires a token for /v1', async () => {

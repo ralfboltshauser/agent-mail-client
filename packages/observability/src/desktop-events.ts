@@ -55,6 +55,7 @@ const desktopStages = [
   't3-projects',
   't3-launch',
   't3-link',
+  'mail-link',
   'login-settings',
   'external-link',
 ] as const
@@ -118,6 +119,7 @@ const ipcChannels = [
   'amc:saveSendSettings',
   'amc:saveSignature',
   'amc:search',
+  'amc:askAgent',
   'amc:sendDraft',
   'amc:sendSettings',
   'amc:setAutoTriage',

@@ -337,11 +337,12 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
       'search',
       {
         description:
-          'Full-text search over the entire mail history. All words must match; from:, to: and subject: narrow it. Returns Threads.',
+          'Full-text search over the entire mail history. All words must match. Filters: from:, to:, cc:, subject:, after: and before: (YYYY-MM-DD UTC). Returns Threads.',
         inputSchema: {
           query: z.string().min(1),
           account_id: z.string().optional(),
           limit: z.number().int().min(1).max(50).default(15),
+          offset: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
         },
         annotations: { readOnlyHint: true },
       },
@@ -350,6 +351,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
           queries.search(a.query, {
             ...((accountId ?? a.account_id) ? { accountId: accountId ?? a.account_id } : {}),
             limit: a.limit,
+            offset: a.offset,
           }),
         ),
     )

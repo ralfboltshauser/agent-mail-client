@@ -95,6 +95,8 @@ async function openMailbox(api: Partial<AmcApi>) {
     copyDiagnostics: async () => {},
     onCopyDiagnostics: () => () => {},
     onOpenSettings: () => () => {},
+    askAgent: async () => ({ opened: true }),
+    onOpenMailSearch: () => () => {},
     onOpenThread: (callback) => {
       openThread = callback
       return () => {

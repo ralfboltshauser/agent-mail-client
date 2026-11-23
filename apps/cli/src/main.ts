@@ -12,6 +12,7 @@ import {
   doctorWarnings,
   type GmailAuthStartResponse,
   type Health,
+  MAIL_SEARCH_PAGE_SIZE,
   type Me,
   type MessageDetail,
   type MutationResponse,
@@ -48,6 +49,8 @@ const scopedCommands = new Set([
   'thread',
   'message',
   'search',
+  'link.thread',
+  'link.search',
   'contacts',
   'labels',
   'archive',
@@ -350,27 +353,41 @@ program
 
 program
   .command('search')
-  .description('Search the entire history (from:, to:, subject: work)')
+  .description('Search synced mail (from:, to:, cc:, subject:, after:, before:)')
   .argument('<query...>', 'what to look for')
   .option('--account <id>', 'Account ID')
-  .option('-n, --limit <n>', 'how many', '20')
+  .option('-n, --limit <n>', 'page size', '20')
+  .option('--offset <n>', 'number of matching threads to skip', '0')
   .option('--json', 'print JSON')
-  .action(async (words: string[], opts: { account?: string; limit: string; json?: boolean }) => {
-    const query = words.join(' ')
-    const params = new URLSearchParams({ q: query, limit: opts.limit })
-    if (opts.account) params.set('accountId', opts.account)
-    const config = requireConfig()
-    const hits = agentMode()
-      ? await mailTool<SearchHit[]>(config, true, 'search', {
-          query,
-          account_id: opts.account,
-          limit: Number(opts.limit),
-        })
-      : (await authed(config)<{ hits: SearchHit[] }>(`/v1/search?${params}`)).hits
-    if (opts.json) return printJson(hits)
-    if (hits.length === 0) return console.log('Nothing found.')
-    printThreads(hits)
-  })
+  .action(
+    async (
+      words: string[],
+      opts: { account?: string; limit: string; offset: string; json?: boolean },
+    ) => {
+      const query = words.join(' ')
+      const limit = Number(opts.limit)
+      const offset = Number(opts.offset)
+      const max = agentMode() ? MAIL_SEARCH_PAGE_SIZE : 200
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > max)
+        throw new Error(`Search limit must be between 1 and ${max}.`)
+      if (!Number.isSafeInteger(offset) || offset < 0)
+        throw new Error('Search offset must be a nonnegative integer.')
+      const params = new URLSearchParams({ q: query, limit: opts.limit, offset: opts.offset })
+      if (opts.account) params.set('accountId', opts.account)
+      const config = requireConfig()
+      const hits = agentMode()
+        ? await mailTool<SearchHit[]>(config, true, 'search', {
+            query,
+            account_id: opts.account,
+            limit,
+            offset,
+          })
+        : (await authed(config)<{ hits: SearchHit[] }>(`/v1/search?${params}`)).hits
+      if (opts.json) return printJson(hits)
+      if (hits.length === 0) return console.log('Nothing found.')
+      printThreads(hits)
+    },
+  )
 
 async function organise(action: OrganiseAction, json?: boolean) {
   const api = authed(requireConfig())

@@ -1,4 +1,4 @@
-import type { SearchHit } from '@amc/protocol'
+import { MAIL_SEARCH_PAGE_SIZE, type SearchHit } from '@amc/protocol'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { getAmc } from '@/lib/amc'
 import { failureText, recordCaughtFailure } from '@/lib/failure'
@@ -7,6 +7,8 @@ interface HistorySearch {
   accountId: string | null
   text: string
   hits: SearchHit[] | null
+  hasMore: boolean
+  offset: number
   loading: boolean
   failed: boolean
   failure?: string
@@ -21,7 +23,7 @@ export function useMailSearch(accountId: string | null) {
   const text = search?.text ?? filterText
   // Match the Engine's token boundaries, including quoted phrases and cc:.
   const fields = (text.match(/(\w+:)?"[^"]*"|\S+/g) ?? [])
-    .map((token) => /^(?:from|to|cc|subject):(.*)$/i.exec(token)?.[1])
+    .map((token) => /^(?:from|to|cc|subject|after|before):(.*)$/i.exec(token)?.[1])
     .filter((value) => value !== undefined)
   const structured = fields.length > 0
   const needsValue = fields.some(
@@ -53,31 +55,49 @@ export function useMailSearch(accountId: string | null) {
     input.current?.blur()
   }
 
-  const runSearch = async (text: string) => {
+  const runSearch = async (text: string, scope = accountId, offset = 0) => {
     text = text.trim()
     if (!text) return
     const generation = ++request.current
     const matches = (current: HistorySearch | null): current is HistorySearch =>
-      current?.accountId === accountId && current.text === text
+      current?.accountId === scope && current.text === text
     setHistory((current) => ({
-      accountId,
+      accountId: scope,
       text,
+      offset,
+      hasMore: matches(current) && current.hasMore,
       hits: matches(current) ? current.hits : null,
       loading: true,
       failed: matches(current) && current.failed,
       failure: matches(current) ? current.failure : undefined,
     }))
     try {
-      const hits = await getAmc().search(text, accountId)
+      const hits = offset
+        ? await getAmc().search(text, scope, offset)
+        : await getAmc().search(text, scope)
       if (generation === request.current) {
-        setHistory({ accountId, text, hits, loading: false, failed: false })
+        setHistory((current) => {
+          const previous = offset && matches(current) ? (current.hits ?? []) : []
+          const combined = [...new Map([...previous, ...hits].map((hit) => [hit.id, hit])).values()]
+          return {
+            accountId: scope,
+            text,
+            hits: combined,
+            offset: offset + hits.length,
+            hasMore: hits.length === MAIL_SEARCH_PAGE_SIZE && combined.length > previous.length,
+            loading: false,
+            failed: false,
+          }
+        })
       }
     } catch (error) {
       if (generation === request.current) {
         const failure = failureText(error)
         setHistory((current) => ({
-          accountId,
+          accountId: scope,
           text,
+          offset,
+          hasMore: matches(current) && current.hasMore,
           hits: matches(current) ? current.hits : null,
           loading: false,
           failed: true,
@@ -98,5 +118,8 @@ export function useMailSearch(accountId: string | null) {
     changeFilter,
     clearSearch,
     runSearch,
+    retrySearch: () => search && runSearch(search.text, accountId, search.offset),
+    loadMore: () =>
+      search?.hasMore && !search.loading && runSearch(search.text, accountId, search.offset),
   }
 }

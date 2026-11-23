@@ -89,6 +89,7 @@ it.each([false, true])(
       {
         id: 'active',
         title: 'Scratch',
+        workspaceRoot: '/tmp/scratch',
         ...(supportsRuntimeMode ? {} : { localDefaultMode: 'full-access' }),
       },
     ])
