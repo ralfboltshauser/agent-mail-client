@@ -60,7 +60,7 @@ The existing Organise journal is the authority for provider inverses. Do not use
 - **Filter out** moves the selected Thread's eligible incoming Inbox messages to the Account's **Filtered** Label. **Restore to Inbox** returns eligible messages. Both use verified Gmail label changes or exact IMAP UID MOVE or UIDPLUS COPY and UID EXPUNGE. The Engine journals each message and supports Undo.
 - In the desktop Thread list and reader, **!** (Shift+1) applies Filter out and **F** opens Forward. The Thread toolbar and list context menu offer Filter out for Inbox Threads and Restore to Inbox for Filtered Threads.
 - The classifier submits independent Bucket and Filter predictions. Phase 1 presents Filter suggestions in review. Explicit owner intent queues provider work.
-- The Decision log records owner judgments and predictions against the exact arrival and mailbox generation. Undo appends a retraction. The Engine keeps any enabled owner reasons in its private reason store. Private reason capture defaults to off until erasure ships. Synthetic runs can set `AMC_PRIVATE_TRIAGE_REASONS=1` at Engine startup and `VITE_AMC_PRIVATE_TRIAGE_REASONS=1` when building the Desktop renderer. See [Owner preferences](owner-preferences.md).
+- The Decision log records owner judgments and predictions against the exact arrival and mailbox generation. Undo appends a retraction. The Engine keeps optional owner reasons in its private reason store. Shift+F and Shift+X open the reason input. An installation can disable capture with `AMC_PRIVATE_TRIAGE_REASONS=0` at Engine startup and `VITE_AMC_PRIVATE_TRIAGE_REASONS=0` at Desktop build time. See [Owner preferences](owner-preferences.md).
 
 ### Avatar fetching and safety
 

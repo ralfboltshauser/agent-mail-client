@@ -7,6 +7,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs'
+import { writeFile } from 'node:fs/promises'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type {
@@ -31,6 +32,8 @@ import {
   SenderAvatarResolve,
   SenderDecision,
   SenderListQuery,
+  TriageExportInput,
+  TriageHistoryQuery,
   TriageQueueQuery,
 } from '@amc/protocol'
 import {
@@ -466,6 +469,42 @@ function registerIpc() {
       signal: AbortSignal.timeout(10_000),
     }),
   )
+  ipcMain.handle('amc:triageHistory', (_event, query: unknown) => {
+    const params = queryString(TriageHistoryQuery.parse(query))
+    return requireEngine().get(`/v1/triage/events?${params}`, {
+      signal: AbortSignal.timeout(10_000),
+    })
+  })
+  ipcMain.handle('amc:forgetTriageDecision', (_event, id: string) =>
+    requireEngine().request(`/v1/triage/events/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      redirect: 'error',
+      signal: AbortSignal.timeout(10_000),
+    }),
+  )
+  ipcMain.handle('amc:exportTriageHistory', async (_event, input: unknown) => {
+    const engine = requireEngine()
+    const body = TriageExportInput.parse(input)
+    const { filePath } = await dialog.showSaveDialog({
+      title: 'Export triage history',
+      defaultPath: 'amc-owner-preferences.jsonl',
+    })
+    if (!filePath) return false
+    if (requireEngine() !== engine) throw new Error('The Engine pairing changed')
+    const response = await engine.response('/v1/triage/events/export', {
+      method: 'POST',
+      body,
+      redirect: 'error',
+      signal: AbortSignal.timeout(60_000),
+    })
+    if (!response.headers.get('Content-Type')?.startsWith('application/x-ndjson'))
+      throw new Error('Engine did not return an owner-preferences export')
+    await writeFile(filePath, Buffer.from(await response.arrayBuffer()), {
+      flag: 'wx',
+      mode: 0o600,
+    })
+    return true
+  })
   ipcMain.handle('amc:triageQueue', (_event, query: unknown) => {
     return requireEngine().get(`/v1/triage/queue?${queryString(TriageQueueQuery.parse(query))}`, {
       signal: AbortSignal.timeout(10_000),

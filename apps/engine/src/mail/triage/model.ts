@@ -138,9 +138,15 @@ interface ContextReceipt {
   tokenId: string
   runId: string
   expires: number
+  erasureEpoch: string | null
   accountId: string
   accountGeneration: number
   inputs: ReceiptTarget[]
+}
+
+function erasureEpoch(db: Db) {
+  const epoch = db.prepare('SELECT receipt_epoch FROM triage_privacy_store').get()?.receipt_epoch
+  return typeof epoch === 'string' ? epoch : null
 }
 
 export function prepareContext(
@@ -177,6 +183,7 @@ export function prepareContext(
     tokenId: agent.tokenId,
     runId,
     expires: Number(lease?.expires_at),
+    erasureEpoch: erasureEpoch(db),
     accountId,
     accountGeneration,
     inputs: refs.map(({ arrival: _, ...ref }) => ({
@@ -261,6 +268,7 @@ export function submitPrediction(
     if (
       !context ||
       context.version !== 1 ||
+      context.erasureEpoch !== erasureEpoch(db) ||
       !target ||
       context.runId !== runId ||
       context.expires <= Date.now() ||

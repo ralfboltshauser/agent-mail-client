@@ -3,6 +3,7 @@ import { toast } from 'sonner'
 import { setLoadRemoteImagesAutomatically, useRemoteImages } from '@/data/remote-image-preferences'
 import { getAmc } from '@/lib/amc'
 import type { NotificationSettings } from '../../../shared/api'
+import { TriagePrivacy } from './triage-privacy'
 import { AutoTriageSetting } from './triage-status'
 import { Button } from './ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
@@ -103,6 +104,7 @@ function PrivacyPreferences() {
       <p id={id} className="text-xs text-muted-foreground">
         Remote images can tell senders when you opened their mail.
       </p>
+      <TriagePrivacy />
     </section>
   )
 }

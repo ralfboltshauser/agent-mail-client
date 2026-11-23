@@ -31,6 +31,7 @@ import { mutationRoutes } from './mutations.ts'
 import { type OwnerActionHandler, ownerActionRoutes, senderRoutes } from './senders.ts'
 import { syncRoutes } from './sync.ts'
 import { tokenRoutes } from './tokens.ts'
+import { triageHistoryRoutes } from './triage-history.ts'
 import { triageLeaseRoutes } from './triage-lease.ts'
 
 export interface AppEnv {
@@ -180,6 +181,7 @@ export function createApp({
 
   v1.route('/', tokenRoutes(db))
   v1.route('/triage/lease', triageLeaseRoutes(db))
+  v1.route('/triage/events', triageHistoryRoutes(db))
   if (mutations) {
     v1.route('/', mutationRoutes(mutations))
     v1.route('/', agentActionRoutes(db, mutations))
