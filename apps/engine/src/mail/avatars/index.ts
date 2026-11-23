@@ -113,8 +113,8 @@ export class SenderAvatars {
       if (!job) return
       this.#running++
       void this.#run(job)
-        .catch(() => {
-          this.#log.warn('sender avatar cache write failed')
+        .catch((err) => {
+          this.#log.log('warn', 'avatar.cache.failed', { stage: 'write', err })
         })
         .finally(() => {
           this.#jobs.delete(job.domain)
@@ -145,7 +145,6 @@ export class SenderAvatars {
     previous: CacheEntry | null,
     deadline: AbortSignal,
   ) {
-    const start = performance.now()
     const signal =
       source === 'bimi'
         ? AbortSignal.any([deadline, AbortSignal.timeout(LOOKUP_BUDGET / 2)])
@@ -184,10 +183,9 @@ export class SenderAvatars {
       serveUntil,
       failures,
     })
-    this.#log.debug(
-      { source, outcome, ms: Math.round(performance.now() - start) },
-      'sender avatar lookup',
-    )
+    this.#log.log('debug', 'avatar.lookup.finished', {
+      outcome: outcome === 'ready' ? 'hit' : outcome === 'transient' ? 'failed' : 'miss',
+    })
     return outcome
   }
 }

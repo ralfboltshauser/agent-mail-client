@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
 import { setTimeout as delay } from 'node:timers/promises'
+import { cliCommand, newRunId } from '@amc/observability'
 import {
   type AccountSummary,
   type AgentAction,
@@ -22,10 +23,12 @@ import {
   type ThreadList,
   type ThreadSummary,
 } from '@amc/protocol'
-import { Command } from 'commander'
+import { Command, CommanderError } from 'commander'
 import { authed, request } from './client.ts'
 import { readConfig, writeConfig } from './config.ts'
+import { registerDiagnosticsCommands } from './diagnostics.ts'
 import { addImapAccount } from './imap-signin.ts'
+import { cliContext, cliFailure, closeClientLogs, retainFailureSource } from './observability.ts'
 import { loopbackSignIn } from './signin.ts'
 import { printOwnerAction, registerSmartInboxCommands } from './smart-inbox.ts'
 import { describeTriageFailure, runTriage, TriageFailure } from './triage.ts'
@@ -37,6 +40,24 @@ const program = new Command()
   .name('amc')
   .description('Agent Mail Client: work with your mail from the shell')
   .version(VERSION)
+  .exitOverride()
+  .configureOutput({
+    outputError: (message, write) =>
+      write(
+        ['logs', 'diagnostics'].includes(process.argv[2] ?? '')
+          ? 'Invalid diagnostics command options.\n'
+          : message,
+      ),
+  })
+  .hook('preAction', (_program, action) => {
+    const names = [action.name()]
+    for (let parent = action.parent; parent && parent !== program; parent = parent.parent)
+      names.unshift(parent.name())
+    const context = cliContext.getStore()
+    if (context) context.command = cliCommand(names.join('.'))
+  })
+
+registerDiagnosticsCommands(program, readConfig)
 
 program
   .command('pair')
@@ -153,8 +174,7 @@ account
       return
     }
     if (kind !== 'gmail') {
-      console.error('Choose gmail or imap.')
-      process.exit(2)
+      throw new CommanderError(2, 'amc.invalidInput', 'Choose gmail or imap.')
     }
     const api = authed(requireConfig())
     const { code, state } = await loopbackSignIn((redirectUri) =>
@@ -365,6 +385,8 @@ const triage = program
   .option('--dry-run', 'print proposed Buckets and reasons')
   .option('--recent', 'only include Threads with delivery in the last 24 hours')
   .action(async (opts: { account?: string; dryRun?: boolean; recent?: boolean }) => {
+    const context = cliContext.getStore()
+    if (context) context.runId = newRunId()
     const controller = new AbortController()
     const interrupt = () => controller.abort(new Error('Triage interrupted'))
     process.once('SIGINT', interrupt)
@@ -411,7 +433,8 @@ function triageCommandError(error: unknown) {
       process.env.AMC_DEBUG === '1' ? `${className}: ${message}` : message,
     )
     .join('\n')
-  return new Error(message)
+  const cause = failures[0] instanceof TriageFailure ? failures[0].cause : undefined
+  return retainFailureSource(new Error(message), cause ?? failures[0])
 }
 
 registerSmartInboxCommands(program, triage, requireConfig)
@@ -604,10 +627,9 @@ function ago(ms: number) {
 function requireConfig() {
   const config = readConfig()
   if (!config) {
-    console.error(
+    throw new Error(
       'Not paired. Run `amc-engine pair` on the Host, then `amc pair <code> --engine <url>`.',
     )
-    process.exit(1)
   }
   return config
 }
@@ -637,7 +659,12 @@ async function main() {
   if (!command || ['help', '-h', '--help', 'snooze'].includes(command)) {
     const config = readConfig()
     const me = config
-      ? await authed(config)<Me>('/v1/me', { signal: AbortSignal.timeout(1500) }).catch(() => null)
+      ? await authed(config)<Me>('/v1/me', { signal: AbortSignal.timeout(1500) }).catch(
+          (error: unknown) => {
+            cliFailure('discovery', error)
+            return null
+          },
+        )
       : null
     if (me?.features?.snooze === true) {
       program
@@ -656,8 +683,32 @@ async function main() {
   await program.parseAsync()
 }
 
-main().catch((error: unknown) => {
-  if (process.env.AMC_DEBUG === '1') console.error(error)
-  else console.error(`Error: ${error instanceof Error ? error.message : String(error)}`)
-  process.exit(1)
+const command = cliCommand(process.argv[2] ?? 'help')
+await cliContext.run({ command }, async () => {
+  try {
+    await main()
+    if (process.exitCode) {
+      const details = cliFailure(
+        'command',
+        new Error('Command returned an incomplete result'),
+        'partial',
+      )
+      console.error(`Details: ${details.class} · ${details.id}`)
+    }
+  } catch (error) {
+    if (error instanceof CommanderError && error.exitCode === 0) return
+    const details = cliFailure(
+      'command',
+      error,
+      error instanceof CommanderError ? 'rejected' : undefined,
+    )
+    if (!(error instanceof CommanderError) || error.code === 'amc.invalidInput') {
+      if (process.env.AMC_DEBUG === '1') console.error(error)
+      else console.error(`Error: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    console.error(`Details: ${details.class} · ${details.id}`)
+    process.exitCode = error instanceof CommanderError ? error.exitCode : 1
+  } finally {
+    await closeClientLogs()
+  }
 })

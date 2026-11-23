@@ -1,3 +1,4 @@
+import { newRunId } from '@amc/observability'
 import {
   type OutboxItem,
   type OutboxStatus,
@@ -7,6 +8,8 @@ import {
 import { HTTPException } from 'hono/http-exception'
 import type { Principal } from '../auth/tokens.ts'
 import { type Db, transaction } from '../db/database.ts'
+import { OperationStatus } from '../db/diagnostics.ts'
+import type { Logger } from '../log.ts'
 import { getSetting } from '../settings.ts'
 import { newMessageId, type OutgoingMessage } from './mime.ts'
 
@@ -65,7 +68,18 @@ export function requireDesktopSend(principal: Principal): void {
   }
 }
 
+class OutboxDeliveryError extends Error {}
+
+interface OutboxObservability {
+  log: Logger
+  status: OperationStatus
+}
+
 export class Outbox {
+  readonly #submission = new OperationStatus()
+  readonly #reconciliation = new OperationStatus()
+  readonly #workers = { queued: new OperationStatus(), dispatching: new OperationStatus() }
+  readonly #observability: OutboxObservability | undefined
   #sending: Promise<void> | null = null
   #reconciling: Promise<void> | null = null
 
@@ -74,11 +88,13 @@ export class Outbox {
     delivery: (accountId: string) => Delivery | null,
     publish: (message: FrozenMessage, messageId: string, receipt: Receipt) => void,
     now = Date.now,
+    observability?: OutboxObservability,
   ) {
     this.#db = privateDb
     this.#delivery = delivery
     this.#publish = publish
     this.#now = now
+    this.#observability = observability
   }
 
   readonly #db: Db
@@ -200,24 +216,73 @@ export class Outbox {
   }
 
   async #step(status: 'queued' | 'dispatching'): Promise<void> {
-    const rows = this.#db
-      .prepare(
-        `SELECT * FROM outbox WHERE status = ? AND next_at <= ?
+    const log = this.#observability?.log.with({ runId: newRunId() })
+    const started = performance.now()
+    const stage = status === 'queued' ? 'submit' : 'reconcile'
+    const states = status === 'queued' ? this.#submission : this.#reconciliation
+    const fail = (err: unknown, worker = false) => {
+      this.#observability?.status.failure(err)
+      const count = (worker ? this.#workers[status] : states).failure(err)
+      if (count)
+        log?.log('warn', 'outbox.failed', {
+          stage: worker ? 'worker' : stage,
+          count,
+          durationMs: performance.now() - started,
+          err,
+        })
+    }
+    try {
+      const rows = this.#db
+        .prepare(
+          `SELECT * FROM outbox WHERE status = ? AND next_at <= ?
        ORDER BY next_at, id LIMIT 32`,
-      )
-      .all(status, this.#now()) as unknown as Row[]
-    for (const row of rows) await this.#process(row)
+        )
+        .all(status, this.#now()) as unknown as Row[]
+      let succeeded = 0
+      let failed = false
+      for (const row of rows) {
+        const result = await this.#process(row)
+        if (result) {
+          failed = true
+          fail(result.err)
+        } else succeeded++
+      }
+      if (succeeded) this.#observability?.status.success()
+      if (!failed && succeeded) {
+        const { recovered } = states.success()
+        log?.log(recovered ? 'info' : 'debug', 'outbox.succeeded', {
+          stage,
+          count: succeeded,
+          durationMs: performance.now() - started,
+          recovered,
+        })
+      }
+      if (this.#workers[status].success().recovered) {
+        this.#observability?.status.success()
+        log?.log('info', 'outbox.succeeded', {
+          stage: 'worker',
+          count: rows.length,
+          durationMs: performance.now() - started,
+          recovered: true,
+        })
+      }
+    } catch (err) {
+      fail(err, true)
+      throw err
+    }
   }
 
-  async #process(row: Row): Promise<void> {
+  async #process(row: Row): Promise<{ err: unknown } | undefined> {
     const message = this.#snapshot(row)
     const provider = this.#delivery(message.accountId)
     if (row.status === 'dispatching') {
       let receipt: Receipt | null = null
+      let failure: { err: unknown } | undefined
       try {
         receipt = (await provider?.find(message, row.rfc_id)) ?? null
-      } catch {
+      } catch (err) {
         // A failed lookup provides no evidence about delivery.
+        failure = { err }
       }
       if (receipt) this.#accept(row, message, receipt)
       else if (row.reconciles >= 5) {
@@ -226,6 +291,7 @@ export class Outbox {
             "UPDATE outbox SET status = 'uncertain', detail = 'May have been sent. Check Sent before sending again.' WHERE id = ? AND status = 'dispatching'",
           )
           .run(row.id)
+        failure ??= { err: new OutboxDeliveryError() }
       } else {
         this.#db
           .prepare(
@@ -233,7 +299,7 @@ export class Outbox {
           )
           .run(this.#now() + 15_000, row.id)
       }
-      return
+      return failure
     }
 
     const claimed = transaction(this.#db, () => {
@@ -251,7 +317,7 @@ export class Outbox {
             row.id,
             this.#now(),
           )
-        return false
+        return queued ? 'unavailable' : 'cancelled'
       }
       // This durable compare-and-set is the only transition that permits submission.
       return (
@@ -262,13 +328,14 @@ export class Outbox {
           .run(this.#now() + 15_000, row.id, this.#now()).changes > 0
       )
     })
-    if (!claimed || !provider) return
+    if (claimed === 'unavailable') return { err: new OutboxDeliveryError() }
+    if (claimed !== true || !provider) return
     let result: SubmitResult
     try {
       result = await provider.send(message, row.rfc_id)
-    } catch {
+    } catch (err) {
       // A restart or any ambiguous response leaves the claim in reconciliation.
-      return
+      return { err }
     }
     if (result.kind === 'accepted') this.#accept(row, message, result.receipt)
     if (result.kind === 'failed') {
@@ -277,6 +344,7 @@ export class Outbox {
           "UPDATE outbox SET status = 'failed', snapshot = NULL, detail = ? WHERE id = ? AND status = 'dispatching'",
         )
         .run(result.detail, row.id)
+      return { err: new OutboxDeliveryError() }
     }
     if (result.kind === 'retry') {
       this.#db
@@ -287,7 +355,9 @@ export class Outbox {
           this.#now() + Math.max(result.afterMs ?? 0, Math.min(60_000, 5_000 * (row.attempts + 1))),
           row.id,
         )
+      return { err: new OutboxDeliveryError() }
     }
+    return undefined
   }
 
   #accept(row: Row, message: FrozenMessage, receipt: Receipt) {

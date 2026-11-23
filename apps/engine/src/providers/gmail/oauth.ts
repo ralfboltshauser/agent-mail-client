@@ -96,6 +96,7 @@ async function tokenRequest(
     try {
       return JSON.parse(text) ?? {}
     } catch {
+      // A non-JSON response is classified by the token exchange below.
       return {}
     }
   })) as Partial<TokenResponse> & {

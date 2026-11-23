@@ -1,13 +1,22 @@
-import { randomUUID } from 'node:crypto'
-import type { EventFields } from '@amc/observability'
+import {
+  type EventFields,
+  type Logger,
+  newRunId,
+  type RunId,
+  sanitizeError,
+} from '@amc/observability'
 import { app, type BrowserWindow, clipboard, type IpcMainEvent, ipcMain, shell } from 'electron'
 import { type FeedbackDraft, type FeedbackSendResult, feedbackView } from '../shared/feedback'
 import {
   type FeedbackContext,
+  feedbackCaptureLifetimeMs,
   feedbackMessage,
   feedbackProject,
   launchFeedback,
+  pruneFeedbackCaptures,
+  removeFeedbackCapture,
   saveFeedbackCapture,
+  saveFeedbackExcerpt,
 } from './feedback'
 import { type T3Launcher, t3NavigationLink } from './handoff'
 import { pairedFeedbackLauncher, savedT3Url } from './t3'
@@ -27,25 +36,58 @@ function validDraft(draft: FeedbackDraft) {
   return typeof draft?.text === 'string' && typeof draft.markdown === 'string'
 }
 
+type Stage = EventFields<'feedback.launch.failed'>['stage']
+
 export function registerFeedbackIpc(
   getWindow: () => BrowserWindow | null,
   openWindow: () => void,
-  log: (stage: EventFields<'feedback.launch.failed'>['stage']) => void,
+  logDirectory: string,
+  logger: Logger,
 ) {
-  function failed(
-    stage: EventFields<'feedback.launch.failed'>['stage'],
-    reason: string,
-  ): FeedbackSendResult {
-    log(stage)
-    return { opened: false, reason }
-  }
-
   let ready = false
   let pending = false
   let captureAllowed = false
-  let capture: { id: string; path: string; context: FeedbackContext } | null = null
+  let capture: {
+    id: RunId
+    path: string
+    excerpt?: string
+    context: FeedbackContext
+    retained: boolean
+  } | null = null
   let rendererGeneration = 0
   let busy = false
+
+  function clearCapture() {
+    const current = capture
+    capture = null
+    if (!current || current.retained) return
+    try {
+      removeFeedbackCapture(current.path)
+    } catch (error) {
+      logger.log(
+        'warn',
+        'feedback.capture.failed',
+        { stage: 'CleanupFailed', err: error },
+        { runId: current.id },
+      )
+    }
+  }
+
+  function expireCapture() {
+    if (capture && Date.now() - capture.context.at.getTime() >= feedbackCaptureLifetimeMs)
+      clearCapture()
+  }
+
+  function pruneCaptures() {
+    expireCapture()
+    try {
+      pruneFeedbackCaptures(app.getPath('userData'))
+    } catch (err) {
+      logger.log('warn', 'feedback.capture.failed', { stage: 'CleanupFailed', err })
+    }
+  }
+  pruneCaptures()
+  setInterval(pruneCaptures, 60 * 60 * 1000).unref()
 
   function trusted(event: Pick<IpcMainEvent, 'sender' | 'senderFrame'>) {
     return event.sender === getWindow()?.webContents && event.senderFrame === event.sender.mainFrame
@@ -53,6 +95,7 @@ export function registerFeedbackIpc(
 
   function flushOpen() {
     if (!ready || !pending) return
+    expireCapture()
     pending = false
     const window = getWindow()
     if (!window || capture || busy) return
@@ -61,6 +104,7 @@ export function registerFeedbackIpc(
   }
 
   function active(event: Pick<IpcMainEvent, 'sender' | 'senderFrame'>, id: string) {
+    expireCapture()
     if (!trusted(event) || !capture || capture.id !== id || busy)
       throw new Error('Open Send Feedback again to capture AMC.')
     return capture
@@ -73,22 +117,37 @@ export function registerFeedbackIpc(
   })
   ipcMain.handle('amc:feedbackCapture', async (event, view: unknown) => {
     if (!trusted(event) || !captureAllowed || capture || busy) {
-      log('CaptureUnavailable')
+      logger.log('warn', 'feedback.launch.failed', { stage: 'CaptureUnavailable' })
       throw new Error('AMC feedback is unavailable.')
     }
     captureAllowed = false
     const generation = rendererGeneration
     const at = new Date()
+    const id = newRunId()
     busy = true
     try {
       const image = await event.sender.capturePage()
       if (image.isEmpty() || generation !== rendererGeneration || !trusted(event))
         throw new Error('Window capture is unavailable.')
-      const id = randomUUID()
       const path = saveFeedbackCapture(app.getPath('userData'), image.toPNG(), at)
+      const excerpt = await saveFeedbackExcerpt(path, logDirectory, at).catch((error: unknown) => {
+        logger.log(
+          'warn',
+          'feedback.capture.failed',
+          { stage: 'ExcerptFailed', err: error },
+          { runId: id },
+        )
+        return undefined
+      })
+      if (generation !== rendererGeneration || !trusted(event)) {
+        removeFeedbackCapture(path)
+        throw new Error('Window capture is unavailable.')
+      }
       capture = {
         id,
         path,
+        excerpt,
+        retained: false,
         context: {
           at,
           view: feedbackView(view),
@@ -97,23 +156,65 @@ export function registerFeedbackIpc(
         },
       }
       return { id }
-    } catch {
-      log('CaptureFailed')
-      throw new Error('AMC could not capture its window.')
+    } catch (error) {
+      logger.log(
+        'warn',
+        'feedback.capture.failed',
+        { stage: 'CaptureFailed', err: error },
+        { runId: id },
+      )
+      throw new Error(
+        `AMC could not capture its window. Details: ${sanitizeError(error).class} · run ${id}`,
+      )
     } finally {
       busy = false
     }
   })
   ipcMain.handle('amc:feedbackSend', async (event, id: string, draft: FeedbackDraft) => {
-    if (!trusted(event) || !capture || capture.id !== id || busy || !validDraft(draft))
-      return failed('InvalidSubmission', 'Open Send Feedback again to capture AMC.')
+    expireCapture()
+    if (!trusted(event) || !capture || capture.id !== id || busy || !validDraft(draft)) {
+      logger.log('warn', 'feedback.launch.failed', { stage: 'InvalidSubmission' })
+      return {
+        opened: false,
+        reason: 'Open Send Feedback again to capture AMC.',
+      } satisfies FeedbackSendResult
+    }
     const current = capture
+    const scope = { runId: current.id }
+    const start = performance.now()
+    let stage: Stage | 'Opened' = 'LauncherUnavailable'
+    const finish = (err?: unknown) => {
+      logger.log(
+        stage === 'Opened' ? 'info' : 'warn',
+        'feedback.launch.finished',
+        {
+          operation: 'feedback.launch',
+          status: stage === 'Opened' ? 'ok' : 'failed',
+          stage,
+          durationMs: performance.now() - start,
+          err,
+        },
+        scope,
+      )
+    }
+    const failed = (reason: string, error: unknown = new Error(reason)): FeedbackSendResult => {
+      finish(error)
+      return {
+        opened: false,
+        reason: `${reason} Details: ${sanitizeError(error).class} · run ${current.id}`,
+      }
+    }
+
+    logger.log('info', 'feedback.launch.started', { operation: 'feedback.launch' }, scope)
     busy = true
     try {
-      const launcher = await feedbackLauncher().catch(() => undefined)
-      if (!launcher)
-        return failed('LauncherUnavailable', 'AMC could not find a local T3 connection.')
+      const launcher = await feedbackLauncher()
+      if (!launcher) return failed('AMC could not find a local T3 connection.')
+      if (capture !== current) return failed('Open Send Feedback again to capture AMC.')
 
+      stage = 'LaunchFailed'
+      // A lost response can leave a live T3 thread with these local paths.
+      current.retained = true
       const thread = await launchFeedback(
         launcher,
         feedbackProject,
@@ -121,48 +222,62 @@ export function registerFeedbackIpc(
         draft,
         current.context,
         current.path,
-      ).catch(() => null)
-      if (!thread)
-        return failed(
-          'LaunchFailed',
-          'T3 could not confirm the feedback thread. Check that T3 Code is running and the AMC project is available.',
-        )
+        current.excerpt,
+      )
+      if (!thread) return failed('T3 could not confirm the feedback thread.')
 
+      stage = 'OpenFailed'
       const link = thread.link && t3NavigationLink(thread.link)
       const target =
         link && /^t3code:\/\/threads\/[^/?#]+\/[^/?#]+$/.test(link) ? link : 't3code://'
       try {
         await shell.openExternal(target)
-      } catch {
-        try {
-          await shell.openExternal('t3code://')
-        } catch {
-          return failed(
-            'OpenFailed',
-            'The feedback thread was created, but AMC could not open T3 Code.',
-          )
-        }
+      } catch (error) {
+        logger.log('warn', 'feedback.capture.failed', { stage: 'OpenFailed', err: error }, scope)
+        await shell.openExternal('t3code://')
       }
+      stage = 'Opened'
+      finish()
       return { opened: true } satisfies FeedbackSendResult
+    } catch (error) {
+      if (stage === 'LauncherUnavailable')
+        return failed('AMC could not find a local T3 connection.', error)
+      if (stage === 'OpenFailed')
+        return failed('The feedback thread was created, but AMC could not open T3 Code.', error)
+      return failed(
+        'T3 could not confirm the feedback thread. Check that T3 Code is running and the AMC project is available.',
+        error,
+      )
     } finally {
       busy = false
     }
   })
   ipcMain.handle('amc:feedbackRelease', (event, id: string) => {
-    if (trusted(event) && capture?.id === id) capture = null
+    if (trusted(event) && capture?.id === id) clearCapture()
   })
   ipcMain.handle('amc:feedbackCopy', (event, id: string, draft: FeedbackDraft) => {
-    const { context, path } = active(event, id)
+    const current = active(event, id)
     if (!validDraft(draft)) throw new Error('Invalid feedback draft.')
-    clipboard.writeText(feedbackMessage(draft, context, path))
-    shell.showItemInFolder(path)
+    try {
+      clipboard.writeText(feedbackMessage(draft, current.context, current.path, current.excerpt))
+      current.retained = true
+      shell.showItemInFolder(current.path)
+    } catch (error) {
+      logger.log(
+        'warn',
+        'feedback.capture.failed',
+        { stage: 'CopyFailed', err: error },
+        { runId: current.id },
+      )
+      throw new Error('AMC could not copy the feedback.')
+    }
   })
   return {
     reset() {
       rendererGeneration += 1
       ready = false
       captureAllowed = false
-      capture = null
+      clearCapture()
     },
     open() {
       pending = true

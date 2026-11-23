@@ -124,8 +124,11 @@ export function createSmtpClient({ host, port, tls, username, password }: ImapCr
 }
 
 export class ImapAuthError extends Error {
-  constructor() {
-    super('IMAP authentication failed. Sign in to this Account again.')
+  constructor(
+    message = 'IMAP authentication failed. Sign in to this Account again.',
+    options?: ErrorOptions,
+  ) {
+    super(message, options)
   }
 }
 
@@ -133,8 +136,7 @@ export async function connectImap(
   client: ImapClient,
   onSocketError: (error: Error) => void = () => {},
 ): Promise<void> {
-  // ImapFlow emits socket errors even when the command also rejects. Do not forward provider
-  // errors to the Engine logger: server response strings can contain credentials or mail data.
+  // ImapFlow emits socket errors as well as rejecting commands. The runner owns sanitized reporting.
   client.on('error', onSocketError)
   try {
     await client.connect()
@@ -145,9 +147,9 @@ export async function connectImap(
       'authenticationFailed' in error &&
       error.authenticationFailed
     ) {
-      throw new ImapAuthError()
+      throw new ImapAuthError(undefined, { cause: error })
     }
-    throw new Error('Could not connect to the IMAP server over TLS')
+    throw new Error('Could not connect to the IMAP server over TLS', { cause: error })
   }
 }
 
@@ -156,8 +158,8 @@ export async function verifyImapAccount(credentials: ImapCredentials): Promise<v
   try {
     await connectImap(imap)
     await imap.mailboxOpen('INBOX', { readOnly: true })
-  } catch {
-    throw new Error('Could not sign in to IMAP and open INBOX over TLS')
+  } catch (cause) {
+    throw new ImapAuthError('Could not sign in to IMAP and open INBOX over TLS', { cause })
   } finally {
     imap.close()
   }
@@ -165,8 +167,8 @@ export async function verifyImapAccount(credentials: ImapCredentials): Promise<v
   const smtp = createSmtpClient(credentials.smtp)
   try {
     await smtp.verify()
-  } catch {
-    throw new Error('Could not sign in to SMTP over TLS')
+  } catch (cause) {
+    throw new Error('Could not sign in to SMTP over TLS', { cause })
   } finally {
     smtp.close()
   }

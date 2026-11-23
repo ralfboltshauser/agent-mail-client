@@ -5,6 +5,7 @@ import { assertOwner } from '../mail/senders/actions.ts'
 import { forgetDecision } from '../mail/triage/erasure.ts'
 import { exportHistory, readHistory } from '../mail/triage/history.ts'
 import type { AppEnv } from './app.ts'
+import { readJson } from './json.ts'
 
 export function triageHistoryRoutes(db: Db) {
   const routes = new Hono<AppEnv>()
@@ -20,7 +21,7 @@ export function triageHistoryRoutes(db: Db) {
     return c.json(readHistory(db, query.data))
   })
   routes.post('/export', async (c) => {
-    const input = TriageExportInput.safeParse(await c.req.json().catch(() => null))
+    const input = TriageExportInput.safeParse(await readJson(c.req))
     if (!input.success)
       return c.json({ error: 'bad_request', message: 'Invalid export scope' }, 400)
     return c.body(exportHistory(db, input.data), 200, {

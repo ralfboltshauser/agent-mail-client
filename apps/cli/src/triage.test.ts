@@ -1,11 +1,17 @@
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { isCorrelationId, newRunId, REQUEST_ID_HEADER, RUN_ID_HEADER } from '@amc/observability'
+import { cliLogDirectory } from '@amc/observability/node'
 import { SubmitTriagePrediction } from '@amc/protocol'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
-import { runTriage, type TriageHarness, withTriageGrant } from './triage.ts'
+import { closeClientLogs } from './observability.ts'
+import { runTriage, type TriageHarness, triageWithGrant, withTriageGrant } from './triage.ts'
 
 const config = { engineUrl: 'http://engine.invalid', token: 'owner' }
 const decision = { threadId: 'a:t1', bucket: 'Reply', reason: 'The sender asked a question' }
@@ -33,6 +39,7 @@ function fixture({
   let holder: string
   let grantName: string
   const originalFetch = globalThis.fetch
+  const engineRequests: { requestId: string | null; runId: string | null }[] = []
   vi.stubGlobal('fetch', async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const req = new Request(input, init)
     const url = new URL(req.url)
@@ -83,6 +90,10 @@ function fixture({
       return Response.json({ revoked: 'test-token' })
     }
     expect(url.pathname).toBe('/mcp')
+    engineRequests.push({
+      requestId: req.headers.get(REQUEST_ID_HEADER),
+      runId: req.headers.get(RUN_ID_HEADER),
+    })
     expect(req.headers.get('Authorization')).toBe('Bearer agent')
     const server = new McpServer({ name: 'engine-fixture', version: '1' })
     const json = (data: unknown) => ({
@@ -190,7 +201,7 @@ function fixture({
     await server.connect(transport)
     return transport.handleRequest(req)
   })
-  return { getThread, setBucket, revoke, list, mint, submit }
+  return { getThread, setBucket, revoke, list, mint, submit, engineRequests }
 }
 
 const harness: TriageHarness = async ({ url, bearer, allowReads }) => {
@@ -222,9 +233,49 @@ const harness: TriageHarness = async ({ url, bearer, allowReads }) => {
   }
 }
 
-afterEach(() => vi.unstubAllGlobals())
+let logHome: string
+beforeEach(async () => {
+  logHome = await mkdtemp(join(tmpdir(), 'amc-triage-test-'))
+  vi.stubEnv('HOME', logHome)
+  vi.stubEnv('XDG_STATE_HOME', logHome)
+})
+afterEach(async () => {
+  await closeClientLogs()
+  vi.unstubAllGlobals()
+  vi.unstubAllEnvs()
+  await rm(logHome, { recursive: true, force: true })
+})
 
 describe('amc triage', () => {
+  it('uses the admitted worker run ID in Engine MCP requests and CLI logs', async () => {
+    vi.stubEnv('AMC_LOG_LEVEL', 'info')
+    const { engineRequests } = fixture({ dryRun: true })
+    const runId = newRunId()
+    const stop = async () => {
+      throw new Error('Worker fixture failure')
+    }
+    await expect(
+      triageWithGrant({ ...config, token: 'agent' }, true, false, signal(), stop, runId),
+    ).rejects.toThrow('Worker fixture failure')
+    await closeClientLogs()
+
+    expect(engineRequests.length).toBeGreaterThan(1)
+    expect(engineRequests.every((request) => request.runId === runId)).toBe(true)
+    const requests = engineRequests.map(({ requestId }) => requestId)
+    expect(requests.every(isCorrelationId)).toBe(true)
+    expect(new Set(requests).size).toBe(requests.length)
+    const logs = await readFile(join(cliLogDirectory(), 'cli.log'), 'utf8')
+    expect(
+      logs
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line)),
+    ).toEqual([
+      expect.objectContaining({ event: 'span.started', operation: 'triage.run', runId }),
+      expect.objectContaining({ event: 'span.finished', outcome: 'error', runId }),
+    ])
+  })
+
   it('passes Claude a schema without the Draft 2020-12 meta-schema', async () => {
     fixture({ dryRun: true })
     await runTriage(config, 'a', true, signal(), async ({ schema }) => {

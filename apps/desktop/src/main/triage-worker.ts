@@ -1,4 +1,9 @@
-import { describeTriageFailure, TriageFailure, triageWithGrant } from '@amc/cli/triage'
+import {
+  closeClientLogs,
+  describeTriageFailure,
+  TriageFailure,
+  triageWithGrant,
+} from '@amc/cli/triage'
 import { isCorrelationId, type RunId } from '@amc/observability'
 import type { TriageResult } from '../shared/api'
 
@@ -23,7 +28,7 @@ port.on('message', ({ data }: { data: TriageWorkerRequest }) => {
   if (!isCorrelationId(runId)) return
   const deadline = AbortSignal.timeout(120_000)
   const signal = AbortSignal.any([controller.signal, deadline])
-  void triageWithGrant({ engineUrl, token }, false, recent, signal)
+  void triageWithGrant({ engineUrl, token }, false, recent, signal, undefined, runId)
     .then((results): TriageWorkerReply => {
       const assigned = results.filter((result) => 'updated' in result && result.updated).length
       return { runId, assigned, skipped: results.length - assigned }
@@ -36,5 +41,9 @@ port.on('message', ({ data }: { data: TriageWorkerRequest }) => {
       )
       return { runId, failure: { reason, className } }
     })
-    .then((reply) => port.postMessage(reply))
+    .then(async (reply) => {
+      // Main terminates the utility process when it receives this reply.
+      await closeClientLogs()
+      port.postMessage(reply)
+    })
 })

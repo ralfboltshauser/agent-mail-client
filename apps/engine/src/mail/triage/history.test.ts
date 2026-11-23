@@ -2,9 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { Writable } from 'node:stream'
 import { TriageHistoryQuery } from '@amc/protocol'
-import pino from 'pino'
 import { expect, it } from 'vitest'
 import { authenticate, issueToken } from '../../auth/tokens.ts'
 import { BlobStore } from '../../blobs.ts'
@@ -12,6 +10,7 @@ import { restoreDatabase } from '../../db/backups.ts'
 import { backupTo, migrate, openDatabase, transaction } from '../../db/database.ts'
 import { MIGRATIONS } from '../../db/migrations.ts'
 import { createApp } from '../../http/app.ts'
+import { createLogger } from '../../log.ts'
 import { testConfig, testDb } from '../../test-support.ts'
 import { decideSender } from '../senders/actions.ts'
 import { MailStore } from '../store.ts'
@@ -163,15 +162,9 @@ it('gates history, JSONL and forget on owner admin; removes shared reasons from 
   const closeLedger = openErasureLedger(db, join(config.dataDir, ERASURE_LEDGER_FILE))
   const { first, second, actionId, edit } = sharedDecision(db)
   const logs: string[] = []
-  const log = pino(
-    new Writable({
-      write(chunk, _encoding, done) {
-        logs.push(String(chunk))
-        done()
-      },
-    }),
-  )
-  const app = createApp({ db, config, log })
+  const logRoutes = new Set<string>()
+  const log = createLogger('debug', logRoutes, (line) => logs.push(line))
+  const app = createApp({ db, config, log, logRoutes })
   const owner = issueToken(db, { kind: 'cli', name: 'owner', scopes: ['admin'] }).secret
   const agent = issueToken(db, {
     kind: 'agent',

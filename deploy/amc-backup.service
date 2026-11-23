@@ -10,7 +10,7 @@ User=amc
 Group=amc
 Environment=AMC_CONFIG=/etc/amc/config.json
 Environment=NODE_ENV=production
-ExecStart=/opt/amc/node/bin/node --disable-warning=ExperimentalWarning --enable-source-maps /opt/amc/current/amc-engine.mjs backup
+ExecStart=/opt/amc/node/bin/node --disable-warning=ExperimentalWarning --enable-source-maps /opt/amc/current/amc-engine.mjs backup --journal
 
 # ADR 0003: the Engine's data and secrets are its own. Lock everything else down.
 UMask=0077

@@ -40,9 +40,9 @@ export function openAvatarIndex(dataDir: string, databasePath: string, log: Logg
     chmodSync(filename, 0o600)
     db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL')
     return new SqliteAvatarIndex(db, `${dev}:${ino}:${birthtimeMs}`)
-  } catch {
+  } catch (err) {
     db?.close()
-    log.warn('using disposable in-memory sender avatar cache')
+    log.log('warn', 'avatar.cache.failed', { stage: 'open', err })
     return new SqliteAvatarIndex(new DatabaseSync(':memory:'))
   }
 }

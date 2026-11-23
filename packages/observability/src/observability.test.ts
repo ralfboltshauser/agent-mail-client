@@ -1,5 +1,7 @@
 import { Hono } from 'hono'
 import { describe, expect, expectTypeOf, it, vi } from 'vitest'
+import { engineEvents } from './engine-events.ts'
+import type { EventName } from './events.ts'
 import { type RequestLogEnv, requestLogging } from './hono.ts'
 import {
   createLogger,
@@ -10,6 +12,7 @@ import {
   newRunId,
   REQUEST_ID_HEADER,
   type RendererLogReport,
+  RUN_ID_HEADER,
   resolveLogLevel,
   sanitizeError,
   sanitizeErrorMessage,
@@ -45,6 +48,54 @@ function expectPrivate(output: string) {
 }
 
 describe('structured logger', () => {
+  it('projects all Engine events with provider and request canaries present', () => {
+    const lines: string[] = []
+    const log = createLogger({
+      component: 'engine',
+      level: 'debug',
+      routes: new Set(['/v1/diagnostics']),
+      sink: (line) => lines.push(line),
+      stackFiles,
+    })
+    for (const [event, spec] of Object.entries(engineEvents)) {
+      const fields = Object.fromEntries(
+        Object.entries(spec.fields).map(([field, rule]) => [
+          field,
+          typeof rule !== 'string'
+            ? rule[0]
+            : rule === 'route'
+              ? '/v1/diagnostics'
+              : rule === 'error'
+                ? maliciousError()
+                : rule === 'status'
+                  ? 500
+                  : rule === 'boolean'
+                    ? true
+                    : 1,
+        ]),
+      )
+      log.log(
+        'error',
+        event as EventName,
+        {
+          ...fields,
+          subject: secret,
+          body: secret,
+          ownerReason: secret,
+          authorization: secret,
+          displayName: secret,
+          attachmentName: secret,
+          sender: secret,
+          recipient: secret,
+          url: secret,
+        } as never,
+        { accountId: secret, requestId: newRequestId() },
+      )
+    }
+    expect(lines.map((line) => JSON.parse(line).event)).toEqual(Object.keys(engineEvents))
+    expectPrivate(lines.join('\n'))
+  })
+
   it('allows declared metadata and drops mail canaries through each logger entry point', async () => {
     const lines: string[] = []
     const log = createLogger({
@@ -254,12 +305,19 @@ describe('request correlation', () => {
     app.onError((_error, c) => c.text('failed', 500))
     for (const route of app.routes) routes.add(route.path)
     const requestId = newRequestId()
+    const runId = newRunId()
     const ok = await app.request(`/item/${canaries[0]}?secret=${canaries[1]}`, {
-      headers: { [REQUEST_ID_HEADER]: requestId, Authorization: `Bearer ${canaries[2]}` },
+      headers: {
+        [REQUEST_ID_HEADER]: requestId,
+        [RUN_ID_HEADER]: runId,
+        Authorization: `Bearer ${canaries[2]}`,
+      },
     })
     expect(await ok.text()).toBe(requestId)
     expect(ok.headers.get(REQUEST_ID_HEADER)).toBe(requestId)
-    const fail = await app.request('/failure', { headers: { [REQUEST_ID_HEADER]: secret } })
+    const fail = await app.request('/failure', {
+      headers: { [REQUEST_ID_HEADER]: secret, [RUN_ID_HEADER]: secret },
+    })
     const replacement = fail.headers.get(REQUEST_ID_HEADER)
     expect(isCorrelationId(replacement)).toBe(true)
     expect(fail.status).toBe(500)
@@ -271,6 +329,7 @@ describe('request correlation', () => {
         status: 200,
         route: '/item/:id',
         requestId,
+        runId,
       }),
       expect.objectContaining({
         level: 'error',

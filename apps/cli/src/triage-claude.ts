@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir, userInfo } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
+import { cliFailure } from './observability.ts'
 import type { TriageHarness } from './triage.ts'
 import { TriageFailure, type TriageFailureReason } from './triage-errors.ts'
 
@@ -64,7 +65,8 @@ export const runClaude: TriageHarness = async ({
     let auth: { loggedIn?: unknown; authMethod?: unknown; apiProvider?: unknown } | null
     try {
       auth = JSON.parse(stdout)
-    } catch {
+    } catch (parseError) {
+      cliFailure('harness-auth', parseError)
       throw new ClaudeAuthError('agent-auth-check')
     }
     if (auth?.loggedIn === false) throw new ClaudeAuthError('agent-auth')
@@ -135,6 +137,7 @@ export const runClaude: TriageHarness = async ({
     signal.addEventListener('abort', stop, { once: true })
     if (signal.aborted) stop()
     let inventoryAccepted = false
+    let malformedOutput = false
     child.stderr.resume()
     try {
       let result: unknown
@@ -145,8 +148,10 @@ export const runClaude: TriageHarness = async ({
         let event: ClaudeEvent | null
         try {
           event = JSON.parse(line)
-        } catch {
+        } catch (error) {
           // Some CLI failures use plain text instead of stream-json.
+          if (!malformedOutput) cliFailure('harness-output', error)
+          malformedOutput = true
           continue
         }
         if (event?.type === 'system' && event.subtype === 'init') {
@@ -186,6 +191,9 @@ export const runClaude: TriageHarness = async ({
       await stopped.catch(() => {})
     }
   } finally {
-    await rm(cwd, { recursive: true, force: true })
+    await rm(cwd, { recursive: true, force: true }).catch((error: unknown) => {
+      cliFailure('harness-cleanup', error)
+      throw error
+    })
   }
 }

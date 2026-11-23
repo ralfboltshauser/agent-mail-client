@@ -9,6 +9,14 @@ export const errorClasses = [
   'TimeoutError',
   'HTTPException',
   'EngineError',
+  'GmailHttpError',
+  'GmailPubSubError',
+  'OAuthError',
+  'ImapAuthError',
+  'ImapSyncFailure',
+  'ImapIdleFailure',
+  'OutboxDeliveryError',
+  'PurgeJobError',
   'SenderError',
   'DraftError',
   'DraftRevisionConflict',
@@ -123,5 +131,20 @@ export function sanitizeError(error: unknown, files: OwnStackFiles = new Map()):
   } catch {
     // Error fields can be getters or a Proxy can throw during inspection.
     return { class: 'UnknownError', message: '[redacted]', stack: [] }
+  }
+}
+
+/** Stored errors are untrusted data. Rebuild the envelope and omit stack paths. */
+export function projectStoredError(value: unknown): SafeError | undefined {
+  if (!value || typeof value !== 'object') return
+  const stored = value as Partial<SafeError>
+  const errorClass = known(errorClasses, stored.class)
+  if (!errorClass) return
+  const code = known(errorCodes, stored.code)
+  return {
+    class: errorClass,
+    ...(code ? { code } : {}),
+    message: sanitizeErrorMessage(stored.message),
+    stack: [],
   }
 }

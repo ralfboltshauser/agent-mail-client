@@ -68,7 +68,7 @@ export class GmailAccountSync {
   readonly #api: GmailApi
   readonly #store: MailStore
   readonly #state: AccountState
-  readonly #log: Logger
+  readonly #log: () => Logger
   // Each runner owns one signal. Replacement invalidates it before starting a new runner.
   readonly #signal: AbortSignal | undefined
   readonly #seen = new Set<string>()
@@ -82,13 +82,13 @@ export class GmailAccountSync {
     api: GmailApi,
     store: MailStore,
     state: AccountState,
-    log: Logger,
+    log: Logger | (() => Logger),
     signal?: AbortSignal,
   ) {
     this.#api = api
     this.#store = store
     this.#state = state
-    this.#log = log
+    this.#log = typeof log === 'function' ? log : () => log
     this.#signal = signal
   }
 
@@ -202,8 +202,6 @@ export class GmailAccountSync {
     this.#signal?.throwIfAborted()
     if (this.#store.writeEpoch(account) !== epoch) return changes
     this.#state.saveCursor({ historyId: latest })
-    if (changes > 0)
-      this.#log.info({ account: this.#state.accountId, changes }, 'gmail changes applied')
     return changes
   }
 
@@ -322,7 +320,7 @@ export class GmailAccountSync {
   async #resync(): Promise<void> {
     const profile = await this.#api.profile(this.#signal)
     this.#signal?.throwIfAborted()
-    this.#log.warn({ account: this.#state.accountId }, 'gmail history expired; resyncing')
+    this.#log().log('warn', 'sync.gmail.history.reset', {}, { accountId: this.#state.accountId })
     this.#state.saveCursor({ historyId: profile.historyId })
     this.#state.saveBackfill({
       phase: 'all',
@@ -379,7 +377,12 @@ export class GmailAccountSync {
         removed++
       }
     }
-    this.#log.info({ account: this.#state.accountId, removed }, 'reconciled after resync')
+    this.#log().log(
+      'info',
+      'sync.gmail.history.reconciled',
+      { count: removed },
+      { accountId: this.#state.accountId },
+    )
     this.#seen.clear()
     return true
   }

@@ -3,6 +3,7 @@ import { writeFile } from 'node:fs/promises'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { closeClientLogs } from '@amc/cli/triage'
 import {
   fetchWithRequestId,
   isCorrelationId,
@@ -1065,11 +1066,8 @@ app.setPath('userData', profile)
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
-  const settings = configureDesktopLogs(
-    profile === defaultProfile ? macLogDirectory() : join(profile, 'logs'),
-    profile,
-    import.meta.url,
-  )
+  const logDirectory = profile === defaultProfile ? macLogDirectory() : join(profile, 'logs')
+  const settings = configureDesktopLogs(logDirectory, profile, import.meta.url)
   const report = limitRendererReports(() => rendererLog)
   ipcMain.handle(RENDERER_LOG_CHANNEL, (event, payload: unknown) => {
     if (ownMainFrame(event, window?.webContents, rendererUrl)) report(payload)
@@ -1081,13 +1079,7 @@ if (!app.requestSingleInstanceLock()) {
     .whenReady()
     .then(() => {
       protectRemoteImageRequests(session.defaultSession)
-      feedback = registerFeedbackIpc(
-        () => window,
-        openWindow,
-        (stage) => {
-          mainLog.log('warn', 'feedback.launch.failed', { stage })
-        },
-      )
+      feedback = registerFeedbackIpc(() => window, openWindow, logDirectory, desktopLogger)
       buildMenu()
       triage = new AutoTriage({
         enabled: !existsSync(triageOffFile()),
@@ -1181,7 +1173,9 @@ if (!app.requestSingleInstanceLock()) {
         if (changedTimer) clearTimeout(changedTimer)
         return Promise.allSettled([
           flushDrafts(),
-          Promise.resolve(stoppingTriage).finally(() => settings.close()),
+          Promise.resolve(stoppingTriage).finally(() =>
+            Promise.all([settings.close(), closeClientLogs()]),
+          ),
         ])
       },
       // The replica already has each staged edit. Exit even if the Engine or triage stalls.

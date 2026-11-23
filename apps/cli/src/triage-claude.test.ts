@@ -6,6 +6,7 @@ import { runClaude } from './triage-claude.ts'
 
 const { execFile, spawn } = vi.hoisted(() => ({ execFile: vi.fn(), spawn: vi.fn() }))
 vi.mock('node:child_process', () => ({ execFile, spawn }))
+vi.mock('./observability.ts', () => ({ cliFailure: vi.fn() }))
 
 afterEach(() => {
   vi.resetAllMocks()

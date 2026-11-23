@@ -10,6 +10,7 @@ import {
 } from './events.ts'
 import { newRunId } from './ids.ts'
 
+export { cliCommand } from './client-events.ts'
 export { rendererFailureSources } from './desktop-events.ts'
 export {
   type ErrorClass,
@@ -34,6 +35,7 @@ export {
   newRunId,
   REQUEST_ID_HEADER,
   type RequestId,
+  RUN_ID_HEADER,
   type RunId,
 } from './ids.ts'
 
@@ -43,9 +45,10 @@ export {
   triageFailureMessages,
 } from './triage-diagnostics.ts'
 
-const levels = ['debug', 'info', 'warn', 'error'] as const
+export const levels = ['debug', 'info', 'warn', 'error'] as const
 export type Level = (typeof levels)[number]
-export type Component = 'engine' | 'main' | 'renderer' | 'cli' | 'mcp'
+export const components = ['engine', 'main', 'renderer', 'cli', 'mcp'] as const
+export type Component = (typeof components)[number]
 export type Sink = (line: string) => void
 
 export function resolveLogLevel(value: unknown, fallback: Level = 'info'): Level {
@@ -77,7 +80,7 @@ function ownValue(object: unknown, key: string): unknown {
     : undefined
 }
 
-function safeScope(scope: unknown) {
+export function safeScope(scope: unknown) {
   try {
     return Object.fromEntries(
       Object.entries(scopeRules).flatMap(([key, valid]) => {
@@ -90,7 +93,7 @@ function safeScope(scope: unknown) {
   }
 }
 
-function validField(rule: FieldRule, value: unknown, routes?: ReadonlySet<string>): boolean {
+export function validField(rule: FieldRule, value: unknown, routes?: ReadonlySet<string>): boolean {
   switch (rule) {
     case 'route':
       return typeof value === 'string' && routes?.has(value) === true
@@ -114,8 +117,7 @@ export function createLogger({
   routes,
   stackFiles,
 }: LoggerOptions): Logger {
-  if (!['engine', 'main', 'renderer', 'cli', 'mcp'].includes(component))
-    throw new TypeError('Invalid AMC log component')
+  if (!components.includes(component)) throw new TypeError('Invalid AMC log component')
   const threshold = levels.indexOf(resolveLogLevel(level))
 
   function scoped(context: LogScope, spanId?: string, parentSpanId?: string): Logger {

@@ -1,13 +1,27 @@
 import { execFile } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
-import { isCorrelationId, REQUEST_ID_HEADER } from '@amc/observability'
-import { expect, it } from 'vitest'
+import { isCorrelationId, newRequestId, newRunId, REQUEST_ID_HEADER } from '@amc/observability'
+import { afterEach, beforeEach, expect, it } from 'vitest'
+
+let logHome: string
+beforeEach(async () => {
+  logHome = await mkdtemp(join(tmpdir(), 'amc-cli-test-home-'))
+})
+afterEach(async () => {
+  await rm(logHome, { recursive: true, force: true })
+})
+
+const logEnv = () => ({ HOME: logHome, XDG_STATE_HOME: logHome, XDG_CONFIG_HOME: logHome })
+const localLogs = () =>
+  process.platform === 'darwin'
+    ? join(logHome, 'Library', 'Logs', 'AMC')
+    : join(logHome, 'amc', 'logs')
 
 it.each(['0', '1'])('reports a missing triage account with AMC_DEBUG=%s', async (debug) => {
   let requestId: string | string[] | undefined
@@ -31,6 +45,7 @@ it.each(['0', '1'])('reports a missing triage account with AMC_DEBUG=%s', async 
       {
         env: {
           ...process.env,
+          ...logEnv(),
           AMC_ENGINE_URL: `http://127.0.0.1:${address.port}`,
           AMC_TOKEN: 'test',
           AMC_DEBUG: debug,
@@ -38,10 +53,15 @@ it.each(['0', '1'])('reports a missing triage account with AMC_DEBUG=%s', async 
       },
     )
     const message = 'Error: Choose an Account with --account <id> (see amc accounts --json)'
-    const stderr = debug === '1' ? expect.stringMatching(/\n\s+at /) : `${message}\n`
+    const stderr =
+      debug === '1' ? expect.stringMatching(/\n\s+at /) : expect.stringContaining(`${message}\n`)
     await expect(result).rejects.toMatchObject({ code: 1, stdout: '', stderr })
     await expect(result).rejects.toHaveProperty('stderr', expect.stringContaining(message))
     expect(isCorrelationId(requestId)).toBe(true)
+    const [record] = (await readFile(join(localLogs(), 'cli.log'), 'utf8')).trim().split('\n')
+    const failure = JSON.parse(record ?? '')
+    expect(failure).toMatchObject({ event: 'cli.command.failed', command: 'triage', requestId })
+    await expect(result).rejects.toHaveProperty('stderr', expect.stringContaining(failure.runId))
   } finally {
     server.close()
   }
@@ -99,6 +119,7 @@ it.each([
       {
         env: {
           ...process.env,
+          ...logEnv(),
           AMC_ENGINE_URL: `http://127.0.0.1:${address.port}`,
           AMC_TOKEN: 'test',
         },
@@ -126,6 +147,7 @@ it('reports unavailable backup health from an older Engine in doctor', async () 
       {
         env: {
           ...process.env,
+          ...logEnv(),
           AMC_ENGINE_URL: `http://127.0.0.1:${address.port}`,
           AMC_TOKEN: 'test',
         },
@@ -171,6 +193,7 @@ it('fetches deferred bodies before printing a thread', async () => {
       {
         env: {
           ...process.env,
+          ...logEnv(),
           AMC_ENGINE_URL: `http://127.0.0.1:${address.port}`,
           AMC_TOKEN: 'test',
         },
@@ -224,6 +247,7 @@ it('submits a no-reply Snooze when the Engine advertises Snooze', async () => {
       {
         env: {
           ...process.env,
+          ...logEnv(),
           AMC_ENGINE_URL: `http://127.0.0.1:${address.port}`,
           AMC_TOKEN: 'test',
         },
@@ -413,6 +437,7 @@ async function cliFor(server: ReturnType<typeof createServer>, env: NodeJS.Proce
       {
         env: {
           ...process.env,
+          ...logEnv(),
           AMC_ENGINE_URL: `http://127.0.0.1:${address.port}`,
           AMC_TOKEN: 'fixture',
           ...env,
@@ -420,3 +445,76 @@ async function cliFor(server: ReturnType<typeof createServer>, env: NodeJS.Proce
       },
     )
 }
+
+it('prints only projected local logs and correlates rotated records by run and request', async () => {
+  const runId = newRunId()
+  const requestId = newRequestId()
+  const canary = 'Synthetic Owner Reason subject@example.test https://synthetic.invalid/token'
+  await mkdir(localLogs(), { recursive: true })
+  const record = {
+    ts: new Date().toISOString(),
+    level: 'warn',
+    component: 'cli',
+    event: 'cli.command.failed',
+    command: 'triage',
+    operation: 'command',
+    status: 'failed',
+    runId,
+    requestId,
+    err: { class: 'Error', message: canary },
+    subject: canary,
+  }
+  await writeFile(join(localLogs(), 'cli.log.2'), `${JSON.stringify(record)}\n`)
+  await writeFile(
+    join(localLogs(), 'cli.log'),
+    `{ broken ${canary}\n${JSON.stringify({ msg: canary })}\n`,
+  )
+  const run = (...args: string[]) =>
+    promisify(execFile)(
+      process.execPath,
+      [fileURLToPath(new URL('./main.ts', import.meta.url)), 'logs', ...args],
+      { env: { ...process.env, ...logEnv() } },
+    )
+  const { stdout } = await run(
+    '--component',
+    'cli',
+    '--since',
+    '1h',
+    '--level',
+    'warn',
+    '--run',
+    runId,
+    '--request',
+    requestId,
+  )
+  expect(JSON.parse(stdout)).toMatchObject({
+    event: record.event,
+    runId,
+    requestId,
+    err: { class: 'Error', message: '[redacted]' },
+  })
+  expect(stdout).not.toContain(canary)
+  await expect(run('--private-option-with-canary')).rejects.toHaveProperty(
+    'stderr',
+    expect.not.stringContaining('private-option-with-canary'),
+  )
+})
+
+it('degrades gracefully for an older Engine and supplies a fresh authenticated request ID', async () => {
+  const server = createServer((req, res) => {
+    expect(req.url).toBe('/v1/diagnostics')
+    expect(req.headers.authorization).toBe('Bearer fixture')
+    expect(isCorrelationId(req.headers[REQUEST_ID_HEADER])).toBe(true)
+    res.writeHead(404).end(JSON.stringify({ message: 'synthetic private text' }))
+  })
+  server.listen(0, '127.0.0.1')
+  try {
+    const run = await cliFor(server)
+    const { stdout, stderr } = await run('diagnostics')
+    expect(stdout).toBe('')
+    expect(stderr).toContain('unavailable on this Engine version')
+    expect(stderr).not.toContain('synthetic private text')
+  } finally {
+    server.close()
+  }
+})

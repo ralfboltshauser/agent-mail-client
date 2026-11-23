@@ -20,8 +20,9 @@ export function runTriageProcess(
     accountId,
     false,
     AbortSignal.any([signal, quitting]),
-    (grant) => runWorker({ ...grant, recent, runId }, signal, quitting),
+    (grant, grantedRunId) => runWorker({ ...grant, recent, runId: grantedRunId }, signal, quitting),
     3_000,
+    runId,
   )
 }
 

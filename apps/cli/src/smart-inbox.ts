@@ -291,15 +291,15 @@ export function registerSmartInboxCommands(
 async function saveAvatar(config: CliConfig, digest: string, out: string) {
   if (!/^[0-9a-f]{64}$/.test(digest)) throw new Error('Invalid cached PNG digest')
   const path = `/v1/sender-avatars/${digest}`
-  const response = await fetch(new URL(path, config.engineUrl), {
-    headers: { Authorization: `Bearer ${config.token}` },
+  const image = await response(config.engineUrl, path, {
+    token: config.token,
     redirect: 'error',
     signal: AbortSignal.timeout(10_000),
   })
-  if (!response.ok || response.headers.get('content-type') !== 'image/png' || !response.body)
+  if (image.headers.get('content-type') !== 'image/png' || !image.body)
     throw new Error('Engine did not return a cached PNG')
   const chunks: Uint8Array[] = []
-  const reader = response.body.getReader()
+  const reader = image.body.getReader()
   let size = 0
   for (;;) {
     const { value, done } = await reader.read()

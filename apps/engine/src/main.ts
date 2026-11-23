@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { type EventFields, newRunId } from '@amc/observability'
 import { serve } from '@hono/node-server'
 import { createPairingCode } from './auth/tokens.ts'
 import { BlobStore } from './blobs.ts'
@@ -10,11 +11,12 @@ import { databasePath, loadConfig } from './config.ts'
 import { Sealer } from './crypto.ts'
 import { backupDatabase, lockDatabaseFiles, restoreDatabase } from './db/backups.ts'
 import { migrate, openDatabase } from './db/database.ts'
+import { EngineDiagnostics, OperationStatus } from './db/diagnostics.ts'
 import { createApp } from './http/app.ts'
 import { serveComposerSocket } from './http/composer-socket.ts'
 import { senderAvatarRoutes } from './http/sender-avatars.ts'
 import { triageRoutes } from './http/triage.ts'
-import { createLogger } from './log.ts'
+import { createLogger, type Logger } from './log.ts'
 import { SenderAvatars } from './mail/avatars/index.ts'
 import { openAvatarIndex } from './mail/avatars/store.ts'
 import { gmailDelivery, imapDelivery, imapDraftMirror, publishSent } from './mail/delivery.ts'
@@ -59,6 +61,24 @@ Usage:
 
 The config file is read from $AMC_CONFIG or /etc/amc/config.json.`
 
+type EngineStage = EventFields<'engine.stage.finished'>['stage']
+
+function recordStage<T>(log: Logger | undefined, stage: EngineStage, run: () => T): T {
+  const start = performance.now()
+  try {
+    const result = run()
+    log?.log('info', 'engine.stage.finished', { stage, durationMs: performance.now() - start })
+    return result
+  } catch (err) {
+    log?.log('error', 'engine.stage.finished', {
+      stage,
+      durationMs: performance.now() - start,
+      err,
+    })
+    throw err
+  }
+}
+
 async function main(argv: string[]) {
   const [command = 'serve', ...rest] = argv
   if (command === '--help' || command === '-h' || command === 'help') {
@@ -70,11 +90,36 @@ async function main(argv: string[]) {
     return
   }
 
-  const config = loadConfig()
-  const log = createLogger(config.logLevel)
-  for (const dir of [config.dataDir, config.blobDir, config.backupDir]) {
-    mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const journal =
+    command === 'serve' ||
+    ((command === 'backup' || command === 'migrate') && rest.includes('--journal'))
+  const bootstrap = journal ? createLogger() : undefined
+  const config = recordStage(bootstrap, 'config', loadConfig)
+  const logRoutes = new Set<string>()
+  const log = createLogger(journal ? config.logLevel : 'silent', logRoutes)
+  if (journal) {
+    const consoleStatus = new OperationStatus()
+    // Parser and transport dependencies can write untrusted text to console, even in quiet mode.
+    // Drop their text and structured arguments at the service boundary.
+    const dependencyLog = (...args: unknown[]) => {
+      const err = args.find((arg) => arg instanceof Error) ?? new Error()
+      const count = consoleStatus.failure(err)
+      if (count) log.log('warn', 'engine.runtime.failed', { source: 'console', count, err })
+    }
+    console.error = console.warn = console.info = console.log = console.debug = dependencyLog
+    process.on('uncaughtException', (err) => {
+      log.log('error', 'engine.runtime.failed', { source: 'uncaught', count: 1, err })
+      process.exitCode = 1
+      // Fatal service exceptions must end the process after pending journal writes drain.
+      process.stdout.write('', () => process.exit(1))
+    })
   }
+  const diagnostics = new EngineDiagnostics()
+  recordStage(journal ? log : undefined, 'directories', () => {
+    for (const dir of [config.dataDir, config.blobDir, config.backupDir]) {
+      mkdirSync(dir, { recursive: true, mode: 0o700 })
+    }
+  })
   const dbPath = databasePath(config)
   if (command === 'restore') {
     const [source] = rest
@@ -86,26 +131,53 @@ async function main(argv: string[]) {
     return
   }
 
-  const guard = lockDatabaseFiles(config.dataDir)
   if (command === 'backup') {
+    const backupLog = log.with({ runId: newRunId() })
+    const start = performance.now()
     try {
-      process.env.SQLITE_TMPDIR = config.backupDir
-      console.log(`Verified backup written to ${backupDatabase(dbPath, config.backupDir)}`)
-    } finally {
-      guard.close()
+      const guard = lockDatabaseFiles(config.dataDir)
+      try {
+        process.env.SQLITE_TMPDIR = config.backupDir
+        const target = backupDatabase(dbPath, config.backupDir)
+        if (!journal) console.log(`Verified backup written to ${target}`)
+        backupLog.log('info', 'deploy.backup.succeeded', {
+          stage: 'nightly',
+          durationMs: performance.now() - start,
+          count: 1,
+          recovered: false,
+        })
+      } finally {
+        guard.close()
+      }
+    } catch (err) {
+      backupLog.log('error', 'deploy.backup.failed', {
+        stage: 'nightly',
+        durationMs: performance.now() - start,
+        count: 1,
+        err,
+      })
+      throw err
     }
     return
   }
 
   process.env.SQLITE_TMPDIR = config.dataDir
-  const db = openDatabase(dbPath)
-  const version = migrate(db, { backupDir: config.backupDir, log })
+  const { guard, db } = recordStage(journal ? log : undefined, 'database', () => {
+    const guard = lockDatabaseFiles(config.dataDir)
+    try {
+      return { guard, db: openDatabase(dbPath) }
+    } catch (err) {
+      guard.close()
+      throw err
+    }
+  })
+  const version = migrate(db, { backupDir: config.backupDir, log, status: diagnostics.migrations })
 
   switch (command) {
     case 'migrate':
       db.close()
       guard.close()
-      console.log(`Schema version ${version}`)
+      if (!journal) console.log(`Schema version ${version}`)
       return
     case 'pair': {
       const kind = rest.includes('--desktop') ? 'desktop' : 'cli'
@@ -117,183 +189,258 @@ async function main(argv: string[]) {
       return
     }
     case 'serve': {
-      const closeErasureLedger = openErasureLedger(db, join(config.dataDir, ERASURE_LEDGER_FILE))
-      const bridge = setInterval(() => {
-        try {
-          if (!backfillLegacyBatch(db)) clearInterval(bridge)
-        } catch {
-          clearInterval(bridge)
-          log.error('Legacy triage history backfill paused until Engine restart')
-        }
-      }, 100)
-      bridge.unref()
+      const initializing = performance.now()
+      try {
+        const closeErasureLedger = openErasureLedger(db, join(config.dataDir, ERASURE_LEDGER_FILE))
+        const bridge = setInterval(() => {
+          try {
+            if (!backfillLegacyBatch(db)) clearInterval(bridge)
+          } catch (err) {
+            clearInterval(bridge)
+            log.log('error', 'engine.stage.finished', {
+              stage: 'legacy-backfill',
+              durationMs: 0,
+              err,
+            })
+          }
+        }, 100)
+        bridge.unref()
 
-      const sealer = Sealer.fromSecretsDir(config.secretsDir)
-      const blobs = new BlobStore(config.blobDir)
-      const snoozeEnabled = config.features.snooze
-      const store = new MailStore(db, blobs)
-      const queries = new MailQueries(db, snoozeEnabled, blobs)
-      let oauth: OAuthClient | null = null
-      const oauthClient = () => {
-        oauth ??= loadOAuthClient(config.secretsDir)
-        return oauth
-      }
-      const sync = new SyncManager({
-        db,
-        store,
-        sealer,
-        log,
-        oauthClient,
-        gmailPubSub: config.gmailPubSubProject
-          ? gmailPubSub(config.gmailPubSubProject, config.secretsDir)
-          : undefined,
-      })
-      const drafts = new Drafts(db, store, (accountId) => {
-        const gmail = sync.gmailApi(accountId)
-        if (gmail) return gmail
-        const imap = sync.imapProvider(accountId)
-        return imap
-          ? imapDraftMirror(imap, () => sync.imapProvider(accountId)?.draftEndpoint)
-          : null
-      })
-      // The durable claim must reach disk before a provider may accept a send.
-      db.exec('PRAGMA synchronous = FULL')
-      const outbox = new Outbox(
-        db,
-        (accountId) => {
-          const gmail = sync.gmailApi(accountId)
-          if (gmail) return gmailDelivery(gmail)
-          const imap = sync.imapProvider(accountId)
-          return imap ? imapDelivery(imap) : null
-        },
-        (message, id, receipt) => {
-          publishSent(store, drafts, message, id, receipt)
-          markConfirmedReply(store, message, id, receipt)
-        },
-      )
-      const mutations = new Mutations(store, (accountId) => sync.gmailApi(accountId), log, {
-        snoozeEnabled,
-        imap: (accountId, work) => sync.organiseImap(accountId, work),
-      })
-      const stopping = new AbortController()
-      setMaxListeners(0, stopping.signal)
-      let editorScript: Promise<string> | undefined
-      const avatars = new SenderAvatars(openAvatarIndex(config.dataDir, dbPath, log), log, {
-        enabled: process.env.AMC_REMOTE_AVATARS !== '0',
-        shutdown: stopping.signal,
-      })
-      const app = createApp({
-        db,
-        config,
-        log,
-        mutations,
-        outbox,
-        shutdownSignal: stopping.signal,
-        smartInbox: {
-          avatars: senderAvatarRoutes(db, avatars),
-          triage: triageRoutes(db),
-          ownerActions: correctionActions(store),
-        },
-        composerScript: () => {
-          editorScript ??= composerScript()
-          return editorScript
-        },
-        mail: { db, store, queries, blobs, sealer, sync, oauthClient, drafts, log },
-      })
-      let stopPurgeMaintenance: (() => Promise<void>) | undefined
-      const server = serve(
-        {
-          createServer,
-          fetch: app.fetch,
-          hostname: config.listen.host,
-          port: config.listen.port,
-        },
-        () => {
-          stopPurgeMaintenance = startPurgeMaintenance(db, dbPath, log)
-          log.info(
-            { version: VERSION, schemaVersion: version, ...config.listen },
-            'engine listening',
-          )
-        },
-      )
-      const closeComposer = serveComposerSocket(
-        server as ReturnType<typeof createServer>,
-        config,
-        db,
-        drafts,
-      )
-      sync.start()
-      mutations.start()
-      const sends = setInterval(() => {
-        void outbox.runDue().catch(() => log.error('Could not advance the Outbox'))
-      }, 500)
-      let mirroring: Promise<void> | undefined
-      const mirrors = setInterval(() => {
-        mirroring ??= drafts
-          .mirrorPending()
-          .catch(() => log.error('Could not mirror drafts'))
-          .finally(() => {
-            mirroring = undefined
+        const sealer = Sealer.fromSecretsDir(config.secretsDir)
+        const blobs = new BlobStore(config.blobDir)
+        const snoozeEnabled = config.features.snooze
+        const store = new MailStore(db, blobs)
+        const queries = new MailQueries(db, snoozeEnabled, blobs)
+        let oauth: OAuthClient | null = null
+        const oauthClient = () => {
+          oauth ??= loadOAuthClient(config.secretsDir)
+          return oauth
+        }
+        const sync = new SyncManager({
+          db,
+          store,
+          sealer,
+          log,
+          diagnostics,
+          oauthClient,
+          gmailPubSub: config.gmailPubSubProject
+            ? gmailPubSub(config.gmailPubSubProject, config.secretsDir)
+            : undefined,
+        })
+        const drafts = new Drafts(
+          db,
+          store,
+          (accountId) => {
+            const gmail = sync.gmailApi(accountId)
+            if (gmail) return gmail
+            const imap = sync.imapProvider(accountId)
+            return imap
+              ? imapDraftMirror(imap, () => sync.imapProvider(accountId)?.draftEndpoint)
+              : null
+          },
+          log,
+        )
+        // The durable claim must reach disk before a provider may accept a send.
+        db.exec('PRAGMA synchronous = FULL')
+        const outbox = new Outbox(
+          db,
+          (accountId) => {
+            const gmail = sync.gmailApi(accountId)
+            if (gmail) return gmailDelivery(gmail)
+            const imap = sync.imapProvider(accountId)
+            return imap ? imapDelivery(imap) : null
+          },
+          (message, id, receipt) => {
+            publishSent(store, drafts, message, id, receipt)
+            markConfirmedReply(store, message, id, receipt)
+          },
+          Date.now,
+          { log, status: diagnostics.outbox },
+        )
+        const mutations = new Mutations(store, (accountId) => sync.gmailApi(accountId), log, {
+          snoozeEnabled,
+          imap: (accountId, work) => sync.organiseImap(accountId, work),
+        })
+        const stopping = new AbortController()
+        setMaxListeners(0, stopping.signal)
+        let editorScript: Promise<string> | undefined
+        const avatars = new SenderAvatars(openAvatarIndex(config.dataDir, dbPath, log), log, {
+          enabled: process.env.AMC_REMOTE_AVATARS !== '0',
+          shutdown: stopping.signal,
+        })
+        const app = createApp({
+          db,
+          config,
+          log,
+          logRoutes,
+          diagnostics,
+          mutations,
+          outbox,
+          shutdownSignal: stopping.signal,
+          smartInbox: {
+            avatars: senderAvatarRoutes(db, avatars),
+            triage: triageRoutes(db),
+            ownerActions: correctionActions(store),
+          },
+          composerScript: () => {
+            editorScript ??= composerScript()
+            return editorScript
+          },
+          mail: { db, store, queries, blobs, sealer, sync, oauthClient, drafts, log },
+        })
+        let stopPurgeMaintenance: (() => Promise<void>) | undefined
+        const listening = performance.now()
+        const server = serve(
+          {
+            createServer,
+            fetch: app.fetch,
+            hostname: config.listen.host,
+            port: config.listen.port,
+          },
+          () => {
+            stopPurgeMaintenance = startPurgeMaintenance(db, dbPath, log, diagnostics.purge)
+            log.log('info', 'engine.stage.finished', {
+              stage: 'listen',
+              durationMs: performance.now() - listening,
+            })
+          },
+        )
+        const closeComposer = serveComposerSocket(
+          server as ReturnType<typeof createServer>,
+          config,
+          db,
+          drafts,
+          log,
+        )
+        server.once('error', (err) => {
+          log.log('error', 'engine.stage.finished', {
+            stage: 'listen',
+            durationMs: performance.now() - listening,
+            err,
           })
-      }, 3000)
-      let pullingDrafts: Promise<unknown> | undefined
-      const imports = setInterval(() => {
-        pullingDrafts ??= Promise.allSettled(
-          queries.accounts().map(async ({ id }) => {
-            const api = sync.gmailApi(id)
-            if (api) await drafts.pullGmail(id, api)
-            else {
-              const imap = sync.imapProvider(id)
-              if (imap) await drafts.pullImap(id, imap)
-            }
-          }),
-        ).finally(() => {
-          pullingDrafts = undefined
-        })
-      }, 30_000)
-      const shutdown = (signal: string) => {
-        if (stopping.signal.aborted) return
-        log.info({ signal }, 'shutting down')
-        clearInterval(bridge)
-        clearInterval(sends)
-        clearInterval(mirrors)
-        clearInterval(imports)
-        closeComposer()
-        const httpClosed = new Promise<void>((resolve, reject) => {
-          server.close((error) => (error ? reject(error) : resolve()))
-        })
-        stopping.abort()
-        const timeout = setTimeout(() => {
-          log.error({ signal }, 'Engine shutdown timed out')
           process.exit(1)
-        }, 10_000)
-        void Promise.allSettled([
-          httpClosed.finally(() => mutations.stop()),
-          sync.stop(),
-          stopPurgeMaintenance?.(),
-          outbox.waitForIdle(),
-          mirroring,
-          pullingDrafts,
-        ])
-          .then((results) => {
-            clearTimeout(timeout)
-            if (results.some((result) => result.status === 'rejected')) {
-              log.error({ signal }, 'Could not drain Engine work during shutdown')
-              process.exit(1)
-            }
-            closeErasureLedger()
-            db.close()
-            guard.close()
-            process.exit(0)
+        })
+        sync.start()
+        mutations.start()
+        const sends = setInterval(() => {
+          void outbox.runDue().catch(() => {
+            // The lane records the failure once even when multiple timer ticks await it.
           })
-          .catch(() => {
-            log.error({ signal }, 'Could not close the Engine database during shutdown')
+        }, 500)
+        const mirrorStatus = new OperationStatus()
+        const importStatus = new OperationStatus()
+        let mirroring: Promise<void> | undefined
+        const mirrors = setInterval(() => {
+          mirroring ??= drafts
+            .mirrorPending()
+            .then(() => {
+              if (mirrorStatus.success().recovered)
+                log.log('info', 'engine.stage.finished', { stage: 'draft-mirror', durationMs: 0 })
+            })
+            .catch((err) => {
+              if (mirrorStatus.failure(err))
+                log.log('error', 'engine.stage.finished', {
+                  stage: 'draft-mirror',
+                  durationMs: 0,
+                  err,
+                })
+            })
+            .finally(() => {
+              mirroring = undefined
+            })
+        }, 3000)
+        let pullingDrafts: Promise<unknown> | undefined
+        const imports = setInterval(() => {
+          pullingDrafts ??= Promise.allSettled(
+            queries.accounts().map(async ({ id }) => {
+              const api = sync.gmailApi(id)
+              if (api) await drafts.pullGmail(id, api)
+              else {
+                const imap = sync.imapProvider(id)
+                if (imap) await drafts.pullImap(id, imap)
+              }
+            }),
+          )
+            .then((results) => {
+              const failure = results.find((result) => result.status === 'rejected')
+              if (failure) {
+                if (importStatus.failure(failure.reason))
+                  log.log('error', 'engine.stage.finished', {
+                    stage: 'draft-import',
+                    durationMs: 0,
+                    err: failure.reason,
+                  })
+              } else if (importStatus.success().recovered) {
+                log.log('info', 'engine.stage.finished', { stage: 'draft-import', durationMs: 0 })
+              }
+            })
+            .finally(() => {
+              pullingDrafts = undefined
+            })
+        }, 30_000)
+        const shutdown = () => {
+          if (stopping.signal.aborted) return
+          const start = performance.now()
+          const report = (err?: unknown) =>
+            log.log(err ? 'error' : 'info', 'engine.stage.finished', {
+              stage: 'shutdown',
+              durationMs: performance.now() - start,
+              err,
+            })
+          clearInterval(bridge)
+          clearInterval(sends)
+          clearInterval(mirrors)
+          clearInterval(imports)
+          closeComposer()
+          const httpClosed = new Promise<void>((resolve, reject) => {
+            server.close((error) => (error ? reject(error) : resolve()))
+          })
+          stopping.abort()
+          const timeout = setTimeout(() => {
+            report(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
             process.exit(1)
-          })
+          }, 10_000)
+          void Promise.allSettled([
+            httpClosed.finally(() => mutations.stop()),
+            sync.stop(),
+            stopPurgeMaintenance?.(),
+            outbox.waitForIdle(),
+            mirroring,
+            pullingDrafts,
+          ])
+            .then((results) => {
+              clearTimeout(timeout)
+              const failure = results.find((result) => result.status === 'rejected')
+              if (failure) {
+                report(failure.reason)
+                process.exit(1)
+              }
+              closeErasureLedger()
+              db.close()
+              guard.close()
+              report()
+              process.exit(0)
+            })
+            .catch((err) => {
+              report(err)
+              process.exit(1)
+            })
+        }
+        process.on('SIGTERM', shutdown)
+        process.on('SIGINT', shutdown)
+        log.log('info', 'engine.stage.finished', {
+          stage: 'initialize',
+          durationMs: performance.now() - initializing,
+        })
+        return
+      } catch (err) {
+        log.log('error', 'engine.stage.finished', {
+          stage: 'initialize',
+          durationMs: performance.now() - initializing,
+          err,
+        })
+        throw err
       }
-      process.on('SIGTERM', () => shutdown('SIGTERM'))
-      process.on('SIGINT', () => shutdown('SIGINT'))
-      return
     }
     default:
       db.close()
@@ -303,7 +450,14 @@ async function main(argv: string[]) {
   }
 }
 
-main(process.argv.slice(2)).catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : error)
+const args = process.argv.slice(2)
+main(args).catch((error: unknown) => {
+  const command = args[0] ?? 'serve'
+  if (
+    command !== 'serve' &&
+    !((command === 'backup' || command === 'migrate') && args.includes('--journal'))
+  ) {
+    console.error(error instanceof Error ? error.message : error)
+  }
   process.exit(1)
 })
