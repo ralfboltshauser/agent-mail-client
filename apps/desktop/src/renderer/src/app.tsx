@@ -1,6 +1,7 @@
-import { useCallback } from 'react'
+import { useCallback, useEffect } from 'react'
 import { toast } from 'sonner'
 import { getAmc } from '@/lib/amc'
+import { copyDiagnostics } from '@/lib/diagnostics'
 import { failureText } from '@/lib/failure'
 import { type FailureDetails, formatFailure } from '../../shared/failure'
 import { MailLoading } from './components/mail-state'
@@ -17,10 +18,12 @@ export function App() {
   const gate = usePairingGate()
   const { dark, setTheme } = useTheme()
   const toggleTheme = useCallback(() => setTheme(dark ? 'light' : 'dark'), [dark, setTheme])
-  if (!gate.phase) return <MailLoading label="Opening AMC" />
+  useEffect(() => getAmc().onCopyDiagnostics(copyDiagnostics), [])
   return (
     <TooltipProvider delayDuration={400}>
-      {gate.phase === 'unpaired' ? (
+      {!gate.phase ? (
+        <MailLoading label="Opening AMC" />
+      ) : gate.phase === 'unpaired' ? (
         <PairScreen
           savedEngineUrl={gate.engineUrl}
           recoveryMessage={gate.error}
@@ -36,7 +39,7 @@ export function App() {
           onToggleTheme={toggleTheme}
         />
       )}
-      <FeedbackEntry />
+      {gate.phase && <FeedbackEntry />}
       <Toaster theme={dark ? 'dark' : 'light'} position="top-right" offset={{ top: 56 }} />
     </TooltipProvider>
   )

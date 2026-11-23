@@ -12,6 +12,7 @@ export function deferred<T>() {
 
 export function rendererAdapter() {
   const fixture = createMailFixture('inbox')
+  const diagnosticsListeners = new Set<() => void>()
   const feedbackListeners = new Set<() => void>()
   const settingsListeners = new Set<() => void>()
   let pause: (() => Promise<void>) | undefined
@@ -27,6 +28,11 @@ export function rendererAdapter() {
 
   const api = {
     ...fixture.api,
+    copyDiagnostics: vi.fn(fixture.api.copyDiagnostics),
+    onCopyDiagnostics: (listener) => {
+      diagnosticsListeners.add(listener)
+      return () => diagnosticsListeners.delete(listener)
+    },
     feedback: {
       ...fixture.api.feedback,
       onOpen(listener: () => void) {
@@ -62,6 +68,9 @@ export function rendererAdapter() {
 
   return {
     api,
+    emitCopyDiagnostics() {
+      for (const listener of diagnosticsListeners) listener()
+    },
     emitFeedback() {
       for (const listener of feedbackListeners) listener()
     },

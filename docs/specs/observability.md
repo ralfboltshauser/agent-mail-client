@@ -239,7 +239,7 @@ Use the baseline line indexes above to locate catches after rebase. Each slice o
 
 - [ ] Own `apps/desktop/src/main/` except the feedback modules named in C, plus preload, shared IPC types and renderer except `features/feedback/`. Send Engine IDs from `main/engine.ts`, pairing in `main/index.ts`, and any direct HTTP implementation. Wire runtime/window/React and IPC reports through preload with main-frame checks and backpressure. Add Desktop debug settings and a main-owned logger for each Desktop component.
 - [ ] Instrument `main/{sync,organise,triage-process,triage-worker,auto-triage,handoff,draft-updates,renderer-load,replica,auth}.ts` and associated UI failure Details. Add `desktop.sync.failed`, `desktop.ipc.failed`, `triage.run.failed`, `handoff.failed`, and their start or recovery markers to `desktop-events.ts`. Review Desktop main and renderer catches in the index, with special attention to recovery loops and user-facing toasts. Rebase the concurrent triage fix before integrating with `auto-triage.ts` and `components/triage-status.tsx`.
-- [ ] Own the menu and IPC wiring for **Copy diagnostics**. Use the sanitized reader C provides. Wire the Engine request and use C's snapshot contract with A's dedicated projection. Keep screenshot feedback capture and launch code in C.
+- [x] Add **Help → Copy Diagnostics** and a command palette entry. Main copies Desktop sync state, health warning codes, installed versions, the validated Engine snapshot or its availability and error class, and up to 50 recent local warnings and errors from the shared reader.
 
 ### C. CLI, MCP and feedback excerpt
 
