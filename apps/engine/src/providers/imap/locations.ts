@@ -23,14 +23,17 @@ export interface MessageLocation extends Location {
 
 export const PAGE = 32
 
-// A merged message card must have exactly one verified Drafts location.
+// A merged card must have one verified Drafts location. The arrival key survives
+// other folders' resets and is regenerated when this location is recreated.
 export const imapDraftRevisionSql = `(
   SELECT CASE WHEN count(*) = 1 AND min(l.verified) = 1 THEN
-    max(json_array(a.mailbox_generation, l.path_key, l.validity, l.uid, l.source_blob))
+    max(CASE WHEN l.arrival_key IS NOT NULL THEN
+      json_array(l.arrival_key, l.path_key, l.validity, l.uid, l.source_blob)
+    END)
   END
-  FROM imap_location l JOIN account a ON a.id = l.account_id
+  FROM imap_location l
   WHERE l.message_id = m.id AND l.account_id = m.account_id
-    AND l.label_id = m.account_id || ':DRAFT' AND a.kind = 'imap'
+    AND l.label_id = m.account_id || ':DRAFT'
 )`
 
 export class ImapLocations {

@@ -25,6 +25,7 @@ import { buildMessage } from './mime.ts'
 import { type Delivery, Outbox } from './outbox.ts'
 import { MailQueries } from './queries.ts'
 import { MailStore } from './store.ts'
+import { advanceMailboxGeneration } from './triage/annotations.ts'
 
 function setup(imap?: { mirror: () => DraftMirror; delivery: () => Delivery }) {
   const db = testDb()
@@ -951,6 +952,9 @@ it('opens a verified IMAP draft and rejects ambiguous locations and pre-relink c
       body: 'IMAP draft',
       id: drafts.list()[0]?.id,
     })
+    // A UIDVALIDITY reset in another folder bumps this counter without touching Drafts.
+    advanceMailboxGeneration(db, account)
+    expect((await open()).status).toBe(200)
     locations.put(location.folder, location.uidValidity, { ...item, uid: uid + 1 }, incoming, hash)
     expect((await open()).status).toBe(404)
     locations.remove(location.folder.path, location.uidValidity, uid + 1)
