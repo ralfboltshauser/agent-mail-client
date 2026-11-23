@@ -9,6 +9,7 @@ import {
   type ThreadSummary,
 } from '@amc/protocol'
 import type { AmcApi, ReplicaThreadMessage, SyncStatus, TriageStatus } from '../../../shared/api'
+import { createActivityFixture } from './agent-activity-fixture'
 import { htmlReaderFixture, readerImage, readerImageAttachment } from './html-reader-fixtures'
 
 /** Synthetic data only. The fixture never calls the preload bridge. */
@@ -19,6 +20,7 @@ export function createFixture(scenario: string): AmcApi {
 export function createMailFixture(scenario: string) {
   const htmlReader = scenario === 'html-reader'
   const now = Date.now()
+  const activity = scenario === 'activity' ? createActivityFixture(now) : null
   const account: AccountSummary = {
     id: 'studio',
     kind: 'gmail',
@@ -213,6 +215,8 @@ export function createMailFixture(scenario: string) {
         statusListeners.delete(listener)
       }
     },
+    copyDiagnostics: async () => {},
+    onCopyDiagnostics: () => () => {},
     onOpenSettings: () => () => {},
     onOpenThread: () => () => {},
     onChanged: (listener) => {
@@ -364,6 +368,7 @@ export function createMailFixture(scenario: string) {
       nextBefore: null,
     }),
     undoAgentAction: async () => {},
+    ...activity,
     contacts: async () => [],
     startCompose: async ({ mode, threadId }) => {
       if (discarded) draftNumber++

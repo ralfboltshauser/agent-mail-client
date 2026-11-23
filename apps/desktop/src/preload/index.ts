@@ -54,6 +54,13 @@ const api: AmcApi = {
   reportFailure,
   logSettings: invoke('logSettings') as AmcApi['logSettings'],
   setDebugLogging: invoke('setDebugLogging') as AmcApi['setDebugLogging'],
+  copyDiagnostics: invoke('copyDiagnostics') as AmcApi['copyDiagnostics'],
+  onCopyDiagnostics(listener) {
+    const handler = () => listener()
+    ipcRenderer.on('amc:copyDiagnostics', handler)
+    ipcRenderer.send('amc:diagnosticsReady')
+    return () => ipcRenderer.off('amc:copyDiagnostics', handler)
+  },
   feedback: {
     onOpen(listener) {
       const handler = () => listener()
