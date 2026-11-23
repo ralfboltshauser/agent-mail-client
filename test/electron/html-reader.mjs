@@ -286,6 +286,54 @@ async function main() {
     console.log(
       `HTML reader verified in Chromium ${process.versions.chrome}, minimum-window iframe ${narrowReaderWidth}px, horizontal gutter ${scrollbar}px`,
     )
+
+    const sidebarLayout = () =>
+      run(() => {
+        const sidebar = document.querySelector('[data-slot="sidebar-content"]')
+        const viewport = sidebar.querySelector('[data-radix-scroll-area-viewport]') ?? sidebar
+        const inbox = sidebar.querySelector('[aria-current="page"]')
+        return {
+          width: inbox.getBoundingClientRect().width,
+          overflow: viewport.scrollHeight - viewport.clientHeight,
+          overlay: !!sidebar.querySelector('[data-slot="scroll-area-thumb"]'),
+          focusPreserved: document.activeElement === inbox,
+        }
+      })
+    await waitFor(() => run(() => !!document.querySelector('[aria-current="page"]')), 'sidebar')
+    win.setContentSize(1360, 760)
+    await waitFor(() => run(() => innerHeight === 760), 'short window')
+    const closed = await sidebarLayout()
+    assert.equal(closed.overflow, 0, 'folders fit with Triage closed')
+    assert.equal(closed.overlay, false)
+    await run(() => {
+      const sidebar = document.querySelector('[data-slot="sidebar-content"]')
+      sidebar.querySelector('[aria-current="page"]').focus()
+      const triage = [...sidebar.querySelectorAll('button')].find(
+        (button) => button.textContent.trim() === 'Triage',
+      )
+      triage.click()
+    })
+    await waitFor(async () => (await sidebarLayout()).overflow > 0, 'sidebar overflow')
+    const open = await sidebarLayout()
+    assert.equal(open.width, closed.width, 'overflow keeps the Inbox button the same width')
+    assert.ok(open.focusPreserved)
+    await waitFor(async () => (await sidebarLayout()).overlay, 'sidebar overlay thumb')
+    const wheelTarget = await run(() => {
+      const viewport = document.querySelector('[data-radix-scroll-area-viewport]')
+      const bounds = viewport.getBoundingClientRect()
+      return { x: Math.round(bounds.left + 40), y: Math.round(bounds.top + 40) }
+    })
+    await wc.debugger.sendCommand('Input.dispatchMouseEvent', {
+      type: 'mouseWheel',
+      ...wheelTarget,
+      deltaX: 0,
+      deltaY: 200,
+    })
+    await waitFor(
+      () => run(() => document.querySelector('[data-radix-scroll-area-viewport]').scrollTop > 0),
+      'native sidebar wheel scrolling',
+    )
+    console.log(`Sidebar row kept its ${open.width}px width when Triage overflowed`)
   } catch (error) {
     console.error(error)
     process.exitCode = 1
