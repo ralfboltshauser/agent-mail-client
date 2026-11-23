@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
-    "dev": "node --watch src/main.ts serve"
+    "dev": ": \"${AMC_CONFIG:?Set AMC_CONFIG to an isolated development config}\" && node --watch src/main.ts serve"
   },
   "dependencies": {
     "@amc/composer": "workspace:*",

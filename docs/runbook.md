@@ -22,9 +22,9 @@ if Finder offers the confirmation. On newer macOS versions, try opening AMC,
 then use **Open Anyway** under **System Settings → Privacy & Security**.
 [Apple's Gatekeeper instructions](https://support.apple.com/en-us/102445)
 
-Quit the electron-vite dev instance before switching to the installed app. Both
-use the same profile at `~/Library/Application Support/@amc/desktop`. The desktop
-stores its Engine token in `credentials/pairing.json`, using the same file
+The installed app uses the profile at
+`~/Library/Application Support/@amc/desktop`. The desktop stores its Engine token
+in `credentials/pairing.json`, using the same file
 permissions as the CLI (mode `0600` in a `0700` directory). Code running as your
 Mac user can read these credentials.
 
@@ -70,6 +70,25 @@ Desktop main revokes the run's grant by name after the worker exits, including
 on crash or timeout. On quit it stops the worker and allows up to three
 seconds for cleanup. If revocation cannot reach the Engine, the grant expires
 five minutes after minting.
+
+## Development profiles
+
+T3 starts new independent AMC threads in worktrees based on `main` and installs
+dependencies from the frozen lockfile before the first turn. If you create a
+checkout manually, run `pnpm install --frozen-lockfile`.
+
+Start the desktop app with `pnpm --filter @amc/desktop dev` or the **Desktop dev**
+action in T3. Unpackaged builds keep their replica, credentials, feedback, and
+logs in `apps/desktop/.amc-dev/` in that checkout. To test an installed build
+with a disposable profile, pass an explicit `--user-data-dir=<absolute path>`.
+For synthetic mail without pairing, use the [renderer harness](../test/renderer/README.md).
+
+To run a local Engine, create a separate config with a loopback listener on an
+unused port and `dataDir`, `blobDir`, `secretsDir`, and `backupDir` under a
+dedicated local test directory. Create the secrets directory with mode `0700`
+and generate a local encryption key with `(umask 077; openssl rand 32 > /path/to/dev-secrets/key)`.
+Run `AMC_CONFIG=/absolute/path/to/dev-config.json pnpm --filter @amc/engine dev`.
+Use provider fakes for mail operations.
 
 ## Layout
 
