@@ -171,6 +171,7 @@ export interface SmartInboxApi {
   listSenders(query: Partial<SenderListQuery>): Promise<SenderList>
   decideSender(input: SenderDecision): Promise<OwnerActionStatus>
   reviewFilter?(input: FilterReviewInput): Promise<OwnerActionStatus>
+  filterThread?(threadId: string, actionId: string): Promise<OwnerActionStatus>
   restoreFiltered?(threadId: string, actionId: string): Promise<OwnerActionStatus>
   editOwnerReason?(
     actionId: string,

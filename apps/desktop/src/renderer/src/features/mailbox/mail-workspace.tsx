@@ -24,6 +24,7 @@ import {
   selectedThreadQuery,
 } from './mailbox-queries'
 import { ReaderToolbar } from './reader-toolbar'
+import { useFilterActions } from './use-filter-actions'
 import { useInboxSections } from './use-inbox-sections'
 import { useMailCommands } from './use-mail-commands'
 import { useMailCompose } from './use-mail-compose'
@@ -127,6 +128,8 @@ export function MailWorkspace({
     snoozeEnabled,
   })
   const { organise, organisePicker, canUndoOrganise, setBucketPickerId } = actions
+  const getFilterActions = useFilterActions(accounts, labels)
+  const filterActions = selected ? getFilterActions(selected) : []
   const review = useTriageReview(accountId)
   const { close: closeReview } = review
   const compose = useMailCompose(activeThread, accountId ?? accounts[0]?.id, review.onQueued)
@@ -181,6 +184,7 @@ export function MailWorkspace({
     accounts,
     selected,
     hasThread: !!activeThread,
+    filterActions,
     ownView,
     snoozeEnabled,
     actions,
@@ -290,11 +294,13 @@ export function MailWorkspace({
             notification={notificationRow}
             onSelect={select}
             move={move}
+            getFilterActions={getFilterActions}
             readerToolbar={
               <ReaderToolbar
                 selected={selected}
                 activeThread={activeThread}
                 actions={actions}
+                filterActions={filterActions}
                 compose={compose}
               />
             }

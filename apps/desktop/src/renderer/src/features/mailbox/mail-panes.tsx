@@ -21,6 +21,7 @@ import {
   queryFailed,
   selectedThreadQuery,
 } from './mailbox-queries'
+import type { FilterAction } from './use-filter-actions'
 import type { InboxNavigation } from './use-inbox-sections'
 import type { useMailboxRows } from './use-mailbox-rows'
 import { NO_THREAD_IDS } from './use-mailbox-rows'
@@ -38,6 +39,7 @@ export function MailPanes({
   onSelect,
   move,
   readerToolbar,
+  getFilterActions,
   reader,
 }: {
   title: string
@@ -52,6 +54,7 @@ export function MailPanes({
   onSelect: (id: string) => void
   move: (delta: number) => void
   readerToolbar: ReactNode
+  getFilterActions: (thread: ThreadSummary) => FilterAction[]
   reader: ReactNode
 }) {
   const { search, filterText, runSearch } = mailSearch
@@ -107,6 +110,7 @@ export function MailPanes({
               selectedId={selectedId}
               onSelect={onSelect}
               onMove={move}
+              getFilterActions={getFilterActions}
               self={self}
               matchSnippets={searchRows?.snippets}
               empty={
@@ -241,11 +245,6 @@ export const MailReader = memo(function MailReader({
           onRetry={refresh}
           snoozeEnabled={snoozeEnabled}
           labelNames={labelNames}
-          filtered={
-            !!labels?.some(
-              (label) => label.managed === 'filtered' && data?.thread.labelIds.includes(label.id),
-            )
-          }
           scrollRef={scrollRef}
         />
       </div>

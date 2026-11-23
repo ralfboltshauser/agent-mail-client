@@ -3,7 +3,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import type { ReviewApi, SmartInboxApi } from '../../apps/desktop/src/shared/api'
 import { deferred, rendererAdapter } from './adapter'
 import { commits, expectBudget } from './profile'
-import { firstSubject, listbox, mount, row } from './workspace'
+import { firstSubject, listbox, mount, reader, row } from './workspace'
 
 afterEach(() => vi.unstubAllEnvs())
 
@@ -647,56 +647,148 @@ it.each([
   },
 )
 
-it('shows a count for the managed Filtered Label and restores the selected Thread', async () => {
-  const { adapter, smart, result } = await fixture()
-  const detail = await adapter.api.thread('thread-1')
-  if (!detail) throw new Error('Expected synthetic Thread')
-  const labelId = 'studio:filtered'
-  let restored = false
-  const visible = { ...detail.thread, labelIds: [labelId] }
-  const labels = await adapter.api.labels(null)
-  adapter.api.labels.mockResolvedValue([
-    ...labels,
-    {
-      id: labelId,
-      name: 'Filtered',
+it.each(['list', 'reader'] as const)(
+  'filters from the %s with ! instead of the bucket key',
+  async (area) => {
+    const { adapter, smart, result } = await fixture({ empty: true })
+    const pending = deferred<OwnerActionStatus>()
+    const filterThread = vi.fn<NonNullable<SmartInboxApi['filterThread']>>(() => pending.promise)
+    Object.assign(adapter.api, { smartInbox: { ...smart, review: smart, filterThread } })
+    await mount(adapter)
+    const target = area === 'list' ? listbox() : reader()
+    await press('!', target, { code: 'Digit1', shiftKey: true })
+    await press('!', target, { code: 'Digit1', shiftKey: true, repeat: true })
+    expect(filterThread).toHaveBeenCalledExactlyOnceWith('thread-1', expect.any(String))
+    expect(adapter.api.startCompose).not.toHaveBeenCalled()
+    expect(smart.reviewFilter).not.toHaveBeenCalled()
+    expect(row(firstSubject)).toBeTruthy()
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Filter out' }).disabled).toBe(
+      true,
+    )
+    await act(async () => pending.resolve(result(filterThread.mock.calls[0][1])))
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Filter out' }).disabled).toBe(
+      false,
+    )
+  },
+)
+
+it.each(['list', 'reader'] as const)(
+  'still opens a Forward draft with F from the %s',
+  async (area) => {
+    const { adapter, smart, result } = await fixture()
+    const filterThread = vi.fn(async (_id: string, actionId: string) => result(actionId))
+    Object.assign(adapter.api, { smartInbox: { ...smart, review: smart, filterThread } })
+    await mount(adapter)
+    await press('f', area === 'list' ? listbox() : reader(), { code: 'KeyF' })
+    expect(adapter.api.startCompose).toHaveBeenCalledExactlyOnceWith({
       accountId: 'studio',
-      providerId: 'filtered',
-      kind: 'user',
-      color: null,
-      managed: 'filtered',
-    },
-  ])
-  const counts = await adapter.api.counts(null)
-  adapter.api.counts.mockImplementation(async () => ({
-    ...counts,
-    filteredByLabel: { [labelId]: restored ? 0 : 1 },
-  }))
-  const inbox = await adapter.api.threads({ view: { kind: 'inbox' }, accountId: null })
-  adapter.api.threads.mockImplementation(async ({ view }) =>
-    view.kind === 'label' ? (restored ? [] : [visible]) : inbox,
-  )
-  adapter.api.thread.mockImplementation(async (id) =>
-    id === visible.id
-      ? {
-          ...detail,
-          thread: restored ? detail.thread : visible,
-        }
-      : null,
-  )
-  const restoreFiltered = vi.fn(async (_id: string, actionId: string) => {
-    restored = true
-    adapter.emitChanged()
-    return result(actionId)
-  })
-  Object.assign(adapter.api, { smartInbox: { ...smart, review: smart, restoreFiltered } })
+      mode: 'forward',
+      threadId: 'thread-1',
+    })
+    expect(screen.getByRole('dialog', { name: 'Compose' })).toBeTruthy()
+    expect(filterThread).not.toHaveBeenCalled()
+  },
+)
+
+it('leaves ! available for typing in the search and composer fields', async () => {
+  const { adapter, smart, result } = await fixture()
+  const filterThread = vi.fn(async (_id: string, actionId: string) => result(actionId))
+  Object.assign(adapter.api, { smartInbox: { ...smart, review: smart, filterThread } })
   await mount(adapter)
-  await click(screen.getByRole('button', { name: 'Filtered 1' }))
-  await click(screen.getByRole('button', { name: 'Restore to Inbox' }))
-  expect(restoreFiltered).toHaveBeenCalledExactlyOnceWith(visible.id, expect.any(String))
-  expect(screen.getByRole('button', { name: 'Filtered 0' })).toBeTruthy()
-  expect(screen.queryByRole('button', { name: 'Restore to Inbox' })).toBeNull()
+
+  const typeBang = async (field: HTMLElement) => {
+    field.focus()
+    await act(async () => {
+      expect(fireEvent.keyDown(field, { key: '!', code: 'Digit1', shiftKey: true })).toBe(true)
+    })
+  }
+  await typeBang(screen.getByRole('textbox', { name: /Filter mail or press Enter/ }))
+  await press('f', listbox(), { code: 'KeyF' })
+  const composer = screen.getByRole('dialog', { name: 'Compose' })
+  await typeBang(within(composer).getByRole('textbox', { name: 'Subject' }))
+  await typeBang(within(composer).getByRole('textbox', { name: 'Message body' }))
+
+  expect(filterThread).not.toHaveBeenCalled()
 })
+
+it('offers Filter out in the toolbar and targets the right-clicked Inbox row', async () => {
+  const { adapter, smart, result } = await fixture()
+  const filterThread = vi.fn(async (_id: string, actionId: string) => result(actionId))
+  Object.assign(adapter.api, { smartInbox: { ...smart, review: smart, filterThread } })
+  await mount(adapter)
+  await click(screen.getByRole('button', { name: 'Filter out' }))
+  await act(async () => fireEvent.contextMenu(row('Sunday at the studio')))
+  await click(
+    within(screen.getByRole('menu', { name: 'Thread actions' })).getByRole('menuitem', {
+      name: 'Filter out',
+    }),
+  )
+  expect(filterThread.mock.calls.map(([id]) => id)).toEqual(['thread-1', 'thread-2'])
+  expect(reader()).toBeTruthy()
+})
+
+it.each(['toolbar', 'context menu'] as const)(
+  'restores a filtered Thread via the %s',
+  async (entry) => {
+    const { adapter, smart, result } = await fixture()
+    const detail = await adapter.api.thread('thread-1')
+    if (!detail) throw new Error('Expected synthetic Thread')
+    const labelId = 'studio:filtered'
+    let restored = false
+    const visible = { ...detail.thread, labelIds: [labelId] }
+    const labels = await adapter.api.labels(null)
+    adapter.api.labels.mockResolvedValue([
+      ...labels,
+      {
+        id: labelId,
+        name: 'Filtered',
+        accountId: 'studio',
+        providerId: 'filtered',
+        kind: 'user',
+        color: null,
+        managed: 'filtered',
+      },
+    ])
+    const counts = await adapter.api.counts(null)
+    adapter.api.counts.mockImplementation(async () => ({
+      ...counts,
+      filteredByLabel: { [labelId]: restored ? 0 : 1 },
+    }))
+    const inbox = await adapter.api.threads({ view: { kind: 'inbox' }, accountId: null })
+    adapter.api.threads.mockImplementation(async ({ view }) =>
+      view.kind === 'label' ? (restored ? [] : [visible]) : inbox,
+    )
+    adapter.api.thread.mockImplementation(async (id) =>
+      id === visible.id
+        ? {
+            ...detail,
+            thread: restored ? detail.thread : visible,
+          }
+        : null,
+    )
+    const restoreFiltered = vi.fn(async (_id: string, actionId: string) => {
+      restored = true
+      adapter.emitChanged()
+      return result(actionId)
+    })
+    Object.assign(adapter.api, { smartInbox: { ...smart, review: smart, restoreFiltered } })
+    await mount(adapter)
+    await click(screen.getByRole('button', { name: 'Filtered 1' }))
+    if (entry === 'context menu') {
+      await act(async () => fireEvent.contextMenu(row(firstSubject)))
+      await click(
+        within(screen.getByRole('menu', { name: 'Thread actions' })).getByRole('menuitem', {
+          name: 'Restore to Inbox',
+        }),
+      )
+    } else {
+      await click(screen.getByRole('button', { name: 'Restore to Inbox' }))
+    }
+    expect(restoreFiltered).toHaveBeenCalledExactlyOnceWith(visible.id, expect.any(String))
+    expect(screen.getByRole('button', { name: 'Filtered 0' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Restore to Inbox' })).toBeNull()
+  },
+)
 
 it('keeps a private inline reason after transport failure and retries the same action', async () => {
   const { adapter, smart } = await fixture()

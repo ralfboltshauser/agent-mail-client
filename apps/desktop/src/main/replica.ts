@@ -384,6 +384,21 @@ export class Replica {
     return rows.map(readThreadListRow)
   }
 
+  inboxFilterMessageIds(id: string): string[] {
+    return this.db
+      .prepare(`
+        SELECT m.id FROM message m JOIN thread t ON t.id = m.thread_id
+        WHERE t.id = ?
+          AND EXISTS (SELECT 1 FROM json_each(m.data, '$.labelIds') WHERE value = t.account_id || ':INBOX')
+          AND NOT EXISTS (SELECT 1 FROM json_each(m.data, '$.labelIds')
+            WHERE value IN (t.account_id || ':SENT', t.account_id || ':DRAFT',
+              t.account_id || ':SPAM', t.account_id || ':TRASH'))
+      `)
+      .all(id)
+      .map(({ id }) => String(id))
+      .sort()
+  }
+
   thread(id: string): ThreadWithMessages | null {
     const base = this.baseThread(id)
     if (!base) return null

@@ -27,12 +27,20 @@ export const OwnerActionReasonInput = z.object({
   reason: OwnerReason.min(1).nullable(),
 })
 export type OwnerActionReasonInput = z.infer<typeof OwnerActionReasonInput>
+const inboxTargetDigest = z.string().regex(/^[a-f0-9]{64}$/)
+export const InboxFilterTarget = z.object({
+  revision: z.number().int().nonnegative(),
+  messageIds: z.array(id).min(1),
+  digest: inboxTargetDigest,
+})
+
 export const FilterReviewInput = z.object({
   threadId: id,
   decision: FilterDecisionLabel,
   messageIds: z.array(id).min(1).max(100).optional(),
   predictionId: id.optional(),
   expectedRevision: z.number().int().nonnegative(),
+  expectedInboxTarget: inboxTargetDigest.optional(),
   clientActionId: z.uuid(),
   reason: OwnerReason.optional(),
   source: z.enum(['triage-key', 'thread-action', 'cli']).optional(),

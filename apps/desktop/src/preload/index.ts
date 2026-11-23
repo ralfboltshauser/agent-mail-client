@@ -30,6 +30,7 @@ const api: AmcApi = {
     listSenders: invoke('listSenders') as SmartInboxApi['listSenders'],
     decideSender: invoke('decideSender') as SmartInboxApi['decideSender'],
     reviewFilter: invoke('reviewFilter') as NonNullable<SmartInboxApi['reviewFilter']>,
+    filterThread: invoke('filterThread') as NonNullable<SmartInboxApi['filterThread']>,
     restoreFiltered: invoke('restoreFiltered') as NonNullable<SmartInboxApi['restoreFiltered']>,
     editOwnerReason: invoke('editOwnerReason') as NonNullable<SmartInboxApi['editOwnerReason']>,
     adoptScreenedDestination: invoke(

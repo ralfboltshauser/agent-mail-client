@@ -13,6 +13,7 @@ import {
 } from 'lucide-react'
 import { useHotkeys } from '@/hooks/use-hotkeys'
 import type { View } from '../../../../shared/api'
+import type { FilterAction } from './use-filter-actions'
 import type { InboxNavigation } from './use-inbox-sections'
 import type { useMailCompose } from './use-mail-compose'
 import type { useMailDialogs } from './use-mail-dialogs'
@@ -22,6 +23,7 @@ export function useMailCommands({
   accounts,
   selected,
   hasThread,
+  filterActions,
   ownView,
   snoozeEnabled,
   actions,
@@ -40,6 +42,7 @@ export function useMailCommands({
   accounts: { id: string }[]
   selected: ThreadSummary | undefined
   hasThread: boolean
+  filterActions: FilterAction[]
   ownView: boolean
   snoozeEnabled: boolean
   actions: ReturnType<typeof useThreadActions>
@@ -164,6 +167,20 @@ export function useMailCommands({
       f: () => {
         if (!ownView) void startCompose('forward')
       },
+      ...Object.fromEntries(
+        filterActions.flatMap(({ shortcut, disabled, run }) =>
+          shortcut && !disabled && !ownView
+            ? [
+                [
+                  shortcut,
+                  (event: KeyboardEvent) => {
+                    if (!event.repeat) run()
+                  },
+                ],
+              ]
+            : [],
+        ),
+      ),
       'shift+t': (event) => {
         if (!event.repeat) handOff()
       },

@@ -5,7 +5,7 @@ import type { Mutations } from '../mail/mutations.ts'
 import { assertOwner } from '../mail/senders/actions.ts'
 import type { MailStore } from '../mail/store.ts'
 import { checkOwnerReason } from '../mail/triage/annotations.ts'
-import { listFiltered, reviewFilter } from '../mail/triage/filtering.ts'
+import { inboxFilterTarget, listFiltered, reviewFilter } from '../mail/triage/filtering.ts'
 import { threadInput } from '../mail/triage/input.ts'
 import type { AppEnv } from './app.ts'
 
@@ -28,6 +28,11 @@ export function filteredRoutes(store: MailStore, queue: Mutations) {
       return c.json({ error: 'bad_request', message: 'Invalid Filtered query' }, 400)
     const { accountId, cursor, limit, threadId } = input.data
     return c.json(listFiltered(store.db, accountId, cursor, limit, threadId))
+  })
+  routes.get('/inbox-target', (c) => {
+    const input = ListQuery.shape.threadId.unwrap().safeParse(c.req.query('threadId'))
+    if (!input.success) return c.json({ error: 'bad_request', message: 'Invalid Thread ID' }, 400)
+    return c.json(inboxFilterTarget(store.db, input.data))
   })
   routes.post('/destination/adopt', async (c) => {
     const input = AdoptScreenedDestination.safeParse(await c.req.json().catch(() => null))
