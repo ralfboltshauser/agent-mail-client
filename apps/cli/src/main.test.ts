@@ -8,6 +8,7 @@ import { text } from 'node:stream/consumers'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { isCorrelationId, newRequestId, newRunId, REQUEST_ID_HEADER } from '@amc/observability'
+import { parseMailLink } from '@amc/protocol'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 
 let logHome: string
@@ -446,6 +447,43 @@ async function cliFor(server: ReturnType<typeof createServer>, env: NodeJS.Proce
       },
     )
 }
+
+it('passes the search offset and generates an Engine-bound link with the same query', async () => {
+  const requests: URL[] = []
+  const server = createServer((req, res) => {
+    requests.push(new URL(req.url ?? '', 'http://localhost'))
+    res.setHeader('Content-Type', 'application/json')
+    res.end('{"hits":[]}')
+  })
+  server.listen(0, '127.0.0.1')
+  try {
+    const run = await cliFor(server)
+    const query = 'from:alice@example.test "annual budget"'
+    const [search, linked] = await Promise.all([
+      run('search', '--account', 'a', '--limit', '1', '--offset', '1', '--json', '--', query),
+      run('--as-agent', 'link', 'search', '--web', '--account', 'a', '--', query),
+    ])
+    expect(JSON.parse(search.stdout)).toEqual([])
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.pathname).toBe('/v1/search')
+    expect(Object.fromEntries(requests[0]?.searchParams ?? [])).toEqual({
+      q: query,
+      offset: '1',
+      limit: '1',
+      accountId: 'a',
+    })
+    const url = new URL(linked.stdout.trim())
+    expect(url.pathname).toBe('/open-mail')
+    expect(parseMailLink(decodeURIComponent(url.hash.slice(1)))).toEqual({
+      kind: 'search',
+      query,
+      accountId: 'a',
+      engineOrigin: url.origin,
+    })
+  } finally {
+    server.close()
+  }
+})
 
 it('keeps token create --agent as the name of a new grant', async () => {
   let request: unknown

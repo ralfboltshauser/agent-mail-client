@@ -17,6 +17,7 @@ import type { BlobStore } from '../blobs.ts'
 import type { Db } from '../db/database.ts'
 import { imapDraftRevisionSql } from '../providers/imap/locations.ts'
 import { type BodyParts, readBodyParts, readTextBody } from './body-blobs.ts'
+import { mailSearch } from './search.ts'
 import { senderStatusSql } from './senders/index.ts'
 import { latestInboxMessageSql } from './triage/input.ts'
 
@@ -498,60 +499,51 @@ export class MailQueries {
     return parts ? (readBodyParts(blobs, parts) ?? null) : null
   }
 
-  /** Full-text search over the entire history, best matches first, one hit per Thread. */
-  search(text: string, options: { accountId?: string; limit?: number } = {}): SearchHit[] {
-    const match = toFtsQuery(text)
-    if (!match) return []
-    const limit = Math.min(Math.max(options.limit ?? 30, 1), 200)
+  /** Search synced history, with one result per Thread and deterministic page ordering. */
+  search(
+    text: string,
+    options: { accountId?: string; limit?: number; offset?: number } = {},
+  ): SearchHit[] {
+    const query = mailSearch(text)
+    if (!query) return []
+    const { match, filters, values } = query
+    const limit = Math.min(Math.max(Math.trunc(options.limit ?? 30), 1), 200)
+    const offset =
+      options.offset !== undefined && Number.isSafeInteger(options.offset)
+        ? Math.max(options.offset, 0)
+        : 0
+    const conditions = [
+      ...(match ? ['message_fts MATCH ?'] : []),
+      ...(options.accountId ? ['m.account_id = ?'] : []),
+      ...filters,
+    ]
     const rows = this.db
       .prepare(
-        `WITH hits AS (
-           SELECT m.thread_id, bm25(message_fts, 10.0, 5.0, 1.0, 2.0) AS rank,
-                  snippet(message_fts, 2, '«', '»', '…', 12) AS match_snippet
-           FROM message_fts JOIN message m ON m.rowid = message_fts.rowid
-           WHERE message_fts MATCH ? AND (? IS NULL OR m.account_id = ?)
-           ORDER BY rank LIMIT 2000
+        `WITH hits AS MATERIALIZED (
+           SELECT m.thread_id, m.id AS message_id,
+             ${match ? 'bm25(message_fts, 10.0, 5.0, 1.0, 2.0)' : '-m.sent_at'} AS rank,
+             ${match ? "snippet(message_fts, 2, '«', '»', '…', 12)" : 'm.snippet'} AS match_snippet
+           FROM message m
+           ${match ? 'JOIN message_fts ON message_fts.rowid = m.rowid' : ''}
+           WHERE ${conditions.join(' AND ')}
          ), best AS (
-           SELECT thread_id, min(rank) AS rank, match_snippet FROM hits GROUP BY thread_id
+           SELECT thread_id, rank, match_snippet,
+             row_number() OVER (PARTITION BY thread_id ORDER BY rank, message_id) AS position
+           FROM hits
          )
          SELECT ${this.#threadColumns}, best.match_snippet
          FROM best JOIN thread t ON t.id = best.thread_id
-         ORDER BY best.rank + (strftime('%s','now') * 1000 - t.last_message_at) / 3.15e12 ASC
-         LIMIT ?`,
+         WHERE best.position = 1
+         ORDER BY ${match ? 'best.rank - t.last_message_at / 3.15e12' : 'best.rank'}, t.id
+         LIMIT ? OFFSET ?`,
       )
       .all(
-        match,
-        options.accountId ?? null,
-        options.accountId ?? null,
+        ...(match ? [match] : []),
+        ...(options.accountId ? [options.accountId] : []),
+        ...values,
         limit,
-      ) as unknown as (ThreadRow & {
-      match_snippet: string
-    })[]
+        offset,
+      ) as unknown as (ThreadRow & { match_snippet: string })[]
     return rows.map((r) => ({ ...toThread(r), matchSnippet: r.match_snippet }))
   }
-}
-
-/**
- * Turns what a person types into a safe FTS5 query: every word must match (prefix match on the
- * last one), quoted so that FTS syntax characters in the input can't break the query.
- * Supports `from:`/`to:` style field filters on the people column.
- */
-export function toFtsQuery(text: string): string | null {
-  const tokens = text.match(/(\w+:)?"[^"]*"|\S+/g) ?? []
-  const parts: string[] = []
-  tokens.forEach((raw, index) => {
-    const field = /^(from|to|cc|subject):/i.exec(raw)
-    let value = field ? raw.slice(field[0].length) : raw
-    value = value.replace(/^"|"$/g, '').replace(/"/g, '""').trim()
-    if (!value) return
-    const isLast = index === tokens.length - 1
-    const term = `"${value}"${isLast && !field ? '*' : ''}`
-    if (field) {
-      const column = field[1]?.toLowerCase() === 'subject' ? 'subject' : 'people'
-      parts.push(`${column} : ${term}`)
-    } else {
-      parts.push(term)
-    }
-  })
-  return parts.length ? parts.join(' AND ') : null
 }

@@ -132,7 +132,7 @@ export function cliLauncher(
         using db = new DatabaseSync(join(state, 'statev2.sqlite'), { readOnly: true })
         const projects = db
           .prepare(`
-          SELECT project_id AS id, title
+          SELECT project_id AS id, title, workspace_root AS workspaceRoot
           FROM projection_projects
           WHERE deleted_at IS NULL AND archived_at IS NULL AND workspace_root <> ''
           ORDER BY title COLLATE NOCASE, project_id

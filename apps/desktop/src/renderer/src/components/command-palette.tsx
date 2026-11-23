@@ -3,6 +3,7 @@ import { defaultFilter } from 'cmdk'
 import {
   Layers,
   type LucideIcon,
+  MessageCircleQuestionMark,
   Moon,
   RefreshCw,
   Search,
@@ -11,7 +12,8 @@ import {
   Undo2,
   Users,
 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { toast } from 'sonner'
 import {
   CommandDialog,
   CommandEmpty,
@@ -22,9 +24,18 @@ import {
   CommandShortcut,
 } from '@/components/ui/command'
 import { getAmc } from '@/lib/amc'
-import type { View } from '../../../shared/api'
+import { failureText, recordCaughtFailure } from '@/lib/failure'
+import type { AskAgentRuntime, View } from '../../../shared/api'
 import { navigableLabels, systemViews } from './app-sidebar'
 import { Kbd } from './ui/kbd'
+
+const runtimeDescription: Record<AskAgentRuntime, string> = {
+  'approval-required': 'T3 · Approval Required',
+  'auto-accept-edits': 'T3 · Auto-Accept Edits',
+  auto: 'T3 · Auto',
+  'full-access': 'T3 · Full Access',
+  unknown: 'Uses local T3 permissions',
+}
 
 interface CommandAction {
   name: string
@@ -36,6 +47,7 @@ interface CommandAction {
 interface Props {
   open: boolean
   onOpenChange: (open: boolean) => void
+  accountId: string | null
   accounts: AccountSummary[]
   labels: Label[]
   onView: (view: View) => void
@@ -55,6 +67,7 @@ interface Props {
 export function CommandPalette({
   open,
   onOpenChange,
+  accountId,
   accounts,
   labels,
   onView,
@@ -70,10 +83,43 @@ export function CommandPalette({
   undo,
 }: Props) {
   const [query, setQuery] = useState('')
+  const [runtime, setRuntime] = useState<AskAgentRuntime>('unknown')
+  useEffect(() => {
+    if (!open) return
+    let current = true
+    void getAmc()
+      .askAgentRuntime()
+      .then((mode) => {
+        if (current) setRuntime(mode)
+      })
+      .catch(recordCaughtFailure)
+    return () => {
+      current = false
+    }
+  }, [open])
   const run = (fn: () => void) => () => {
     onOpenChange(false)
     setQuery('')
+    setRuntime('unknown')
     fn()
+  }
+  const asking = useRef(false)
+  const ask = async () => {
+    if (asking.current) return
+    asking.current = true
+    onOpenChange(false)
+    setQuery('')
+    setRuntime('unknown')
+    const id = toast.loading('Opening Ask Agent in T3 Code…')
+    try {
+      const result = await getAmc().askAgent(query.trim(), accountId)
+      if (result.opened) toast.dismiss(id)
+      else toast.error(result.reason, { id })
+    } catch (error) {
+      toast.error('Could not open Ask Agent', { id, description: failureText(error) })
+    } finally {
+      asking.current = false
+    }
   }
   const renderAction = (item: CommandAction) => (
     <CommandItem key={item.name} value={item.name} onSelect={run(item.run)}>
@@ -86,19 +132,27 @@ export function CommandPalette({
     <CommandDialog
       open={open}
       onOpenChange={(next) => {
-        if (!next) setQuery('')
+        if (!next) {
+          setQuery('')
+          setRuntime('unknown')
+        }
         onOpenChange(next)
       }}
       onCloseAutoFocus={onCloseAutoFocus}
       title="Command palette"
-      description="Run an action, switch views or search all mail."
+      description="Run a command, search mail, or ask an agent in T3 Code."
       showCloseButton={false}
       filter={(value, search, keywords) =>
-        value === 'mail-search-fallback' ? 0.001 : defaultFilter(value, search, keywords)
+        value === 'mail-search-fallback'
+          ? 0.002
+          : value === 'ask-agent-fallback'
+            ? 0.001
+            : defaultFilter(value, search, keywords)
       }
     >
       <CommandInput
-        placeholder="Type a command or search mail…"
+        placeholder="Type a command, search, or ask about mail…"
+        maxLength={4000}
         value={query}
         onValueChange={setQuery}
       />
@@ -188,10 +242,22 @@ export function CommandPalette({
           </CommandItem>
         </CommandGroup>
         {query.trim() && (
-          <CommandGroup heading="Search all mail">
+          <CommandGroup heading="Mail">
             <CommandItem value="mail-search-fallback" onSelect={run(() => onSearch(query.trim()))}>
               <Search />
-              Search for “{query.trim()}”
+              <span className="min-w-0 truncate">Search for “{query.trim()}”</span>
+            </CommandItem>
+            <CommandItem value="ask-agent-fallback" onSelect={() => void ask()}>
+              <MessageCircleQuestionMark />
+              <span className="min-w-0">
+                <span className="block">Ask Agent in T3</span>
+                <span className="block truncate text-xs text-muted-foreground">
+                  {runtimeDescription[runtime]}
+                </span>
+              </span>
+              <CommandShortcut className="truncate tracking-normal">
+                {accounts.find((account) => account.id === accountId)?.address ?? 'All accounts'}
+              </CommandShortcut>
             </CommandItem>
           </CommandGroup>
         )}

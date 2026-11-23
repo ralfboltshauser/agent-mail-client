@@ -1,6 +1,6 @@
 import { act, fireEvent, screen, within } from '@testing-library/react'
 import { expect, it, vi } from 'vitest'
-import { deferred } from './adapter'
+import { deferred, rendererAdapter } from './adapter'
 import { commitCounts, commits, expectBudget } from './profile'
 import {
   firstSubject,
@@ -333,6 +333,82 @@ it('offers structured history search without filtering the inbox before submissi
   expect(adapter.api.search).toHaveBeenCalledExactlyOnceWith(value, account.id)
   expect(screen.queryByRole('button', { name: /Search all mail/ })).toBeNull()
   expect(document.activeElement).toBe(input)
+})
+
+it('opens a new agent thread through Cmd+K with the selected account and exact question', async () => {
+  const adapter = await mount()
+  const ask = vi.spyOn(adapter.api, 'askAgent')
+  vi.spyOn(adapter.api, 'askAgentRuntime').mockResolvedValue('full-access')
+  const [account] = await adapter.api.accounts()
+  await act(async () => fireEvent.keyDown(listbox(), { key: '1', metaKey: true }))
+  await act(async () => fireEvent.keyDown(listbox(), { key: 'k', metaKey: true }))
+  const input = screen.getByPlaceholderText('Type a command, search, or ask about mail…')
+  const question = 'Find emails from alice@example.test about the meeting'
+  await act(async () => fireEvent.change(input, { target: { value: question } }))
+  const action = screen.getByRole('option', { name: /Ask Agent in T3/ })
+  expect(within(action).getByText(account.address)).toBeTruthy()
+  expect(within(action).getByText('T3 · Full Access')).toBeTruthy()
+  await act(async () => fireEvent.click(action))
+  expect(ask).toHaveBeenCalledExactlyOnceWith(question, account.id)
+  expect(adapter.api.search).not.toHaveBeenCalled()
+})
+
+it('applies an account and search link together and ignores the previous search reply', async () => {
+  const fixture = rendererAdapter()
+  let openSearch: Parameters<typeof fixture.api.onOpenMailSearch>[0] = () => {}
+  fixture.api.onOpenMailSearch = (callback) => {
+    openSearch = callback
+    return () => {
+      openSearch = () => {}
+    }
+  }
+  const adapter = await mount(fixture)
+  const [account] = await adapter.api.accounts()
+  const [first] = await adapter.api.threads({ view: { kind: 'inbox' }, accountId: null })
+  const stale = deferred<Awaited<ReturnType<typeof adapter.api.search>>>()
+  adapter.api.search.mockReturnValueOnce(stale.promise).mockResolvedValueOnce([])
+  const input = screen.getByRole<HTMLInputElement>('textbox', { name: 'Search mail' })
+  await act(async () => fireEvent.change(input, { target: { value: 'old query' } }))
+  await act(async () => fireEvent.keyDown(input, { key: 'Enter' }))
+
+  const query = 'from:alice@example.test'
+  const engineOrigin = 'https://engine.example.test'
+  const arrivingAccount = `${account.id}-arriving`
+  await act(async () =>
+    openSearch({ kind: 'search', query, accountId: arrivingAccount, engineOrigin }),
+  )
+  expect(adapter.api.search).toHaveBeenLastCalledWith(query, arrivingAccount, 0, engineOrigin)
+  expect(input.value).toBe(query)
+  expect(screen.getByText('No matching threads')).toBeTruthy()
+  await act(async () => stale.resolve([{ ...first, matchSnippet: 'stale reply' }]))
+  expect(screen.getByText('No matching threads')).toBeTruthy()
+  expect(screen.queryByText('stale reply')).toBeNull()
+})
+
+it('keeps selection and rows while a second result page fails and is retried', async () => {
+  const adapter = await mount()
+  const [first] = await adapter.api.threads({ view: { kind: 'inbox' }, accountId: null })
+  const searchHit = { ...first, matchSnippet: first.snippet }
+  const firstPage = Array.from({ length: 50 }, (_, index) => ({
+    ...searchHit,
+    id: index === 0 ? searchHit.id : `search-${index}`,
+    subject: index === 0 ? searchHit.subject : `Synthetic search result ${index}`,
+  }))
+  const input = screen.getByRole<HTMLInputElement>('textbox', { name: 'Search mail' })
+  adapter.api.search.mockResolvedValueOnce(firstPage)
+  await act(async () => fireEvent.change(input, { target: { value: 'launch' } }))
+  await act(async () => fireEvent.keyDown(input, { key: 'Enter' }))
+  const before = mailboxNodes(searchHit.subject)
+  adapter.api.search.mockRejectedValueOnce(new Error('Engine offline'))
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Load more results' })))
+  expect(adapter.api.search).toHaveBeenLastCalledWith('launch', null, 50)
+  expect(selected()).toBe(before.selection)
+  adapter.api.search.mockResolvedValueOnce([])
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Retry search' })))
+  expect(adapter.api.search).toHaveBeenLastCalledWith('launch', null, 50)
+  expect(listbox()).toBe(before.list)
+  expect(selected()).toBe(before.selection)
+  expect(screen.queryByRole('button', { name: 'Load more results' })).toBeNull()
 })
 
 it('moves focus and selection from search to the matching threads with Arrow Down', async () => {

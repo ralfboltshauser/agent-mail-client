@@ -222,6 +222,9 @@ export function createMailFixture(scenario: string) {
     copyDiagnostics: async () => {},
     onCopyDiagnostics: () => () => {},
     onOpenSettings: () => () => {},
+    askAgentRuntime: async () => 'approval-required',
+    askAgent: async () => ({ opened: true }),
+    onOpenMailSearch: () => () => {},
     onOpenThread: () => () => {},
     onChanged: (listener) => {
       changed.add(listener)

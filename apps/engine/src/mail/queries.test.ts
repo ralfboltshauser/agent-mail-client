@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { BlobStore } from '../blobs.ts'
 import { tempDir, testDb } from '../test-support.ts'
-import { MailQueries, toFtsQuery } from './queries.ts'
+import { MailQueries } from './queries.ts'
+import { mailSearch } from './search.ts'
 import { type IncomingMessage, MailStore } from './store.ts'
 
 function msg(id: string, overrides: Partial<IncomingMessage> = {}): IncomingMessage {
@@ -106,6 +107,80 @@ describe('MailQueries', () => {
     expect(queries.search('"unbalanced')).toEqual([])
   })
 
+  it('applies directional people and UTC day filters to the same matching message', () => {
+    const { store, queries } = setup()
+    const alice = { name: 'Alice Baker', address: 'alice@example.test' }
+    store.putMessage(
+      'a',
+      [],
+      msg('sent', {
+        to: [alice],
+        bodyText: 'annual budget',
+        sentAt: Date.parse('2026-11-23'),
+      }),
+    )
+    store.putMessage(
+      'a',
+      [],
+      msg('cc', {
+        cc: [alice],
+        bodyText: 'annual budget',
+        sentAt: Date.parse('2026-11-23'),
+      }),
+    )
+    store.putMessage(
+      'a',
+      [],
+      msg('old', {
+        from: alice,
+        bodyText: 'annual budget',
+        sentAt: Date.parse('2026-11-22'),
+      }),
+    )
+    store.putMessage(
+      'a',
+      [],
+      msg('fresh', {
+        from: alice,
+        bodyText: 'annual budget',
+        sentAt: Date.parse('2026-11-23'),
+      }),
+    )
+    store.putMessage(
+      'a',
+      [],
+      msg('crossed', {
+        providerThreadId: 't-sent',
+        from: alice,
+        bodyText: 'annual report',
+        sentAt: Date.parse('2026-11-23'),
+      }),
+    )
+
+    const query = 'from:ALICE@example.test "annual budget" after:2026-11-23 before:2026-11-24'
+    expect(queries.search(query).map(({ id }) => id)).toEqual(['a:t-fresh'])
+    expect(queries.search(query, { accountId: 'other' })).toEqual([])
+    expect(queries.search('to:"Alice Baker"').map(({ id }) => id)).toEqual(['a:t-sent'])
+    expect(queries.search('cc:alice@example.test').map(({ id }) => id)).toEqual(['a:t-cc'])
+    expect(queries.search('from:alice@example.test after:2026-02-30')).toEqual([])
+  })
+
+  it('pages after deduplication even when one thread has over 2,000 matches', () => {
+    const { db, store, queries } = setup()
+    store.putMessage('a', [], msg('busy', { bodyText: 'meeting' }))
+    store.putMessage('a', [], msg('other', { bodyText: `meeting ${'discuss '.repeat(50)}` }))
+    db.exec(`
+      WITH RECURSIVE numbers(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM numbers WHERE n < 2000)
+      INSERT INTO message (id, account_id, thread_id, provider_id, body_text, sent_at)
+      SELECT 'a:extra-' || n, 'a', 'a:t-busy', 'extra-' || n, 'meeting', 1000 FROM numbers
+    `)
+    expect(queries.search('meeting', { limit: 1 }).map(({ id }) => id)).toEqual(['a:t-busy'])
+    expect(queries.search('meeting', { limit: 1, offset: 1 }).map(({ id }) => id)).toEqual([
+      'a:t-other',
+    ])
+    expect(queries.search('meeting', { limit: 1, offset: 2 })).toEqual([])
+  })
+
   it('learns contacts from mail', () => {
     const { db, store } = setup()
     store.putMessage('a', ['owner@example.com'], msg('m1'))
@@ -126,11 +201,11 @@ describe('MailQueries', () => {
   })
 })
 
-describe('toFtsQuery', () => {
+describe('mailSearch', () => {
   it('quotes terms and prefix-matches the last word', () => {
-    expect(toFtsQuery('hello wor')).toBe('"hello" AND "wor"*')
-    expect(toFtsQuery('from:bob "exact phrase"')).toBe('people : "bob" AND "exact phrase"*')
-    expect(toFtsQuery('  ')).toBeNull()
-    expect(toFtsQuery('a"b OR c')).toBe('"a""b" AND "OR" AND "c"*')
+    expect(mailSearch('hello wor')?.match).toBe('"hello" AND "wor"*')
+    expect(mailSearch('from:bob "exact phrase"')?.match).toBe('"exact phrase"')
+    expect(mailSearch('  ')).toBeNull()
+    expect(mailSearch('a"b OR c')?.match).toBe('"a""b" AND "OR" AND "c"*')
   })
 })

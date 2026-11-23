@@ -16,6 +16,36 @@ amc --as-agent draft show <draft-id> --json
 amc --as-agent draft update <draft-id> --revision <revision> --body-file revised.txt --json
 ```
 
+## Find mail and open it in Desktop
+
+```sh
+amc search --json -- 'from:alice@example.test "annual budget" after:2026-11-23'
+amc search --json --limit 50 --offset 50 -- 'from:alice@example.test'
+amc link thread -- 'account:thread'
+amc link search --account account -- 'from:alice@example.test'
+amc link search --web -- 'subject:"annual budget"'
+```
+
+Combine free text with `from:`, `to:`, `cc:`, `subject:`, `after:`, and
+`before:`. Each term and filter applies to the same message. Person filters
+match a full email address exactly or a literal substring of the name or
+address. Use quotes around a phrase or multiword field value. `after:` starts
+at the given YYYY-MM-DD in UTC, inclusive. `before:` ends at the given UTC day,
+exclusive. Date filters apply to the message timestamp. Search covers synced,
+indexed mail, including attachment filenames.
+
+Add `--offset` to retrieve further results. Count threads already returned
+and stop when a page is shorter than the limit. To reuse the same search in
+AMC, pass its query and account to `link search`. Use `--web` for T3 chat,
+then choose **Open in AMC** on the Engine page. Search links include the query
+in the URL. Copy them where that query can be shared.
+
+In AMC Desktop, open **Search & Ask** in the sidebar or press **⌘K**.
+Type your question and select **Ask Agent in T3**. This requires the local
+T3 Code CLI, an active AMC project pointing at an AMC checkout, and the
+current AMC CLI installed via `pnpm cli:install`. Update the Engine and
+Desktop to the same release for paging and browser links.
+
 Use `--reply-all` to include the other thread recipients. Repeat `--to`, `--cc`,
 or `--bcc` to override a recipient field. Each takes an address or
 `'Name <address>'`. Pass an empty value by itself to

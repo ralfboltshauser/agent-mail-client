@@ -16,6 +16,7 @@
     "enableEmbeddedAsarIntegrityValidation": true,
     "onlyLoadAppFromAsar": true
   },
+  "protocols": [{ "name": "AMC Mail", "schemes": ["amc"] }],
   "artifactName": "${productName}-${version}-${arch}.${ext}",
   "mac": {
     "target": [{ "target": "dmg", "arch": ["arm64"] }],

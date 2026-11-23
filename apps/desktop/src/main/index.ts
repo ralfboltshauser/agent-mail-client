@@ -32,12 +32,16 @@ import {
   type FilteredPage,
   FilterReviewInput,
   InboxFilterTarget,
+  MAIL_SEARCH_PAGE_SIZE,
+  type MailLinkDestination,
   MIRROR_CHANGED,
   MutationRequest,
   OwnerActionReasonInput,
+  parseMailLink,
   SenderAvatarResolve,
   SenderDecision,
   SenderListQuery,
+  sameMailEngine,
   THREAD_DRAFT_UNAVAILABLE,
   TriageExportInput,
   TriageHistoryQuery,
@@ -57,10 +61,11 @@ import {
   session,
   shell,
 } from 'electron'
-import type { SyncStatus, ThreadQuery, TriageStatus } from '../shared/api'
+import type { AskAgentResult, SyncStatus, ThreadQuery, TriageStatus } from '../shared/api'
 import { failureDetails, formatFailure, validFailure } from '../shared/failure'
 import { feedbackAccelerator } from '../shared/feedback'
 import { projectActionFailures } from './action-failures'
+import { askAgent, askAgentRuntime, pruneAgentSearches } from './ask-agent'
 import { clearPairing, loadPairing, savePairing } from './auth'
 import { AutoTriage } from './auto-triage'
 import { desktopDiagnostics, installedCliVersion } from './diagnostics'
@@ -111,6 +116,9 @@ let notificationSettings = DEFAULT_NOTIFICATION_SETTINGS
 let notifications: NewMailNotifications | null = null
 let threadNavigationReady = false
 let pendingThreadId: string | null = null
+let pendingMailLink: MailLinkDestination | null = null
+let resolvingMailLink: MailLinkDestination | null = null
+let askingAgent = false
 let pendingSettings = false
 let diagnosticsReady = false
 let pendingDiagnostics = false
@@ -277,6 +285,7 @@ function startSync(client: EngineClient) {
     }
     broadcast('amc:status', status)
     triage.setAvailable(status.phase === 'live')
+    if (status.phase === 'live' || status.phase === 'error') openPendingMailLink()
     if (status.phase === 'live' && replayOnLive) {
       replayOnLive = false
       draftRecovery = recovering.then(() => {
@@ -406,9 +415,10 @@ function registerIpc(logDirectory: string) {
     if (!settings.enabled) notifications?.clear()
   })
   ipcMain.on('amc:threadNavigationReady', (event) => {
-    if (event.sender !== window?.webContents) return
+    if (!ownMainFrame(event, window?.webContents, rendererUrl)) return
     threadNavigationReady = true
     openPendingThread()
+    openPendingMailLink()
     openPendingSettings()
   })
   handle('amc:triageStatus', () => triage.status)
@@ -454,6 +464,7 @@ function registerIpc(logDirectory: string) {
     pausedStatus = null
     engine = null
     pendingThreadId = null
+    pendingMailLink = null
     triage.connect(null)
     clearPairing()
     openReplica().clear()
@@ -699,6 +710,7 @@ async function pair(engineUrl: string, code: string) {
     stopSync()
     if (previousUrl !== url) {
       pendingThreadId = null
+      if (previousUrl) pendingMailLink = null
       const db = openReplica()
       db.transaction(() => {
         db.clear()
@@ -902,14 +914,53 @@ function registerReadIpc() {
   handle('amc:filter', (_e, text: string, accountId: string | null) =>
     openReplica().filter(text, accountId),
   )
-  handle('amc:search', async (_e, text: string, accountId: string | null) => {
-    const params = new URLSearchParams({
-      q: text,
-      limit: '50',
-      ...(accountId ? { accountId } : {}),
-    })
-    return (await requireEngine().get<{ hits: unknown[] }>(`/v1/search?${params}`)).hits
-  })
+  handle(
+    'amc:search',
+    async (_e, text: string, accountId: string | null, offset = 0, engineOrigin?: string) => {
+      const client = requireEngine()
+      if (engineOrigin !== undefined && !sameMailEngine({ engineOrigin }, client.baseUrl))
+        throw new Error('The search link points to a different Engine.')
+      const params = new URLSearchParams({
+        q: text,
+        limit: String(MAIL_SEARCH_PAGE_SIZE),
+        ...(offset ? { offset: String(offset) } : {}),
+        ...(accountId ? { accountId } : {}),
+      })
+      return (await client.get<{ hits: unknown[] }>(`/v1/search?${params}`)).hits
+    },
+  )
+  handle('amc:askAgentRuntime', () => askAgentRuntime())
+  handle(
+    'amc:askAgent',
+    async (_e, input: unknown, accountId: unknown): Promise<AskAgentResult> => {
+      if (typeof input !== 'string' || !input.trim() || input.length > 4000)
+        return { opened: false, reason: 'Enter a question of up to 4,000 characters.' }
+      if (
+        accountId !== null &&
+        (typeof accountId !== 'string' ||
+          !openReplica()
+            .accounts()
+            .some(({ id }) => id === accountId))
+      )
+        return { opened: false, reason: 'That mail account is unavailable.' }
+      const client = engine
+      if (!client) return { opened: false, reason: 'Connect AMC to its Engine first.' }
+      if (askingAgent) return { opened: false, reason: 'AMC is already opening a T3 thread.' }
+      askingAgent = true
+      try {
+        return await askAgent(
+          client,
+          app.getPath('userData'),
+          input.trim(),
+          accountId,
+          () => engine === client,
+          (url) => shell.openExternal(url),
+        )
+      } finally {
+        askingAgent = false
+      }
+    },
+  )
   handle('amc:contacts', async (_e, text: string) => {
     return (
       await requireEngine().get<{ contacts: unknown[] }>(
@@ -971,6 +1022,77 @@ function openPendingThread() {
   const [thread] = openReplica().summaries([pendingThreadId])
   pendingThreadId = null
   if (thread) broadcast('amc:openThread', thread)
+}
+
+function receiveMailLink(link: MailLinkDestination) {
+  pendingThreadId = null
+  pendingMailLink = link
+  if (app.isReady() && feedback) {
+    openWindow()
+    openPendingMailLink()
+  }
+}
+
+function openPendingMailLink() {
+  const target = pendingMailLink
+  const client = engine
+  if (!target || !client || !threadNavigationReady || resolvingMailLink === target) return
+  const finish = () => {
+    if (target.kind === 'search') {
+      if (
+        target.accountId &&
+        !openReplica()
+          .accounts()
+          .some(({ id }) => id === target.accountId)
+      )
+        return false
+      broadcast('amc:openMailSearch', target)
+      return true
+    }
+    const [thread] = openReplica().summaries([target.threadId])
+    if (!thread) return false
+    broadcast('amc:openThread', thread)
+    return true
+  }
+  const unavailable = (message: string, detail: string) => {
+    pendingMailLink = null
+    if (window)
+      void dialog
+        .showMessageBox(window, { message, detail })
+        .catch((error) => operationFailure('mail-link', error))
+  }
+  if (!sameMailEngine(target, client.baseUrl)) {
+    unavailable(
+      'This link points to a different AMC Engine.',
+      'Open links from the Engine paired with this Desktop.',
+    )
+    return
+  }
+  if (finish()) {
+    pendingMailLink = null
+    return
+  }
+  const loop = sync
+  if (loop?.status.phase === 'connecting' || loop?.status.phase === 'bootstrapping') return
+  resolvingMailLink = target
+  void (async () => {
+    try {
+      if (loop?.status.phase === 'live') await loop.pull()
+    } catch (error) {
+      operationFailure('mail-link', error)
+    } finally {
+      if (resolvingMailLink === target) resolvingMailLink = null
+    }
+    if (target !== pendingMailLink || client !== engine || !threadNavigationReady) return
+    if (finish()) pendingMailLink = null
+    else
+      unavailable(
+        target.kind === 'search'
+          ? 'This search’s account is unavailable in AMC.'
+          : 'This thread is unavailable in AMC.',
+        'Check that AMC is connected to the same Engine and has synced this mail.',
+      )
+  })().catch((error) => operationFailure('mail-link', error))
 }
 
 function createWindow() {
@@ -1145,10 +1267,26 @@ if (!app.requestSingleInstanceLock()) {
   })
   handle('amc:logSettings', settings.read)
   handle('amc:setDebugLogging', (_event, enabled: unknown) => settings.write(enabled))
-  app.on('second-instance', openWindow)
+  const linkFromArgs = (args: string[]) =>
+    args.map(parseMailLink).find((target): target is MailLinkDestination => target !== null)
+  pendingMailLink = linkFromArgs(process.argv) ?? null
+  app.on('open-url', (event, value) => {
+    const target = parseMailLink(value)
+    if (!target) return
+    event.preventDefault()
+    receiveMailLink(target)
+  })
+  app.on('second-instance', (_event, args) => {
+    const target = linkFromArgs(args)
+    if (target) receiveMailLink(target)
+    else if (app.isReady() && feedback) openWindow()
+  })
   void app
     .whenReady()
     .then(() => {
+      if (app.isPackaged && !customProfile && process.platform !== 'linux')
+        app.setAsDefaultProtocolClient('amc')
+      void pruneAgentSearches(profile).catch((error) => operationFailure('t3-launch', error))
       protectRemoteImageRequests(session.defaultSession)
       feedback = registerFeedbackIpc(() => window, openWindow, logDirectory, desktopLogger)
       buildMenu()
@@ -1201,6 +1339,7 @@ if (!app.requestSingleInstanceLock()) {
               notification.once('click', () => {
                 release()
                 if (engine !== source) return
+                pendingMailLink = null
                 pendingThreadId = threadId
                 openWindow()
                 openPendingThread()
@@ -1227,7 +1366,9 @@ if (!app.requestSingleInstanceLock()) {
             /* pair records its failure before rejecting. */
           })
       }
-      if (!loginItem || !app.getLoginItemSettings().wasOpenedAtLogin) createWindow()
+      if (pendingMailLink || !loginItem || !app.getLoginItemSettings().wasOpenedAtLogin) {
+        if (!window) createWindow()
+      }
       app.on('activate', openWindow)
       app.on('browser-window-focus', refreshTray)
     })

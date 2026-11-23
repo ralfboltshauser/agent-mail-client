@@ -1,5 +1,5 @@
 import type { Label } from '@amc/protocol'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import { AgentActivity } from '@/components/agent-activity'
 import { AppSidebar, systemViews } from '@/components/app-sidebar'
 import { CommandPalette } from '@/components/command-palette'
@@ -11,7 +11,7 @@ import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
 import { shareReply } from '@/data/share-reply'
 import { useReplicaSelector, useSyncField } from '@/hooks/use-amc'
 import { getAmc } from '@/lib/amc'
-import type { View } from '../../../../shared/api'
+import type { MailLinkSearch, View } from '../../../../shared/api'
 import { useMailSearch } from '../search/use-mail-search'
 import { TriageReview } from '../triage-review/triage-review'
 import { useTriageReview } from '../triage-review/use-triage-review'
@@ -62,13 +62,19 @@ export function MailWorkspace({
     (left, right) => shareReply(left, right) === left,
   )
   const accounts = accountData ?? NO_ACCOUNTS
-  if (accountId !== null && accountData && !accountData.some(({ id }) => id === accountId)) {
-    setAccountId(null)
-  }
   const labels = useReplicaSelector(labelsQuery(accountId), ({ data }) => data ?? NO_LABELS)
 
   const mailSearch = useMailSearch(accountId)
   const { filter, search, input: searchInput, resetSearch, clearSearch, runSearch } = mailSearch
+  // A link may resolve against fresher replica data than the renderer's account list.
+  if (
+    !search?.engineOrigin &&
+    accountId !== null &&
+    accountData &&
+    !accountData.some(({ id }) => id === accountId)
+  ) {
+    setAccountId(null)
+  }
   const key = mailboxKey(accountId, view, filter, search?.text)
   const mailbox = useMailboxRows({
     engineUrl,
@@ -160,33 +166,54 @@ export function MailWorkspace({
     select(target ?? null, mailboxKey(accountId, next, ''))
   }
 
-  // Notification targets can be opened before they have arrived in the list query.
-  useEffect(
-    () =>
-      getAmc().onOpenThread((target) => {
-        collapse()
-        closeReview(false)
-        const next = target.inInbox ? INBOX : { kind: 'all' as const }
-        resetSearch(true)
-        openSender(null)
-        setBucketPickerId(null)
-        setAccountId(null)
-        setView(next)
-        setNotification(target)
-        setSelection({ key: mailboxKey(null, next, ''), id: target.id })
-      }),
-    [
-      resetSearch,
-      setAccountId,
-      setView,
-      setNotification,
-      setBucketPickerId,
-      setSelection,
-      openSender,
-      closeReview,
-      collapse,
-    ],
+  const openMailSearch = useEffectEvent(
+    ({ query, accountId: target, engineOrigin }: MailLinkSearch) => {
+      collapse()
+      closeReview(false)
+      resetSearch(true)
+      openSender(null)
+      setBucketPickerId(null)
+      setNotification(null)
+      setAccountId(target)
+      const next = { kind: 'all' } as const
+      setView(next)
+      setSelection({ key: mailboxKey(target, next, '', query.trim()), id: null })
+      void runSearch(query, target, 0, engineOrigin)
+    },
   )
+
+  // Install the search listener before onOpenThread announces navigation readiness.
+  // Notification targets can be opened before they have arrived in the list query.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: React Effect Events are intentionally excluded from effect dependencies.
+  useEffect(() => {
+    const removeSearch = getAmc().onOpenMailSearch((target) => openMailSearch(target))
+    const removeThread = getAmc().onOpenThread((target) => {
+      collapse()
+      closeReview(false)
+      const next = target.inInbox ? INBOX : { kind: 'all' as const }
+      resetSearch(true)
+      openSender(null)
+      setBucketPickerId(null)
+      setAccountId(null)
+      setView(next)
+      setNotification(target)
+      setSelection({ key: mailboxKey(null, next, ''), id: target.id })
+    })
+    return () => {
+      removeSearch()
+      removeThread()
+    }
+  }, [
+    resetSearch,
+    setAccountId,
+    setView,
+    setNotification,
+    setBucketPickerId,
+    setSelection,
+    openSender,
+    closeReview,
+    collapse,
+  ])
 
   const selectAccount = (id: string | null) => {
     collapse()
@@ -389,6 +416,7 @@ export function MailWorkspace({
         labels={labels}
         onView={goTo}
         onAccount={selectAccount}
+        accountId={accountId}
         onSearch={(text) => {
           collapse()
           void runSearch(text)

@@ -15,6 +15,7 @@ import type {
   Draft,
   FilterReviewInput,
   Label,
+  MailLinkDestination,
   OrganiseAction,
   OutboxItem,
   OwnerActionStatus,
@@ -122,9 +123,14 @@ export interface ActiveHandoff {
 
 export type T3RuntimeMode = 'approval-required' | 'auto-accept-edits' | 'auto' | 'full-access'
 
+export type AskAgentRuntime = T3RuntimeMode | 'unknown'
+export type AskAgentResult = { opened: true } | { opened: false; reason: string }
+export type MailLinkSearch = Extract<MailLinkDestination, { kind: 'search' }>
+
 export interface T3Project {
   id: string
   title: string
+  workspaceRoot?: string
   localDefaultMode?: T3RuntimeMode | 'unknown'
   archivedAt?: string | null
   deletedAt?: string | null
@@ -223,6 +229,9 @@ export interface AmcApi {
   notificationSettings(): Promise<NotificationSettings>
   saveNotificationSettings(settings: NotificationSettings): Promise<void>
   onOpenSettings(listener: () => void): () => void
+  askAgentRuntime(): Promise<AskAgentRuntime>
+  askAgent(question: string, accountId: string | null): Promise<AskAgentResult>
+  onOpenMailSearch(listener: (search: MailLinkSearch) => void): () => void
   onOpenThread(listener: (thread: ThreadSummary) => void): () => void
   triageStatus(): Promise<TriageStatus>
   setAutoTriage(enabled: boolean): Promise<void>
@@ -255,7 +264,12 @@ export interface AmcApi {
   /** Instant local filter over subject, people and snippet. */
   filter(text: string, accountId: string | null): Promise<DesktopThreadSummary[]>
   /** Full-text search over the entire history, on the Engine. */
-  search(text: string, accountId: string | null): Promise<SearchHit[]>
+  search(
+    text: string,
+    accountId: string | null,
+    offset?: number,
+    engineOrigin?: string,
+  ): Promise<SearchHit[]>
   contacts(text: string): Promise<Contact[]>
   startCompose(input: ComposeStart): Promise<ComposeDraft>
   composeDrafts(): Promise<VersionedDraft[]>

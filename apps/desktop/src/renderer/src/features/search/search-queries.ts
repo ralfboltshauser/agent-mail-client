@@ -1,4 +1,4 @@
-import type { SearchHit } from '@amc/protocol'
+import { MAIL_SEARCH_PAGE_SIZE, type SearchHit } from '@amc/protocol'
 import type { ReplicaQuery } from '@/data/query-cache'
 import { shareReply } from '@/data/share-reply'
 import type { ThreadIndex } from '@/data/thread-queries'
@@ -49,7 +49,14 @@ export function searchSummariesQuery(
   const ids = hits.map(({ id }) => id)
   return {
     key: JSON.stringify(['search-summaries', accountId, ids]),
-    load: async (previous) => indexRows(await getAmc().summaries(ids), previous),
+    load: async (previous) => {
+      // The replica endpoint caps each request at 100 IDs.
+      const pages: Promise<DesktopThreadSummary[]>[] = []
+      for (let i = 0; i < ids.length; i += MAIL_SEARCH_PAGE_SIZE * 2) {
+        pages.push(getAmc().summaries(ids.slice(i, i + MAIL_SEARCH_PAGE_SIZE * 2)))
+      }
+      return indexRows((await Promise.all(pages)).flat(), previous)
+    },
     isEmpty: ({ ids }) => ids.length === 0,
     retainDuringBootstrap: 'defer-reads',
   }

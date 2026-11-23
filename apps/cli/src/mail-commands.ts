@@ -1,4 +1,11 @@
-import type { Label, ThreadSummary } from '@amc/protocol'
+import {
+  type Label,
+  type MailLink,
+  mailLink,
+  mailWebLink,
+  parseMailLink,
+  type ThreadSummary,
+} from '@amc/protocol'
 import type { Command } from 'commander'
 import { z } from 'zod'
 import type { CliConfig } from './config.ts'
@@ -66,6 +73,29 @@ export function registerMailCommands(
   agent: () => boolean,
   printThreads: (threads: ThreadSummary[]) => void,
 ) {
+  const links = program.command('link').description('Generate links that open in AMC Desktop')
+  const printLink = (target: MailLink, web?: boolean) => {
+    const { engineUrl } = config()
+    const native = mailLink(engineUrl, target)
+    if (!parseMailLink(native)) throw new Error('Invalid mail link target.')
+    console.log(web ? mailWebLink(engineUrl, target) : native)
+  }
+  links
+    .command('thread')
+    .argument('<id>')
+    .option('--web', 'use a browser-compatible link')
+    .action((id: string, opts: { web?: boolean }) =>
+      printLink({ kind: 'thread', threadId: id }, opts.web),
+    )
+  links
+    .command('search')
+    .argument('<query>')
+    .option('--account <id>', 'Account ID')
+    .option('--web', 'use a browser-compatible link')
+    .action((query: string, opts: { account?: string; web?: boolean }) =>
+      printLink({ kind: 'search', query, accountId: opts.account ?? null }, opts.web),
+    )
+
   program
     .command('whoami')
     .description('Show the current mail grant')

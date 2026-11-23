@@ -297,6 +297,7 @@ export function mailRoutes(deps: MailDeps) {
       hits: queries.search(text, {
         accountId: c.get('principal').accountId ?? c.req.query('accountId'),
         limit: intParam(c.req.query('limit')),
+        offset: intParam(c.req.query('offset')),
       }),
     })
   })

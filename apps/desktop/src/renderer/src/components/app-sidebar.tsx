@@ -311,7 +311,7 @@ export function AppSidebar({
           <SidebarMenuItem>
             <SidebarMenuButton onClick={onPalette}>
               <Search />
-              Command palette<Kbd className="ml-auto">⌘K</Kbd>
+              Search &amp; Ask<Kbd className="ml-auto">⌘K</Kbd>
             </SidebarMenuButton>
           </SidebarMenuItem>
           <SidebarMenuItem>

@@ -970,6 +970,32 @@ describe('MCP tools', () => {
     expect(await other.client.callTool(args)).toMatchObject({ isError: true })
   })
 
+  it('pages directional search inside the read grant account', async () => {
+    const deps = setup()
+    deps.db.exec(`
+      INSERT INTO account (id, kind, address, credentials, created_at)
+      VALUES ('b', 'gmail', 'other@example.test', x'00', 0)
+    `)
+    for (const id of ['m2', 'm3']) deps.store.putMessage('a', [], fromGmail(deps.gmail.add(id)))
+    deps.store.putMessage('b', [], fromGmail(deps.gmail.add('outside')))
+    const { client } = await connect(['read'], deps, 'a')
+    const search = async (offset: number) =>
+      JSON.parse(
+        text(
+          await client.callTool({
+            name: 'search',
+            arguments: { query: 'from:alice@example.com', account_id: 'b', limit: 1, offset },
+          }),
+        ),
+      )
+    const first = await search(0)
+    const second = await search(1)
+    expect(first).toMatchObject([{ accountId: 'a' }])
+    expect(second).toMatchObject([{ accountId: 'a' }])
+    expect(first[0].id).not.toBe(second[0].id)
+    await client.close()
+  })
+
   it('searches mail and contacts', async () => {
     const { client } = await connect(['read'])
     expect(

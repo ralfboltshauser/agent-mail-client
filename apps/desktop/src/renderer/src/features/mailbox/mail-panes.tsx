@@ -64,7 +64,7 @@ export function MailPanes({
   getFilterActions: (thread: ThreadSummary) => FilterAction[]
   reader: ReactNode
 }) {
-  const { search, filter, runSearch } = mailSearch
+  const { search, filter, retrySearch, loadMore } = mailSearch
   const { query, searchRows } = mailbox
   const inboxReady = useReplicaSelector(inbox ? query : null, ({ data }) => data !== undefined)
   const senderAddress = useReplicaSelector(inbox?.senderId ? query : null, ({ data }) =>
@@ -113,7 +113,7 @@ export function MailPanes({
           {search
             ? search.failed && (
                 <RefreshError
-                  retry={() => void runSearch(search.text)}
+                  retry={() => void retrySearch()}
                   retryLabel="Retry search"
                   failure={search.failure}
                 >
@@ -170,6 +170,18 @@ export function MailPanes({
               }
             />
           </div>
+          {search?.hasMore && !search.failed && (
+            <div className="flex justify-center border-t p-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={search.loading}
+                onClick={() => void loadMore()}
+              >
+                {search.loading ? 'Loading more…' : 'Load more results'}
+              </Button>
+            </div>
+          )}
         </div>
       </ResizablePanel>
       <ResizableHandle disabled={expanded} className={expanded ? 'invisible' : undefined} />

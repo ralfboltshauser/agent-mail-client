@@ -67,7 +67,7 @@ function expectAllowed() {
 }
 
 async function openSettings() {
-  await act(async () => fireEvent.click(screen.getByRole('button', { name: /Command palette/ })))
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: /Search & Ask/ })))
   await act(async () => fireEvent.click(screen.getByText('Settings')))
   return screen.getByRole<HTMLInputElement>('checkbox', {
     name: 'Load remote images automatically',
