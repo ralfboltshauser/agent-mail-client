@@ -23,10 +23,14 @@ export interface MessageLocation extends Location {
 
 export const PAGE = 32
 
-// Both readers use the same identity for the exact IMAP draft copy.
+// A merged message card must have exactly one verified Drafts location.
 export const imapDraftRevisionSql = `(
-  SELECT a.mailbox_generation || ':' || m.imap_fingerprint FROM account a
-  WHERE a.id = m.account_id AND a.kind = 'imap'
+  SELECT CASE WHEN count(*) = 1 AND min(l.verified) = 1 THEN
+    max(json_array(a.mailbox_generation, l.path_key, l.validity, l.uid, l.source_blob))
+  END
+  FROM imap_location l JOIN account a ON a.id = l.account_id
+  WHERE l.message_id = m.id AND l.account_id = m.account_id
+    AND l.label_id = m.account_id || ':DRAFT' AND a.kind = 'imap'
 )`
 
 export class ImapLocations {
@@ -238,7 +242,7 @@ export class ImapLocations {
           +unread,
           +starred,
         ) as { message_id: string } | undefined
-      if (row) this.#refresh(row.message_id)
+      if (row) this.#refresh(row.message_id, false)
     })
   }
 
@@ -330,7 +334,7 @@ export class ImapLocations {
       )
   }
 
-  #refresh(mid: string): void {
+  #refresh(mid: string, locationsChanged = true): void {
     const { db } = this.store
     if (!db.prepare('SELECT 1 FROM imap_location WHERE message_id = ? LIMIT 1').get(mid)) {
       this.store.deleteMessage(this.accountId, mid.slice(this.accountId.length + 1))
@@ -341,6 +345,16 @@ export class ImapLocations {
         thread_id: string
       }
       this.store.refreshThread(row.thread_id)
+    } else if (
+      locationsChanged &&
+      db
+        .prepare(
+          'SELECT 1 FROM message WHERE id = ? AND ? IN (SELECT value FROM json_each(label_ids))',
+        )
+        .get(mid, labelId(this.accountId, 'DRAFT'))
+    ) {
+      // Different locations can leave the same deduplicated card and labels in place.
+      this.store.recordChange('message', mid, 'upsert')
     }
   }
 }

@@ -977,9 +977,29 @@ it('opens a verified IMAP draft and rejects ambiguous locations and pre-relink c
     locations.put(newLocation.folder, newLocation.uidValidity, item, newMessage, newHash)
     await drafts.pullImap(account, newProvider)
     expect((await open()).status).toBe(404)
-    expect(
-      await (await open(fixture(queries.message(messageId)?.imapDraftRevision))).json(),
-    ).toMatchObject({ body: 'Different draft' })
+    const replacementRevision = fixture(queries.message(messageId)?.imapDraftRevision)
+    const replacementDraft = (await (await open(replacementRevision)).json()) as ComposeDraft
+    expect(replacementDraft.body).toBe('Different draft')
+
+    const duplicateUid = replacement.add('Drafts', 'Subject: Replacement', 'Different draft', [
+      '\\Draft',
+    ])
+    locations.put(
+      newLocation.folder,
+      newLocation.uidValidity,
+      { ...item, uid: duplicateUid },
+      newMessage,
+      newHash,
+    )
+    await drafts.pullImap(account, newProvider)
+    expect((await open(replacementRevision)).status).toBe(404)
+    replacement.expunge('Drafts', newUid)
+    locations.remove(newLocation.folder.path, newLocation.uidValidity, newUid)
+    expect((await open(replacementRevision)).status).toBe(404)
+    const duplicateRevision = fixture(queries.message(messageId)?.imapDraftRevision)
+    const survivingDraft = (await (await open(duplicateRevision)).json()) as ComposeDraft
+    expect(survivingDraft.body).toBe('Different draft')
+    expect(survivingDraft.id).not.toBe(replacementDraft.id)
   } finally {
     db.close()
   }
