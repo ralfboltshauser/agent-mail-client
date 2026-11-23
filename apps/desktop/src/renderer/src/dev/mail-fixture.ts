@@ -19,6 +19,7 @@ export function createFixture(scenario: string): AmcApi {
 
 export function createMailFixture(scenario: string) {
   const htmlReader = scenario === 'html-reader'
+  const draftReader = scenario === 'draft-reader'
   const now = Date.now()
   const activity = scenario === 'activity' ? createActivityFixture(now) : null
   const account: AccountSummary = {
@@ -159,7 +160,10 @@ export function createMailFixture(scenario: string) {
     sentAt: thread.lastMessageAt - (older ? 3_600_000 : 0),
     unread: !older && thread.unreadCount > 0,
     starred: thread.starred,
-    labelIds: thread.labelIds,
+    labelIds:
+      draftReader && thread.id === 'thread-1' && older
+        ? [...thread.labelIds, `${account.id}:DRAFT`]
+        : thread.labelIds,
     listUnsubscribe: null,
     bodyRevision: '1',
     attachments:
@@ -388,6 +392,11 @@ export function createMailFixture(scenario: string) {
     composeDrafts: async () => (discarded ? [] : [draft]),
     composeDraft: async (id) => {
       if (discarded || id !== draft.id) throw new Error(DRAFT_MISSING)
+      return draft
+    },
+    composeDraftByMessage: async (messageId) => {
+      if (!draftReader || discarded || messageId !== 'thread-1:older')
+        throw new Error(DRAFT_MISSING)
       return draft
     },
     discardDraft: async (id) => {

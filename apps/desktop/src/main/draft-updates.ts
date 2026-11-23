@@ -1,11 +1,17 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { newRunId } from '@amc/observability'
-import type { ComposePatch } from '@amc/protocol'
+import { type ComposePatch, DRAFT_RECOVERY_PENDING } from '@amc/protocol'
 import type { EngineClient } from './engine'
 import { failureScope, knownFailure, mainLog } from './observability'
 
 export function composeDraftPath(id: string): string {
   return `/v1/compose/drafts/${encodeURIComponent(id)}`
+}
+
+export class DraftRecoveryPending extends Error {
+  constructor() {
+    super(DRAFT_RECOVERY_PENDING)
+  }
 }
 
 export class LocalDraftUpdates {
@@ -49,21 +55,31 @@ export class LocalDraftUpdates {
     this.#db.exec('DELETE FROM draft_update')
   }
 
-  flush(engine: Pick<EngineClient, 'request'> | null): Promise<void> {
+  async recover(engine: Pick<EngineClient, 'request'>, id: string): Promise<boolean> {
+    const pending = this.#db.prepare('SELECT 1 FROM draft_update WHERE id = ?')
+    if (!pending.get(id)) return false
+    await this.flush(engine, id)
+    if (pending.get(id)) throw new DraftRecoveryPending()
+    return true
+  }
+
+  flush(engine: Pick<EngineClient, 'request'> | null, id: string | null = null): Promise<void> {
     if (!engine) return Promise.resolve()
-    if (this.#flush) return this.#flush.then(() => this.flush(engine))
-    this.#flush = this.#send(engine).finally(() => {
+    if (this.#flush) return this.#flush.then(() => this.flush(engine, id))
+    this.#flush = this.#send(engine, id).finally(() => {
       this.#flush = null
     })
     return this.#flush
   }
 
-  async #send(engine: Pick<EngineClient, 'request'>): Promise<void> {
+  async #send(engine: Pick<EngineClient, 'request'>, id: string | null): Promise<void> {
     const runId = newRunId()
     const stage = 'draft-replay'
     const log = mainLog.with({ runId })
     try {
-      const updates = this.#db.prepare('SELECT * FROM draft_update').all() as {
+      const updates = this.#db
+        .prepare('SELECT * FROM draft_update WHERE ? IS NULL OR id = ?')
+        .all(id, id) as {
         id: string
         revision: number
         body: string

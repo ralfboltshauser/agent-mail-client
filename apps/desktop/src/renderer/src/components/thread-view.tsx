@@ -18,6 +18,8 @@ interface Props {
   labelNames: Map<string, string>
   scrollRef: React.RefObject<HTMLDivElement | null>
   expanded?: boolean
+  onEditDraft?: (messageId: string, imapRevision?: string) => void
+  draftEditingDisabled?: boolean
 }
 
 const HIDDEN_LABELS = /:(INBOX|UNREAD|STARRED|IMPORTANT|SENT|DRAFT|CATEGORY_\w+)$/
@@ -74,6 +76,8 @@ export function ThreadView({
   labelNames,
   scrollRef,
   expanded = false,
+  onEditDraft,
+  draftEditingDisabled,
 }: Props) {
   if (!data && unavailable) {
     return (
@@ -134,7 +138,12 @@ export function ThreadView({
           <BucketCard bucket={thread.bucket.bucket} reason={thread.bucket.reason} />
         )}
         <div className="space-y-2.5">
-          <ThreadMessages key={JSON.stringify([thread.accountId, thread.id])} messages={messages} />
+          <ThreadMessages
+            key={JSON.stringify([thread.accountId, thread.id])}
+            messages={messages}
+            onEditDraft={onEditDraft}
+            draftEditingDisabled={draftEditingDisabled}
+          />
         </div>
       </div>
     </div>

@@ -15,6 +15,7 @@ import type {
 import { RECENT_THREAD_BODIES } from '@amc/protocol'
 import type { BlobStore } from '../blobs.ts'
 import type { Db } from '../db/database.ts'
+import { imapDraftRevisionSql } from '../providers/imap/locations.ts'
 import { type BodyParts, readBodyParts, readTextBody } from './body-blobs.ts'
 import { senderStatusSql } from './senders/index.ts'
 import { latestInboxMessageSql } from './triage/input.ts'
@@ -70,6 +71,7 @@ interface MessageRow {
   starred: number
   label_ids: string
   list_unsubscribe: string | null
+  imap_draft_revision: string | null
   screening_disposition: MessageDetail['screeningDisposition'] | null
 }
 
@@ -420,6 +422,9 @@ export class MailQueries {
                 m.cc_json, m.bcc_json, m.reply_to_json, m.subject, m.snippet, CAST(${body} AS BLOB) AS body_text, m.body_parts, m.html_blob,
                 CASE WHEN m.body_search_limit IS NOT NULL THEN length(m.body_text) > m.body_search_limit ELSE 0 END AS body_search_truncated,
                 m.sent_at, m.delivered_at, m.unread, m.starred, m.label_ids, m.list_unsubscribe,
+                CASE WHEN m.imap_fingerprint IS NOT NULL
+                  AND m.account_id || ':DRAFT' IN (SELECT value FROM json_each(m.label_ids))
+                  THEN ${imapDraftRevisionSql} END AS imap_draft_revision,
                 CASE WHEN EXISTS (
                   SELECT 1 FROM screened_destination d WHERE d.account_id = m.account_id
                     AND m.account_id || ':' || d.provider_id IN (SELECT value FROM json_each(m.label_ids))
@@ -448,6 +453,7 @@ export class MailQueries {
             Buffer.from(m.body_text).toString('utf8'))
       return {
         id: m.id,
+        ...(m.imap_draft_revision ? { imapDraftRevision: m.imap_draft_revision } : {}),
         threadId: m.thread_id,
         accountId: m.account_id,
         rfcMessageId: m.rfc_message_id,

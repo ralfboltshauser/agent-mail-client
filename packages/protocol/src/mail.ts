@@ -90,6 +90,7 @@ export const MessageDetail = z.object({
   unread: z.boolean(),
   starred: z.boolean(),
   labelIds: z.array(z.string()),
+  imapDraftRevision: z.string().optional(),
   listUnsubscribe: z.string().nullable(),
   screeningDisposition: ScreeningDisposition.optional(),
   attachments: z.array(AttachmentSummary),

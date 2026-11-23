@@ -124,6 +124,7 @@ export function imapDraftMirror(
 ): DraftMirror {
   return {
     imap: true,
+    draftIdAt: (folder, uid, uidValidity) => api.draftId(folder, uid, uidValidity),
     saveDraft: async ({ raw }) => {
       const saved = await api.saveDraft(raw)
       return { ...saved, message: { ...saved.message, threadId: '' } }

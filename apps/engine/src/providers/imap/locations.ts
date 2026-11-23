@@ -23,6 +23,19 @@ export interface MessageLocation extends Location {
 
 export const PAGE = 32
 
+// A merged card must have one verified Drafts location. The arrival key survives
+// other folders' resets and is regenerated when this location is recreated.
+export const imapDraftRevisionSql = `(
+  SELECT CASE WHEN count(*) = 1 AND min(l.verified) = 1 THEN
+    max(CASE WHEN l.arrival_key IS NOT NULL THEN
+      json_array(l.arrival_key, l.path_key, l.validity, l.uid, l.source_blob)
+    END)
+  END
+  FROM imap_location l
+  WHERE l.message_id = m.id AND l.account_id = m.account_id
+    AND l.label_id = m.account_id || ':DRAFT'
+)`
+
 export class ImapLocations {
   readonly #threads: ImapThreads
 
@@ -232,7 +245,7 @@ export class ImapLocations {
           +unread,
           +starred,
         ) as { message_id: string } | undefined
-      if (row) this.#refresh(row.message_id)
+      if (row) this.#refresh(row.message_id, false)
     })
   }
 
@@ -324,7 +337,7 @@ export class ImapLocations {
       )
   }
 
-  #refresh(mid: string): void {
+  #refresh(mid: string, locationsChanged = true): void {
     const { db } = this.store
     if (!db.prepare('SELECT 1 FROM imap_location WHERE message_id = ? LIMIT 1').get(mid)) {
       this.store.deleteMessage(this.accountId, mid.slice(this.accountId.length + 1))
@@ -335,6 +348,16 @@ export class ImapLocations {
         thread_id: string
       }
       this.store.refreshThread(row.thread_id)
+    } else if (
+      locationsChanged &&
+      db
+        .prepare(
+          'SELECT 1 FROM message WHERE id = ? AND ? IN (SELECT value FROM json_each(label_ids))',
+        )
+        .get(mid, labelId(this.accountId, 'DRAFT'))
+    ) {
+      // Different locations can leave the same deduplicated card and labels in place.
+      this.store.recordChange('message', mid, 'upsert')
     }
   }
 }

@@ -799,4 +799,18 @@ export const MIGRATIONS: readonly Migration[] = [
       DROP TABLE accepted_sender_thread;
     `,
   },
+  {
+    version: 26,
+    name: 'Refresh IMAP draft cards with their source identity',
+    sql: `
+      INSERT INTO change_log (entity, entity_id, op, at)
+        SELECT 'message', m.id, 'upsert', unixepoch() * 1000 FROM message m
+        WHERE m.imap_fingerprint IS NOT NULL
+          AND m.account_id || ':DRAFT' IN (SELECT value FROM json_each(m.label_ids));
+      UPDATE message AS m SET modseq = (
+        SELECT max(modseq) FROM change_log WHERE entity = 'message' AND entity_id = m.id
+      ) WHERE m.imap_fingerprint IS NOT NULL
+          AND m.account_id || ':DRAFT' IN (SELECT value FROM json_each(m.label_ids));
+    `,
+  },
 ]
