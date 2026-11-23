@@ -118,7 +118,7 @@ describe('desktop feedback', () => {
     expect(panel()).toBeNull()
     const confirmation = await screen.findByText('Opened in T3')
     const toaster = confirmation.closest('[data-sonner-toaster]')
-    expect(toaster?.getAttribute('data-y-position')).toBe('top')
+    expect(toaster?.getAttribute('data-y-position')).toBe('bottom')
     expect(toaster?.getAttribute('data-x-position')).toBe('right')
     expect(adapter.api.feedback.capture).toHaveBeenCalledExactlyOnceWith('inbox')
     expect(adapter.api.feedback.send).toHaveBeenCalledExactlyOnceWith('renderer-fixture', {
