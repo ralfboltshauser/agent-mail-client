@@ -1,5 +1,6 @@
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
+import { dispatchMessageKeydown } from '@/hooks/use-hotkeys'
 import { rendererAdapter } from './adapter'
 import { expectBudget } from './profile'
 import { listbox, mount, reader } from './workspace'
@@ -59,6 +60,49 @@ describe('desktop feedback', () => {
     expect(toolbar()?.querySelector('[data-annotation-marker]')).toBeNull()
     clickToolbar('Exit')
     expect(panel()).toBeNull()
+  })
+
+  it('keeps forwarded message shortcuts out of feedback mode', async () => {
+    const adapter = rendererAdapter()
+    const readThread = adapter.api.thread.getMockImplementation()
+    adapter.api.thread.mockImplementation(async (id) => {
+      const result = await readThread?.(id)
+      if (!result) return null
+      return {
+        ...result,
+        messages: result.messages.map((message) => ({ ...message, hasHtml: true })),
+      }
+    })
+    adapter.api.messageHtml = vi.fn(async () => '<p>Synthetic message</p>')
+    await mount(adapter)
+    const frame = document.querySelector<HTMLIFrameElement>('iframe[title="Message"]')
+    if (!frame) throw new Error('Expected message iframe')
+    frame.focus()
+
+    const pressCopy = () => {
+      const event = new KeyboardEvent('keydown', {
+        key: 'C',
+        metaKey: true,
+        shiftKey: true,
+        cancelable: true,
+      })
+      dispatchMessageKeydown(frame, event)
+      return event.defaultPrevented
+    }
+
+    await openFeedback(adapter)
+    expect(document.activeElement).toBe(frame)
+    expect(pressCopy()).toBe(false)
+
+    clickToolbar('Exit')
+    const writeText = vi.fn(async () => {})
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    try {
+      await act(async () => expect(pressCopy()).toBe(true))
+      expect(writeText).toHaveBeenCalledExactlyOnceWith("amc thread --json -- 'thread-1'")
+    } finally {
+      Reflect.deleteProperty(navigator, 'clipboard')
+    }
   })
 
   it('accepts Cmd+Enter with only a general note', async () => {

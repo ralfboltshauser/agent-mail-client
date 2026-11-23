@@ -2,6 +2,7 @@ import { BUCKETS, type ThreadSummary } from '@amc/protocol'
 import {
   Activity,
   CircleHelp,
+  Copy,
   Forward,
   Layers,
   ListChecks,
@@ -15,6 +16,11 @@ import {
 } from 'lucide-react'
 import { useHotkeys } from '@/hooks/use-hotkeys'
 import type { View } from '../../../../shared/api'
+import {
+  copyThreadReference,
+  copyThreadReferenceLabel,
+  copyThreadReferenceShortcut,
+} from './thread-reference'
 import type { FilterAction } from './use-filter-actions'
 import type { InboxNavigation } from './use-inbox-sections'
 import type { useMailCompose } from './use-mail-compose'
@@ -25,7 +31,7 @@ import type { useThreadActions } from './use-thread-actions'
 export function useMailCommands({
   accounts,
   selected,
-  hasThread,
+  activeThreadId,
   filterActions,
   ownView,
   snoozeEnabled,
@@ -45,7 +51,7 @@ export function useMailCommands({
 }: {
   accounts: { id: string }[]
   selected: ThreadSummary | undefined
-  hasThread: boolean
+  activeThreadId: string | undefined
   filterActions: FilterAction[]
   ownView: boolean
   snoozeEnabled: boolean
@@ -88,10 +94,14 @@ export function useMailCommands({
     openSendSettings,
   } = dialogs
   const { expanded, canExpand, reader, scroll: readerScroll, toggle, exit } = readerFocus
-  const canHandOff = !ownView && !draft && !openingComposer && !!selected && hasThread
+  const canHandOff = !ownView && !draft && !openingComposer && !!selected && !!activeThreadId
   const handOff = () => {
     if (canHandOff && selected) setHandoffThread(selected.id)
   }
+  const copyReference =
+    !ownView && !reviewOpen && !draft && !openingComposer && activeThreadId !== undefined
+      ? () => void copyThreadReference(activeThreadId)
+      : undefined
   const commandActions = [
     ...(expanded || canExpand
       ? [
@@ -109,7 +119,7 @@ export function useMailCommands({
       shortcut: 'C',
       run: () => void startCompose('new'),
     },
-    ...(hasThread && !ownView && !openingComposer
+    ...(activeThreadId && !ownView && !openingComposer
       ? [
           { name: 'Reply', icon: Reply, shortcut: 'R', run: () => void startCompose('reply') },
           {
@@ -146,6 +156,16 @@ export function useMailCommands({
         ]
       : []),
     ...(canHandOff ? [{ name: 'Hand off', icon: Forward, shortcut: '⇧T', run: handOff }] : []),
+    ...(copyReference
+      ? [
+          {
+            name: copyThreadReferenceLabel,
+            icon: Copy,
+            shortcut: copyThreadReferenceShortcut,
+            run: copyReference,
+          },
+        ]
+      : []),
     ...(activeHandoff && endingHandoff !== activeHandoff.id
       ? [{ name: 'End hand-off', icon: X, run: () => void endHandoff(activeHandoff.id) }]
       : []),
@@ -200,6 +220,9 @@ export function useMailCommands({
       'shift+t': (event) => {
         if (!event.repeat) handOff()
       },
+      ...(copyReference
+        ? { 'mod+shift+c': { run: copyReference, when: canCopyReferenceWithHotkey } }
+        : {}),
       ...(openReview
         ? {
             t: (event: KeyboardEvent) => {
@@ -280,5 +303,15 @@ export function useMailCommands({
     reader,
   )
 
-  return { commandActions, appActions }
+  return { commandActions, appActions, copyReference }
+}
+
+function canCopyReferenceWithHotkey(event: KeyboardEvent): boolean {
+  const target = event.target as HTMLElement | null
+  return (
+    !event.repeat &&
+    !target?.isContentEditable &&
+    !target?.closest?.('input, textarea, select, [role="textbox"]') &&
+    (target?.ownerDocument ?? document).getSelection()?.isCollapsed !== false
+  )
 }
