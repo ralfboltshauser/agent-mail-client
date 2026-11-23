@@ -78,6 +78,7 @@ it.each(['immediate', 'staggered'] as const)(
   'preserves mailbox nodes on a cloned no-op sync event with %s replies',
   async (timing) => {
     const adapter = await mount()
+    await openSidebarTriage()
     const before = mailboxNodes()
     const queries = [
       adapter.api.accounts,
@@ -101,6 +102,57 @@ it.each(['immediate', 'staggered'] as const)(
     expectBudget(idleMailbox)
   },
 )
+
+it('shows Bucket context and action without replacing the selected Thread or message', async () => {
+  const adapter = await mount()
+  const before = mailboxNodes()
+  const scroll = before.heading.closest<HTMLElement>('.overflow-y-auto')
+  if (!scroll) throw new Error('Expected the reader scroll container')
+  const view = within(scroll)
+  const message = () => view.getByRole('button', { name: /Mina/, expanded: true })
+  const messageButton = message()
+  const body = view.getByText(/Could you approve the warm grey/)
+  const context = 'The printer sent a proof for Field Notes.'
+  const action = 'Approve the warm grey by Thursday.'
+  const updateReason = (reason: string) =>
+    act(async () => adapter.api.setBucket({ threadId: 'thread-1', bucket: 'Reply', reason }))
+
+  expect(
+    view.getByText('Mina needs your approval on the print proof before Thursday.'),
+  ).toBeTruthy()
+  expect(view.queryByRole('term')).toBeNull()
+  scroll.scrollTop = 48
+
+  await updateReason(`Context: ${context} | Action: ${action}`)
+  expect(view.getByText('Reply')).toBeTruthy()
+  expect(view.getAllByRole('term').map((term) => term.textContent)).toEqual(['Context', 'Action'])
+  const contextText = view.getByText(context, { selector: 'dd' })
+  const actionText = view.getByText(action, { selector: 'dd' })
+  expect(actionText.compareDocumentPosition(body) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  expectContinuity(before)
+  expect(message()).toBe(messageButton)
+  expect(view.getByText(/Could you approve the warm grey/)).toBe(body)
+  expect(scroll.scrollTop).toBe(48)
+
+  commits.clear()
+  await act(async () => adapter.emitChanged())
+  expect(view.getByText(context)).toBe(contextText)
+  expect(view.getByText(action)).toBe(actionText)
+  expectBudget(idleMailbox)
+
+  await updateReason(`Context: ${context}`)
+  expect(view.getAllByRole('term').map((term) => term.textContent)).toEqual(['Context'])
+  expect(view.getByText(context)).toBe(contextText)
+
+  for (const reason of ['See the note. Action: compare the samples.', 'Context: Proof | Action:']) {
+    await updateReason(reason)
+    expect(view.getByText(reason, { selector: 'p' })).toBeTruthy()
+    expect(view.queryByRole('term')).toBeNull()
+  }
+  expectContinuity(before)
+  expect(message()).toBe(messageButton)
+  expect(scroll.scrollTop).toBe(48)
+})
 
 it('keeps the focused reader and its mailbox stable during staggered no-op sync', async () => {
   const adapter = await mount()
@@ -164,6 +216,7 @@ it('applies one off-reader bucket change to the existing row', async () => {
 
 it('updates each count at its display site without committing the surrounding mailbox', async () => {
   const adapter = await mount()
+  await openSidebarTriage()
   const before = mailboxNodes()
   const inbox = screen.getByRole('heading', { name: 'Inbox' }).parentElement
   const later = screen.getByRole('button', { name: 'Later' }).closest('li')
@@ -180,6 +233,10 @@ it('updates each count at its display site without committing the surrounding ma
   expectContinuity(before)
   expectBudget(idleMailbox)
 })
+
+async function openSidebarTriage() {
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Triage' })))
+}
 
 it('commits only the indicator when an account reports a sync error', async () => {
   const adapter = await mount()

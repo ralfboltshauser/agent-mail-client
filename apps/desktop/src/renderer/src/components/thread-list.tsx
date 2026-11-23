@@ -64,10 +64,6 @@ export function ThreadList({
   const getScrollElement = useCallback(() => scrollRef.current, [])
   const layout = useReplicaSelector(inbox ? query : null, ({ data }) => inbox?.readLayout(data))
   const visibleIds = useReplicaSelector(inbox ? query : null, ({ data }) => inbox?.readIds(data))
-  const hasMail = useReplicaSelector(
-    inbox ? query : null,
-    ({ data }) => (data?.ids.length ?? 0) > 0,
-  )
   const target = inbox && notification?.id === selectedId ? notification?.id : undefined
   const leadingId = target && !visibleIds?.includes(target) ? target : undefined
   const ids = useMemo(() => {
@@ -75,7 +71,7 @@ export function ThreadList({
     if (leadingId) return [leadingId, ...(visibleIds ?? [])]
     return visibleIds ?? flatIds
   }, [inbox, flatIds, leadingId, visibleIds])
-  const sectioned = layout !== undefined && (hasMail || ids.length > 0)
+  const sectioned = layout !== undefined && (layout.items.length > 0 || ids.length > 0)
   const { lastOrder, scope } = inbox ?? {}
   useLayoutEffect(() => {
     if (lastOrder && scope) lastOrder.current = { scope, ids }
@@ -95,6 +91,10 @@ export function ThreadList({
       : layout.items
   }, [ids, layout, leadingId, sectioned])
   const positions = useMemo(() => new Map(items.map((item, index) => [item.id, index])), [items])
+  const headerIds = useMemo(
+    () => INBOX_SECTIONS.map(inboxHeaderId).filter((id) => positions.has(id)),
+    [positions],
+  )
   const rowOrder = useMemo(() => new Map(ids.map((id, index) => [id, index + 1])), [ids])
   const rowIndexes = useMemo(() => {
     const indexes = new Map<string, number>()
@@ -128,8 +128,8 @@ export function ThreadList({
       if (selectedIndex >= 0) indexes.add(selectedIndex)
       if (focusedIndex !== undefined) indexes.add(focusedIndex)
       if (sectioned) {
-        for (const section of INBOX_SECTIONS) {
-          const index = positions.get(inboxHeaderId(section))
+        for (const id of headerIds) {
+          const index = positions.get(id)
           if (index !== undefined) indexes.add(index)
         }
         const updatesFooter = positions.get('footer:Updates')
@@ -137,7 +137,7 @@ export function ThreadList({
       }
       return [...indexes].sort((a, b) => a - b)
     },
-    [selectedIndex, focusedIndex, positions, sectioned],
+    [selectedIndex, focusedIndex, headerIds, positions, sectioned],
   )
   const virtualizer = useVirtualizer({
     count: items.length,
@@ -169,11 +169,13 @@ export function ThreadList({
   )
   useImperativeHandle(inbox?.focus, () => ({
     jump(delta: number) {
+      if (headerIds.length === 0) return
       const item = items[focusedIndex ?? selectedIndex]
-      const section = item && 'section' in item ? INBOX_SECTIONS.indexOf(item.section) : -1
-      const start = section < 0 && delta < 0 ? INBOX_SECTIONS.length : section
-      const index = Math.max(0, Math.min(INBOX_SECTIONS.length - 1, start + delta))
-      focusHeader(inboxHeaderId(INBOX_SECTIONS[index]))
+      const section =
+        item && 'section' in item ? headerIds.indexOf(inboxHeaderId(item.section)) : -1
+      const start = section < 0 && delta < 0 ? headerIds.length : section
+      const index = Math.max(0, Math.min(headerIds.length - 1, start + delta))
+      focusHeader(headerIds[index])
     },
     move(delta: number) {
       if (!inbox) return false
@@ -197,12 +199,20 @@ export function ThreadList({
     const previous = previousSection.current
     previousSection.current = activeItem && 'section' in activeItem ? activeItem.section : undefined
     if (!sectioned) return
-    if (focused === 'footer:Updates' && focusedIndex === undefined) {
-      focusHeader(inboxHeaderId('Updates'))
+    if (
+      focused !== null &&
+      focusedIndex === undefined &&
+      document.activeElement === document.body
+    ) {
+      if (focused === 'footer:Updates' && positions.has(inboxHeaderId('Updates'))) {
+        focusHeader(inboxHeaderId('Updates'))
+      } else {
+        listRef.current?.focus({ preventScroll: true })
+      }
     } else if (selectedId === null && previous && document.activeElement === listRef.current) {
       focusHeader(inboxHeaderId(previous))
     }
-  }, [activeItem, focusHeader, focused, focusedIndex, sectioned, selectedId])
+  }, [activeItem, focusHeader, focused, focusedIndex, positions, sectioned, selectedId])
 
   const rememberAnchor = useInboxScrollAnchor(scrollRef, virtualizer, positions, sectioned)
 
@@ -269,6 +279,9 @@ export function ThreadList({
             data-active-row-visible={selectedVisible || undefined}
             tabIndex={0}
             className="mail-list absolute inset-0"
+            onFocus={(event) => {
+              if (event.target === event.currentTarget) setFocused(null)
+            }}
             onKeyDown={(event) => {
               if (event.target !== event.currentTarget) return
               if (event.key === 'Enter' && !event.nativeEvent.isComposing && selectedIndex >= 0) {

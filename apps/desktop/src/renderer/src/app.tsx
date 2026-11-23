@@ -40,7 +40,7 @@ export function App() {
         />
       )}
       {gate.phase && <FeedbackEntry />}
-      <Toaster theme={dark ? 'dark' : 'light'} position="bottom-center" />
+      <Toaster theme={dark ? 'dark' : 'light'} position="top-right" offset={{ top: 56 }} />
     </TooltipProvider>
   )
 }

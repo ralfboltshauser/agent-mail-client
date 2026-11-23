@@ -1097,11 +1097,11 @@ function buildMenu() {
 }
 
 app.setName('AMC')
-// Both the packaged app and electron-vite use the original dev profile by default.
 const customProfile = app.commandLine.getSwitchValue('user-data-dir')
 const defaultProfile = join(app.getPath('appData'), '@amc', 'desktop')
-const profile = customProfile || defaultProfile
-mkdirSync(profile, { recursive: true })
+const profile =
+  customProfile || (app.isPackaged ? defaultProfile : join(app.getAppPath(), '.amc-dev'))
+mkdirSync(profile, { mode: 0o700, recursive: true })
 app.setPath('userData', profile)
 if (!app.requestSingleInstanceLock()) {
   app.quit()

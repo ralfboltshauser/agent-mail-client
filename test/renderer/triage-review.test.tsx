@@ -1066,6 +1066,7 @@ it.each(['toolbar', 'context menu'] as const)(
     })
     Object.assign(adapter.api, { smartInbox: { ...smart, review: smart, restoreFiltered } })
     await mount(adapter)
+    await click(screen.getByRole('button', { name: 'Labels', expanded: false }))
     await click(screen.getByRole('button', { name: 'Filtered 1' }))
     if (entry === 'context menu') {
       await act(async () => fireEvent.contextMenu(row(firstSubject)))
