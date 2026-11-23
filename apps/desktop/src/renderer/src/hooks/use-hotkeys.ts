@@ -1,8 +1,20 @@
 import { type RefObject, useEffect, useLayoutEffect, useRef } from 'react'
 
-export type HotkeyMap = Record<string, (event: KeyboardEvent) => void>
+type HotkeyHandler = (event: KeyboardEvent) => void
+type HotkeyBinding = HotkeyHandler | { run: HotkeyHandler; when: (event: KeyboardEvent) => boolean }
+export type HotkeyMap = Record<string, HotkeyBinding>
 const MESSAGE_KEYDOWN = 'amc:message-keydown'
-const messageKeys = new Set(['o', 'escape', 'j', 'k', 'space', '/', 'mod+f', 'mod+k'])
+const messageKeys = new Set([
+  'o',
+  'escape',
+  'j',
+  'k',
+  'space',
+  '/',
+  'mod+f',
+  'mod+k',
+  'mod+shift+c',
+])
 
 export function dispatchMessageKeydown(frame: HTMLIFrameElement, event: KeyboardEvent) {
   frame.dispatchEvent(new CustomEvent(MESSAGE_KEYDOWN, { bubbles: true, detail: event }))
@@ -11,6 +23,13 @@ export function dispatchMessageKeydown(frame: HTMLIFrameElement, event: Keyboard
 function isTyping(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null
   return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
+}
+
+function runBinding(binding: HotkeyBinding, event: KeyboardEvent) {
+  if (typeof binding !== 'function' && !binding.when(event)) return
+  event.preventDefault()
+  const run = typeof binding === 'function' ? binding : binding.run
+  run(event)
 }
 
 /**
@@ -32,7 +51,9 @@ export function useHotkeys(
     let pendingTimer: number | undefined
     const handleKey = (event: KeyboardEvent, fromMessage: boolean) => {
       const target = event.target as Element | null
-      const inOverlay = target?.closest?.('[role="dialog"], [role="menu"]')
+      const inOverlay = target?.closest?.(
+        'dialog[open], [role="dialog"], [role="alertdialog"], [role="menu"]',
+      )
       if (event.isComposing || event.keyCode === 229 || event.defaultPrevented || inOverlay) return
       const key = event.key === ' ' ? 'space' : event.key.toLowerCase()
       if (
@@ -60,8 +81,7 @@ export function useHotkeys(
         pending = null
         window.clearTimeout(pendingTimer)
         if (available(seq) && handlers[seq]) {
-          event.preventDefault()
-          handlers[seq](event)
+          runBinding(handlers[seq], event)
           return
         }
       }
@@ -74,10 +94,7 @@ export function useHotkeys(
         return
       }
       const handler = handlers[combo]
-      if (handler && available(combo)) {
-        event.preventDefault()
-        handler(event)
-      }
+      if (handler && available(combo)) runBinding(handler, event)
     }
     const onKey = (event: KeyboardEvent) => handleKey(event, false)
     const onMessageKey = (event: Event) => {

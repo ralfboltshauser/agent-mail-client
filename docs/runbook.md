@@ -179,6 +179,13 @@ its reply body. The Composer Link in the prompt lasts up to two hours. A new han
 the same Thread revokes both previous credentials. Sending or deleting the draft also
 revokes its Composer Link. Review and send the reply from AMC desktop.
 
+To work with an open Thread in an existing T3 conversation, choose **Copy thread reference**
+in the reader or command palette, or press **⌘⇧C**. Paste the copied command into the
+T3 conversation and ask the Agent to run it. It has the form
+`amc thread --json -- '<thread-id>'` and contains only the canonical Thread ID.
+The T3 environment must have `amc` on its PATH, configured for the same Engine
+with existing permission to read that Thread.
+
 ## IMAP Draft replacements
 
 AMC reconnects a clean draft to a new UID in the same Drafts folder when

@@ -196,10 +196,10 @@ export function MailWorkspace({
     setAccountId(id)
     select(null, mailboxKey(id, view, filter))
   }
-  const { commandActions, appActions } = useMailCommands({
+  const { commandActions, appActions, copyReference } = useMailCommands({
     accounts,
     selected,
-    hasThread: !!activeThread,
+    activeThreadId: activeThread?.id,
     filterActions,
     ownView,
     snoozeEnabled,
@@ -331,6 +331,7 @@ export function MailWorkspace({
                 expanded={expanded}
                 canExpand={readerFocus.canExpand}
                 onToggleFocus={readerFocus.toggle}
+                onCopyThreadReference={copyReference}
               />
             }
             reader={

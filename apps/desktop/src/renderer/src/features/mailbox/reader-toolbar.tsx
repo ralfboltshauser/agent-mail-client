@@ -4,6 +4,7 @@ import { BucketPicker } from '@/components/bucket-picker'
 import { OrganiseToolbar } from '@/components/organise'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
+import { copyThreadReferenceLabel, copyThreadReferenceShortcut } from './thread-reference'
 import type { FilterAction } from './use-filter-actions'
 import type { useMailCompose } from './use-mail-compose'
 import type { useThreadActions } from './use-thread-actions'
@@ -54,6 +55,7 @@ interface ReaderActionsProps {
   actions: ReturnType<typeof useThreadActions>
   compose: ReturnType<typeof useMailCompose>
   filterActions: FilterAction[]
+  onCopyThreadReference: (() => void) | undefined
 }
 
 function ReaderActions({
@@ -62,6 +64,7 @@ function ReaderActions({
   actions,
   compose,
   filterActions,
+  onCopyThreadReference,
 }: ReaderActionsProps) {
   const {
     organise,
@@ -135,6 +138,17 @@ function ReaderActions({
           >
             Hand off
           </Button>
+          {onCopyThreadReference && (
+            <Button
+              size="sm"
+              variant="ghost"
+              title={`${copyThreadReferenceLabel} (${copyThreadReferenceShortcut})`}
+              aria-keyshortcuts="Meta+Shift+C"
+              onClick={onCopyThreadReference}
+            >
+              {copyThreadReferenceLabel}
+            </Button>
+          )}
           {activeHandoff && (
             <>
               <span className="text-xs text-muted-foreground">Active hand-off</span>

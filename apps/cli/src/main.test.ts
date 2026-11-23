@@ -446,6 +446,27 @@ async function cliFor(server: ReturnType<typeof createServer>, env: NodeJS.Proce
     )
 }
 
+it.each(['studio:19bc1234', "--studio:imap:it's%40example.test"])(
+  'reads the exact Thread ID %j after the end-of-options marker',
+  async (id) => {
+    const requests: [string | undefined, string | undefined][] = []
+    const server = createServer((req, res) => {
+      requests.push([req.method, req.url])
+      res.setHeader('Content-Type', 'application/json')
+      res.end(JSON.stringify({ id, messages: [] }))
+    })
+    server.listen(0, '127.0.0.1')
+    try {
+      const run = await cliFor(server)
+      const { stdout } = await run('thread', '--json', '--', id)
+      expect(JSON.parse(stdout)).toEqual({ id, messages: [] })
+      expect(requests).toEqual([['GET', `/v1/threads/${encodeURIComponent(id)}?deferBodies=1`]])
+    } finally {
+      server.close()
+    }
+  },
+)
+
 it('prints only projected local logs and correlates rotated records by run and request', async () => {
   const runId = newRunId()
   const requestId = newRequestId()

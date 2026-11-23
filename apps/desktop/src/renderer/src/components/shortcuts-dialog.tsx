@@ -1,4 +1,8 @@
 import { BUCKETS } from '@amc/protocol'
+import {
+  copyThreadReferenceLabel,
+  copyThreadReferenceShortcut,
+} from '@/features/mailbox/thread-reference'
 import { feedbackShortcut } from '../../../shared/feedback'
 import { systemViews } from './app-sidebar'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
@@ -30,6 +34,7 @@ export function ShortcutsDialog({
         ['Next / previous thread', 'J / K'],
         ['Next / previous Inbox section', '⇧J / ⇧K'],
         ['Page down in reader', 'Space'],
+        [copyThreadReferenceLabel, copyThreadReferenceShortcut],
         ['Triage Inbox', 'T'],
         ['Switch accounts', '⌘0–9'],
       ],
