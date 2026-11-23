@@ -14,6 +14,7 @@ import { memo, useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { getAmc } from '@/lib/amc'
 import { recordCaughtFailure } from '@/lib/failure'
+import { ariaShortcut, composeFieldShortcuts } from '@/lib/mail-shortcuts'
 import type { DraftSession } from './draft-session'
 
 function InlinePreview({ draftId, src, alt }: { draftId: string; src: string; alt: string }) {
@@ -63,6 +64,7 @@ export function useComposerEditor({ id, doc }: DraftSession) {
       attributes: {
         class: 'amc-compose-editor min-h-36 outline-none',
         'aria-label': 'Message body',
+        'aria-keyshortcuts': ariaShortcut(composeFieldShortcuts.body),
         role: 'textbox',
         'aria-multiline': 'true',
       },

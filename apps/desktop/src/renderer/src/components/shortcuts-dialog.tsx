@@ -3,6 +3,7 @@ import {
   copyThreadReferenceLabel,
   copyThreadReferenceShortcut,
 } from '@/features/mailbox/thread-reference'
+import { composeFieldShortcuts, shortcutLabel } from '@/lib/mail-shortcuts'
 import { feedbackShortcut } from '../../../shared/feedback'
 import { systemViews } from './app-sidebar'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
@@ -47,6 +48,12 @@ export function ShortcutsDialog({
         ['Reply all', 'A'],
         ['Forward', 'F'],
         ['Hand off', '⇧T'],
+        ['Focus From', shortcutLabel(composeFieldShortcuts.from)],
+        ['Focus To', shortcutLabel(composeFieldShortcuts.to)],
+        ['Focus Cc', shortcutLabel(composeFieldShortcuts.cc)],
+        ['Focus Bcc', shortcutLabel(composeFieldShortcuts.bcc)],
+        ['Focus Subject', shortcutLabel(composeFieldShortcuts.subject)],
+        ['Focus message body', shortcutLabel(composeFieldShortcuts.body)],
         ['Send in composer', '⌘↵'],
       ],
     },

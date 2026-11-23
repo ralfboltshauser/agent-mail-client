@@ -12,6 +12,16 @@ export const mailShortcuts = {
   searchMail: 'mod+f',
 } as const
 
+export const composeFieldShortcuts = {
+  // The native Send Feedback command uses Command+Shift+F.
+  from: 'mod+shift+e',
+  to: 'mod+shift+o',
+  cc: 'mod+shift+c',
+  bcc: 'mod+shift+b',
+  subject: 'mod+shift+s',
+  body: 'mod+shift+m',
+} as const
+
 export function shortcutLabel(binding: string): string {
   if (binding === 'escape') return 'Esc'
   return binding.replace('mod+', '⌘').replace('shift+', '⇧').toUpperCase()

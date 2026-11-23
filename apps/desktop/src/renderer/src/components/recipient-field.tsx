@@ -6,12 +6,26 @@ import { recordCaughtFailure } from '@/lib/failure'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 
+export function parseRecipientInput(value: string): Address[] | null {
+  const addresses = value
+    .split(/[,;]/)
+    .map((word) => word.trim())
+    .filter(Boolean)
+  if (!addresses.length || addresses.some((word) => !/^[^\s@,<>]+@[^\s@,<>]+$/.test(word)))
+    return null
+  return addresses.map((address) => ({ address, name: null }))
+}
+
 export function RecipientField({
+  name,
   label,
+  shortcut,
   recipients,
   onChange,
 }: {
+  name: string
   label: string
+  shortcut: string
   recipients: Address[]
   onChange: (addresses: Address[]) => void
 }) {
@@ -59,12 +73,8 @@ export function RecipientField({
   }
 
   const commit = (value: string) => {
-    const addresses = value
-      .split(/[,;]/)
-      .map((word) => word.trim())
-      .filter(Boolean)
-    if (!addresses.length || addresses.some((word) => !/^[^\s@,<>]+@[^\s@,<>]+$/.test(word))) return
-    add(addresses.map((address) => ({ address, name: null })))
+    const addresses = parseRecipientInput(value)
+    if (addresses) add(addresses)
   }
 
   return (
@@ -93,6 +103,8 @@ export function RecipientField({
         ))}
         <Input
           id={id}
+          name={name}
+          aria-keyshortcuts={shortcut}
           data-recipient-input="true"
           role="combobox"
           aria-expanded={Boolean(visible)}
@@ -101,17 +113,22 @@ export function RecipientField({
           aria-activedescendant={visible && choices[active] ? `${id}-${active}` : undefined}
           className="h-8 w-auto min-w-36 flex-1 border-0 bg-transparent shadow-none focus-visible:ring-1 dark:bg-transparent"
           value={query}
-          onFocus={() => setOpen(true)}
+          onFocus={() => {
+            if (query.trim()) setOpen(true)
+          }}
           onBlur={() => {
             commit(query)
             setOpen(false)
           }}
           onChange={(event) => {
-            setQuery(event.target.value)
+            const value = event.target.value
+            setQuery(value)
+            setOpen(Boolean(value.trim()))
             setMatches([])
             setActive(-1)
           }}
           onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing) return
             if (event.key === 'Escape' && visible) {
               event.preventDefault()
               event.stopPropagation()
