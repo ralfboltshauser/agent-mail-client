@@ -8,6 +8,7 @@ export const messageKeydownEvent = 'amc:message-keydown'
 const messageKeys = new Set([
   mailShortcuts.focusReader,
   mailShortcuts.escape,
+  mailShortcuts.reply,
   'j',
   'k',
   'space',
