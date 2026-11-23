@@ -235,6 +235,8 @@ export function ThreadList({
 
   const mounted = virtualizer.getVirtualItems()
   const visible = virtualizer.range
+  const selectedVisible =
+    visible !== null && selectedIndex >= visible.startIndex && selectedIndex <= visible.endIndex
   return (
     <div
       ref={scrollRef}
@@ -264,6 +266,7 @@ export function ThreadList({
             role="listbox"
             aria-label="Threads"
             aria-activedescendant={selectedIndex >= 0 ? `${listId}-${selectedId}` : undefined}
+            data-active-row-visible={selectedVisible || undefined}
             tabIndex={0}
             className="mail-list absolute inset-0"
             onKeyDown={(event) => {

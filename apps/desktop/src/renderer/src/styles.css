@@ -247,12 +247,12 @@
 
 @layer utilities {
   @media (forced-colors: none) {
-    .mail-list[aria-activedescendant]:focus-visible {
+    .mail-list[data-active-row-visible]:focus-visible {
       outline: none;
     }
 
-    .mail-list[aria-activedescendant]:focus-visible .mail-row[aria-selected="true"] {
-      background-color: color-mix(in oklch, var(--accent), var(--ring) 25%);
+    .mail-list[data-active-row-visible]:focus-visible .mail-row[aria-selected="true"] {
+      background-color: color-mix(in oklch, var(--accent), var(--ring) 16%);
     }
   }
 }
