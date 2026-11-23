@@ -278,6 +278,13 @@ async function main() {
     const closed = await sidebarLayout()
     assert.equal(closed.overflow, 0, 'folders fit with Triage closed')
     assert.equal(closed.overlay, false)
+    const collapsedHeaderGap = await run(() => {
+      const headers = [...document.querySelectorAll('[data-sidebar="group-label"]')]
+      const triage = headers.find((header) => header.textContent === 'Triage')
+      const labels = headers.find((header) => header.textContent === 'Labels')
+      return labels.getBoundingClientRect().top - triage.getBoundingClientRect().bottom
+    })
+    assert.equal(collapsedHeaderGap, 8, 'collapsed Triage and Labels have a compact gap')
     await run(() => {
       const sidebar = document.querySelector('[data-slot="sidebar-content"]')
       sidebar.querySelector('[aria-current="page"]').focus()
