@@ -55,8 +55,9 @@ function inboxLayoutSelector(collapsed: CollapsePreferences, showAll: boolean) {
     const items: InboxItem[] = []
     const ids: string[] = []
     for (const section of INBOX_SECTIONS) {
-      items.push({ kind: 'header', section, id: inboxHeaderId(section) })
       const { ids: keys, rowIds } = order[section]
+      if (keys.length === 0) continue
+      items.push({ kind: 'header', section, id: inboxHeaderId(section) })
       if (collapsed[section]) continue
       const visible =
         section === 'Updates' && !showAll ? Math.min(UPDATES_PREVIEW, keys.length) : keys.length

@@ -15,7 +15,8 @@ import { listbox, options, reader, selected } from './workspace'
 type ThreadSummary = Awaited<ReturnType<AmcApi['threads']>>[number]
 
 const inbox = { view: { kind: 'inbox' as const }, accountId: null }
-const headers = ['New senders', 'Action/Reply', 'Follow-up', 'Updates', 'Seen']
+const headings = () =>
+  screen.queryAllByRole('heading', { level: 3 }).map((node) => node.textContent)
 const header = (name: string) => screen.getByRole('button', { name: new RegExp(`^${name} \\d+`) })
 const sectionCommits = () =>
   Object.fromEntries([...commits].filter(([id]) => id.startsWith('section:')))
@@ -55,13 +56,7 @@ async function mountSections(
 it('starts with three Updates and preserves collapse across account switches and restart', async () => {
   const { api, result, app } = await mountSections()
   expect(api.threads).toHaveBeenCalledWith(inbox)
-  expect(screen.getAllByRole('heading', { level: 3 }).map((node) => node.textContent)).toEqual([
-    'New senders0',
-    'Action/Reply4',
-    'Follow-up1',
-    'Updates3',
-    'Seen0',
-  ])
+  expect(headings()).toEqual(['Action/Reply4', 'Follow-up1', 'Updates3'])
   // The legacy fixture has exactly three Updates. Move a fourth Thread in.
   await act(async () => api.setBucket({ threadId: 'thread-8', bucket: 'Later', reason: 'Update' }))
   expect(header('Updates').textContent).toBe('Updates4')
@@ -86,17 +81,21 @@ it('starts with three Updates and preserves collapse across account switches and
 })
 
 it('shows the New senders hint, advertises the existing T binding, and hides the hint on collapse', async () => {
+  let includeNewSenders = true
   const triageQueue = vi.fn(async () => ({ revision: 0, cards: [], cursor: null }))
-  const { api } = await mountSections(withNewSenders, {
-    ...senderControls(),
-    triageQueue,
-    review: {
-      reviewPairing: vi.fn(async () => 'synthetic-pairing'),
-      reviewBucket: vi.fn<ReviewApi['reviewBucket']>(),
-      reviewOrganise: vi.fn<ReviewApi['reviewOrganise']>(),
-      reviewOrganiseStatus: vi.fn<ReviewApi['reviewOrganiseStatus']>(),
+  const { api, emitChanged } = await mountSections(
+    (rows) => (includeNewSenders ? withNewSenders(rows) : rows),
+    {
+      ...senderControls(),
+      triageQueue,
+      review: {
+        reviewPairing: vi.fn(async () => 'synthetic-pairing'),
+        reviewBucket: vi.fn<ReviewApi['reviewBucket']>(),
+        reviewOrganise: vi.fn<ReviewApi['reviewOrganise']>(),
+        reviewOrganiseStatus: vi.fn<ReviewApi['reviewOrganiseStatus']>(),
+      },
     },
-  })
+  )
   const hint = () => screen.queryByText(/Accept or block each sender/)
   expect(hint()?.querySelector('kbd')?.textContent).toBe('T')
   expect(hint()?.textContent).toBe('Accept or block each sender. Press T to review.')
@@ -109,6 +108,15 @@ it('shows the New senders hint, advertises the existing T binding, and hides the
   await act(async () => fireEvent.click(header('New senders')))
   expect(hint()).toBeNull()
   await act(async () => fireEvent.click(header('New senders')))
+  expect(hint()).toBeTruthy()
+
+  includeNewSenders = false
+  await act(async () => emitChanged())
+  expect(screen.queryByRole('heading', { name: /^New senders/ })).toBeNull()
+  expect(hint()).toBeNull()
+  includeNewSenders = true
+  await act(async () => emitChanged())
+  expect(headings()[0]).toBe('New senders2')
   expect(hint()).toBeTruthy()
 
   const active = listbox()
@@ -310,11 +318,86 @@ it('navigates across section boundaries and activates disclosure with native key
   expect(selected().dataset.threadId).toBe('thread-8')
   await act(async () => fireEvent.keyDown(active, { key: 'j' }))
   expect(selected().dataset.threadId).toBe('thread-4')
-  expect(headers.map(header)).toHaveLength(5)
+  expect(headings()).toEqual(['Action/Reply4', 'Follow-up1', 'Updates3'])
   await act(async () => fireEvent.keyDown(active, { key: 't' }))
   expect(screen.queryByRole('dialog')).toBeNull()
   await act(async () => fireEvent.keyDown(active, { key: 'T', shiftKey: true }))
   expect(screen.getByRole('dialog', { name: 'Hand off to T3' })).toBeTruthy()
+})
+
+it('adds and removes Follow-up in place and keeps keyboard navigation on visible sections', async () => {
+  let includeFollowUp = false
+  const { emitChanged } = await mountSections((rows) =>
+    rows.flatMap((row) =>
+      row.bucket?.bucket !== 'Follow-up'
+        ? [row]
+        : includeFollowUp
+          ? [{ ...row, unreadCount: 0 }]
+          : [],
+    ),
+  )
+  expect(headings()).toEqual(['Action/Reply4', 'Updates3'])
+  const list = listbox()
+  const action = header('Action/Reply')
+  const updates = header('Updates')
+  const rows = options()
+  const current = selected()
+  const heading = reader()
+  act(() => list.focus())
+  await act(async () => fireEvent.keyDown(list, { key: 'J', shiftKey: true }))
+  expect(document.activeElement).toBe(updates)
+  await act(async () => fireEvent.keyDown(updates, { key: 'K', shiftKey: true }))
+  expect(document.activeElement).toBe(action)
+
+  includeFollowUp = true
+  await act(async () => emitChanged())
+  expect(headings()).toEqual(['Action/Reply4', 'Follow-up1', 'Updates3'])
+  expect(document.activeElement).toBe(action)
+  expect(
+    screen.getByRole('button', { name: 'Mark Follow-up seen' }).getAttribute('aria-disabled'),
+  ).toBe('true')
+  await act(async () => fireEvent.keyDown(action, { key: 'J', shiftKey: true }))
+  const followUp = header('Follow-up')
+  expect(document.activeElement).toBe(followUp)
+  await act(async () => fireEvent.click(followUp))
+  expect(followUp.getAttribute('aria-expanded')).toBe('false')
+
+  includeFollowUp = false
+  await act(async () => emitChanged())
+  expect(headings()).toEqual(['Action/Reply4', 'Updates3'])
+  expect(document.activeElement).toBe(list)
+  await act(async () => fireEvent.keyDown(list, { key: 'J', shiftKey: true }))
+  expect(document.activeElement).toBe(updates)
+
+  includeFollowUp = true
+  await act(async () => emitChanged())
+  expect(header('Follow-up').getAttribute('aria-expanded')).toBe('false')
+  expect(document.activeElement).toBe(updates)
+  expect(listbox()).toBe(list)
+  expect(options()).toEqual(rows)
+  expect(selected()).toBe(current)
+  expect(reader()).toBe(heading)
+})
+
+it('shows the existing empty Inbox state when its last entry leaves', async () => {
+  let includeThread = true
+  const { emitChanged } = await mountSections((rows) => (includeThread ? rows.slice(0, 1) : []))
+  await act(async () => fireEvent.click(header('Action/Reply')))
+  expect(headings()).toEqual(['Action/Reply1'])
+  expect(screen.queryByText('Inbox is clear')).toBeNull()
+
+  includeThread = false
+  await act(async () => emitChanged())
+  expect(headings()).toEqual([])
+  expect(screen.getByText('Inbox is clear')).toBeTruthy()
+  expect(screen.getByText('New mail will appear here.')).toBeTruthy()
+  expect(screen.queryByRole('listbox', { name: 'Threads' })).toBeNull()
+
+  includeThread = true
+  await act(async () => emitChanged())
+  expect(headings()).toEqual(['Action/Reply1'])
+  expect(header('Action/Reply').getAttribute('aria-expanded')).toBe('false')
+  expect(screen.queryByText('Inbox is clear')).toBeNull()
 })
 
 it('archives the selected Inbox Thread and restores its row via Organise Undo', async () => {
@@ -366,8 +449,11 @@ it('keeps row DOM identity and commits only the moved row and affected section h
   expect(sectionCommits()).toEqual({})
 })
 
-it('keeps the viewport anchored to a surviving Thread after collapsing an earlier section', async () => {
-  await mountSections()
+it('keeps the viewport anchored to a surviving Thread as an earlier section changes', async () => {
+  let includeFollowUp = true
+  const { emitChanged } = await mountSections((rows) =>
+    rows.filter((row) => includeFollowUp || row.bucket?.bucket !== 'Follow-up'),
+  )
   const viewport = listbox().closest<HTMLElement>('[data-thread-viewport]')
   const anchor = byId('thread-4')
   if (!viewport || !anchor) throw new Error('Expected the virtual viewport and its anchor')
@@ -391,6 +477,18 @@ it('keeps the viewport anchored to a surviving Thread after collapsing an earlie
   expect(byId('thread-4')).toBe(anchor)
   expect(viewport.scrollTop).toBe(start() + distance)
   expect(viewport.scrollTop).toBeLessThan(formerOffset)
+  const collapsedOffset = viewport.scrollTop
+
+  includeFollowUp = false
+  await act(async () => emitChanged())
+  expect(byId('thread-4')).toBe(anchor)
+  expect(viewport.scrollTop).toBe(start() + distance)
+  expect(viewport.scrollTop).toBeLessThan(collapsedOffset)
+
+  includeFollowUp = true
+  await act(async () => emitChanged())
+  expect(byId('thread-4')).toBe(anchor)
+  expect(viewport.scrollTop).toBe(collapsedOffset)
 })
 
 it('indexes Threads beyond the legacy replica cap while mounting a bounded window', async () => {
