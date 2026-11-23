@@ -97,12 +97,13 @@ On the Mac, enable the checked-in hooks once per clone with
 setting and use the hooks from their checked-out branch. Bring older branches
 up to date to pick up the hook.
 
-The pre-push hook runs `pnpm verify` and blocks the push if a check fails. Push
-from a clean worktree with the outgoing commit checked out. Run `pnpm verify`
-directly to repeat the same checks. It installs from the frozen lockfile, runs
-the full check and build, then exercises both macOS scrollbar modes in Electron
-with synthetic mail. For non-Mac development, run `pnpm check` and `pnpm build`
-for feedback and use the Mac for the full gate.
+Run focused checks while iterating. For the full pass, push from a clean Mac
+worktree with the outgoing commit checked out. The pre-push hook runs
+`pnpm verify` and blocks the push if a check fails. It installs from the frozen
+lockfile, runs the full check and build, then exercises both macOS scrollbar
+modes in Electron with synthetic mail. Run `pnpm verify` directly when you need
+the full suite outside a push. On other platforms, use `pnpm check` and
+`pnpm build` for feedback and use the Mac for the full gate.
 
 ## Layout
 
