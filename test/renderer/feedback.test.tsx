@@ -116,7 +116,10 @@ describe('desktop feedback', () => {
 
     await waitFor(() => expect(adapter.api.feedback.send).toHaveBeenCalledTimes(1))
     expect(panel()).toBeNull()
-    expect(await screen.findByText('Opened in T3')).toBeTruthy()
+    const confirmation = await screen.findByText('Opened in T3')
+    const toaster = confirmation.closest('[data-sonner-toaster]')
+    expect(toaster?.getAttribute('data-y-position')).toBe('top')
+    expect(toaster?.getAttribute('data-x-position')).toBe('right')
     expect(adapter.api.feedback.capture).toHaveBeenCalledExactlyOnceWith('inbox')
     expect(adapter.api.feedback.send).toHaveBeenCalledExactlyOnceWith('renderer-fixture', {
       text: 'More room here',

@@ -11,7 +11,7 @@ The owner is daily-driving AMC and sends feedback from inside the app. Your job:
 
 A feedback thread contains some of:
 - **Owner text** — what's wrong or wanted. Authoritative.
-- **Screenshot** of the AMC window (attached image).
+- **Screenshot** of the AMC window. Inspect the attached image when visible. If the message supplies a `Local screenshot` path, open the original PNG with a local image viewer. AMC manages the capture's retention, so inspect it in place without making a temporary copy or running a cleanup command.
 - **Annotations** — Agentation-style list: element selector / React component name, the owner's note per element, optionally selected text.
 - **Local log excerpt** — path to a recent, sanitized extract on the Mac. Read it locally if present.
 - **Context block** — AMC version (git SHA), app view (route/folder/mode), window size, timestamp. No mail content.
@@ -59,12 +59,12 @@ Decide:
 
 ## Step 3 — Implement (via subagents)
 
-You supervise; Codex subagents do the work. Use `delegate_task` with `providerInstanceId: codex`, model `gpt-6.2-sol`, `options: {reasoningEffort: medium}`, `runtimeMode: full-access`, `isolation: worktree` or a fresh `/tmp` clone.
+You supervise; Codex subagents do the work. Target the AMC project with `delegate_task`, using `providerInstanceId: codex`, model `gpt-6.2-sol`, `options: {reasoningEffort: medium}`, and `runtimeMode: full-access`. Follow the workspace and scratch-file guidance in [AGENTS.md](../../../AGENTS.md).
 
 Every brief starts with:
 > NEVER request approval or sandbox escalation. The owner is away. You may write scratch files under /tmp. If something would need approval, skip it and note it.
 
-The brief includes: the one-sentence problem/desired behaviour, the area and likely files (from the annotation's component names/selectors), acceptance criteria, how to verify (unit test + renderer harness for UI, CLI for engine), repo rules (read AGENTS.md incl. Desktop React rules, GLOSSARY.md, ADRs), the privacy rules above, "unsigned commits, open a PR, wait for `gh pr checks N --watch`, don't merge", and "final report: PR URL, head SHA, CI state, what changed, how verified".
+The brief includes the desired behavior, likely files, acceptance criteria, and the smallest test that proves the change. Point to AGENTS.md, GLOSSARY.md, and the relevant ADRs. Carry forward the privacy rules. Ask the delegate to use unsigned commits, open a PR without merging it, and report the URL, head SHA, checks already run, and any pending CI.
 
 Independent feedback items → parallel subagents in separate checkouts. Don't stack conflicting work on the same files.
 
@@ -74,11 +74,7 @@ Start a **new** `delegate_task` (role review) with the PR URL, the problem state
 
 ## Step 5 — Merge, release, verify
 
-```bash
-gh pr checks N --watch
-gh pr merge N --squash --delete-branch --match-head-commit <SHA>
-cd /Users/ralf/Documents/codex/agent-mail-client && git pull -q && pnpm check
-```
+If checks or reviews are pending, call T3's `watch_pull_request` and yield. On wake, check the current head and reverify any changed findings before proceeding. Merge the reviewed SHA once checks and reviews pass, then update the AMC checkout and run `pnpm check`.
 Deploy only what changed:
 - Engine (`apps/engine`, `packages/*` used by engine, migrations): `pnpm deploy:host`
 - Desktop: quit AMC (`osascript -e 'quit app "AMC"'`, wait until the process is gone), `pnpm desktop:install`, `open -a ~/Applications/AMC.app`

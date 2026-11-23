@@ -5,9 +5,9 @@
   "type": "module",
   "main": "out/main/index.js",
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "env -u ELECTRON_RUN_AS_NODE electron-vite dev",
     "build": "electron-vite build",
-    "start": "electron-vite preview",
+    "start": "env -u ELECTRON_RUN_AS_NODE electron-vite preview",
     "package": "pnpm build && node build/prepare-package.mjs && electron-builder --mac --arm64 --publish never",
     "package:dir": "pnpm package --dir"
   },

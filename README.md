@@ -18,6 +18,8 @@ pnpm check        # typecheck, lint, test
 pnpm build        # builds all workspace packages
 ```
 
+See [development profiles](docs/runbook.md#development-profiles) to start an isolated Desktop or Engine.
+
 | Path | What |
 |---|---|
 | `apps/engine` | the Engine: runs on the Host as the `amc` user |
