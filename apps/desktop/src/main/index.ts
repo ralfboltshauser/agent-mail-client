@@ -45,6 +45,7 @@ import {
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   type IpcMainInvokeEvent,
   ipcMain,
@@ -61,6 +62,7 @@ import { feedbackAccelerator } from '../shared/feedback'
 import { projectActionFailures } from './action-failures'
 import { clearPairing, loadPairing, savePairing } from './auth'
 import { AutoTriage } from './auto-triage'
+import { desktopDiagnostics, installedCliVersion } from './diagnostics'
 import { composeDraftPath } from './draft-updates'
 import { carryRequest, EngineClient, EngineError } from './engine'
 import { registerFeedbackIpc } from './feedback-ipc'
@@ -109,6 +111,8 @@ let notifications: NewMailNotifications | null = null
 let threadNavigationReady = false
 let pendingThreadId: string | null = null
 let pendingSettings = false
+let diagnosticsReady = false
+let pendingDiagnostics = false
 const notificationSettingsFile = () => join(app.getPath('userData'), 'notifications.json')
 let feedback: ReturnType<typeof registerFeedbackIpc>
 let handoff: Handoff
@@ -368,7 +372,27 @@ function handle<Args extends unknown[], Result>(
   })
 }
 
-function registerIpc() {
+function registerIpc(logDirectory: string) {
+  let copying: Promise<void> | undefined
+  handle('amc:copyDiagnostics', () => {
+    copying ??= desktopDiagnostics({
+      desktopVersion: app.getVersion(),
+      readCliVersion: installedCliVersion,
+      directory: logDirectory,
+      engine,
+      sync: sync?.status ?? pausedStatus ?? startupStatus,
+    })
+      .then((snapshot) => clipboard.writeText(snapshot))
+      .finally(() => {
+        copying = undefined
+      })
+    return copying
+  })
+  ipcMain.on('amc:diagnosticsReady', (event) => {
+    if (!ownMainFrame(event, window?.webContents, rendererUrl)) return
+    diagnosticsReady = true
+    openPendingDiagnostics()
+  })
   handle('amc:notificationSettings', () => notificationSettings)
   handle('amc:saveNotificationSettings', (_event, input: unknown) => {
     const settings = parseNotificationSettings(input)
@@ -939,18 +963,21 @@ function createWindow() {
   })
   const current = window
   threadNavigationReady = false
+  diagnosticsReady = false
   current.webContents.on('before-input-event', (event, input) => {
     handleMailRefreshKey(event, input, checkMail)
   })
   current.webContents.on('did-start-navigation', ({ isMainFrame, isSameDocument }) => {
     if (isMainFrame && !isSameDocument) {
       threadNavigationReady = false
+      diagnosticsReady = false
       feedback.reset()
     }
   })
   current.webContents.on('render-process-gone', () => {
     feedback.reset()
     threadNavigationReady = false
+    diagnosticsReady = false
   })
   current.once('ready-to-show', () => current.show())
   // Never let the app window navigate away or open windows; links go to the browser.
@@ -1028,6 +1055,18 @@ function openSettings() {
   openPendingSettings()
 }
 
+function openPendingDiagnostics() {
+  if (!diagnosticsReady || !pendingDiagnostics) return
+  pendingDiagnostics = false
+  broadcast('amc:copyDiagnostics')
+}
+
+function copyDiagnosticsFromMenu() {
+  pendingDiagnostics = true
+  if (!window?.isFocused()) openWindow()
+  openPendingDiagnostics()
+}
+
 function buildMenu() {
   const menu = Menu.buildFromTemplate([
     { role: 'appMenu', id: 'app-menu' },
@@ -1043,6 +1082,7 @@ function buildMenu() {
           accelerator: feedbackAccelerator,
           click: feedback.open,
         },
+        { label: 'Copy Diagnostics', click: copyDiagnosticsFromMenu },
       ],
     },
   ])
@@ -1099,7 +1139,7 @@ if (!app.requestSingleInstanceLock()) {
         },
         changed: (status) => broadcast('amc:triageStatus', status),
       })
-      registerIpc()
+      registerIpc(logDirectory)
       openReplica()
       const packagedMac = process.platform === 'darwin' && app.isPackaged
       const loginItem = packagedMac && !customProfile

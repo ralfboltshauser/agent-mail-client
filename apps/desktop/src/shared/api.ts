@@ -215,6 +215,8 @@ export interface AmcApi {
   reportFailure?(report: RendererLogReport): void
   logSettings?(): Promise<DesktopLogSettings>
   setDebugLogging?(enabled: boolean): Promise<DesktopLogSettings>
+  copyDiagnostics(): Promise<void>
+  onCopyDiagnostics(listener: () => void): () => void
   feedback: FeedbackApi
   smartInbox?: SmartInboxApi
   notificationSettings(): Promise<NotificationSettings>

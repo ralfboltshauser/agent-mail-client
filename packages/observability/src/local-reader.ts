@@ -1,7 +1,7 @@
 import { constants } from 'node:fs'
 import { open } from 'node:fs/promises'
 import { join } from 'node:path'
-import { projectStoredError } from './errors.ts'
+import { type ErrorClass, projectStoredError } from './errors.ts'
 import { type EventName, events } from './events.ts'
 import { isCorrelationId } from './ids.ts'
 import { type Component, components, type Level, levels, safeScope, validField } from './index.ts'
@@ -196,12 +196,12 @@ export async function readRecentLogs(directory: string, now = Date.now()) {
 
 export type DiagnosticsSource<T> =
   | { status: 'available'; snapshot: T }
-  | { status: 'unavailable' | 'unsupported' | 'unauthorized' | 'invalid' }
+  | { status: 'unavailable' | 'unsupported' | 'unauthorized' | 'invalid'; errorClass?: ErrorClass }
 
 /** Supply the Engine snapshot only after running the dedicated protocol validator. */
 export async function assembleDiagnostics<T>(input: {
   directory: string
-  versions: Readonly<Record<string, string>>
+  versions: Readonly<Record<string, string | null>>
   engine: DiagnosticsSource<T>
 }) {
   return {

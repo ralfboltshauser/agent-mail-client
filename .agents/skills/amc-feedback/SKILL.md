@@ -29,6 +29,8 @@ Restate the feedback as one sentence: **problem → desired behaviour**, plus th
 
 Read the file identified by `Local log excerpt` if the thread supplies a path. Match its warnings, errors and correlation IDs to the screenshot timestamp. If screenshot Details show a run ID, run `amc logs --run <id>` on the machine with those logs. For a request ID, run `amc logs --request <id>` on that machine. Include only the relevant event, error class and correlation ID in external reports. If the excerpt has expired, use the correlation ID from the screenshot or continue with the other evidence.
 
+If the owner supplies a snapshot from **Help → Copy Diagnostics** or the command palette, use its versions, Desktop sync state, health warning codes, Engine diagnostic status and recent local warnings to investigate. Use the same external-report limits as for the local excerpt.
+
 Classify:
 | Kind | Example | Default path |
 |---|---|---|

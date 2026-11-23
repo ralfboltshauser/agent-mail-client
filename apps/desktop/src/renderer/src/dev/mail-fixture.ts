@@ -209,6 +209,8 @@ export function createMailFixture(scenario: string) {
         statusListeners.delete(listener)
       }
     },
+    copyDiagnostics: async () => {},
+    onCopyDiagnostics: () => () => {},
     onOpenSettings: () => () => {},
     onOpenThread: () => () => {},
     onChanged: (listener) => {
