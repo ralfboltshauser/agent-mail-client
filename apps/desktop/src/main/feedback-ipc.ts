@@ -17,6 +17,7 @@ import {
   feedbackMessage,
   feedbackProject,
   launchFeedback,
+  pruneFeedbackCaptures,
   removeFeedbackCapture,
   saveFeedbackCapture,
   saveFeedbackExcerpt,
@@ -99,6 +100,17 @@ export function registerFeedbackIpc(
     if (capture && Date.now() - capture.context.at.getTime() >= feedbackCaptureLifetimeMs)
       clearCapture()
   }
+
+  function pruneCaptures() {
+    expireCapture()
+    try {
+      pruneFeedbackCaptures(app.getPath('userData'))
+    } catch (err) {
+      logger.log('warn', 'feedback.capture.failed', { stage: 'CleanupFailed', err })
+    }
+  }
+  pruneCaptures()
+  setInterval(pruneCaptures, 60 * 60 * 1000).unref()
 
   function trusted(event: Pick<IpcMainEvent, 'sender' | 'senderFrame'>) {
     return event.sender === getWindow()?.webContents && event.senderFrame === event.sender.mainFrame

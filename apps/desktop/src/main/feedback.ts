@@ -16,21 +16,36 @@ export function saveFeedbackCapture(userData: string, png: Buffer, at: Date) {
   mkdirSync(directory, { mode: 0o700, recursive: true })
   if (!lstatSync(directory).isDirectory()) throw new Error('Invalid feedback directory.')
   chmodSync(directory, 0o700)
+  pruneFeedbackDirectory(directory, at.getTime(), 19)
   const name = `${at.getTime()}-${randomUUID()}.png`
   const path = join(directory, name)
   writeFileSync(path, png, { mode: 0o600, flag: 'wx' })
-  chmodSync(path, 0o600)
+  return path
+}
 
-  const older = readdirSync(directory, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && captureName.test(entry.name) && entry.name !== name)
+export function pruneFeedbackCaptures(userData: string, now = Date.now()) {
+  const directory = join(userData, 'feedback')
+  try {
+    if (!lstatSync(directory).isDirectory()) return
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw error
+  }
+  pruneFeedbackDirectory(directory, now, 20)
+}
+
+function pruneFeedbackDirectory(directory: string, now: number, maxCaptures: number) {
+  const entries = readdirSync(directory, { withFileTypes: true })
+  const older = entries
+    .filter((entry) => entry.isFile() && captureName.test(entry.name))
     .map((entry) => entry.name)
     .sort((a, b) => Number.parseInt(b, 10) - Number.parseInt(a, 10))
   for (const [index, old] of older.entries()) {
-    if (index >= 19 || at.getTime() - Number.parseInt(old, 10) >= feedbackCaptureLifetimeMs)
+    if (index >= maxCaptures || now - Number.parseInt(old, 10) >= feedbackCaptureLifetimeMs)
       removeFeedbackCapture(join(directory, old))
   }
   // An interrupted removal can leave an excerpt behind without a screenshot.
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+  for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith('.logs.json')) continue
     const pngName = entry.name.replace(/\.logs\.json$/, '.png')
     if (!captureName.test(pngName)) continue
@@ -41,7 +56,6 @@ export function saveFeedbackCapture(userData: string, png: Buffer, at: Date) {
     }
     rmSync(join(directory, entry.name), { force: true })
   }
-  return path
 }
 
 export function removeFeedbackCapture(path: string) {

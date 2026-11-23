@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   saveCapture: vi.fn(),
   saveExcerpt: vi.fn(),
   removeCapture: vi.fn(),
+  pruneCaptures: vi.fn(),
 }))
 
 vi.mock('electron', () => ({
@@ -27,6 +28,7 @@ vi.mock('./feedback', async (importOriginal) => ({
   saveFeedbackCapture: mocks.saveCapture,
   saveFeedbackExcerpt: mocks.saveExcerpt,
   removeFeedbackCapture: mocks.removeCapture,
+  pruneFeedbackCaptures: mocks.pruneCaptures,
 }))
 vi.mock('./t3-cli', () => ({ localT3Launcher: mocks.localLauncher }))
 vi.mock('./t3', () => ({
@@ -161,6 +163,20 @@ describe('feedback IPC', () => {
     expect(await send()).toMatchObject({ opened: false })
     expect(mocks.removeCapture).toHaveBeenCalledExactlyOnceWith(path)
     expect(mocks.localLauncher).not.toHaveBeenCalled()
+  })
+
+  it('prunes retained artifacts on startup and while the app is idle', async () => {
+    vi.useFakeTimers()
+    const { release, send } = await captureFeedback()
+    expect(mocks.pruneCaptures).toHaveBeenCalledExactlyOnceWith('/tmp/fixture')
+    mocks.localLauncher.mockResolvedValue({
+      launch: vi.fn().mockResolvedValue({ threadId: 'test' }),
+    })
+    await expect(send()).resolves.toEqual({ opened: true })
+    await release()
+    expect(mocks.removeCapture).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
+    expect(mocks.pruneCaptures).toHaveBeenCalledTimes(2)
   })
 
   it('cleans up a released capture which was never handed to T3', async () => {

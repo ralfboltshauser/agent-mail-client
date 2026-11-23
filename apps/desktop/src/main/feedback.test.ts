@@ -15,6 +15,7 @@ import {
   feedbackCaptureLifetimeMs,
   feedbackMessage,
   launchFeedback,
+  pruneFeedbackCaptures,
   saveFeedbackCapture,
   saveFeedbackExcerpt,
 } from './feedback'
@@ -89,12 +90,8 @@ describe('feedback captures', () => {
     const text = readFileSync(excerpt, 'utf8')
     expect(text).toContain('feedback.launch.failed')
     expect(text).not.toContain(canary)
-    saveFeedbackCapture(
-      root,
-      Buffer.from('synthetic'),
-      new Date(context.at.getTime() + feedbackCaptureLifetimeMs),
-    )
-    expect(readdirSync(join(root, 'feedback'))).toHaveLength(1)
+    pruneFeedbackCaptures(root, context.at.getTime() + feedbackCaptureLifetimeMs)
+    expect(readdirSync(join(root, 'feedback'))).toEqual([])
   })
 
   it('passes Agentation markdown verbatim and only includes allowlisted window context', () => {
