@@ -1,7 +1,7 @@
 import DOMPurify from 'dompurify'
 
 const BASE_CSS = `
-  :where(html) { color-scheme: light; background: #fff; color: #1f1f23;
+  :where(html) { background: #fff; color: #1f1f23;
     font: 14px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
     overflow-wrap: break-word; }
   :where(html, body) { margin: 0; padding: 0; }
@@ -72,9 +72,12 @@ export function messageDocument(clean: HTMLHtmlElement, remote: boolean) {
   const policy = doc.createElement('meta')
   policy.httpEquiv = 'Content-Security-Policy'
   policy.content = csp
+  const colorScheme = doc.createElement('meta')
+  colorScheme.name = 'color-scheme'
+  colorScheme.content = 'only light'
   const styles = doc.createElement('style')
   styles.textContent = BASE_CSS
-  head.prepend(charset, policy, styles)
+  head.prepend(charset, policy, colorScheme, styles)
 
   // The reader owns scrolling at the viewport. A sender can still size and clip its
   // inner layout, but root/body overflow must not hide the rest of the message.
