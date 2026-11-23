@@ -205,12 +205,17 @@ it('drives drafts and organize through the CLI with paired, scoped and handoff c
   })
   const home = tempDir()
   let oldEngine: 'always' | 'on-write' | undefined
-  let createResponse: 'lost' | 'malformed' | undefined
+  let draftResponseFault:
+    | {
+        tool: 'create_draft' | 'update_draft' | 'delete_draft'
+        response: 'lost' | Record<string, unknown>
+      }
+    | undefined
   vi.spyOn(mutations, 'kick').mockImplementation(() => {})
   const listener = serve({
     fetch: async (req) => {
       const rpc =
-        req.method === 'POST' && (oldEngine || createResponse)
+        req.method === 'POST' && (oldEngine || draftResponseFault)
           ? ((await req.clone().json()) as { method: string; params?: { name?: string } })
           : null
       const path = new URL(req.url).pathname
@@ -221,12 +226,18 @@ it('drives drafts and organize through the CLI with paired, scoped and handoff c
       )
         return new Response(null, { status: 404 })
       const response = await app.fetch(req)
-      if (createResponse && rpc?.method === 'tools/call' && rpc.params?.name === 'create_draft') {
-        if (createResponse === 'lost') return new Response(null, { status: 502 })
+      if (
+        draftResponseFault &&
+        rpc?.method === 'tools/call' &&
+        rpc.params?.name === draftResponseFault.tool
+      ) {
+        if (draftResponseFault.response === 'lost') return new Response(null, { status: 502 })
         const payload = (await response.json()) as {
           result: { content: { type: string; text: string }[] }
         }
-        payload.result.content = [{ type: 'text', text: '{}' }]
+        payload.result.content = [
+          { type: 'text', text: JSON.stringify(draftResponseFault.response) },
+        ]
         return Response.json(payload)
       }
       return response
@@ -404,31 +415,30 @@ it('drives drafts and organize through the CLI with paired, scoped and handoff c
           .stdout,
       ).threads.map(({ accountId }: { accountId: string }) => accountId),
     ).toEqual(['a', 'a'])
-    expect(
-      JSON.parse(
-        (
-          await cli(
-            scoped.secret,
-            [
-              '--as-agent',
-              'draft',
-              'create',
-              '--to',
-              'Reader <reader@example.com>',
-              '--body-file',
-              '-',
-              '--json',
-            ],
-            'New synthetic note',
-          )
-        ).stdout,
-      ),
-    ).toMatchObject({
+    const newDraft = JSON.parse(
+      (
+        await cli(
+          scoped.secret,
+          [
+            '--as-agent',
+            'draft',
+            'create',
+            '--to',
+            'Reader <reader@example.com>',
+            '--body-file',
+            '-',
+            '--json',
+          ],
+          'New synthetic note',
+        )
+      ).stdout,
+    )
+    expect(newDraft).toMatchObject({
       accountId: 'a',
       to: [{ name: 'Reader', address: 'reader@example.com' }],
     })
-    for (const failure of ['lost', 'malformed'] as const) {
-      createResponse = failure
+    for (const failure of ['lost', {}] as const) {
+      draftResponseFault = { tool: 'create_draft', response: failure }
       const before = drafts.list().length
       expect(
         await cli(scoped.secret, ['--as-agent', ...draftReply], 'Saved before response failure'),
@@ -439,7 +449,37 @@ it('drives drafts and organize through the CLI with paired, scoped and handoff c
       })
       expect(drafts.list()).toHaveLength(before + 1)
     }
-    createResponse = undefined
+    const unconfirmed = {
+      code: 1,
+      stdout: '',
+      stderr: expect.stringContaining('Check AMC before retrying'),
+    }
+    draftResponseFault = { tool: 'update_draft', response: { id: 'wrong-draft', revision: 1 } }
+    expect(
+      await cli(owner.secret, [
+        'draft',
+        'update',
+        newDraft.id,
+        '--revision',
+        String(newDraft.revision),
+        '--subject',
+        'Changed',
+      ]),
+    ).toMatchObject(unconfirmed)
+    const changed = drafts.get(newDraft.id)
+    expect(changed?.subject).toBe('Changed')
+    draftResponseFault = { tool: 'delete_draft', response: { absent: 'wrong-draft' } }
+    expect(
+      await cli(owner.secret, [
+        'draft',
+        'discard',
+        newDraft.id,
+        '--revision',
+        String(changed?.revision),
+      ]),
+    ).toMatchObject(unconfirmed)
+    expect(drafts.get(newDraft.id)).toBeNull()
+    draftResponseFault = undefined
 
     const denied = await cli(scoped.secret, [
       '--as-agent',

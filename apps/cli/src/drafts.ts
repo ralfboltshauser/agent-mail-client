@@ -164,7 +164,7 @@ export function registerDraftCommands(
         agent(),
         'update_draft',
         { draft_id: id, ...patch, revision: current, report_mirror: true },
-        { checked: true, write: true, result: DraftReceipt },
+        { checked: true, write: true, result: DraftReceipt.refine((receipt) => receipt.id === id) },
       )
       printReceipt(result, opts.json)
     })
@@ -182,7 +182,13 @@ export function registerDraftCommands(
         false,
         'delete_draft',
         { draft_id: id, revision: revision(opts.revision) },
-        { checked: true, write: true, result: DiscardReceipt },
+        {
+          checked: true,
+          write: true,
+          result: DiscardReceipt.refine(
+            (receipt) => ('deleted' in receipt ? receipt.deleted : receipt.absent) === id,
+          ),
+        },
       )
       if (opts.json) return printJson(result)
       console.log(
