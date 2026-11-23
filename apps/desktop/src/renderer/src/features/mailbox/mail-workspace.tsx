@@ -68,8 +68,7 @@ export function MailWorkspace({
   const labels = useReplicaSelector(labelsQuery(accountId), ({ data }) => data ?? NO_LABELS)
 
   const mailSearch = useMailSearch(accountId)
-  const { search, input: searchInput, resetSearch, clearSearch, runSearch } = mailSearch
-  const filter = mailSearch.filterText.trim()
+  const { filter, search, input: searchInput, resetSearch, clearSearch, runSearch } = mailSearch
   const key = mailboxKey(accountId, view, filter, search?.text)
   const mailbox = useMailboxRows({
     engineUrl,
@@ -237,7 +236,7 @@ export function MailWorkspace({
         : undefined,
   })
   const title = search
-    ? `Search: ${search.text}`
+    ? 'Search results'
     : view.kind === 'label'
       ? (labels.find((label) => label.id === view.labelId)?.name ?? 'Label')
       : view.kind === 'bucket'

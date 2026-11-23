@@ -992,7 +992,7 @@ it('leaves ! available for typing in the search and composer fields', async () =
       expect(fireEvent.keyDown(field, { key: '!', code: 'Digit1', shiftKey: true })).toBe(true)
     })
   }
-  await typeBang(screen.getByRole('textbox', { name: /Filter mail or press Enter/ }))
+  await typeBang(screen.getByRole('textbox', { name: /Search mail/ }))
   await press('f', listbox(), { code: 'KeyF' })
   const composer = screen.getByRole('dialog', { name: 'Compose' })
   await typeBang(within(composer).getByRole('textbox', { name: 'Subject' }))

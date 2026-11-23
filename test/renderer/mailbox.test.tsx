@@ -269,6 +269,58 @@ async function openSidebarTriage() {
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Triage' })))
 }
 
+it('offers structured history search without filtering the inbox before submission', async () => {
+  const adapter = await mount()
+  const before = mailboxNodes()
+  const input = screen.getByRole<HTMLInputElement>('textbox', { name: 'Search mail' })
+  act(() => input.focus())
+  expect(screen.getByText('Filters Inbox as you type')).toBeTruthy()
+
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'People' })))
+  expect(input.value).toBe('from:')
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Subject' })))
+  expect(input.value).toBe('subject:')
+  expect(document.activeElement).toBe(input)
+  expect(screen.getByText('Enter a value after the colon.')).toBeTruthy()
+  expect(screen.getByRole<HTMLButtonElement>('button', { name: /Search all mail/ }).disabled).toBe(
+    true,
+  )
+  await act(async () => fireEvent.keyDown(input, { key: 'Enter' }))
+  expect(adapter.api.search).not.toHaveBeenCalled()
+
+  const value = 'subject:"print proof"'
+  await act(async () => fireEvent.change(input, { target: { value } }))
+  expect(adapter.api.filter).not.toHaveBeenCalled()
+  expect(listbox()).toBe(before.list)
+  expect(options()).toEqual(before.rows)
+  expect(selected()).toBe(before.selection)
+  expect(reader()).toBe(before.heading)
+
+  const action = screen.getByRole('button', { name: /Search all mail/ })
+  expect(within(action).getByText('All accounts')).toBeTruthy()
+  const [account] = await adapter.api.accounts()
+  await act(async () => fireEvent.keyDown(input, { key: '1', metaKey: true }))
+  expect(within(action).getByText(account.address)).toBeTruthy()
+  await act(async () => fireEvent.keyDown(input, { key: 'Enter', isComposing: true }))
+  expect(adapter.api.search).not.toHaveBeenCalled()
+  await act(async () => fireEvent.click(action))
+  expect(adapter.api.search).toHaveBeenCalledExactlyOnceWith(value, account.id)
+  expect(screen.queryByRole('button', { name: /Search all mail/ })).toBeNull()
+  expect(document.activeElement).toBe(input)
+})
+
+it('moves focus and selection from search to the matching threads with Arrow Down', async () => {
+  await mount()
+  const input = screen.getByRole('textbox', { name: 'Search mail' })
+  act(() => input.focus())
+  await act(async () => fireEvent.change(input, { target: { value: 'e' } }))
+  const previous = selected()
+  await act(async () => fireEvent.keyDown(input, { key: 'ArrowDown' }))
+  expect(document.activeElement).toBe(listbox())
+  expect(selected()).not.toBe(previous)
+  expect(screen.queryByRole('button', { name: /Search all mail/ })).toBeNull()
+})
+
 it('commits only the indicator when an account reports a sync error', async () => {
   const adapter = await mount()
   const before = mailboxNodes()
@@ -287,7 +339,7 @@ it.each(['filter', 'history'] as const)(
   'refreshes one %s result without committing other rows or the reader',
   async (mode) => {
     const adapter = await mount()
-    const input = screen.getByRole('textbox', { name: /Filter mail/ })
+    const input = screen.getByRole('textbox', { name: /Search mail/ })
     await act(async () => fireEvent.change(input, { target: { value: 'e' } }))
     if (mode === 'history') {
       await act(async () => fireEvent.keyDown(input, { key: 'Enter' }))

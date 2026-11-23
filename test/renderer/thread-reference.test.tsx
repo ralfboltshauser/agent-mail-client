@@ -84,7 +84,7 @@ it('preserves ordinary copy and routes the shared chord to Cc in the composer', 
   const heading = reader()
   expect(await pressCopy(heading, false)).toBe(false)
   expect(await pressCopy(heading, true, true)).toBe(false)
-  expect(await pressCopy(screen.getByRole('textbox', { name: /Filter mail/ }))).toBe(false)
+  expect(await pressCopy(screen.getByRole('textbox', { name: /Search mail/ }))).toBe(false)
 
   const selection = window.getSelection()
   selection?.selectAllChildren(heading)
