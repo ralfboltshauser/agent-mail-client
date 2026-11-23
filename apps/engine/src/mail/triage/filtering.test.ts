@@ -774,3 +774,51 @@ it('keeps a fresh paired-sender IMAP arrival in Inbox without a new-sender Triag
     db.close()
   }
 })
+
+it('refreshes queue snapshots from the head and matches Inbox New Sender groups', () => {
+  const { db, put } = fixture()
+  try {
+    put('early', { labels: ['INBOX'], date: 1000 })
+    const second = put('second', { labels: ['INBOX'], date: 2000, from: 'second@example.test' })
+    const snapshot = triageQueue(db, { accountId: 'a', limit: 1 })
+    expect(snapshot.cards.map(({ threadId }) => threadId)).toEqual([second])
+    const cursor = snapshot.cursor
+    if (!cursor) throw new Error('Expected a second queue page')
+    expect(triageQueue(db, { accountId: 'a', limit: 1, cursor }).cards).toHaveLength(1)
+
+    const latest = put('latest', { labels: ['INBOX'], date: 3000 })
+    const fresh = put('fresh', { labels: ['INBOX'], date: 4000, from: 'fresh@example.test' })
+    expect(() => triageQueue(db, { accountId: 'a', limit: 1, cursor })).toThrow(
+      'Triage queue changed. Start a fresh snapshot.',
+    )
+
+    expect(triageQueue(db, { accountId: 'a', limit: 1, cursor, nextBatch: '1' }).cards).toEqual([])
+    const refreshed = triageQueue(db, { accountId: 'a', limit: 100 })
+    expect(refreshed.revision).toBeGreaterThan(snapshot.revision)
+    expect(refreshed.cards.map(({ threadId }) => threadId)).toEqual([fresh, latest, second])
+    const inbox = new MailQueries(db).threads({ accountId: 'a', inbox: true }).threads
+    const inboxGroups = new Set(
+      inbox.flatMap(({ inboxSender }) =>
+        inboxSender?.status === 'new'
+          ? [JSON.stringify([inboxSender.accountId, inboxSender.address])]
+          : [],
+      ),
+    )
+    expect(inbox).toHaveLength(4)
+    expect(
+      new Set(
+        refreshed.cards.flatMap(({ id }) =>
+          id.kind === 'sender' ? [JSON.stringify([id.accountId, id.address])] : [],
+        ),
+      ),
+    ).toEqual(inboxGroups)
+
+    // Skips are local to Desktop. The Engine still returns the live Sender card.
+    expect(
+      triageQueue(db, { accountId: 'a', senderAddress: 'feed@example.test', limit: 1 }).cards[0]
+        ?.threadId,
+    ).toBe(latest)
+  } finally {
+    db.close()
+  }
+})

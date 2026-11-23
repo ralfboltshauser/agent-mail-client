@@ -300,7 +300,16 @@ export function TriageReview({
                   ),
                 }}
               />
-              <ReviewState store={store} message={message} busy={busy} error={errors} />
+              <ReviewState
+                store={store}
+                message={message}
+                busy={busy}
+                error={errors}
+                onReviewSkipped={() => {
+                  focus()
+                  void store.refresh('skipped')
+                }}
+              />
               <nav aria-label="Queue actions" className="mt-4 flex flex-wrap gap-2">
                 <Button size="sm" variant="outline" onClick={() => run(' ')}>
                   Skip <Kbd>Space</Kbd>
