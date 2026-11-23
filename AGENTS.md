@@ -22,6 +22,10 @@ Review handwritten files around 300 lines and components around 150 lines. Split
 
 The owner can open a feedback thread from AMC with **⌘⇧F**. Use the [AMC feedback skill](.agents/skills/amc-feedback/SKILL.md) when a thread starts with “AMC feedback”.
 
+## AMC change requests
+
+Use the [AMC work skill](.agents/skills/amc-work/SKILL.md) when asked to fix a bug, polish the UI, change an interaction, or build a feature in AMC. It routes the work and registers the steps in T3's Tasks drawer. Feedback intake hands off to the same skill.
+
 ## Agent workspaces and scratch files
 
 - For implementation and review delegates, target the AMC project and use T3-managed worktree isolation. For a read-only review, inspect the branch or PR diff directly if it already has the evidence you need.
