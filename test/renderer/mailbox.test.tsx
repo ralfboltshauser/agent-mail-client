@@ -354,6 +354,33 @@ it('advances the compact reader after Archive and returns to Inbox when empty', 
   expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Inbox' }))
 })
 
+it('closes a notification-opened reader when Archive removes its collapsed Inbox row', async () => {
+  const adapter = rendererAdapter()
+  const target = (await adapter.api.thread('thread-1'))?.thread
+  if (!target) throw new Error('Expected notification thread')
+  let notify: ((thread: NonNullable<typeof target>) => void) | undefined
+  adapter.api.onOpenThread = (callback) => {
+    notify = callback
+    return () => {
+      notify = undefined
+    }
+  }
+  const narrow = compactViewport()
+  await mount(adapter)
+  narrow()
+  adapter.api.threads.mockResolvedValueOnce([target])
+  await act(async () => adapter.emitChanged())
+  fireEvent.click(screen.getByRole('button', { name: /^Action\/Reply/ }))
+  expect(screen.queryByRole('option')).toBeNull()
+  await act(async () => notify?.(target))
+  expect(reader()).toBeTruthy()
+
+  adapter.api.threads.mockResolvedValue([])
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Archive' })))
+  expect(screen.queryByRole('button', { name: 'Back to mailbox' })).toBeNull()
+  expect(screen.getByText('Inbox is clear')).toBeTruthy()
+})
+
 it('applies one off-reader bucket change to the existing row', async () => {
   const adapter = await mount()
   const before = mailboxNodes()

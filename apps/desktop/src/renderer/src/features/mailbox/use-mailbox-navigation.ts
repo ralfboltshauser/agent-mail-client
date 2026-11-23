@@ -19,7 +19,10 @@ export function mailboxKey(accountId: string | null, view: View, filter: string,
 export function useMailboxNavigation(snoozeEnabled: boolean) {
   const [accountId, setAccountId] = useState<string | null>(null)
   const [selectedView, setView] = useState<View>(INBOX)
-  const [notification, setNotification] = useState<ThreadSummary | null>(null)
+  const [notification, setNotification] = useState<{
+    thread: ThreadSummary
+    confirmed: boolean
+  } | null>(null)
   const view = !snoozeEnabled && selectedView.kind === 'snoozed' ? INBOX : selectedView
   if (view !== selectedView) setView(view)
   return { accountId, setAccountId, view, setView, notification, setNotification }

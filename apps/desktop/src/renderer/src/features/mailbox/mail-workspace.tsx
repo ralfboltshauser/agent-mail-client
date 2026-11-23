@@ -90,7 +90,7 @@ export function MailWorkspace({
     hits: search?.hits ?? null,
     searching: search !== null,
   })
-  const notificationRow = !search && !filter ? notification : null
+  const notificationRow = !search && !filter ? (notification?.thread ?? null) : null
   // A sent delivery can appear in Outbox before the Sent list has caught up.
   const pendingSent =
     sentTarget?.scope === key && !mailbox.ids?.includes(sentTarget.id) ? sentTarget : null
@@ -101,13 +101,25 @@ export function MailWorkspace({
     storageKey: JSON.stringify(['amc-inbox-collapse-v1', engineUrl, accountId]),
   })
   const { focus: inboxFocus, openSender } = inbox
-  const notificationIsListed = useReplicaSelector(
+  const notificationPresence = useReplicaSelector(
     notificationRow ? mailbox.query : null,
-    ({ data }) =>
-      notificationRow &&
-      (sectioned ? inbox.readIds(data) : data?.ids)?.includes(notificationRow.id),
+    ({ data }) => {
+      if (!notificationRow || !data) return 'unknown'
+      if (!data.summaries.has(notificationRow.id)) return 'missing'
+      return sectioned && !inbox.readIds(data)?.includes(notificationRow.id) ? 'hidden' : 'visible'
+    },
   )
-  if (notificationIsListed) setNotification(null)
+  if (notification) {
+    // Keep explicitly opened rows accessible while their Inbox section is collapsed.
+    if (
+      notificationPresence === 'visible' ||
+      (notification.confirmed && notificationPresence === 'missing')
+    ) {
+      setNotification(null)
+    } else if (notificationPresence === 'hidden' && !notification.confirmed) {
+      setNotification({ ...notification, confirmed: true })
+    }
+  }
   const {
     selectedId,
     ids,
@@ -235,7 +247,7 @@ export function MailWorkspace({
       setBucketPickerId(null)
       setAccountId(null)
       setView(next)
-      setNotification(target)
+      setNotification({ thread: target, confirmed: false })
       const destination = mailboxKey(null, next, '')
       setSelection({ key: destination, id: target.id })
       open(destination)
