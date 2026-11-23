@@ -25,6 +25,7 @@ function fixture({
   busy = false,
   modern = false,
   decisionLog = false,
+  expectedReason = decision.reason,
 } = {}) {
   const setBucket = vi.fn(() =>
     modern ? { updated: false, reason: 'The Inbox input changed' } : { updated: true },
@@ -174,6 +175,7 @@ function fixture({
       async (args) => {
         expect(args).toEqual({
           ...decision,
+          reason: expectedReason,
           onlyUntriaged: true,
           ...(modern ? { triage: { inputRevision: 19, confidence: 'low' } } : {}),
         })
@@ -298,15 +300,24 @@ describe('amc triage', () => {
   )
 
   it('ignores legacy private and copied examples while submitting Bucket metadata', async () => {
-    fixture({ modern: true })
+    const reason = 'Context: The print shop needs a decision. | Action: Approve the proof.'
+    fixture({ modern: true, expectedReason: reason })
     const results = await runTriage(config, 'a', false, signal(), async ({ prompt }) => {
+      expect(prompt).toContain('`Context: … | Action: …`')
+      expect(prompt).toContain('use only `Context: …`')
       expect(prompt).not.toContain('Synthetic example')
       expect(prompt).not.toContain('Synthetic owner preference')
       expect(prompt).not.toContain('"chosen":"Later"')
-      return { decisions: [{ ...decision, confidence: 'low', inputRevision: 99 }] }
+      return { decisions: [{ ...decision, reason, confidence: 'low', inputRevision: 99 }] }
     })
     expect(results).toEqual([
-      { ...decision, confidence: 'low', updated: false, skipped: 'The Inbox input changed' },
+      {
+        ...decision,
+        reason,
+        confidence: 'low',
+        updated: false,
+        skipped: 'The Inbox input changed',
+      },
     ])
   })
 
@@ -319,12 +330,16 @@ describe('amc triage', () => {
           labelId: 'bucket.reply',
           confidence: 'low',
           matchedRuleRevisionId: null,
-          displayReason: 'Synthetic display reason',
+          displayReason: dryRun
+            ? 'Context: The print shop confirmed the delivery date.'
+            : 'Context: The print shop needs a decision. | Action: Approve the proof.',
         },
         filter: { labelId: 'filter.filtered', confidence: 'high', matchedRuleRevisionId: null },
         protection: 'billing',
       }
       const result = await runTriage(config, 'a', dryRun, signal(), async (request) => {
+        expect(request.prompt).toContain('`Context: … | Action: …`')
+        expect(request.prompt).toContain('use only `Context: …`')
         expect(request.prompt).toContain('"fixture-event"')
         expect(request.prompt).toContain('"filter.keep"')
         expect(request.prompt).not.toContain('Synthetic private canary')
