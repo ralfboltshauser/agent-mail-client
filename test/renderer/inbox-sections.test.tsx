@@ -562,9 +562,12 @@ it('marks only exposed unread Updates and undoes a specific Thread action', asyn
   expect(markSeen().getAttribute('aria-disabled')).toBe('true')
   await act(async () => fireEvent.click(markSeen()))
   expect(organise).not.toHaveBeenCalled()
+  expect(header('Updates').getAttribute('aria-expanded')).toBe('false')
 
   await act(async () => fireEvent.click(header('Updates')))
+  expect(organise).not.toHaveBeenCalled()
   await act(async () => fireEvent.click(markSeen()))
+  expect(header('Updates').getAttribute('aria-expanded')).toBe('true')
   expect(organise.mock.calls).toEqual(
     ['thread-4', 'thread-5', 'thread-6'].map((threadId) => [
       { kind: 'read', threadId, value: true },

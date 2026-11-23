@@ -78,7 +78,7 @@ export const InboxSectionHeader = memo(function InboxSectionHeader({
       size="sm"
       aria-label={`Mark ${section} seen`}
       aria-disabled={!canMark}
-      className="aria-disabled:opacity-50"
+      className="h-10 rounded-none pr-5 focus-visible:ring-inset aria-disabled:opacity-50"
       onClick={() => void markSeen()}
     >
       Mark seen
@@ -86,8 +86,8 @@ export const InboxSectionHeader = memo(function InboxSectionHeader({
   )
   return (
     <div className="border-b">
-      <div className="flex min-h-10 items-center justify-between gap-1 px-2">
-        <h3 className="min-w-0">
+      <div className="flex">
+        <h3 className="min-w-0 flex-1">
           <Button
             data-inbox-disclosure
             variant="ghost"
@@ -95,7 +95,7 @@ export const InboxSectionHeader = memo(function InboxSectionHeader({
             aria-expanded={!collapsed}
             aria-controls={controls}
             onClick={() => onToggle(section)}
-            className="max-w-full font-semibold"
+            className="flex h-10 w-full cursor-pointer justify-start rounded-none font-semibold focus-visible:ring-inset has-[>svg]:pl-4.5"
           >
             <Chevron aria-hidden />
             <span className="truncate">{section}</span>
