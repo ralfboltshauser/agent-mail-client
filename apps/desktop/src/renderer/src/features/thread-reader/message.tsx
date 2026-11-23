@@ -2,8 +2,9 @@ import { ChevronDown, FileText, Paperclip } from 'lucide-react'
 import { useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { SenderAvatar } from '@/features/sender-avatar/sender-avatar'
 import { getAmc } from '@/lib/amc'
-import { fileSize, fullDate, hueFor, initials, listDate, personName } from '@/lib/format'
+import { fileSize, fullDate, listDate, personName } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import type { ReplicaThreadMessage } from '../../../../shared/api'
 import { MessageContent } from './message-content'
@@ -22,7 +23,6 @@ export function Message({
   const [{ open, visited }, setExpansion] = useState({ open: defaultOpen, visited: defaultOpen })
   const isDraft = m.labelIds.includes(`${m.accountId}:DRAFT`)
   const files = m.attachments.filter((attachment) => !attachment.inline)
-  const hue = hueFor(m.from?.address ?? '')
 
   return (
     <div
@@ -38,12 +38,7 @@ export function Message({
         aria-expanded={open}
         onClick={() => setExpansion((current) => ({ open: !current.open, visited: true }))}
       >
-        <div
-          className="flex size-8 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold mail-avatar"
-          style={{ '--avatar-hue': hue } as React.CSSProperties}
-        >
-          {initials(m.from)}
-        </div>
+        <SenderAvatar address={m.from?.address} name={m.from?.name} />
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline gap-2">
             <span className="truncate text-sm font-semibold">{personName(m.from)}</span>

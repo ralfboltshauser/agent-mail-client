@@ -145,7 +145,7 @@ function linkify(text: string): React.ReactNode[] {
         // biome-ignore lint/suspicious/noArrayIndexKey: positional text segments
         key={i}
         href={part}
-        className="text-primary underline-offset-2 hover:underline"
+        className="text-primary underline underline-offset-2"
         onClick={(e) => {
           e.preventDefault()
           void getAmc().openExternal(part)

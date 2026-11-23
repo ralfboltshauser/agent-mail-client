@@ -14,11 +14,13 @@
   :root {
     color-scheme: light dark;
     --ink: #151515;
-    --paper: #f8f7f3;
+    --paper: #f8f8f8;
     --page: light-dark(var(--paper), var(--ink));
     --text: light-dark(var(--ink), var(--paper));
-    --muted: light-dark(#575650, #b5b3ad);
-    --line: light-dark(#d7d4cc, #42413f);
+    --muted: light-dark(#565656, #b3b3b3);
+    --line: light-dark(#d4d4d4, #414141);
+    --unread-light: oklch(.55 0 0);
+    --unread-dark: oklch(.72 0 0);
     --display: "Space Grotesk", system-ui, sans-serif;
     --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, system-ui, sans-serif;
     --mono: "SF Mono", ui-monospace, Menlo, monospace;
@@ -41,7 +43,8 @@
   h3 { font-size: 18px; line-height: 1.15; }
   p + p { margin-top: 10px; }
   a { color: inherit; text-underline-offset: .17em; }
-  a:focus-visible, input:focus-visible { outline: 2px solid Highlight; outline-offset: 4px; }
+  ::selection { background: var(--text); color: var(--page); }
+  a:focus-visible, input:focus-visible { outline: 2px solid currentColor; outline-offset: 4px; }
   img { display: block; max-width: 100%; }
   .intro { display: grid; grid-template-columns: 1fr 1fr; gap: clamp(18px, 5vw, 58px); align-items: center; padding-block: 24px; }
   .intro figure { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
@@ -59,7 +62,7 @@
   section h2 { margin-bottom: 12px; }
   .logo-rules { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 22px; }
   .logo-rules h3 { margin-bottom: 4px; }
-  .dock { display: flex; align-items: end; flex-wrap: wrap; gap: 15px; margin-top: 12px; padding: 12px 15px; background: #e3e2de; color: var(--ink); border-radius: 8px; }
+  .dock { display: flex; align-items: end; flex-wrap: wrap; gap: 15px; margin-top: 12px; padding: 12px 15px; background: #e2e2e2; color: var(--ink); border-radius: 8px; }
   .dock figure { display: grid; justify-items: center; }
   .dock figcaption { padding: 3px 0 0; border: 0; }
   .small-marks { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; align-self: center; margin-left: auto; font: 12px var(--mono); }
@@ -69,20 +72,18 @@
   .display-sample { font: 700 clamp(24px, 5vw, 42px)/1 var(--display); letter-spacing: -.045em; }
   .ui-sample { font: 600 17px/1.3 var(--sans); }
   .swatch { padding: 12px 14px; }
-  .semantics { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 8px; margin: 12px 0; }
-  .meaning { border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
-  .meaning strong { display: block; font-size: 13px; }
-  .meaning span { color: var(--muted); font-size: 12px; }
-  .meaning::before { content: ""; display: block; width: 22px; height: 4px; margin-bottom: 6px; border-radius: 2px; background: var(--cue); }
+  .avatar-examples { display: flex; gap: 8px; margin-top: 12px; }
+  .avatar { display: inline-grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: var(--avatar); color: #fff; font-size: 13px; font-weight: 600; }
   .examples { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
   .mail { background: var(--surface); color: var(--on-surface); padding: 12px; border-radius: 8px; border: 1px solid var(--line); }
+  .mail.light { --surface: oklch(.995 0 0); --on-surface: oklch(.21 0 0); --cue: var(--unread-light); }
+  .mail.dark { --surface: oklch(.196 0 0); --on-surface: oklch(.95 0 0); --cue: var(--unread-dark); }
   .mail span { display: block; font-size: 12px; opacity: .8; margin-top: 3px; }
   .mail b::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 7px; vertical-align: .1em; border-radius: 50%; background: var(--cue); }
   .assets { display: flex; flex-wrap: wrap; gap: 6px 16px; }
   @media (max-width: 520px) {
     .intro { grid-template-columns: 1fr; }
     .logo-rules { grid-template-columns: 1fr; }
-    .semantics { grid-template-columns: repeat(2, minmax(0,1fr)); }
     .small-marks { margin-left: 0; }
   }
 </style>
@@ -154,19 +155,18 @@
     <h2 id="color-heading">Color</h2>
     <div class="grid">
       <div class="plate swatch dark">Ink · #151515</div>
-      <div class="plate swatch light">Paper · #F8F7F3</div>
+      <div class="plate swatch light">Paper · #F8F8F8</div>
     </div>
-    <p style="margin-top:10px">Use ink and paper for brand artwork. In the app, take surfaces, text, borders, selection, and focus from the desktop theme. The samples below show what each hue communicates.</p>
-    <div class="semantics">
-      <div class="meaning" style="--cue:oklch(.55 .2 264)"><strong>Blue</strong><span>Unread, focus, selection, primary actions</span></div>
-      <div class="meaning" style="--cue:oklch(.696 .17 162)"><strong>Green</strong><span>Healthy sync, confirmed completion</span></div>
-      <div class="meaning" style="--cue:oklch(.769 .188 70)"><strong>Amber</strong><span>Needs review, warning</span></div>
-      <div class="meaning" style="--cue:oklch(.58 .22 27)"><strong>Red</strong><span>Failure, destructive action</span></div>
-    </div>
-    <p>Pair color with a label or a distinguishable state cue. Check text and focus contrast against the actual light and dark surfaces.</p>
+    <p style="margin-top:10px">Use ink and paper for brand artwork and the desktop theme’s grayscale palette for the interface. Distinguish unread mail, selection, focus, and status through contrast, icons, and labels.</p>
     <div class="examples">
-      <div class="mail light" style="--cue:oklch(.55 .2 264)"><b>Unread</b><span>Updated contract</span></div>
-      <div class="mail dark" style="--cue:oklch(.72 .15 264)"><b>Unread</b><span>Updated contract</span></div>
+      <div class="mail light"><b>Unread</b><span>Updated contract</span></div>
+      <div class="mail dark"><b>Unread</b><span>Updated contract</span></div>
+    </div>
+    <p style="margin-top:10px">Sender avatars are the only interface elements that use color. Assign initials avatars a stable color from the sender’s normalized email address. Use the name when the address is missing.</p>
+    <div class="avatar-examples" aria-hidden="true">
+      <span class="avatar" style="--avatar:#304879">MP</span>
+      <span class="avatar" style="--avatar:#235d54">RL</span>
+      <span class="avatar" style="--avatar:#884028">SC</span>
     </div>
   </section>
 

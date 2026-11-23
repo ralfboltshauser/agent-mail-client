@@ -26,7 +26,7 @@ const outcomes = {
   partial: {
     label: 'Partially applied',
     icon: CircleAlert,
-    style: 'bg-amber-500/12 text-amber-800 dark:text-amber-300',
+    style: 'bg-accent text-accent-foreground',
   },
   failed: { label: 'Failed', icon: CircleAlert, style: 'bg-destructive/10 text-destructive' },
   rejected: { label: 'Rejected', icon: Minus, style: 'bg-destructive/10 text-destructive' },

@@ -283,7 +283,7 @@ export function AppSidebar({
                   return (
                     <SidebarMenuItem key={label.id}>
                       <SidebarMenuButton isActive={sameView(view, v)} onClick={() => onView(v)}>
-                        <Tag style={label.color ? { color: label.color } : undefined} />
+                        <Tag />
                         <span className="truncate">
                           {label.managed === 'filtered' ? 'Filtered' : label.name}
                         </span>

@@ -20,7 +20,7 @@ color_mask() {
 }
 
 color_mask "$mask" '#000000' "$assets/mark.png"
-color_mask "$mask" '#F8F7F3' "$assets/mark-paper.png"
+color_mask "$mask" '#F8F8F8' "$assets/mark-paper.png"
 magick -background none -density 768 "$assets/wordmark.svg" -trim +repage "$scratch/wordmark.png"
 
 make_lockup() {
@@ -31,7 +31,7 @@ make_lockup() {
 }
 
 make_lockup "$assets/mark.png" '#000000' "$assets/lockup-ink.png"
-make_lockup "$assets/mark-paper.png" '#F8F7F3' "$assets/lockup-paper.png"
+make_lockup "$assets/mark-paper.png" '#F8F8F8' "$assets/lockup-paper.png"
 
 magick -size 1024x1024 xc:none -fill '#FFFFFF' \
   -draw 'roundrectangle 80,80 943,943 194,194' \
