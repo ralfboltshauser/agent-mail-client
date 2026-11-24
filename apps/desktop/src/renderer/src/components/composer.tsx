@@ -135,7 +135,7 @@ export function Composer({
       focused.hasAttribute('data-recipient-input') &&
       surface.current?.contains(focused)
     ) {
-      // Escape dismisses without moving focus. Let the field commit a valid address.
+      // Dismissal can leave the field focused. Let it commit a valid address.
       focused.blur()
     }
     void minimise(onMinimise)
@@ -169,7 +169,6 @@ export function Composer({
             editor.view.focus()
           else recipients.current?.focus('to')
         }}
-        onPointerDownOutside={(event) => event.preventDefault()}
         onEscapeKeyDown={(event) => {
           // Radix sees Escape before the recipient field can close its suggestions.
           if (

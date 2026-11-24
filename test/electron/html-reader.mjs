@@ -91,12 +91,34 @@ async function checkComposerKeyboard(wc, run) {
   await expectFocus('cc')
   await press('M', 77, commandShift)
   await expectFocus('Message body')
+  await wc.debugger.sendCommand('Input.insertText', { text: 'Draft saved from the backdrop' })
+  assert.equal(await run(() => document.elementFromPoint(10, 10)?.dataset.slot), 'dialog-overlay')
+  for (const type of ['mousePressed', 'mouseReleased']) {
+    await wc.debugger.sendCommand('Input.dispatchMouseEvent', {
+      type,
+      x: 10,
+      y: 10,
+      button: 'left',
+      clickCount: 1,
+    })
+  }
+  await waitFor(
+    () => run(() => !document.querySelector('[role="dialog"]')),
+    'backdrop click to minimise the composer',
+  )
+  await run(() =>
+    [...document.querySelectorAll('button')]
+      .find((button) => button.textContent.trim() === 'Resume draft')
+      .click(),
+  )
+  await expectFocus('Message body')
+  assert.equal(await run(() => document.activeElement.textContent), 'Draft saved from the backdrop')
   await press('Escape', 27)
   await waitFor(
     () => run(() => !document.querySelector('[role="dialog"]')),
     'saved composer to close',
   )
-  console.log('Composer keyboard navigation passed with native Tab and field shortcuts')
+  console.log('Composer keyboard navigation and backdrop dismissal passed with native input')
 }
 
 async function main() {
