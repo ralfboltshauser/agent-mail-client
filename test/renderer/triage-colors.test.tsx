@@ -1,4 +1,3 @@
-import type { Bucket } from '@amc/protocol'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { expect, it, vi } from 'vitest'
 import { App } from '@/app'
@@ -85,7 +84,12 @@ it('updates triage badges in place, preserves the choice on failure, and restore
 it('renders an unknown bucket from the replica as a neutral badge', async () => {
   const adapter = rendererAdapter()
   const bucket = 'New bucket from a later version of the Engine'
-  await adapter.api.setBucket({ threadId: 'thread-1', bucket: bucket as Bucket, reason: 'Sample' })
+  type KnownBucket = Parameters<typeof adapter.api.setBucket>[0]['bucket']
+  await adapter.api.setBucket({
+    threadId: 'thread-1',
+    bucket: bucket as KnownBucket,
+    reason: 'Sample',
+  })
   vi.stubGlobal('amc', adapter.api)
   await act(async () => render(<App />))
   await act(async () => fireEvent.click(row(firstSubject)))
