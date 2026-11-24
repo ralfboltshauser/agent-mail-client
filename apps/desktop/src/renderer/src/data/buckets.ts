@@ -10,6 +10,7 @@ import {
 import { useReplicaSelector } from '@/hooks/use-amc'
 import { getAmc } from '@/lib/amc'
 import type { ReplicaQuery } from './query-cache'
+import { shareReply } from './share-reply'
 
 const catalogQuery: ReplicaQuery<BucketCatalog | null> = {
   key: 'bucket-catalog',
@@ -18,6 +19,22 @@ const catalogQuery: ReplicaQuery<BucketCatalog | null> = {
 }
 
 export const useBucketCatalog = () => useReplicaSelector(catalogQuery, ({ data }) => data)
+
+export function useBucketOrder(enabled: boolean) {
+  return useReplicaSelector(
+    enabled ? catalogQuery : null,
+    ({ data }) => (data?.definitions ?? BUILT_IN_BUCKETS).map(({ id }) => id),
+    (previous, next) => shareReply(previous, next) === previous,
+  )
+}
+
+export function useBucketNameById(id: BucketDefinition['id'] | null) {
+  const builtIn = BUILT_IN_BUCKETS.find((item) => item.id === id)
+  return useReplicaSelector(
+    id && !builtIn ? catalogQuery : null,
+    ({ data }) => builtIn?.name ?? data?.definitions.find((item) => item.id === id)?.name,
+  )
+}
 
 export function useBucketName(key: BucketStorageKey | null | undefined) {
   const id = key && CustomBucketId.safeParse(key).success ? key : null

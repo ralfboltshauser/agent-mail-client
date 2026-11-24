@@ -1,4 +1,4 @@
-import type { ThreadSummary } from '@amc/protocol'
+import { type BucketDefinition, bucketIdForKey, type ThreadSummary } from '@amc/protocol'
 import type { AmcApi, DesktopThreadSummary, ThreadQuery } from '../../../shared/api'
 import type { ReplicaQuery } from './query-cache'
 import { shareReply } from './share-reply'
@@ -86,14 +86,7 @@ export function messageTextQuery(
   }
 }
 
-export const INBOX_SECTIONS = [
-  'New senders',
-  'Action/Reply',
-  'Follow-up',
-  'Updates',
-  'Seen',
-] as const
-export type InboxSection = (typeof INBOX_SECTIONS)[number]
+export type InboxSection = BucketDefinition['id'] | 'New senders' | 'Unassigned'
 
 export interface SenderCardData {
   id: string
@@ -115,24 +108,15 @@ interface InboxSectionData {
 }
 
 interface InboxIndex {
-  sections: Record<InboxSection, InboxSectionData>
+  sections: ReadonlyMap<InboxSection, InboxSectionData>
   cards: ReadonlyMap<string, SenderCardData>
 }
 
 function sectionFor(thread: ThreadSummary): InboxSection {
   const sender = thread.inboxSender
   if (sender?.status === 'new' && sender.accountId === thread.accountId) return 'New senders'
-  switch (thread.bucket?.bucket) {
-    case 'Reply':
-    case 'Action':
-      return 'Action/Reply'
-    case 'Follow-up':
-      return 'Follow-up'
-  }
-  const handled = thread.ownerHandledMessageId
-  const unactioned =
-    handled === null || (handled !== undefined && sender && handled !== sender.messageId)
-  return thread.unreadCount === 0 && unactioned ? 'Seen' : 'Updates'
+  if (thread.bucketAssignment) return thread.bucketAssignment.bucketId
+  return thread.bucket ? bucketIdForKey(thread.bucket.bucket) : 'Unassigned'
 }
 
 function compareActivity(a: ThreadSummary, b: ThreadSummary) {
@@ -182,7 +166,7 @@ function groupSenders(threads: ThreadSummary[], previous: InboxIndex | undefined
 
 function indexInbox(previous: ThreadIndex | undefined, index: ThreadIndex): InboxIndex {
   const prior = previous?.inbox
-  const dirty = new Set<InboxSection>(prior ? [] : INBOX_SECTIONS)
+  const dirty = new Set<InboxSection>()
   for (const [id, thread] of index.summaries) {
     const old = previous?.summaries.get(id)
     if (old === thread) continue
@@ -200,27 +184,29 @@ function indexInbox(previous: ThreadIndex | undefined, index: ThreadIndex): Inbo
 
   const senders = affected.get('New senders')
   const cards = senders ? groupSenders(senders, prior) : (prior?.cards ?? new Map())
-  const sections = {} as InboxIndex['sections']
-  for (const section of INBOX_SECTIONS) {
-    const rows = affected.get(section)
-    const old = prior?.sections[section]
-    if (!rows && old) {
-      sections[section] = old
+  const sections = new Map(prior?.sections)
+  for (const [section, rows] of affected) {
+    if (rows.length === 0) {
+      sections.delete(section)
       continue
     }
+    const old = prior?.sections.get(section)
     const ids =
       section === 'New senders'
         ? Array.from(cards.keys())
-        : (rows ?? []).sort(compareThreads).map(({ id }) => id)
-    sections[section] = shareReply(old, {
-      ids,
-      rowIds:
-        section === 'New senders'
-          ? Array.from(cards.values(), (card) => card.representativeId)
-          : ids,
-      unread: rows?.filter((thread) => thread.unreadCount > 0).length ?? 0,
-      count: ids.length,
-    })
+        : rows.sort(compareThreads).map(({ id }) => id)
+    sections.set(
+      section,
+      shareReply(old, {
+        ids,
+        rowIds:
+          section === 'New senders'
+            ? Array.from(cards.values(), (card) => card.representativeId)
+            : ids,
+        unread: rows.filter((thread) => thread.unreadCount > 0).length,
+        count: ids.length,
+      }),
+    )
   }
   return { sections, cards }
 }

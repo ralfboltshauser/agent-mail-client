@@ -100,6 +100,7 @@ export function MailWorkspace({
   const sectioned = view.kind === 'inbox' && !search && !filter
   const inbox = useInboxSections({
     scope: key,
+    enabled: sectioned,
     storageKey: JSON.stringify(['amc-inbox-collapse-v1', engineUrl, accountId]),
   })
   const { focus: inboxFocus, openSender } = inbox

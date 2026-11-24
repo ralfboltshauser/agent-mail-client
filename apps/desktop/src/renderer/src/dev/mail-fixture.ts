@@ -46,14 +46,11 @@ export function createMailFixture(scenario: string) {
     backfill: { phase: 'done', fetched: 8, estimatedTotal: 8 },
   }
   const self = { name: account.displayName, address: account.address }
-  const sampleBuckets: Bucket[] = [
-    'Reply',
-    'Action',
-    'Follow-up',
-    'Update',
-    'Later',
-    'When I have time',
-  ]
+  // Give the navigation harness two adjacent unread Threads in the first Bucket.
+  const sampleBuckets: Bucket[] =
+    scenario === 'renderer-navigation'
+      ? ['Reply', 'Reply', 'Follow-up', 'Update', 'Later', 'When I have time', 'Reply', 'Action']
+      : ['Reply', 'Action', 'Follow-up', 'Update', 'Later', 'When I have time']
   const sample = [
     ['Mina Park', 'Field Notes · print proof', 'Could you approve the warm grey before Thursday?'],
     ['Noah Ellis', 'Sunday at the studio', 'I booked the north room from 10 to 12.'],

@@ -12,7 +12,7 @@ import {
   useState,
 } from 'react'
 import { replicaStoreFor } from '@/data/replica-store'
-import { INBOX_SECTIONS } from '@/data/thread-queries'
+import type { InboxSection } from '@/data/thread-queries'
 import type { MailboxThreadQuery } from '@/features/mailbox/mailbox-queries'
 import type { FilterAction } from '@/features/mailbox/use-filter-actions'
 import { type InboxNavigation, inboxHeaderId } from '@/features/mailbox/use-inbox-sections'
@@ -94,8 +94,8 @@ export function ThreadList({
   }, [ids, layout, leadingId, sectioned])
   const positions = useMemo(() => new Map(items.map((item, index) => [item.id, index])), [items])
   const headerIds = useMemo(
-    () => INBOX_SECTIONS.map(inboxHeaderId).filter((id) => positions.has(id)),
-    [positions],
+    () => items.filter(({ kind }) => kind === 'header').map(({ id }) => id),
+    [items],
   )
   const rowOrder = useMemo(() => new Map(ids.map((id, index) => [id, index + 1])), [ids])
   const rowIndexes = useMemo(() => {
@@ -119,7 +119,6 @@ export function ThreadList({
           ? 64
           : 40
       }
-      if (entry?.kind === 'footer') return 40
       return entry?.kind === 'sender' ? 88 : ROW
     },
     [items, inbox?.collapsed],
@@ -134,8 +133,6 @@ export function ThreadList({
           const index = positions.get(id)
           if (index !== undefined) indexes.add(index)
         }
-        const updatesFooter = positions.get('footer:Updates')
-        if (updatesFooter !== undefined) indexes.add(updatesFooter)
       }
       return [...indexes].sort((a, b) => a - b)
     },
@@ -195,7 +192,7 @@ export function ThreadList({
     },
   }))
 
-  const previousSection = useRef<(typeof INBOX_SECTIONS)[number] | undefined>(undefined)
+  const previousSection = useRef<InboxSection | undefined>(undefined)
   const activeItem = items[selectedIndex]
   useLayoutEffect(() => {
     const previous = previousSection.current
@@ -206,15 +203,11 @@ export function ThreadList({
       focusedIndex === undefined &&
       document.activeElement === document.body
     ) {
-      if (focused === 'footer:Updates' && positions.has(inboxHeaderId('Updates'))) {
-        focusHeader(inboxHeaderId('Updates'))
-      } else {
-        listRef.current?.focus({ preventScroll: true })
-      }
+      listRef.current?.focus({ preventScroll: true })
     } else if (selectedId === null && previous && document.activeElement === listRef.current) {
       focusHeader(inboxHeaderId(previous))
     }
-  }, [activeItem, focusHeader, focused, focusedIndex, positions, sectioned, selectedId])
+  }, [activeItem, focusHeader, focused, focusedIndex, sectioned, selectedId])
 
   const rememberAnchor = useInboxScrollAnchor(scrollRef, virtualizer, positions, sectioned)
 

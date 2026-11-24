@@ -88,14 +88,14 @@ belong to the composer session refactor in PR #141.
 
 ## Sectioned Inbox
 
-The harness verifies the fixed order, the Other mail preview, Account-scoped
-collapse after restart, Sender grouping, notification-open, keyboard focus,
-and the scroll anchor when an earlier section collapses. The large fixture
+The harness verifies Bucket catalog order, custom Bucket rename and reorder,
+Account-scoped collapse after restart, Sender grouping, notification-open,
+keyboard focus, and the scroll anchor when an earlier section collapses. The large fixture
 indexes 5,105 Threads and mounts fewer than 40 options.
 
 | Settled action | Workspace | List | Section headings | Changed row | Sibling rows | Reader | Composer |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Off-reader move from Action/Reply to Follow-up | 0 | 1 | 2 | 1 | 0 | 0 | 0 |
+| Off-reader move from Action to Follow-up | 0 | 1 | 2 | 1 | 0 | 0 | 0 |
 | Staggered cloned reply after the move | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | Off-reader cross-section move with composer open | 0 | 1 | 2 | 1 | 0 | 0 | 0 |
 | Same-key failure and retry | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
