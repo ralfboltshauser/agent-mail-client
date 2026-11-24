@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events'
 import { type EventFields, newRunId, type RunId } from '@amc/observability'
 import {
+  BucketCatalog,
   doctorWarnings,
   type Health,
   type Me,
@@ -383,18 +384,21 @@ export class SyncLoop extends EventEmitter<{
       const cursor = this.#replica.modseq
       const since = cursor ?? 0
       const res = await this.#engine.get<SyncChanges>(
-        `/v1/sync/changes?since=${since}&limit=2000`,
+        `/v1/sync/changes?since=${since}&limit=2000&bucketRevision=${this.#replica.bucketCatalog?.revision ?? -1}`,
         { signal },
       )
       signal.throwIfAborted()
-      if (res.changes.length > 0 || res.modseq !== since) {
+      if (res.bucketCatalog || res.changes.length > 0 || res.modseq !== since) {
         const notifications =
           cursor !== null && this.#status.phase !== 'bootstrapping' && this.listenerCount('newMail')
             ? newInboxMessages(this.#replica, res.changes)
             : []
         let arrivals: Map<string, string> | undefined
+        let catalogChanged = false
         this.#replica.transaction(() => {
           arrivals = this.#replica.apply(res.changes)
+          if (res.bucketCatalog)
+            catalogChanged = this.#replica.saveBucketCatalog(BucketCatalog.parse(res.bucketCatalog))
           this.#replica.modseq = res.modseq
           if (res.organiseFailures) this.#replica.organise.notice(res.organiseFailures)
           this.#replica.organise.rebuild()
@@ -403,7 +407,8 @@ export class SyncLoop extends EventEmitter<{
           this.#refreshAccountFailures()
         if (notifications.length) this.emit('newMail', notifications)
         if (arrivals?.size) this.emit('arrivals', arrivals)
-        if (res.changes.length > 0 || res.organiseFailures?.length) this.emit('changed')
+        if (catalogChanged || res.changes.length > 0 || res.organiseFailures?.length)
+          this.emit('changed')
       }
       this.#set({ lastSyncAt: Date.now() })
       if (!res.more) return

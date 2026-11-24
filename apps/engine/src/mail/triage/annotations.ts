@@ -1,5 +1,10 @@
 import { createHmac, randomUUID } from 'node:crypto'
-import { decisionLabels, type OwnerActionReasonInput, TAXONOMY_VERSION } from '@amc/protocol'
+import {
+  CustomBucketId,
+  decisionLabels,
+  type OwnerActionReasonInput,
+  TAXONOMY_VERSION,
+} from '@amc/protocol'
 import { type Db, transaction } from '../../db/database.ts'
 import { SenderError } from '../senders/actions.ts'
 import { normalizeSender } from '../senders/index.ts'
@@ -140,6 +145,12 @@ interface Event {
 export function appendEvent(db: Db, item: Subject, event: Event) {
   if (event.label && !decisionLabels[item.axis].safeParse(event.label).success)
     throw new Error('Invalid decision label for the axis')
+  if (
+    item.axis === 'bucket' &&
+    CustomBucketId.safeParse(event.label).success &&
+    !db.prepare('SELECT 1 FROM custom_bucket WHERE id = ?').get(event.label ?? null)
+  )
+    throw new Error('Unknown custom Bucket in decision history')
   const id = randomUUID()
   db.prepare(`
     INSERT INTO triage_event (id, account_id, account_generation, axis, subject_key, thread_id,

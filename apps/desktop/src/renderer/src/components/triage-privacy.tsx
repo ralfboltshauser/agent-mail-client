@@ -1,5 +1,6 @@
 import type { TriageHistoryEvent, TriageHistoryPage, TriagePhysicalPurge } from '@amc/protocol'
 import { useState } from 'react'
+import { useBucketCatalog } from '@/data/buckets'
 import { ReasonInput } from '@/features/triage-review/reason-input'
 import { getAmc } from '@/lib/amc'
 import { failureText } from '@/lib/failure'
@@ -63,6 +64,7 @@ export function TriagePrivacy() {
 }
 
 function ActionHistory() {
+  const buckets = useBucketCatalog()
   const [page, setPage] = useState<TriageHistoryPage>()
   const [lastForget, setLastForget] = useState<TriagePhysicalPurge>()
   const physicalPurge = page?.physicalPurge ?? lastForget
@@ -154,7 +156,10 @@ function ActionHistory() {
             {page.events.map((event) => (
               <li key={event.id} className="grid gap-1 py-2">
                 <p>
-                  {event.labelId ?? event.kind} · {event.retracted ? 'Undone' : event.source}
+                  {buckets?.definitions.find(({ id }) => id === event.labelId)?.name ??
+                    event.labelId ??
+                    event.kind}{' '}
+                  · {event.retracted ? 'Undone' : event.source}
                 </p>
                 <time dateTime={event.at} className="text-xs text-muted-foreground">
                   {new Date(event.at).toLocaleString()}

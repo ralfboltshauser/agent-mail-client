@@ -130,7 +130,12 @@ export function registerSmartInboxCommands(
     .option('--json', 'print JSON')
     .action(async (_opts, command: Command) => {
       const { account, limit, cursor, json } = command.optsWithGlobals()
-      const query = TriageQueueQuery.parse({ accountId: account, limit, cursor })
+      const query = TriageQueueQuery.parse({
+        accountId: account,
+        limit,
+        cursor,
+        bucketCatalogVersion: '1',
+      })
       const page = await authed(config())<TriageQueuePage>(endpoint('/v1/triage/queue', query))
       if (json) console.log(JSON.stringify(page, null, 2))
       else {

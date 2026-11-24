@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { BucketAssignmentById, type BucketCatalog } from './bucket-catalog.ts'
 import { BucketAssignment } from './buckets.ts'
 import type { MutationResult } from './organise.ts'
 import { InboxSender, ScreeningDisposition } from './smart-inbox.ts'
@@ -54,6 +55,7 @@ export const ThreadSummary = z.object({
   snoozedUntil: z.number().nullable().default(null),
   muted: z.boolean().default(false),
   bucket: BucketAssignment.nullable().optional(),
+  bucketAssignment: BucketAssignmentById.nullable().optional(),
   inboxSender: InboxSender.optional(),
   ownerHandledMessageId: z.string().nullable().optional(),
 })
@@ -193,6 +195,7 @@ export interface SyncState {
 }
 
 export interface SyncChanges {
+  bucketCatalog?: BucketCatalog
   changes: SyncChange[]
   organiseFailures?: MutationResult[]
   /** Ask again with since = this. */

@@ -1,4 +1,5 @@
 export * from './api.ts'
+export * from './bucket-catalog.ts'
 export * from './buckets.ts'
 export * from './compose.ts'
 export * from './decision-labels.ts'

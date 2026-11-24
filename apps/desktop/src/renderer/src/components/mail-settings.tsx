@@ -1,3 +1,4 @@
+import type { BucketStorageKey } from '@amc/protocol'
 import { useEffect, useId, useState } from 'react'
 import { toast } from 'sonner'
 import { setLoadRemoteImagesAutomatically, useRemoteImages } from '@/data/remote-image-preferences'
@@ -6,6 +7,7 @@ import { TriageColorSettings } from '@/features/triage-colors/triage-color-setti
 import { getAmc } from '@/lib/amc'
 import { failureText } from '@/lib/failure'
 import type { NotificationSettings } from '../../../shared/api'
+import { BucketSettings } from './bucket-settings'
 import { DebugLoggingSetting } from './debug-logging-setting'
 import { TriagePrivacy } from './triage-privacy'
 import { AutoTriageSetting } from './triage-status'
@@ -15,21 +17,24 @@ import { Input } from './ui/input'
 
 export function MailSettings({
   initial,
+  onOpenBucket,
   onClose,
   onCloseAutoFocus,
 }: {
   initial: number
+  onOpenBucket: (bucket: BucketStorageKey) => void
   onClose: () => void
   onCloseAutoFocus: (event: Event) => void
 }) {
   const id = useId()
   const [seconds, setSeconds] = useState(String(initial))
   const [saving, setSaving] = useState(false)
+  const [savingBuckets, setSavingBuckets] = useState(false)
   return (
     <Dialog
       open
       onOpenChange={(open) => {
-        if (!open) onClose()
+        if (!open && !savingBuckets) onClose()
       }}
     >
       <DialogContent
@@ -85,6 +90,7 @@ export function MailSettings({
         <div className="border-t pt-4">
           <AutoTriageSetting />
         </div>
+        <BucketSettings onOpen={onOpenBucket} onPendingChange={setSavingBuckets} />
         <PrivacyPreferences />
         <NotificationPreferences />
         <DebugLoggingSetting />

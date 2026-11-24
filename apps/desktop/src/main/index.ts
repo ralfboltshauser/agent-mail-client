@@ -25,6 +25,10 @@ import type {
 } from '@amc/protocol'
 import {
   AdoptScreenedDestination,
+  BucketByIdInput,
+  BucketByIdReviewInput,
+  BucketCatalog,
+  BucketCatalogEdit,
   BucketInput,
   BucketReviewInput,
   DRAFT_CHANGED,
@@ -61,7 +65,7 @@ import {
   session,
   shell,
 } from 'electron'
-import type { AskAgentResult, SyncStatus, ThreadQuery, TriageStatus } from '../shared/api'
+import type { AmcApi, AskAgentResult, SyncStatus, ThreadQuery, TriageStatus } from '../shared/api'
 import { failureDetails, formatFailure, validFailure } from '../shared/failure'
 import { feedbackAccelerator } from '../shared/feedback'
 import { projectActionFailures } from './action-failures'
@@ -347,6 +351,11 @@ const safeEngineHints = new Set([
   'The recipients, subject or attachments may have changed. Reopen the draft to review them.',
   'Triage queue changed. Start a fresh snapshot.',
   'Owner action unavailable',
+  'A Bucket already uses that name.',
+  'The Bucket catalog changed. Reload it and retry.',
+  'Describe when automatic triage should use this Bucket.',
+  'The custom Bucket limit has been reached.',
+  'This Bucket is archived.',
   'The sender rule changed while saving the decision. Choose Accept or Block again.',
 ])
 
@@ -623,9 +632,12 @@ function registerIpc(logDirectory: string) {
     return true
   })
   handle('amc:triageQueue', (_event, query: unknown) => {
-    return requireEngine().get(`/v1/triage/queue?${queryString(TriageQueueQuery.parse(query))}`, {
-      signal: AbortSignal.timeout(10_000),
-    })
+    return requireEngine().get(
+      `/v1/triage/queue?${queryString({ ...TriageQueueQuery.parse(query), bucketCatalogVersion: '1' })}`,
+      {
+        signal: AbortSignal.timeout(10_000),
+      },
+    )
   })
   handle('amc:reviewPairing', () => requireEngine().pairingScope)
   handle('amc:reviewBucket', async (_event, input: unknown) => {
@@ -633,7 +645,7 @@ function registerIpc(logDirectory: string) {
     const result = await requireEngine()
       .request('/v1/bucket', {
         method: 'PUT',
-        body: BucketReviewInput.parse(input),
+        body: BucketByIdReviewInput.or(BucketReviewInput).parse(input),
         signal: AbortSignal.timeout(10_000),
       })
       .catch(reportReviewRejection)
@@ -663,8 +675,48 @@ function registerIpc(logDirectory: string) {
     const result = await resolveSenderAvatars(connection, SenderAvatarResolve.parse(input), known)
     return connection === engine ? result : { rows: [] }
   })
-  handle('amc:setBucket', async (_event, input: unknown) => {
-    const body = BucketInput.parse(input)
+  handle('amc:bucketCatalog', () => openReplica().bucketCatalog)
+  handle('amc:manageBuckets', async (_event, input: unknown) => {
+    const edit = BucketCatalogEdit.parse(input)
+    const connection = requireEngine()
+    const currentReplica = openReplica()
+    const path =
+      edit.kind === 'update'
+        ? `/v1/buckets/${edit.id}`
+        : edit.kind === 'reorder'
+          ? '/v1/buckets/order'
+          : '/v1/buckets'
+    const method = edit.kind === 'create' ? 'POST' : edit.kind === 'update' ? 'PATCH' : 'PUT'
+    const accept = (value: unknown) => {
+      if (connection !== engine || currentReplica !== replica)
+        throw new Error('Pairing changed while saving the Bucket.')
+      const catalog = BucketCatalog.parse(value)
+      if (currentReplica.saveBucketCatalog(catalog)) refreshMail()
+      return currentReplica.bucketCatalog ?? catalog
+    }
+    try {
+      const value = await connection.request<BucketCatalog | { catalog: BucketCatalog }>(path, {
+        method,
+        body: edit.input,
+        signal: AbortSignal.timeout(10_000),
+      })
+      return accept('catalog' in value ? value.catalog : value)
+    } catch (error) {
+      if (
+        error instanceof EngineError &&
+        error.code === 'bucket_conflict' &&
+        connection === engine
+      ) {
+        try {
+          accept(await connection.get('/v1/buckets', { signal: AbortSignal.timeout(10_000) }))
+        } catch {
+          // The Engine client records refresh failures. Preserve the original write error.
+        }
+      }
+      throw error
+    }
+  })
+  const assignBucket: AmcApi['setBucket'] & AmcApi['setBucketById'] = async (body) => {
     const loop = sync
     if (!loop) throw new Error('Resume sync to move Threads between Buckets')
     await requireEngine().request('/v1/bucket', {
@@ -673,7 +725,11 @@ function registerIpc(logDirectory: string) {
       signal: AbortSignal.timeout(10_000),
     })
     loop.pullInBackground() // The normal sync loop retries if this pull fails.
-  })
+  }
+  handle('amc:setBucket', (_event, input: unknown) => assignBucket(BucketInput.parse(input)))
+  handle('amc:setBucketById', (_event, input: unknown) =>
+    assignBucket(BucketByIdInput.parse(input)),
+  )
   handle('amc:organise', (_event, input: unknown) => {
     if (!organise) throw new Error('Pair with the Engine first')
     const id = organise.enqueue(input, (sync?.status ?? pausedStatus)?.snoozeEnabled)

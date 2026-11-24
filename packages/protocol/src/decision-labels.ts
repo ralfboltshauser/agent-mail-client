@@ -11,11 +11,13 @@ export const BucketDecisionLabel = z.enum([
   'bucket.newsletters',
   'bucket.clear',
 ])
+export const CustomBucketId = z.templateLiteral(['bucket.custom.', z.uuid()])
+export const BucketId = z.union([BucketDecisionLabel.exclude(['bucket.clear']), CustomBucketId])
 export const FilterDecisionLabel = z.enum(['filter.filtered', 'filter.keep'])
 export const SenderDecisionLabel = z.enum(['sender.accept', 'sender.block', 'sender.clear'])
 export const AttentionDecisionLabel = z.enum(['attention.interrupt', 'attention.quiet'])
 export const decisionLabels = {
-  bucket: BucketDecisionLabel,
+  bucket: z.union([BucketDecisionLabel, CustomBucketId]),
   filter: FilterDecisionLabel,
   sender: SenderDecisionLabel,
   attention: AttentionDecisionLabel,

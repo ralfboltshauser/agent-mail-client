@@ -813,4 +813,24 @@ export const MIGRATIONS: readonly Migration[] = [
           AND m.account_id || ':DRAFT' IN (SELECT value FROM json_each(m.label_ids));
     `,
   },
+  {
+    version: 27,
+    name: 'Custom Bucket catalog',
+    sql: `
+      CREATE TABLE bucket_catalog (id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL) STRICT;
+      INSERT INTO bucket_catalog VALUES (1, 0);
+      CREATE TABLE custom_bucket (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        normalized_name TEXT NOT NULL UNIQUE,
+        description TEXT NOT NULL,
+        automatic INTEGER NOT NULL CHECK (automatic IN (0, 1)),
+        archived INTEGER NOT NULL CHECK (archived IN (0, 1)),
+        position INTEGER NOT NULL,
+        classification_revision INTEGER NOT NULL,
+        request_id TEXT NOT NULL UNIQUE,
+        create_input TEXT NOT NULL
+      ) STRICT;
+    `,
+  },
 ]

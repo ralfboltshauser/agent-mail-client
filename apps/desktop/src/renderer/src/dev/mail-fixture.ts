@@ -3,7 +3,11 @@ import {
   actionLabels,
   applyLabelPatch,
   BUCKETS,
+  BUILT_IN_BUCKETS,
   type Bucket,
+  type BucketCatalog,
+  type BucketDefinition,
+  bucketLabels,
   type ComposeDraft,
   DRAFT_MISSING,
   type OutboxItem,
@@ -152,6 +156,8 @@ export function createMailFixture(scenario: string) {
       threadId: null,
     },
   ]
+  const bucketFixture = scenario === 'custom-buckets'
+  let bucketCatalog: BucketCatalog = { revision: 0, definitions: [...BUILT_IN_BUCKETS] }
   let undoSendSeconds = 10
   let notificationSettings = { enabled: true, showSnippet: true, quietStart: '', quietEnd: '' }
   const message = (thread: ThreadSummary, older: boolean): ReplicaThreadMessage => ({
@@ -243,6 +249,27 @@ export function createMailFixture(scenario: string) {
       cursor: null,
     }),
   }
+  const assignBucket: AmcApi['setBucket'] & AmcApi['setBucketById'] = async (input) => {
+    const { threadId, reason } = input
+    const bucket =
+      'bucket' in input
+        ? input.bucket
+        : (BUCKETS.find((name) => bucketLabels[name] === input.bucketId) ?? null)
+    threads = threads.map((thread) =>
+      thread.id === threadId
+        ? {
+            ...thread,
+            bucket: bucket ? { bucket, reason, setBy: 'Jules', setAt: Date.now() } : null,
+            bucketAssignment:
+              !bucket && 'bucketId' in input && input.bucketId
+                ? { bucketId: input.bucketId, reason, setBy: 'Jules', setAt: Date.now() }
+                : null,
+          }
+        : thread,
+    )
+    notify()
+  }
+
   const api: AmcApi = {
     ...(triageReader ? { smartInbox: reviewFixture } : {}),
     feedback: {
@@ -310,9 +337,14 @@ export function createMailFixture(scenario: string) {
       starred: threads.filter((thread) => thread.starred).length,
       drafts: 1,
       buckets: Object.fromEntries(
-        BUCKETS.map((bucket) => [
+        [
+          ...BUCKETS,
+          ...bucketCatalog.definitions.filter(({ builtIn }) => !builtIn).map(({ id }) => id),
+        ].map((bucket) => [
           bucket,
-          threads.filter((thread) => thread.bucket?.bucket === bucket).length,
+          threads.filter(
+            (thread) => (thread.bucketAssignment?.bucketId ?? thread.bucket?.bucket) === bucket,
+          ).length,
         ]),
       ),
     }),
@@ -331,7 +363,7 @@ export function createMailFixture(scenario: string) {
           case 'starred':
             return thread.starred
           case 'bucket':
-            return thread.bucket?.bucket === view.bucket
+            return (thread.bucketAssignment?.bucketId ?? thread.bucket?.bucket) === view.bucket
           case 'label':
             return thread.labelIds.includes(view.labelId)
           case 'all':
@@ -358,17 +390,45 @@ export function createMailFixture(scenario: string) {
       if (scenario === 'error') throw new Error('The Engine is offline.')
       return filter(query).map((thread) => ({ ...thread, matchSnippet: thread.snippet }))
     },
-    setBucket: async ({ threadId, bucket, reason }) => {
-      threads = threads.map((thread) =>
-        thread.id === threadId
-          ? {
-              ...thread,
-              bucket: bucket ? { bucket, reason, setBy: 'Jules', setAt: Date.now() } : null,
+    ...(bucketFixture
+      ? {
+          bucketCatalog: async () => bucketCatalog,
+          manageBuckets: async (edit: Parameters<NonNullable<AmcApi['manageBuckets']>>[0]) => {
+            const { definitions, revision } = bucketCatalog
+            let next: BucketDefinition[]
+            if (edit.kind === 'create') {
+              const { name, description, automatic } = edit.input
+              next = [
+                ...definitions,
+                {
+                  id: `bucket.custom.${edit.input.requestId}`,
+                  name,
+                  description,
+                  automatic,
+                  builtIn: false,
+                  archived: false,
+                  classificationRevision: 1,
+                },
+              ]
+            } else if (edit.input.expectedRevision !== revision) {
+              throw new Error('The Bucket catalog changed. Reload it and retry.')
+            } else if (edit.kind === 'update') {
+              const { expectedRevision: _, ...patch } = edit.input
+              next = definitions.map((item) => (item.id === edit.id ? { ...item, ...patch } : item))
+            } else {
+              const order = new Map<string, number>(edit.input.ids.map((id, index) => [id, index]))
+              next = [...definitions].sort(
+                (a, b) => (order.get(a.id) ?? -1) - (order.get(b.id) ?? -1),
+              )
             }
-          : thread,
-      )
-      notify()
-    },
+            bucketCatalog = { revision: revision + 1, definitions: next }
+            notify()
+            return bucketCatalog
+          },
+        }
+      : {}),
+    setBucket: assignBucket,
+    setBucketById: assignBucket,
     organise: async (action) => {
       if (action.kind === 'undo') {
         const id = action.mutationId ?? [...mutations.keys()].at(-1)

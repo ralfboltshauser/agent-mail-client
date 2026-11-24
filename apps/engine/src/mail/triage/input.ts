@@ -1,4 +1,4 @@
-import type { Bucket, BucketConfidence } from '@amc/protocol'
+import type { BucketConfidence, BucketStorageKey } from '@amc/protocol'
 import type { Db } from '../../db/database.ts'
 
 // Keep the arrival identity independent of Sender parsing and Sent-evidence readiness.
@@ -12,7 +12,7 @@ export const latestInboxMessageSql = `(
 )`
 
 export interface Assignment {
-  bucket: Bucket | null
+  bucket: BucketStorageKey | null
   bucket_reason: string | null
   bucket_set_by: string | null
   bucket_set_at: number | null

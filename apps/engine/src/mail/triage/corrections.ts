@@ -1,14 +1,17 @@
 import { randomUUID } from 'node:crypto'
 import {
+  type BucketByIdReviewInput,
   type BucketReviewInput,
-  bucketLabels,
+  bucketIdForKey,
   type OwnerActionStatus,
+  type OwnerBucketByIdInput,
   type OwnerBucketInput,
 } from '@amc/protocol'
 import type { z } from 'zod'
 import type { Principal } from '../../auth/tokens.ts'
 import { type Db, transaction } from '../../db/database.ts'
 import type { OwnerActionHandler } from '../../http/senders.ts'
+import { assignableBucketKey, guardLegacyBucket } from '../bucket-catalog.ts'
 import type { FrozenMessage, Receipt } from '../outbox.ts'
 import { assertOwner, SenderError } from '../senders/actions.ts'
 import type { MailStore } from '../store.ts'
@@ -16,7 +19,7 @@ import { annotate, annotateUndo, ownerReasonRetry, readOwnerReason } from './ann
 import { type Assignment, markHandled, threadInput, type Watermark } from './input.ts'
 
 const KIND = 'bucket:review'
-type Review = z.infer<typeof BucketReviewInput>
+type Review = BucketReviewInput | z.infer<typeof BucketByIdReviewInput>
 
 interface Previous {
   assignment: Assignment
@@ -89,6 +92,10 @@ export function correctBucket(store: MailStore, principal: Principal, input: Rev
 
     const thread = threadInput(db, input.threadId)
     if (!thread) throw new SenderError('Thread is no longer available', 404)
+    const idAware = 'bucketId' in input
+    guardLegacyBucket(thread.bucket, idAware)
+    const bucket = idAware ? assignableBucketKey(db, input.bucketId) : input.bucket
+    if (!bucket) throw new SenderError('Choose a Bucket for review', 400)
     const target = input.expectedBucketTarget
     if (
       !thread.in_inbox ||
@@ -131,7 +138,7 @@ export function correctBucket(store: MailStore, principal: Principal, input: Rev
       'INSERT INTO owner_action (id, account_id, token_id, kind, request, created_at) VALUES (?, ?, ?, ?, ?, ?)',
     ).run(input.clientActionId, account_id, principal.tokenId, KIND, request, now)
     markHandled(db, input.threadId, { message_id: input_id, action_id: input.clientActionId })
-    store.setBucket(input, 'owner')
+    store.setBucket({ ...input, bucket }, 'owner')
     db.prepare(`
       INSERT INTO triage_correction (action_id, account_id, thread_id, message_id, input_revision,
         applied_revision, previous, chosen, summary, created_at)
@@ -144,7 +151,7 @@ export function correctBucket(store: MailStore, principal: Principal, input: Rev
       modseq,
       input.threadId,
       JSON.stringify(previous),
-      input.bucket,
+      bucket,
       '{}',
       now,
     )
@@ -157,7 +164,7 @@ export function correctBucket(store: MailStore, principal: Principal, input: Rev
       accountId: account_id,
       threadId: input.threadId,
       mid: input_id,
-      label: bucketLabels[input.bucket],
+      label: bucketIdForKey(bucket),
       predictionId: input.predictionId,
       source: 'triage_key',
     })
@@ -165,7 +172,11 @@ export function correctBucket(store: MailStore, principal: Principal, input: Rev
   })
 }
 
-export function setOwnerBucket(store: MailStore, principal: Principal, input: OwnerBucketInput) {
+export function setOwnerBucket(
+  store: MailStore,
+  principal: Principal,
+  input: OwnerBucketInput | z.infer<typeof OwnerBucketByIdInput>,
+) {
   const { db } = store
   return transaction(db, () => {
     assertOwner(db, principal, input.ownerReason ? 'admin' : 'organize')
@@ -187,6 +198,9 @@ export function setOwnerBucket(store: MailStore, principal: Principal, input: Ow
     }
     const thread = threadInput(db, input.threadId)
     if (!thread) return false
+    const idAware = 'bucketId' in input
+    guardLegacyBucket(thread.bucket, idAware)
+    const bucket = idAware ? assignableBucketKey(db, input.bucketId) : input.bucket
     if (input.expectedRevision !== undefined && input.expectedRevision !== thread.modseq)
       throw new SenderError('The Thread changed. Refresh and retry.')
     db.prepare(
@@ -203,11 +217,11 @@ export function setOwnerBucket(store: MailStore, principal: Principal, input: Ow
       threadId: input.threadId,
       mid: thread.input_id ?? undefined,
       revision: thread.modseq,
-      label: input.bucket ? bucketLabels[input.bucket] : 'bucket.clear',
+      label: bucket ? bucketIdForKey(bucket) : 'bucket.clear',
       source: 'thread_action',
       reason: ownerReason,
     })
-    return store.setBucket(input, 'owner')
+    return store.setBucket({ ...input, bucket }, 'owner')
   })
 }
 

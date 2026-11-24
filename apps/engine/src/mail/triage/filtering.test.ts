@@ -13,6 +13,7 @@ import { fromGmail } from '../../providers/gmail/mapping.ts'
 import { FakeImap } from '../../providers/imap/fake.ts'
 import { SyncManager } from '../../sync/manager.ts'
 import { silentLog, tempDir, testDb } from '../../test-support.ts'
+import { createBucket, updateBucket } from '../bucket-catalog.ts'
 import { Mutations } from '../mutations.ts'
 import { MailQueries } from '../queries.ts'
 import { MailStore } from '../store.ts'
@@ -853,3 +854,71 @@ it('refreshes queue snapshots from the head and matches Inbox New Sender groups'
     db.close()
   }
 })
+
+it.each([false, true])(
+  'validates a custom Bucket independently from Filter after a catalog edit (stale: %s)',
+  (stale) => {
+    const { db, store, principal, put, lease } = fixture()
+    try {
+      const threadId = put('custom', { labels: ['INBOX'] })
+      const { definition } = createBucket(store, principal, {
+        name: 'Digests',
+        description: 'Weekly digests',
+        automatic: true,
+        requestId: randomUUID(),
+      })
+      const agent = lease()
+      const context = prepareContext(db, agent, 'a', [{ id: threadId }], 2)
+      expect(context.bucketChoices).toContainEqual(definition)
+      const reference = context.refs[0]
+      if (!reference) throw new Error('Expected a signed target')
+      const { exampleIds: _, ...input } = reference
+      const request: SubmitTriagePrediction = {
+        receipt: context.receipt,
+        runId: context.runId,
+        input,
+        producer: { harnessId: 'fixture', adapterVersion: '1', promptVersion: '1', modelId: null },
+        outputs: {
+          bucket: {
+            labelId: definition.id,
+            confidence: 'high',
+            displayReason: 'Context: Weekly digest',
+            matchedRuleRevisionId: null,
+          },
+          filter: { labelId: 'filter.filtered', confidence: 'high', matchedRuleRevisionId: null },
+          protection: 'routine',
+        },
+      }
+      const proposedBucket = request.outputs.bucket
+      if (!proposedBucket) throw new Error('Expected a Bucket prediction')
+      expect(
+        submitPrediction(store, agent, {
+          ...request,
+          outputs: {
+            ...request.outputs,
+            bucket: { ...proposedBucket, labelId: `bucket.custom.${randomUUID()}` },
+          },
+        }),
+      ).toEqual({ error: 'The Bucket was not eligible in the captured triage context' })
+      updateBucket(
+        store,
+        principal,
+        definition.id,
+        stale
+          ? { description: 'Only monthly digests', expectedRevision: 1 }
+          : { name: 'Roundups', expectedRevision: 1 },
+      )
+      const response = submitPrediction(store, agent, request)
+      expect(response).toMatchObject({
+        outcomes: [
+          { axis: 'bucket', projection: stale ? 'stale' : 'applied' },
+          { axis: 'filter', projection: 'suggested' },
+        ],
+      })
+      expect(submitPrediction(store, agent, request)).toEqual(response)
+      expect(threadInput(db, threadId)?.bucket).toBe(stale ? null : definition.id)
+    } finally {
+      db.close()
+    }
+  },
+)

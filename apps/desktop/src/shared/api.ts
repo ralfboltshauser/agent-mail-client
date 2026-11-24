@@ -3,9 +3,13 @@ import type {
   AccountSummary,
   AdoptScreenedDestination,
   AgentAction,
-  Bucket,
+  BucketByIdInput,
+  BucketByIdReviewInput,
+  BucketCatalog,
+  BucketCatalogEdit,
   BucketInput,
   BucketReviewInput,
+  BucketStorageKey,
   ComposeAttachment,
   ComposeDraft,
   ComposePatch,
@@ -32,6 +36,7 @@ import type {
   TriageQueueRequest,
   VersionedDraft,
 } from '@amc/protocol'
+import type { z } from 'zod'
 import type { FailureDetails } from './failure'
 
 import type { FeedbackApi } from './feedback'
@@ -47,7 +52,7 @@ export type View =
   | { kind: 'all' }
   | { kind: 'snoozed' }
   | { kind: 'trash' }
-  | { kind: 'bucket'; bucket: Bucket }
+  | { kind: 'bucket'; bucket: BucketStorageKey }
   | { kind: 'label'; labelId: string }
 
 export interface ThreadQuery {
@@ -73,7 +78,7 @@ export interface Counts {
   inboxUnread: number
   starred: number
   drafts: number
-  buckets: Partial<Record<Bucket, number>>
+  buckets: Partial<Record<BucketStorageKey, number>>
   filteredByLabel?: Record<string, number>
 }
 
@@ -179,7 +184,9 @@ export interface DesktopSenderAvatarResults {
 
 export interface ReviewApi {
   reviewPairing(): Promise<string>
-  reviewBucket(input: BucketReviewInput): Promise<OwnerActionStatus>
+  reviewBucket(
+    input: BucketReviewInput | z.infer<typeof BucketByIdReviewInput>,
+  ): Promise<OwnerActionStatus>
   reviewOrganise(input: ReviewOrganiseAction, id: string, messageId?: string): Promise<string>
   reviewOrganiseStatus(id: string): Promise<ReviewOrganiseStatus | null>
 }
@@ -250,6 +257,9 @@ export interface AmcApi {
   status(): Promise<SyncStatus>
   syncNow(): Promise<void>
   setBucket(input: BucketInput): Promise<void>
+  setBucketById(input: z.infer<typeof BucketByIdInput>): Promise<void>
+  bucketCatalog?(): Promise<BucketCatalog | null>
+  manageBuckets?(edit: z.infer<typeof BucketCatalogEdit>): Promise<BucketCatalog>
   organise(action: OrganiseAction): Promise<string>
   organiseErrors(): Promise<OrganiseNotice[]>
   agentActivity(before?: number): Promise<{ actions: AgentAction[]; nextBefore: number | null }>

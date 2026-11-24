@@ -135,6 +135,7 @@ export interface SenderAvatarResults {
 }
 
 export const TriageQueueQuery = z.object({
+  bucketCatalogVersion: z.literal('1').optional(),
   accountId: id.optional(),
   cursor: z.string().max(2048).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(100),

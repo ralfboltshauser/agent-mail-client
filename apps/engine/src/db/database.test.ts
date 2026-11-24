@@ -21,7 +21,7 @@ describe('migrate', () => {
     try {
       expect(migrate(db, { migrations: MIGRATIONS.filter(({ version }) => version <= 7) })).toBe(7)
       expect(MIGRATIONS.filter(({ version }) => version > 7).map(({ version }) => version)).toEqual(
-        [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26],
+        [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27],
       )
       db.exec(`
         INSERT INTO account (id, kind, address, credentials, created_at)
@@ -97,6 +97,27 @@ describe('migrate', () => {
     } finally {
       db.close()
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('adds the Bucket catalog to v26 without changing stored assignment facts', () => {
+    const db = openDatabase(':memory:')
+    try {
+      migrate(db, { migrations: MIGRATIONS.filter(({ version }) => version <= 26) })
+      db.exec(`
+        INSERT INTO account (id, kind, address, credentials, created_at)
+        VALUES ('fixture', 'gmail', 'owner@example.test', x'00', 1);
+        INSERT INTO thread (id, account_id, provider_thread_id, bucket, bucket_reason,
+          bucket_set_by, bucket_set_at, bucket_confidence, bucket_revision)
+        VALUES ('fixture:t', 'fixture', 't', 'Reply', 'Synthetic reason', 'owner', 3, 'high', 'revision');
+      `)
+      const assignment = () => db.prepare('SELECT * FROM thread WHERE id = ?').get('fixture:t')
+      const before = assignment()
+      expect(migrate(db)).toBe(latest)
+      expect(assignment()).toEqual(before)
+      expect(db.prepare('SELECT revision FROM bucket_catalog').get()).toEqual({ revision: 0 })
+    } finally {
+      db.close()
     }
   })
 

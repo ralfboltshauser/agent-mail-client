@@ -78,6 +78,7 @@ function combinations<T>(items: readonly T[]): T[][] {
 }
 
 const organizeTools = [
+  'set_bucket_by_id',
   'set_bucket',
   'archive',
   'mark_read',
@@ -126,6 +127,7 @@ it('maps every MCP tool to a CLI command or the triage runner', async () => {
     search: 'search',
     search_contacts: 'contacts',
     list_labels: 'labels',
+    list_buckets: 'buckets list',
     list_untriaged: 'triage untriaged',
     list_drafts: 'draft list',
     read_draft: 'draft show',
@@ -142,6 +144,7 @@ it('maps every MCP tool to a CLI command or the triage runner', async () => {
     remove_label: 'label --remove',
     organize_status: 'agent status',
     set_bucket: 'bucket',
+    set_bucket_by_id: 'bucket <thread> <id>',
     suggest_sender_rule: 'senders suggest',
     submit_triage_prediction: 'internal to triage runner',
   }
@@ -174,7 +177,11 @@ it('drives drafts and organize through the CLI with paired, scoped and handoff c
   )
   store.putMessage('a', [], fromGmail(gmail.add('m2')))
   store.putMessage('b', [], fromGmail(gmail.add('outside')))
-  const owner = issueToken(db, { kind: 'cli', name: 'mac', scopes: ['read', 'organize', 'draft'] })
+  const owner = issueToken(db, {
+    kind: 'cli',
+    name: 'mac',
+    scopes: ['read', 'organize', 'draft', 'admin'],
+  })
   const agent = (scopes: Scope[]) =>
     issueToken(db, {
       kind: 'agent',
@@ -272,6 +279,45 @@ it('drives drafts and organize through the CLI with paired, scoped and handoff c
         )
         processHandle.stdin?.end(input)
       })
+    const custom = await cli(owner.secret, [
+      'buckets',
+      'create',
+      'Receipts',
+      '--description',
+      'Order receipts',
+      '--auto',
+      '--json',
+    ])
+    expect(custom).toMatchObject({ code: 0, stderr: '' })
+    const bucketId = JSON.parse(custom.stdout).definition.id
+    const discovered = await cli(scoped.secret, ['--as-agent', 'buckets', 'list', '--json'])
+    expect(discovered).toMatchObject({ code: 0, stderr: '' })
+    expect(JSON.parse(discovered.stdout).definitions).toContainEqual({
+      id: bucketId,
+      name: 'Receipts',
+    })
+    const assignment = await cli(scoped.secret, [
+      '--as-agent',
+      'bucket',
+      'a:t-m2',
+      bucketId,
+      '--json',
+    ])
+    expect(assignment).toMatchObject({ code: 0, stderr: '' })
+    expect(JSON.parse(assignment.stdout)).toEqual({ updated: true })
+    const updated = await cli(owner.secret, [
+      'buckets',
+      'edit',
+      bucketId,
+      '--name',
+      'Purchases',
+      '--json',
+    ])
+    expect(updated).toMatchObject({ code: 0, stderr: '' })
+    expect(JSON.parse(updated.stdout).definitions).toContainEqual(
+      expect.objectContaining({ id: bucketId, name: 'Purchases', automatic: true }),
+    )
+    expect(deps.queries.threadSummary('a:t-m2')?.bucketAssignment?.bucketId).toBe(bucketId)
     const draftReply = ['reply', 'a:t-m1', '--body-file', '-', '--json']
     const scopedReply = await cli(
       scoped.secret,

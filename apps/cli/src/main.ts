@@ -6,8 +6,12 @@ import {
   type AccountSummary,
   type AgentAction,
   Bucket,
+  BucketByIdInput,
+  BucketByIdReviewInput,
+  BucketId,
   BucketInput,
   BucketReviewInput,
+  bucketLabels,
   type Contact,
   doctorWarnings,
   type GmailAuthStartResponse,
@@ -26,6 +30,7 @@ import {
 } from '@amc/protocol'
 import { Command, CommanderError } from 'commander'
 import { z } from 'zod'
+import { agentBucketCatalog, ownerBucketCatalog, registerBucketCommands } from './buckets.ts'
 import { authed, request } from './client.ts'
 import { readConfig, writeConfig } from './config.ts'
 import { registerDiagnosticsCommands } from './diagnostics.ts'
@@ -60,6 +65,7 @@ const scopedCommands = new Set([
   'mute',
   'label',
   'bucket',
+  'buckets.list',
   'agent.status',
   'triage.untriaged',
   'senders.suggest',
@@ -102,6 +108,7 @@ const agentMode = () => program.opts<{ asAgent?: boolean }>().asAgent === true
 
 registerDiagnosticsCommands(program, readConfig)
 registerSkillCommands(program)
+registerBucketCommands(program, requireConfig, agentMode)
 registerDraftCommands(program, requireConfig, agentMode)
 
 program
@@ -482,11 +489,9 @@ program
 program
   .command('bucket')
   .argument('<thread>', 'Thread id')
-  .argument(
-    '<bucket>',
-    'Reply, Action, Follow-up, Update, Later, "When I have time", Newsletters, or clear',
-  )
+  .argument('<bucket>', 'Bucket name, stable ID, or clear')
   .option('--reason <text>', 'one-line reason', 'Set manually')
+  .option('--id', 'use the ID-aware contract when clearing or replacing a custom assignment')
   .option('--review <revision>', 'record an owner correction at this Thread revision')
   .option('--action-id <id>', 'reuse this review action UUID on retry')
   .option('--only-untriaged', 'skip if already triaged or outside the Inbox (agent only)')
@@ -499,30 +504,55 @@ program
         reason: string
         review?: string
         actionId?: string
+        id?: boolean
         onlyUntriaged?: boolean
         json?: boolean
       },
     ) => {
       const bucket = Bucket.options.find((name) => name.toLowerCase() === value.toLowerCase())
-      if (!bucket && value.toLowerCase() !== 'clear')
-        throw new Error(`Choose ${Bucket.options.join(', ')}, or clear`)
-      const input = { threadId, bucket: bucket ?? null, reason: opts.reason }
+      const config = requireConfig()
+      const clear = value.toLowerCase() === 'clear'
+      const base = { threadId, reason: opts.reason }
+      let input:
+        | { threadId: string; reason: string; bucket: Bucket | null }
+        | z.infer<typeof BucketByIdInput>
+      if (opts.id && clear) input = { ...base, bucketId: null }
+      else if (bucket && opts.id) input = { ...base, bucketId: bucketLabels[bucket] }
+      else if (bucket || clear) input = { ...base, bucket: bucket ?? null }
+      else {
+        const id = BucketId.safeParse(value)
+        const definitions = id.success
+          ? []
+          : agentMode()
+            ? (await agentBucketCatalog(config)).definitions
+            : (await ownerBucketCatalog(config)).definitions.filter(({ archived }) => !archived)
+        const match = id.success
+          ? id.data
+          : definitions.find(
+              ({ name }) =>
+                name.normalize('NFKC').toLowerCase() === value.normalize('NFKC').toLowerCase(),
+            )?.id
+        if (!match) throw new Error('Bucket not found. Check its name or stable ID.')
+        input = { ...base, bucketId: match }
+      }
+      const byId = 'bucketId' in input
+      const label = bucket ?? value
       if (agentMode()) {
         if (opts.review !== undefined || opts.actionId)
           throw new Error('Owner review corrections are unavailable with an agent grant.')
         const result = await mailTool(
           requireConfig(),
           true,
-          'set_bucket',
+          byId ? 'set_bucket_by_id' : 'set_bucket',
           {
-            ...BucketInput.parse(input),
+            ...(byId ? BucketByIdInput.parse(input) : BucketInput.parse(input)),
             onlyUntriaged: opts.onlyUntriaged,
           },
           { write: true, result: BucketWriteResult },
         )
         if (opts.json) return printJson(result)
         console.log(
-          result.updated ? (bucket ? `Moved to ${bucket}` : 'Bucket cleared') : 'Thread skipped.',
+          result.updated ? (clear ? 'Bucket cleared' : `Moved to ${label}`) : 'Thread skipped.',
         )
         return
       }
@@ -530,7 +560,7 @@ program
       if (opts.review !== undefined) {
         if (!/^\d+$/.test(opts.review))
           throw new Error('Expected a Thread revision from amc triage queue')
-        const body = BucketReviewInput.parse({
+        const body = (byId ? BucketByIdReviewInput : BucketReviewInput).parse({
           ...input,
           intent: 'review',
           expectedRevision: Number(opts.review),
@@ -540,14 +570,15 @@ program
           method: 'PUT',
           body,
         })
+        if (opts.json) return printJson(result)
         printOwnerAction(result)
         return
       }
       if (opts.actionId) throw new Error('--action-id requires --review')
-      const body = BucketInput.parse(input)
+      const body = (byId ? BucketByIdInput : BucketInput).parse(input)
       const result = await authed(requireConfig())('/v1/bucket', { method: 'PUT', body })
       if (opts.json) return printJson(result)
-      console.log(bucket ? `Moved to ${bucket}` : 'Bucket cleared')
+      console.log(clear ? 'Bucket cleared' : `Moved to ${label}`)
     },
   )
 

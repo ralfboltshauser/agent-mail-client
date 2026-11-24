@@ -92,3 +92,23 @@ The Engine checks the credential before dispatching, and an older Engine
 rejects those routes even if a rollback happens between discovery and the
 write. The CLI checks which draft fields the grant can edit. Existing paired
 reads and owner mutations retain their HTTP behavior and output shapes.
+
+## Custom Buckets
+
+Use the paired owner CLI to manage the same catalog shown in Desktop **Settings → Triage Buckets**. A new custom Bucket is available for manual assignment. Add a description and use `--auto` to let automatic triage select it.
+
+```sh
+amc buckets create Receipts --description "Order receipts for completed purchases" --auto --json
+amc buckets list --archived --json
+amc buckets show "$bucket_id"
+amc buckets edit "$bucket_id" --name Purchases
+amc buckets edit "$bucket_id" --no-auto
+amc bucket "$thread_id" "$bucket_id"
+amc bucket "$thread_id" clear --id
+amc buckets archive "$bucket_id"
+amc buckets restore "$bucket_id"
+```
+
+Pass all active custom IDs to `amc buckets reorder` in the desired order. Use a stable `--request-id` to retry a create whose response was lost. Settings mutations require a paired owner. Scoped agents can discover active names and IDs with MCP `list_buckets` and assign them using `set_bucket_by_id` with Organise permission. Catalog management MCP tools are available on the paired owner endpoint `/mcp/cli/v1/owner` with Admin permission. Archiving preserves historical assignments and restore starts with automatic assignment off.
+
+Upgrade the Engine before Desktop and CLI. Older clients can still work with the seven built-in Buckets. Upgrade the client to view or change an existing custom assignment.

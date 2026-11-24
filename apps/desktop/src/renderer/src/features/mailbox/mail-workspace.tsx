@@ -8,6 +8,7 @@ import { MailSettings } from '@/components/mail-settings'
 import { OrganiseNotices, OrganisePicker } from '@/components/organise'
 import { ShortcutsDialog } from '@/components/shortcuts-dialog'
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
+import { useBucketName } from '@/data/buckets'
 import { shareReply } from '@/data/share-reply'
 import { useReplicaSelector, useSyncField } from '@/hooks/use-amc'
 import { getAmc } from '@/lib/amc'
@@ -319,12 +320,13 @@ export function MailWorkspace({
             )
         : undefined,
   })
+  const bucketName = useBucketName(view.kind === 'bucket' ? view.bucket : null)
   const title = search
     ? 'Search results'
     : view.kind === 'label'
       ? (labels.find((label) => label.id === view.labelId)?.name ?? 'Label')
       : view.kind === 'bucket'
-        ? view.bucket
+        ? (bucketName ?? 'Bucket')
         : (systemViews(snoozeEnabled).find((v) => v.view.kind === view.kind)?.title ?? 'Mail')
 
   const feedbackView =
@@ -524,6 +526,10 @@ export function MailWorkspace({
       {dialogs.sendSettings !== null && (
         <MailSettings
           initial={dialogs.sendSettings}
+          onOpenBucket={(bucket) => {
+            dialogs.setSendSettings(null)
+            goTo({ kind: 'bucket', bucket })
+          }}
           onClose={() => dialogs.setSendSettings(null)}
           onCloseAutoFocus={dialogs.restoreSettingsFocus}
         />

@@ -3,6 +3,7 @@ import { ArrowLeft, Copy, Forward, Maximize2, Reply, ReplyAll, SendToBack, X } f
 import { BucketPicker } from '@/components/bucket-picker'
 import { OrganiseToolbar } from '@/components/organise'
 import { ToolbarButton } from '@/components/toolbar-button'
+import { threadBucketKey } from '@/data/buckets'
 import { mailShortcuts } from '@/lib/mail-shortcuts'
 import { copyThreadReferenceLabel } from './thread-reference'
 import type { FilterAction } from './use-filter-actions'
@@ -144,7 +145,7 @@ function ReaderActions({
       )}
       {selected && (
         <BucketPicker
-          current={selected.bucket?.bucket ?? null}
+          current={threadBucketKey(selected)}
           open={bucketPickerOpen}
           onOpenChange={(open) => setBucketPickerId(open ? selected.id : null)}
           onSelect={(bucket) => void setBucket(bucket)}
