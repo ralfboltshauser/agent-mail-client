@@ -62,7 +62,7 @@ export function ShortcutsDialog({
       keys: [
         ['Accept sender', 'A'],
         ['Block sender', 'X'],
-        ['Choose a Bucket', '1–6'],
+        ['Choose a Bucket', `1–${BUCKETS.length}`],
         ['Archive this Thread', 'E'],
         ['Filter out this Thread', 'F'],
         ...(import.meta.env.VITE_AMC_PRIVATE_TRIAGE_REASONS !== '0'

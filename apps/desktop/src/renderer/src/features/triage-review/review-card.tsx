@@ -116,7 +116,7 @@ function CardPreview({ card, controls }: { card: Preview; controls: ReviewContro
           </h3>
           {card.suggestFilter && <p className="text-sm font-medium">Suggested: Filter out</p>}
           <p className="text-xs text-muted-foreground">
-            Filter out moves the thread’s Inbox mail to Filtered.
+            Filter out moves this thread’s incoming Inbox mail to Filtered.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
