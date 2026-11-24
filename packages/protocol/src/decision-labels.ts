@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-export const TAXONOMY_VERSION = 1
+export const TAXONOMY_VERSION = 2
 export const BucketDecisionLabel = z.enum([
   'bucket.reply',
   'bucket.action',
@@ -8,6 +8,7 @@ export const BucketDecisionLabel = z.enum([
   'bucket.update',
   'bucket.later',
   'bucket.when_i_have_time',
+  'bucket.newsletters',
   'bucket.clear',
 ])
 export const FilterDecisionLabel = z.enum(['filter.filtered', 'filter.keep'])

@@ -9,6 +9,7 @@ export const BUCKETS = [
   'Update',
   'Later',
   'When I have time',
+  'Newsletters',
 ] as const
 export const Bucket = z.enum(BUCKETS)
 export type Bucket = z.infer<typeof Bucket>
@@ -27,6 +28,7 @@ export const bucketLabels = {
   Update: 'bucket.update',
   Later: 'bucket.later',
   'When I have time': 'bucket.when_i_have_time',
+  Newsletters: 'bucket.newsletters',
 } as const satisfies Record<Bucket, z.infer<typeof BucketDecisionLabel>>
 
 export const BucketReason = z

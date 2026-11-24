@@ -194,7 +194,7 @@ it('shows sections for the selected Bucket without replacing the Thread or messa
   }
   expectContinuity(before)
 
-  for (const bucket of ['Update', 'Later', 'When I have time'] as const) {
+  for (const bucket of ['Update', 'Later', 'When I have time', 'Newsletters'] as const) {
     await setBucket(bucket, structured)
     expect(view.getByText(bucket)).toBeTruthy()
     expect(view.getByText(context, { selector: 'p' })).toBeTruthy()
