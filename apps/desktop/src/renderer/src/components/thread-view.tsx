@@ -16,7 +16,7 @@ interface Props {
   onRetry?: () => void
   snoozeEnabled: boolean
   labelNames: Map<string, string>
-  scrollRef: React.RefObject<HTMLDivElement | null>
+  scrollRef?: React.RefObject<HTMLDivElement | null>
   expanded?: boolean
   onEditDraft?: (messageId: string, imapRevision?: string) => void
   draftEditingDisabled?: boolean

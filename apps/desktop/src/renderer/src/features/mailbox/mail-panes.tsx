@@ -1,9 +1,8 @@
 import type { ThreadSummary } from '@amc/protocol'
 import { Inbox, Layers, Search } from 'lucide-react'
-import { memo, type ReactNode, type RefObject, useLayoutEffect, useMemo } from 'react'
+import { memo, type ReactNode, type RefObject, useMemo } from 'react'
 import { MailLoading, MailState } from '@/components/mail-state'
 import { ThreadList } from '@/components/thread-list'
-import { ThreadView } from '@/components/thread-view'
 import { Button } from '@/components/ui/button'
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
 import { replicaStoreFor } from '@/data/replica-store'
@@ -14,6 +13,7 @@ import { cn } from '@/lib/utils'
 import type { View } from '../../../../shared/api'
 import { SearchInput } from '../search/search-input'
 import type { useMailSearch } from '../search/use-mail-search'
+import { ReaderPresentation } from '../thread-reader/reader-presentation'
 import {
   accountsQuery,
   countsQuery,
@@ -278,6 +278,8 @@ function RefreshError({
 
 export const MailReader = memo(function MailReader({
   engineUrl,
+  scope,
+  onSwitching,
   selectedId,
   selectedAccountId,
   accountId,
@@ -289,6 +291,8 @@ export const MailReader = memo(function MailReader({
   draftEditingDisabled,
 }: {
   engineUrl: string | null
+  scope: string
+  onSwitching: (switching: boolean) => void
   selectedId: string | undefined
   selectedAccountId: string | undefined
   accountId: string | null
@@ -315,13 +319,6 @@ export const MailReader = memo(function MailReader({
     (left, right) =>
       left.data === right.data && left.failed === right.failed && left.failure === right.failure,
   )
-  const hasData = data != null
-  useLayoutEffect(() => {
-    const active = document.activeElement
-    if (expanded && hasData && (active === readerRef.current || active === document.body)) {
-      scrollRef.current?.focus({ preventScroll: true })
-    }
-  }, [expanded, hasData, readerRef, scrollRef])
   const refresh = () => {
     if (query) void replicaStoreFor(getAmc()).refresh(query)
   }
@@ -334,20 +331,22 @@ export const MailReader = memo(function MailReader({
           {data ? 'Could not refresh this thread' : 'Could not load this thread'}
         </RefreshError>
       )}
-      <div className="min-h-0 flex-1">
-        <ThreadView
-          data={data ?? null}
-          loading={query !== null && data === undefined && !failed}
-          unavailable={query !== null && (failed || data === null)}
-          onRetry={refresh}
-          snoozeEnabled={snoozeEnabled}
-          labelNames={labelNames}
-          scrollRef={scrollRef}
-          expanded={expanded}
-          onEditDraft={onEditDraft}
-          draftEditingDisabled={draftEditingDisabled}
-        />
-      </div>
+      <ReaderPresentation
+        key={JSON.stringify([engineUrl, scope, selectedAccountId])}
+        data={data}
+        selectedId={selectedId}
+        onSwitching={onSwitching}
+        loading={query !== null && data === undefined && !failed}
+        unavailable={query !== null && (failed || data === null)}
+        onRetry={refresh}
+        snoozeEnabled={snoozeEnabled}
+        labelNames={labelNames}
+        scrollRef={scrollRef}
+        readerRef={readerRef}
+        expanded={expanded}
+        onEditDraft={onEditDraft}
+        draftEditingDisabled={draftEditingDisabled}
+      />
     </>
   )
 })

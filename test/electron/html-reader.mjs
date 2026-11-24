@@ -135,26 +135,39 @@ async function main() {
         () =>
           run(
             (value) =>
-              [...document.querySelectorAll('iframe')].some((frame) =>
-                frame.contentDocument?.getElementById(value),
+              [...document.querySelectorAll('iframe')].some(
+                (frame) =>
+                  !frame.closest('[inert]') && frame.contentDocument?.getElementById(value),
               ),
             marker,
           ),
         marker,
       )
     }
-    const firstVisibleFrame = async (number, marker) => {
+    const firstVisibleFrame = async (number, marker, outgoingMarker) => {
       const selector = `[data-thread-id="thread-${number}"]`
       await waitFor(() => run((value) => !!document.querySelector(value), selector), selector)
       return run(
-        (row, id) =>
+        (row, id, outgoingId) =>
           new Promise((resolve) => {
             const deadline = performance.now() + 5000
+            let emptyFrames = 0
             const sample = () => {
-              const frame = [...document.querySelectorAll('iframe')].find((candidate) =>
+              const visibleFrames = [...document.querySelectorAll('iframe')].filter((frame) => {
+                const rect = frame.getBoundingClientRect()
+                const reader = frame.closest('.overflow-y-auto')?.getBoundingClientRect()
+                return (
+                  reader &&
+                  rect.height > 0 &&
+                  rect.top < Math.min(innerHeight, reader.bottom) &&
+                  rect.bottom > Math.max(0, reader.top) &&
+                  frame.checkVisibility({ opacityProperty: true, visibilityProperty: true })
+                )
+              })
+              const frame = visibleFrames.find((candidate) =>
                 candidate.contentDocument?.getElementById(id),
               )
-              if (frame?.offsetHeight && getComputedStyle(frame).visibility === 'visible') {
+              if (frame) {
                 const doc = frame.contentDocument
                 resolve({
                   height: frame.offsetHeight,
@@ -162,8 +175,16 @@ async function main() {
                   bottom: doc.getElementById(id).getBoundingClientRect().bottom,
                   overflowY: getComputedStyle(doc.documentElement).overflowY,
                   imageComplete: doc.getElementById('probe-held')?.complete,
+                  emptyFrames,
                 })
               } else if (performance.now() < deadline) {
+                if (
+                  outgoingId &&
+                  !visibleFrames.some((candidate) =>
+                    candidate.contentDocument?.getElementById(outgoingId),
+                  )
+                )
+                  emptyFrames++
                 requestAnimationFrame(sample)
               } else {
                 resolve(null)
@@ -174,6 +195,7 @@ async function main() {
           }),
         selector,
         marker,
+        outgoingMarker ?? null,
       )
     }
     const measure = (marker, width) =>
@@ -535,8 +557,9 @@ async function main() {
       )
       setLoadRemoteImagesAutomatically(true)
     })
-    const firstNewsletter = await firstVisibleFrame(8, 'probe-newsletter-end')
+    const firstNewsletter = await firstVisibleFrame(8, 'probe-newsletter-end', 'probe-images')
     assert.ok(firstNewsletter, 'newsletter appears with the image response held')
+    assert.equal(firstNewsletter.emptyFrames, 0, 'an immediate HTML switch keeps a body visible')
     assert.equal(firstNewsletter.imageComplete, false)
     assert.ok(
       firstNewsletter.bottom <= firstNewsletter.viewport,
@@ -546,8 +569,98 @@ async function main() {
     await run(() => {
       window.firstNewsletterFrame = document.querySelector('iframe')
     })
+    nativeTheme.themeSource = 'dark'
+    await waitFor(() => run(() => document.documentElement.classList.contains('dark')), 'dark UI')
     await selectThread(7, 'probe-theme')
-    const reopenedNewsletter = await firstVisibleFrame(8, 'probe-newsletter-end')
+    const bodyPixel = await waitFor(
+      () =>
+        run(() => {
+          const frame = document.querySelector('iframe')
+          if (getComputedStyle(frame).visibility !== 'visible') return null
+          const rect = frame.getBoundingClientRect()
+          return {
+            x: Math.round(rect.right - 24),
+            y: Math.round(rect.top + 8),
+            width: 1,
+            height: 1,
+          }
+        }),
+      'visible outgoing body',
+    )
+    const captureBodyPixel = async () => [
+      ...(await wc.capturePage(bodyPixel)).toBitmap().subarray(0, 4),
+    ]
+    assert.deepEqual(await captureBodyPixel(), [255, 255, 255, 255], 'outgoing HTML paints white')
+    await run(async () => {
+      const api = (await import('/src/lib/amc.ts')).getAmc()
+      const load = api.messageHtml
+      const observer = new MutationObserver(() => {
+        const frame = [...document.querySelectorAll('[inert] iframe[data-reader-html-ready]')].find(
+          (candidate) => candidate.contentDocument?.getElementById('probe-newsletter-end'),
+        )
+        if (frame) {
+          window.stagedNewsletter = frame
+          window.stagedNewsletterDocument = frame.contentDocument
+        }
+      })
+      observer.observe(document.body, {
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['data-reader-html-ready'],
+      })
+      api.messageHtml = async (id) => {
+        if (id === 'thread-8:latest') {
+          await new Promise((resolve) => {
+            window.releaseNewsletterBody = resolve
+          })
+        }
+        return load(id)
+      }
+      window.restoreMessageHtml = () => {
+        api.messageHtml = load
+      }
+      window.stopWatchingNewsletter = () => observer.disconnect()
+    })
+    const openingNewsletter = firstVisibleFrame(8, 'probe-newsletter-end', 'probe-theme')
+    await waitFor(() => run(() => !!window.releaseNewsletterBody), 'incoming HTML request')
+    assert.ok(
+      await run(() => {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'r', bubbles: true }))
+        return !document.querySelector('[aria-label="Reply"]')
+      }),
+      'Reply is unavailable while the selected body is hidden',
+    )
+    await run(
+      () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+    )
+    const pendingPixel = await captureBodyPixel()
+    assert.equal(await run(() => !!document.querySelector('[role="dialog"]')), false)
+    await run(() => {
+      window.restoreMessageHtml()
+      window.releaseNewsletterBody()
+    })
+    const reopenedNewsletter = await openingNewsletter
+    assert.deepEqual(
+      pendingPixel,
+      [255, 255, 255, 255],
+      'outgoing body stays painted during an HTML read',
+    )
+    assert.equal(
+      reopenedNewsletter?.emptyFrames,
+      0,
+      'switching HTML threads never exposes an empty body frame',
+    )
+    assert.ok(
+      await run(() => {
+        window.stopWatchingNewsletter()
+        const frame = document.querySelector('iframe')
+        return (
+          frame === window.stagedNewsletter &&
+          frame?.contentDocument === window.stagedNewsletterDocument
+        )
+      }),
+      'promotion keeps the staged iframe and its parsed document',
+    )
     assert.deepEqual(reopenedNewsletter, firstNewsletter, 'reopened newsletter fits before release')
     assert.equal(await run(() => window.firstNewsletterFrame.isConnected), false)
     await waitFor(() => requests.held === 2, 'held image request from reopened newsletter')
@@ -565,6 +678,72 @@ async function main() {
     assert.ok(
       Math.abs((await measure('probe-newsletter-end')).height - firstNewsletter.height) <= 1,
     )
+
+    await run(async () => {
+      const api = (await import('/src/lib/amc.ts')).getAmc()
+      const load = api.messageHtml
+      api.messageHtml = async (id) => {
+        if (id === 'thread-7:latest') {
+          await new Promise((resolve) => {
+            window.releaseWorkshopBody = resolve
+          })
+        }
+        return load(id)
+      }
+      window.restoreWorkshopBody = () => {
+        api.messageHtml = load
+      }
+      document.querySelector('[data-thread-id="thread-7"]').click()
+    })
+    await waitFor(() => run(() => !!window.releaseWorkshopBody), 'staged workshop body read')
+    await run(() => document.querySelector('[role="listbox"]').focus())
+    await selectThread(6, 'probe-images')
+    await run(() => {
+      window.restoreWorkshopBody()
+      window.releaseWorkshopBody()
+    })
+    await run(
+      () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+    )
+    assert.ok(
+      await run(() => {
+        const frame = document.querySelector('iframe')
+        return (
+          !!frame?.contentDocument?.getElementById('probe-images') &&
+          !frame.closest('[inert]') &&
+          document.activeElement.getAttribute('role') === 'listbox'
+        )
+      }),
+      'a superseded HTML reply keeps the current reader and list focus',
+    )
+
+    await run(async () => {
+      const api = (await import('/src/lib/amc.ts')).getAmc()
+      const load = api.messageHtml
+      api.messageHtml = async (id) => {
+        if (id === 'thread-7:latest') throw new Error('Synthetic HTML read failed')
+        return load(id)
+      }
+      window.restoreWorkshopBody = () => {
+        api.messageHtml = load
+      }
+      document.querySelector('[data-thread-id="thread-7"]').click()
+    })
+    await waitFor(
+      () =>
+        run(
+          () =>
+            !document.querySelector('iframe') &&
+            document.querySelector('h1')?.textContent === 'Notes from the type review' &&
+            [...document.querySelectorAll('[aria-expanded="true"] + div')].some(
+              (body) => body.textContent === 'The captions are set at the new size.',
+            ),
+        ),
+      'selected message text replaces the outgoing reader after an HTML read fails',
+    )
+    await run(() => window.restoreWorkshopBody())
+    await selectThread(8, 'probe-newsletter-end')
+    console.log('HTML handoff kept the white body painted with 0 empty animation-frame samples')
 
     console.log(
       `HTML reader verified in Chromium ${process.versions.chrome}, split-view iframe ${narrowReaderWidth}px`,

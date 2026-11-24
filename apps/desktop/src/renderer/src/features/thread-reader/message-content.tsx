@@ -137,7 +137,10 @@ export function MessageContent({ message }: { message: ReplicaThreadMessage }) {
   }
   if (visibleText != null && showText) {
     return (
-      <div className={reserveTextSpace ? 'min-h-11' : undefined}>
+      <div
+        className={reserveTextSpace ? 'min-h-11' : undefined}
+        data-reader-body-pending={hasHtml && !html.hasResult ? '' : undefined}
+      >
         <TextBody text={visibleText} />
       </div>
     )
@@ -153,7 +156,7 @@ export function MessageContent({ message }: { message: ReplicaThreadMessage }) {
   if (hasHtml) return <HtmlBodySkeleton />
 
   return (
-    <div className="min-h-11 py-2" aria-busy="true">
+    <div className="min-h-11 py-2" aria-busy="true" data-reader-body-pending="">
       <Skeleton className="h-3 w-3/4" />
     </div>
   )

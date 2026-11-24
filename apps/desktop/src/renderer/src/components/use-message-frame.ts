@@ -203,10 +203,13 @@ function observeMessageFrame(
     const link = (event.target as Element | null)?.closest?.('a, area')
     if (!link) return
     event.preventDefault()
+    if (frame.closest('[inert]')) return
     const href = link.getAttribute('href') ?? link.getAttribute('xlink:href') ?? ''
     if (/^(https?|mailto):/i.test(href)) void getAmc().openExternal(href)
   }
-  const onKey = (event: KeyboardEvent) => dispatchMessageKeydown(frame, event)
+  const onKey = (event: KeyboardEvent) => {
+    if (!frame.closest('[inert]')) dispatchMessageKeydown(frame, event)
+  }
 
   update()
   const observer = new ResizeObserver(schedule)
