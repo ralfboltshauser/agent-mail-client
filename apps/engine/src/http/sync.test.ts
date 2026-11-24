@@ -40,7 +40,7 @@ function setup() {
 
 describe('sync protocol', () => {
   it('syncs owner Bucket settings, protects old assignments, and keeps legacy cursors moving', async () => {
-    const { app, db, add, get } = setup()
+    const { app, db, add, get, store } = setup()
     add('custom', 1_000)
     const owner = issueToken(db, {
       kind: 'cli',
@@ -66,7 +66,10 @@ describe('sync protocol', () => {
     expect((await call('/v1/buckets', 'GET', undefined, agent.secret)).status).toBe(403)
     const since = (await get<{ modseq: number }>('/v1/sync/state')).body.modseq
     const create = { name: 'Receipts', requestId: randomUUID() }
+    const changed = vi.fn()
+    store.on('change', changed)
     const created = await call('/v1/buckets', 'POST', create)
+    expect(changed).toHaveBeenCalledOnce()
     expect(created.status).toBe(201)
     const {
       definition: { id },
@@ -106,6 +109,7 @@ describe('sync protocol', () => {
     expect(
       (await call('/v1/bucket', 'PUT', { ...write, bucket: 'Reply' }, agent.secret)).status,
     ).toBe(409)
+    expect(db.prepare('SELECT status FROM agent_action').get()).toEqual({ status: 'rejected' })
     expect(
       (await call(`/v1/buckets/${id}`, 'PATCH', { name: 'Purchases', expectedRevision: 0 })).status,
     ).toBe(409)

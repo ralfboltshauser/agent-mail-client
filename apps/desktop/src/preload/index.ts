@@ -143,6 +143,7 @@ const api: AmcApi = {
   bucketCatalog: invoke('bucketCatalog') as NonNullable<AmcApi['bucketCatalog']>,
   manageBuckets: invoke('manageBuckets') as NonNullable<AmcApi['manageBuckets']>,
   setBucket: invoke('setBucket') as AmcApi['setBucket'],
+  setBucketById: invoke('setBucketById') as AmcApi['setBucketById'],
   organise: invoke('organise') as AmcApi['organise'],
   organiseErrors: invoke('organiseErrors') as AmcApi['organiseErrors'],
   agentActivity: invoke('agentActivity') as AmcApi['agentActivity'],

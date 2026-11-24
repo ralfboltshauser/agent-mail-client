@@ -101,9 +101,12 @@ it('checks the Engine once per burst and pulls no-op results without invalidatin
     await checking
     expect(loop.status.mailCheck).toBeUndefined()
     expect(loop.status.mailCheckStartedAt).toBeUndefined()
-    expect(get).toHaveBeenCalledExactlyOnceWith('/v1/sync/changes?since=7&limit=2000', {
-      signal: expect.any(AbortSignal),
-    })
+    expect(get).toHaveBeenCalledExactlyOnceWith(
+      '/v1/sync/changes?since=7&limit=2000&bucketRevision=-1',
+      {
+        signal: expect.any(AbortSignal),
+      },
+    )
     expect(changed).not.toHaveBeenCalled()
     expect(replica.modseq).toBe(7)
 

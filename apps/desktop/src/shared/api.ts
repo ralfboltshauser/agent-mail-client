@@ -256,7 +256,8 @@ export interface AmcApi {
   unpair(): Promise<void>
   status(): Promise<SyncStatus>
   syncNow(): Promise<void>
-  setBucket(input: BucketInput | z.infer<typeof BucketByIdInput>): Promise<void>
+  setBucket(input: BucketInput): Promise<void>
+  setBucketById(input: z.infer<typeof BucketByIdInput>): Promise<void>
   bucketCatalog?(): Promise<BucketCatalog | null>
   manageBuckets?(edit: z.infer<typeof BucketCatalogEdit>): Promise<BucketCatalog>
   organise(action: OrganiseAction): Promise<string>

@@ -249,6 +249,27 @@ export function createMailFixture(scenario: string) {
       cursor: null,
     }),
   }
+  const assignBucket: AmcApi['setBucket'] & AmcApi['setBucketById'] = async (input) => {
+    const { threadId, reason } = input
+    const bucket =
+      'bucket' in input
+        ? input.bucket
+        : (BUCKETS.find((name) => bucketLabels[name] === input.bucketId) ?? null)
+    threads = threads.map((thread) =>
+      thread.id === threadId
+        ? {
+            ...thread,
+            bucket: bucket ? { bucket, reason, setBy: 'Jules', setAt: Date.now() } : null,
+            bucketAssignment:
+              !bucket && 'bucketId' in input && input.bucketId
+                ? { bucketId: input.bucketId, reason, setBy: 'Jules', setAt: Date.now() }
+                : null,
+          }
+        : thread,
+    )
+    notify()
+  }
+
   const api: AmcApi = {
     ...(triageReader ? { smartInbox: reviewFixture } : {}),
     feedback: {
@@ -406,26 +427,8 @@ export function createMailFixture(scenario: string) {
           },
         }
       : {}),
-    setBucket: async (input) => {
-      const { threadId, reason } = input
-      const bucket =
-        'bucket' in input
-          ? input.bucket
-          : (BUCKETS.find((name) => bucketLabels[name] === input.bucketId) ?? null)
-      threads = threads.map((thread) =>
-        thread.id === threadId
-          ? {
-              ...thread,
-              bucket: bucket ? { bucket, reason, setBy: 'Jules', setAt: Date.now() } : null,
-              bucketAssignment:
-                !bucket && 'bucketId' in input && input.bucketId
-                  ? { bucketId: input.bucketId, reason, setBy: 'Jules', setAt: Date.now() }
-                  : null,
-            }
-          : thread,
-      )
-      notify()
-    },
+    setBucket: assignBucket,
+    setBucketById: assignBucket,
     organise: async (action) => {
       if (action.kind === 'undo') {
         const id = action.mutationId ?? [...mutations.keys()].at(-1)

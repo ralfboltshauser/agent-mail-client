@@ -4,12 +4,26 @@ import { bucketKey, useBucketCatalog } from '@/data/buckets'
 import { getAmc } from '@/lib/amc'
 import { failureText } from '@/lib/failure'
 import type { AmcApi } from '../../../shared/api'
+import { BucketForm } from './bucket-form'
 import { Button } from './ui/button'
-import { Input } from './ui/input'
+
+const bucketHints = new Set([
+  'A Bucket already uses that name.',
+  'The Bucket catalog changed. Reload it and retry.',
+  'Describe when automatic triage should use this Bucket.',
+  'The custom Bucket limit has been reached.',
+  'This Bucket is archived.',
+])
 
 type Edit = Parameters<NonNullable<AmcApi['manageBuckets']>>[0]
 
-export function BucketSettings({ onOpen }: { onOpen: (bucket: BucketStorageKey) => void }) {
+export function BucketSettings({
+  onOpen,
+  onPendingChange,
+}: {
+  onOpen: (bucket: BucketStorageKey) => void
+  onPendingChange: (pending: boolean) => void
+}) {
   const label = useId()
   const catalog = useBucketCatalog()
   const [editing, setEditing] = useState<BucketDefinition | 'new' | null>(null)
@@ -23,6 +37,7 @@ export function BucketSettings({ onOpen }: { onOpen: (bucket: BucketStorageKey) 
     const api = getAmc()
     if (!api.manageBuckets || pending) return false
     setPending(true)
+    onPendingChange(true)
     setError('')
     setSaved('')
     try {
@@ -30,10 +45,17 @@ export function BucketSettings({ onOpen }: { onOpen: (bucket: BucketStorageKey) 
       setSaved(message)
       return true
     } catch (cause) {
-      setError(failureText(cause))
+      const message =
+        cause instanceof Error
+          ? cause.message
+              .replace(/^Error invoking remote method '[a-zA-Z:]+': Error: /, '')
+              .split('\n')[0]
+          : undefined
+      setError(message && bucketHints.has(message) ? message : failureText(cause))
       return false
     } finally {
       setPending(false)
+      onPendingChange(false)
     }
   }
   const closeEditor = () => {
@@ -145,7 +167,12 @@ export function BucketSettings({ onOpen }: { onOpen: (bucket: BucketStorageKey) 
                   .filter((item) => item.archived)
                   .map((item) => (
                     <li key={item.id} className="flex flex-wrap items-center gap-1">
-                      <Button size="sm" variant="ghost" onClick={() => onOpen(bucketKey(item))}>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={pending}
+                        onClick={() => onOpen(bucketKey(item))}
+                      >
                         {item.name}
                       </Button>
                       <Button
@@ -171,36 +198,23 @@ export function BucketSettings({ onOpen }: { onOpen: (bucket: BucketStorageKey) 
               </ul>
             </details>
           )}
-          {editing && editing !== 'new' && editingRevision !== catalog.revision && (
-            <div className="grid gap-2 text-sm">
-              <output>The Bucket catalog changed while you were editing.</output>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => {
-                  const latest = custom.find(({ id }) => id === editing.id)
-                  if (latest?.archived) closeEditor()
-                  else setEditingRevision(catalog.revision)
-                }}
-              >
-                Review and keep editing
-              </Button>
-            </div>
-          )}
           {editing ? (
             <BucketForm
               key={editing === 'new' ? 'new' : editing.id}
               item={editing === 'new' ? null : editing}
-              pending={pending || (editing !== 'new' && editingRevision !== catalog.revision)}
+              latest={editing === 'new' ? undefined : custom.find(({ id }) => id === editing.id)}
+              pending={pending}
+              needsReview={editing !== 'new' && editingRevision !== catalog.revision}
+              onReview={() => setEditingRevision(catalog.revision)}
               onCancel={closeEditor}
-              onSave={async (values, requestId) => {
+              onSave={async (values, changes, requestId) => {
                 const edit: Edit =
                   editing === 'new'
                     ? { kind: 'create', input: { ...values, requestId } }
                     : {
                         kind: 'update',
                         id: CustomBucketId.parse(editing.id),
-                        input: { ...values, expectedRevision: editingRevision },
+                        input: { ...changes, expectedRevision: editingRevision },
                       }
                 if (await submit(edit, editing === 'new' ? 'Bucket created' : 'Bucket saved'))
                   closeEditor()
@@ -230,85 +244,5 @@ export function BucketSettings({ onOpen }: { onOpen: (bucket: BucketStorageKey) 
       )}
       {saved && <output className="text-sm text-muted-foreground">{saved}</output>}
     </section>
-  )
-}
-
-function BucketForm({
-  item,
-  pending,
-  onSave,
-  onCancel,
-}: {
-  item: BucketDefinition | null
-  pending: boolean
-  onSave: (
-    values: { name: string; description: string; automatic: boolean },
-    requestId: string,
-  ) => Promise<void>
-  onCancel: () => void
-}) {
-  const nameId = useId()
-  const [name, setName] = useState(item?.name ?? '')
-  const [description, setDescription] = useState(item?.description ?? '')
-  const [automatic, setAutomatic] = useState(item?.automatic ?? false)
-  const attempt = useRef<{ key: string; id: string } | null>(null)
-  const nameRef = useRef<HTMLInputElement>(null)
-  const focusName = (element: HTMLInputElement | null) => {
-    if (element && element !== nameRef.current) element.focus()
-    nameRef.current = element
-  }
-  return (
-    <form
-      className="grid gap-2 rounded-md border p-2"
-      onSubmit={(event) => {
-        event.preventDefault()
-        if (pending) return
-        const values = { name: name.trim(), description: description.trim(), automatic }
-        const key = JSON.stringify(values)
-        if (attempt.current?.key !== key) attempt.current = { key, id: crypto.randomUUID() }
-        void onSave(values, attempt.current.id)
-      }}
-    >
-      <label htmlFor={nameId} className="grid gap-1 text-sm">
-        Bucket name
-        <Input
-          id={nameId}
-          ref={focusName}
-          value={name}
-          maxLength={60}
-          required
-          disabled={pending}
-          onChange={(event) => setName(event.target.value)}
-        />
-      </label>
-      <label className="grid gap-1 text-sm">
-        When should triage use this Bucket?
-        <textarea
-          className="rounded-md border bg-background px-3 py-2 text-sm"
-          value={description}
-          maxLength={500}
-          required={automatic}
-          disabled={pending}
-          onChange={(event) => setDescription(event.target.value)}
-        />
-      </label>
-      <label className="flex items-center gap-2 text-sm">
-        <input
-          type="checkbox"
-          checked={automatic}
-          disabled={pending}
-          onChange={(event) => setAutomatic(event.target.checked)}
-        />
-        Allow automatic assignment
-      </label>
-      <div className="flex gap-2">
-        <Button type="submit" size="sm" disabled={pending}>
-          {pending ? 'Saving…' : item ? 'Save Bucket' : 'Create Bucket'}
-        </Button>
-        <Button type="button" size="sm" variant="ghost" disabled={pending} onClick={onCancel}>
-          Cancel
-        </Button>
-      </div>
-    </form>
   )
 }

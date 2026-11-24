@@ -29,11 +29,12 @@ export function MailSettings({
   const id = useId()
   const [seconds, setSeconds] = useState(String(initial))
   const [saving, setSaving] = useState(false)
+  const [savingBuckets, setSavingBuckets] = useState(false)
   return (
     <Dialog
       open
       onOpenChange={(open) => {
-        if (!open) onClose()
+        if (!open && !savingBuckets) onClose()
       }}
     >
       <DialogContent
@@ -89,7 +90,7 @@ export function MailSettings({
         <div className="border-t pt-4">
           <AutoTriageSetting />
         </div>
-        <BucketSettings onOpen={onOpenBucket} />
+        <BucketSettings onOpen={onOpenBucket} onPendingChange={setSavingBuckets} />
         <PrivacyPreferences />
         <NotificationPreferences />
         <DebugLoggingSetting />

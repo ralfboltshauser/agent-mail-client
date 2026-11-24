@@ -4,7 +4,7 @@ import {
   type BucketCatalog,
   type BucketDefinition,
   type BucketStorageKey,
-  bucketIdForKey,
+  CustomBucketId,
   type ThreadSummary,
 } from '@amc/protocol'
 import { useReplicaSelector } from '@/hooks/use-amc'
@@ -20,13 +20,12 @@ const catalogQuery: ReplicaQuery<BucketCatalog | null> = {
 export const useBucketCatalog = () => useReplicaSelector(catalogQuery, ({ data }) => data)
 
 export function useBucketName(key: BucketStorageKey | null | undefined) {
-  const builtin = key && Bucket.safeParse(key)
-  const id = key && builtin && !builtin.success ? key : null
+  const id = key && CustomBucketId.safeParse(key).success ? key : null
   const name = useReplicaSelector(
     id ? catalogQuery : null,
     ({ data }) => data?.definitions.find((item) => item.id === id)?.name,
   )
-  return builtin?.success ? builtin.data : id ? (name ?? 'Custom Bucket') : undefined
+  return id ? (name ?? 'Custom Bucket') : (key ?? undefined)
 }
 
 export function bucketKey(item: BucketDefinition): BucketStorageKey {
@@ -43,10 +42,4 @@ export function threadBucketKey(thread: ThreadSummary | null | undefined): Bucke
     thread?.bucket?.bucket ??
     null
   )
-}
-
-export function bucketSelection(key: BucketStorageKey | null, idAware: boolean) {
-  const builtin = Bucket.safeParse(key)
-  if (idAware) return { bucketId: key === null ? null : bucketIdForKey(key) }
-  return { bucket: builtin.success ? builtin.data : null }
 }

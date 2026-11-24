@@ -10,7 +10,7 @@ import {
 import type { z } from 'zod'
 import { agentGrantActive, type Principal, withinAccount } from '../auth/tokens.ts'
 import { type Db, transaction } from '../db/database.ts'
-import { assignableBucketKey, guardLegacyBucket } from './bucket-catalog.ts'
+import { assignableBucketKey, BucketError, guardLegacyBucket } from './bucket-catalog.ts'
 import { DraftError } from './drafts.ts'
 import { MutationError, type Mutations } from './mutations.ts'
 import type { MailStore } from './store.ts'
@@ -74,7 +74,7 @@ export function setBucketAsAgent(
   onlyUntriaged = false,
 ) {
   const { db } = store
-  return transaction(db, () => {
+  const result = transaction(db, () => {
     const entry = start(db, agent, 'set_bucket', [input.threadId], 1)
     if (entry.error) return { updated: false, error: entry.error, status: 429 as const }
     const account = threadAccount(db, input.threadId)
@@ -86,20 +86,31 @@ export function setBucketAsAgent(
       )
       return { updated: false, error, status: 404 as const }
     }
-    const idAware = 'bucketId' in input
-    if (!onlyUntriaged) {
-      const current = db.prepare('SELECT bucket FROM thread WHERE id = ?').get(input.threadId)
-      guardLegacyBucket(current?.bucket as string | null, idAware)
+    try {
+      const idAware = 'bucketId' in input
+      if (!onlyUntriaged) {
+        const current = db.prepare('SELECT bucket FROM thread WHERE id = ?').get(input.threadId)
+        guardLegacyBucket(current?.bucket as string | null, idAware)
+      }
+      const bucket = idAware ? assignableBucketKey(db, input.bucketId) : input.bucket
+      const updated = store.setBucket({ ...input, bucket }, agent.name, onlyUntriaged)
+      db.prepare('UPDATE agent_action SET status = ?, error = ? WHERE id = ?').run(
+        updated ? 'applied' : 'rejected',
+        updated ? null : 'Thread already has a Bucket or left the Inbox',
+        entry.id,
+      )
+      return { updated }
+    } catch (error) {
+      if (!(error instanceof BucketError)) throw error
+      db.prepare("UPDATE agent_action SET status = 'rejected', error = ? WHERE id = ?").run(
+        error.message,
+        entry.id,
+      )
+      return error
     }
-    const bucket = idAware ? assignableBucketKey(db, input.bucketId) : input.bucket
-    const updated = store.setBucket({ ...input, bucket }, agent.name, onlyUntriaged)
-    db.prepare('UPDATE agent_action SET status = ?, error = ? WHERE id = ?').run(
-      updated ? 'applied' : 'rejected',
-      updated ? null : 'Thread already has a Bucket or left the Inbox',
-      entry.id,
-    )
-    return { updated }
   })
+  if (result instanceof BucketError) throw result
+  return result
 }
 
 export function organizeAsAgent(
