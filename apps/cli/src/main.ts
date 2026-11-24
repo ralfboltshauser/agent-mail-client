@@ -56,6 +56,7 @@ const scopedCommands = new Set([
   'search',
   'link.thread',
   'link.search',
+  'link.draft',
   'contacts',
   'labels',
   'archive',

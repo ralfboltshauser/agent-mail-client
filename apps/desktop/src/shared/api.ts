@@ -130,6 +130,7 @@ export type T3RuntimeMode = 'approval-required' | 'auto-accept-edits' | 'auto' |
 export type AskAgentRuntime = T3RuntimeMode | 'unknown'
 export type AskAgentResult = { opened: true } | { opened: false; reason: string }
 export type MailLinkSearch = Extract<MailLinkDestination, { kind: 'search' }>
+export type MailLinkDraft = Extract<MailLinkDestination, { kind: 'draft' }>
 
 export interface T3Project {
   id: string
@@ -236,6 +237,7 @@ export interface AmcApi {
   askAgentRuntime(): Promise<AskAgentRuntime>
   askAgent(question: string, accountId: string | null): Promise<AskAgentResult>
   onOpenMailSearch(listener: (search: MailLinkSearch) => void): () => void
+  onOpenMailDraft(listener: (draft: MailLinkDraft) => void): () => void
   onOpenThread(listener: (thread: ThreadSummary) => void): () => void
   triageStatus(): Promise<TriageStatus>
   setAutoTriage(enabled: boolean): Promise<void>
@@ -280,7 +282,7 @@ export interface AmcApi {
   contacts(text: string): Promise<Contact[]>
   startCompose(input: ComposeStart): Promise<ComposeDraft>
   composeDrafts(): Promise<VersionedDraft[]>
-  composeDraft(id: string): Promise<ComposeDraft>
+  composeDraft(id: string, engineOrigin?: string): Promise<ComposeDraft>
   composeDraftByMessage(messageId: string, imapRevision?: string): Promise<ComposeDraft>
   discardDraft(id: string, revision: number): Promise<DiscardDraftResult>
   stageComposeBody(id: string, patch: ComposePatch): void

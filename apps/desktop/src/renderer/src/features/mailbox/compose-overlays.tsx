@@ -9,6 +9,7 @@ import type { useMailCompose } from './use-mail-compose'
 export function ComposeOverlays({ compose }: { compose: ReturnType<typeof useMailCompose> }) {
   const {
     draft,
+    composerFocus,
     setDraft,
     handoffThread,
     setHandoffThread,
@@ -55,6 +56,7 @@ export function ComposeOverlays({ compose }: { compose: ReturnType<typeof useMai
       {draft && (
         <Composer
           key={draft.id}
+          ref={composerFocus}
           draft={draft}
           accounts={accounts ?? []}
           onQueued={queued}

@@ -1,5 +1,6 @@
 export type MailLink =
   | { kind: 'thread'; threadId: string }
+  | { kind: 'draft'; draftId: string }
   | { kind: 'search'; query: string; accountId: string | null }
 
 export type MailLinkDestination = MailLink & { engineOrigin: string }
@@ -18,13 +19,14 @@ export function mailLink(engineUrl: string, target: MailLink): string {
   const params = new URLSearchParams({ engine: new URL(engineUrl).origin })
   if (target.kind === 'thread')
     return `amc://thread/${encodeURIComponent(target.threadId)}?${params}`
+  if (target.kind === 'draft') return `amc://draft/${encodeURIComponent(target.draftId)}?${params}`
   params.set('q', target.query)
   if (target.accountId !== null) params.set('accountId', target.accountId)
   return `amc://search?${params}`
 }
 
 export function parseMailLink(value: string): MailLinkDestination | null {
-  if (!/^amc:\/\/(?:thread\/|search\?)/.test(value) || value.length > 25_000) return null
+  if (!/^amc:\/\/(?:draft\/|thread\/|search\?)/.test(value) || value.length > 25_000) return null
   try {
     const url = new URL(value)
     if (url.hash || url.username || url.password || url.port) return null
@@ -37,11 +39,11 @@ export function parseMailLink(value: string): MailLinkDestination | null {
       engine.origin !== engineOrigin
     )
       return null
-    if (url.hostname === 'thread' && params.size === 1 && /^\/[^/]+$/.test(url.pathname)) {
-      const threadId = decodeURIComponent(url.pathname.slice(1))
-      return validId(threadId) && threadId !== '.' && threadId !== '..'
-        ? { kind: 'thread', threadId, engineOrigin }
-        : null
+    if (params.size === 1 && /^\/[^/]+$/.test(url.pathname)) {
+      const id = decodeURIComponent(url.pathname.slice(1))
+      if (!validId(id) || id === '.' || id === '..') return null
+      if (url.hostname === 'draft') return { kind: 'draft', draftId: id, engineOrigin }
+      if (url.hostname === 'thread') return { kind: 'thread', threadId: id, engineOrigin }
     }
     if (url.hostname !== 'search' || url.pathname) return null
     if ([...params.keys()].some((key) => !['engine', 'q', 'accountId'].includes(key))) return null

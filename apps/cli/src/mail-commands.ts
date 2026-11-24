@@ -88,6 +88,13 @@ export function registerMailCommands(
       printLink({ kind: 'thread', threadId: id }, opts.web),
     )
   links
+    .command('draft')
+    .argument('<draft-id>')
+    .option('--web', 'use a browser-compatible link')
+    .action((id: string, opts: { web?: boolean }) =>
+      printLink({ kind: 'draft', draftId: id }, opts.web),
+    )
+  links
     .command('search')
     .argument('<query>')
     .option('--account <id>', 'Account ID')

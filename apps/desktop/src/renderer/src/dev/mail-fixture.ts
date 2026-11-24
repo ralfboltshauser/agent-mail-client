@@ -302,6 +302,7 @@ export function createMailFixture(scenario: string) {
     askAgentRuntime: async () => 'approval-required',
     askAgent: async () => ({ opened: true }),
     onOpenMailSearch: () => () => {},
+    onOpenMailDraft: () => () => {},
     onOpenThread: () => () => {},
     onChanged: (listener) => {
       changed.add(listener)

@@ -3,6 +3,7 @@ import { type MailLink, mailLink, mailWebLink, parseMailLink, sameMailEngine } f
 
 it.each<MailLink>([
   { kind: 'thread', threadId: "imap:some%40example.test/it's $(printf test); :" },
+  { kind: 'draft', draftId: '00000000-0000-4000-8000-000000000001' },
   { kind: 'search', query: 'from:"Änne Beck" subject:"A + B & C?"', accountId: 'a:1' },
   { kind: 'search', query: '"annual budget" after:2026-11-23', accountId: null },
 ])('round trips $kind links through the native and browser encodings', (target) => {
@@ -21,6 +22,10 @@ it.each<MailLink>([
 it.each([
   'https://thread/a',
   'amc://send/anything',
+  'amc://draft/id/send?engine=https%3A%2F%2Fengine.example.test',
+  'amc://draft/id?engine=https%3A%2F%2Fengine.example.test&send=true',
+  'amc://draft/..?engine=https%3A%2F%2Fengine.example.test',
+  'amc://draft/id',
   'amc://thread/id/more',
   'amc://thread/id?token=secret',
   'amc://thread/%00?engine=https%3A%2F%2Fengine.example.test',

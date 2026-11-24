@@ -238,11 +238,14 @@ export function MailWorkspace({
     },
   )
 
-  // Install the search listener before onOpenThread announces navigation readiness.
+  const openMailDraft = useEffectEvent(compose.openLinkedDraft)
+
+  // Install the mail link listeners before onOpenThread announces navigation readiness.
   // Notification targets can be opened before they have arrived in the list query.
   // biome-ignore lint/correctness/useExhaustiveDependencies: React Effect Events are intentionally excluded from effect dependencies.
   useEffect(() => {
     const removeSearch = getAmc().onOpenMailSearch((target) => openMailSearch(target))
+    const removeDraft = getAmc().onOpenMailDraft((target) => void openMailDraft(target))
     const removeThread = getAmc().onOpenThread((target) => {
       collapse()
       closeReview(false)
@@ -259,6 +262,7 @@ export function MailWorkspace({
     })
     return () => {
       removeSearch()
+      removeDraft()
       removeThread()
     }
   }, [

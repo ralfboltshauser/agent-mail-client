@@ -37,8 +37,8 @@ filters. All predicates apply to one message. Results select one best message
 per thread before paging. Existing array shapes support offset pagination.
 As the mailbox changes between pages, the ordering can change.
 
-The protocol package owns `amc://thread/<encoded-id>` and
-`amc://search?q=<query>&accountId=<optional-id>`. Both require an `engine`
+The protocol package owns `amc://thread/<encoded-id>`,
+`amc://draft/<encoded-id>`, and `amc://search?q=<query>&accountId=<optional-id>`. All require an `engine`
 query parameter identifying the paired Engine origin. The CLI emits these links or
 an HTTPS variant on the paired Engine. Desktop Main validates native links and
 holds them until mailbox navigation is ready. It uses the notification route to
@@ -48,11 +48,29 @@ before dispatching an intent and again before executing a linked search. A searc
 link sets the account and query together. Search URLs carry the literal query.
 Both URL forms leave credentials in the app.
 
+For draft links, the CLI derives the native URL from the saved AMC draft ID
+and the configured Engine origin. Desktop Main dispatches the ID and origin
+to the composer owner after the workspace subscribes. The composer uses its
+existing draft-by-ID read on the paired Engine. It reuses the existing editor
+session if that draft is already open. A minimised draft follows the existing
+restore path. The link carries no draft content or send action.
+
+```mermaid
+flowchart LR
+  Agent -->|Create or update draft| Engine[AMC Engine]
+  Engine -->|Saved draft ID| CLI[AMC CLI]
+  CLI -->|Native draft URL| Surface[Agent response]
+  Surface -->|User opens link| OS[OS URL handler]
+  OS -->|Draft ID and Engine origin| Main[Desktop Main]
+  Main -->|Open draft intent| Workspace[Composer state and focus]
+  Workspace -->|Read exact draft via Desktop Main| Engine
+```
+
 The installed T3 chat strips unknown schemes from Markdown and its Electron
 shell separately validates allowed destinations. The HTTPS variant reaches a
 small Engine page with an **Open in AMC** action. The target lives in the
-fragment, so neither the Engine request nor its logs receive the query or
-thread ID from that visit. The page reads no mail. A native T3 integration
+fragment, so neither the Engine request nor its logs receive the query,
+thread ID, or draft ID from that visit. The page reads no mail. A native T3 integration
 would remove the browser step and require changes in both the chat renderer and
 its Desktop URL handler.
 

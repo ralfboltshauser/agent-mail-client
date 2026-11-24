@@ -838,9 +838,17 @@ function registerComposeIpc() {
     async () =>
       (await requireEngine().get<{ drafts: VersionedDraft[] }>(`${compose}/drafts`)).drafts,
   )
-  handle('amc:composeDraft', async (_e, id: string) => {
+  handle('amc:composeDraft', async (_e, id: string, engineOrigin?: string) => {
+    const client = requireEngine()
+    if (engineOrigin !== undefined && !sameMailEngine({ engineOrigin }, client.baseUrl))
+      throw new Error('This link points to a different AMC Engine.')
     await draftRecovery
-    return requireEngine().get(draftPath(id), { signal: AbortSignal.timeout(15_000) })
+    if (engine !== client) throw new Error('The Engine pairing changed')
+    const draft = await client.get<ComposeDraft>(draftPath(id), {
+      signal: AbortSignal.timeout(15_000),
+    })
+    if (engine !== client) throw new Error('The Engine pairing changed')
+    return draft
   })
   handle('amc:composeDraftByMessage', async (_e, messageId: string, imapRevision?: string) => {
     const client = requireEngine()
@@ -1094,6 +1102,10 @@ function openPendingMailLink() {
   const client = engine
   if (!target || !client || !threadNavigationReady || resolvingMailLink === target) return
   const finish = () => {
+    if (target.kind === 'draft') {
+      broadcast('amc:openMailDraft', target)
+      return true
+    }
     if (target.kind === 'search') {
       if (
         target.accountId &&

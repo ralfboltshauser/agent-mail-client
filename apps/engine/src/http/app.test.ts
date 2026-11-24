@@ -25,36 +25,37 @@ describe('HTTP API', () => {
     expect(await res.json()).toMatchObject({ ok: true })
   })
 
-  it('turns only an AMC fragment into a native link without loading mail', async () => {
-    const { app } = setup()
-    const target = {
-      kind: 'search',
-      query: 'subject:"A + B" from:alice@example.test',
-      accountId: 'a',
-    } as const
-    const url = new URL(mailWebLink('https://engine.example.test', target))
-    const response = await app.request(url.pathname)
-    expect(response.status).toBe(200)
-    expect(response.headers.get('Referrer-Policy')).toBe('no-referrer')
-    expect(response.headers.get('Content-Security-Policy')).toContain("default-src 'none'")
-    const html = await response.text()
-    expect(html).not.toContain(target.query)
-    const script = /<script nonce="[^"]+">([\s\S]+)<\/script>/.exec(html)?.[1] ?? ''
-    const render = (hash: string) => {
-      const open = { hidden: true, href: '' }
-      const message = { textContent: '' }
-      runInNewContext(script, {
-        location: { hash },
-        document: { getElementById: (id: string) => (id === 'open' ? open : message) },
+  it.each([
+    { kind: 'search', query: 'subject:"A + B" from:alice@example.test', accountId: 'a' },
+    { kind: 'draft', draftId: '00000000-0000-4000-8000-000000000001' },
+  ] as const)(
+    'turns an AMC $kind fragment into a native link without loading mail',
+    async (target) => {
+      const { app } = setup()
+      const url = new URL(mailWebLink('https://engine.example.test', target))
+      const response = await app.request(url.pathname)
+      expect(response.status).toBe(200)
+      expect(response.headers.get('Referrer-Policy')).toBe('no-referrer')
+      expect(response.headers.get('Content-Security-Policy')).toContain("default-src 'none'")
+      const html = await response.text()
+      expect(html).not.toContain(target.kind === 'search' ? target.query : target.draftId)
+      const script = /<script nonce="[^"]+">([\s\S]+)<\/script>/.exec(html)?.[1] ?? ''
+      const render = (hash: string) => {
+        const open = { hidden: true, href: '' }
+        const message = { textContent: '' }
+        runInNewContext(script, {
+          location: { hash },
+          document: { getElementById: (id: string) => (id === 'open' ? open : message) },
+        })
+        return open
+      }
+      expect(render(url.hash)).toEqual({ hidden: false, href: mailLink(url.origin, target) })
+      expect(render(`#${encodeURIComponent('javascript:alert(1)')}`)).toEqual({
+        hidden: true,
+        href: '',
       })
-      return open
-    }
-    expect(render(url.hash)).toEqual({ hidden: false, href: mailLink(url.origin, target) })
-    expect(render(`#${encodeURIComponent('javascript:alert(1)')}`)).toEqual({
-      hidden: true,
-      href: '',
-    })
-  })
+    },
+  )
 
   it('requires a token for /v1', async () => {
     const { app } = setup()
