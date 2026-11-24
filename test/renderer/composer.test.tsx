@@ -437,25 +437,36 @@ it('keeps later header edits through a send racing an older autosave', async () 
   expect(screen.queryByRole('dialog', { name: 'Compose' })).toBeNull()
 })
 
-it('saves a focused recipient and subject on Escape before the autosave timer', async () => {
-  const { adapter, subject, recipient } = await openComposer()
-  await act(async () => {
-    fireEvent.change(subject, { target: { value: 'Save before closing' } })
-    recipient.focus()
-    fireEvent.change(recipient, { target: { value: 'focused@example.test' } })
-    fireEvent.keyDown(recipient, { key: 'Escape' })
-  })
-  expect(screen.queryByRole('dialog', { name: 'Compose' })).toBeNull()
-  expect(adapter.api.saveCompose).toHaveBeenCalledExactlyOnceWith(
-    'draft-1',
-    expect.objectContaining({
-      fields: expect.objectContaining({
-        subject: 'Save before closing',
-        to: [{ address: 'focused@example.test', name: null }],
+it.each(['Escape', 'backdrop click'] as const)(
+  'saves a focused recipient and subject on %s before the autosave timer',
+  async (action) => {
+    const { adapter, subject, recipient } = await openComposer()
+    // Radix installs its outside pointer listener after opening the dialog.
+    await act(async () => vi.advanceTimersByTimeAsync(1))
+    await act(async () => {
+      fireEvent.change(subject, { target: { value: 'Save before closing' } })
+      recipient.focus()
+      fireEvent.change(recipient, { target: { value: 'focused@example.test' } })
+      if (action === 'Escape') fireEvent.keyDown(recipient, { key: 'Escape' })
+      else {
+        const backdrop = document.querySelector('[data-slot="dialog-overlay"]')
+        if (!backdrop) throw new Error('Composer backdrop is missing')
+        fireEvent(backdrop, new MouseEvent('pointerdown', { bubbles: true, button: 0 }))
+        fireEvent.click(backdrop)
+      }
+    })
+    expect(screen.queryByRole('dialog', { name: 'Compose' })).toBeNull()
+    expect(adapter.api.saveCompose).toHaveBeenCalledExactlyOnceWith(
+      'draft-1',
+      expect.objectContaining({
+        fields: expect.objectContaining({
+          subject: 'Save before closing',
+          to: [{ address: 'focused@example.test', name: null }],
+        }),
       }),
-    }),
-  )
-})
+    )
+  },
+)
 
 it('clears a remotely discarded minimised draft and starts a fresh draft from Compose', async () => {
   const { adapter, dialog } = await openComposer()
