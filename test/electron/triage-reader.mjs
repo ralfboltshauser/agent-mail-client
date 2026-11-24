@@ -45,6 +45,9 @@ export async function checkTriageReader(win, { origin, run, waitFor }) {
         below: actions.top >= reader.bottom,
         actionsAtTop: controls.scrollTop === 0,
         fits: actions.bottom <= innerHeight && pane.scrollWidth <= pane.clientWidth,
+        buttonsFit: [...controls.querySelectorAll('button')].every(
+          (button) => button.scrollWidth <= button.clientWidth + 1,
+        ),
       }
     })
 
@@ -56,7 +59,10 @@ export async function checkTriageReader(win, { origin, run, waitFor }) {
   await waitFor(async () => (await geometry()).below, 'stacked decisions at the minimum width')
   await waitFor(frameReady, 'fitted triage HTML')
   const compact = await geometry()
-  assert.ok(compact.readerHeight > 200 && compact.fits, JSON.stringify(compact))
+  assert.ok(
+    compact.readerHeight > 200 && compact.fits && compact.buttonsFit,
+    JSON.stringify(compact),
+  )
   await run(() => document.querySelector('[data-review-message]').focus())
   await press(' ', 'Space', 32)
   await waitFor(
@@ -101,6 +107,18 @@ export async function checkTriageReader(win, { origin, run, waitFor }) {
           document.activeElement.contentDocument.activeElement.id === 'triage-link',
       ),
     'Shift+Tab returns to the link',
+  )
+
+  await run(async () => {
+    const api = (await import('/src/lib/amc.ts')).getAmc()
+    api.openExternal = async (url) => {
+      window.triageOpenedLink = url
+    }
+  })
+  await press('Enter', 'Enter', 13)
+  await waitFor(
+    () => run(() => window.triageOpenedLink === 'https://example.test/paper'),
+    'Enter opens the link on a suggested-filter card',
   )
 
   await press('F', 'KeyF', 70, 8)

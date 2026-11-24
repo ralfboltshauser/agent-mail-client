@@ -230,7 +230,9 @@ export function TriageReview({
       event.metaKey ||
       event.ctrlKey ||
       event.altKey ||
-      target?.closest?.('input, textarea, select, [contenteditable="true"], [role="menu"]')
+      target?.closest?.(
+        'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="menu"]',
+      )
     )
       return
     if (event.shiftKey) {
@@ -248,7 +250,7 @@ export function TriageReview({
     if (event.key === ' ' && insideReader) return
     if (
       (event.key === ' ' || event.key === 'Enter') &&
-      target?.closest?.('button, a, summary, [role="button"]')
+      target?.closest?.('button, a, area, summary, [role="button"]')
     )
       return
     const key = event.key === 'Enter' && card?.suggestFilter ? 'f' : event.key

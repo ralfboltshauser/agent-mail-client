@@ -119,7 +119,11 @@ it('loads and refreshes a complete deferred body while its message stays expande
     expect(document.body.textContent).toContain(`${longBody}End 1`)
 
     const original = data?.messages[0]
-    const body = firstMessage?.parentElement?.querySelector('.whitespace-pre-wrap')
+    const messageBody = () =>
+      document
+        .getElementById(firstMessage?.getAttribute('aria-controls') ?? '')
+        ?.querySelector('.whitespace-pre-wrap')
+    const body = messageBody()
     const scroll = scrollRef.current
     if (!original || !body || !scroll) throw new Error('Expected the loaded message and reader')
     scroll.scrollTop = 300
@@ -151,13 +155,13 @@ it('loads and refreshes a complete deferred body while its message stays expande
     expect(document.body.textContent).toContain('1 older message')
     expect(document.body.textContent).toContain('Preview 2')
     expect(firstMessage?.getAttribute('aria-expanded')).toBe('true')
-    expect(firstMessage?.parentElement?.querySelector('.whitespace-pre-wrap')).toBe(body)
+    expect(messageBody()).toBe(body)
 
     // Marking it read defers its text again. The accepted revision is already present.
     replica.put('message', MessageDetail.parse({ ...original, bodyText: `${longBody}Updated 1` }))
     await render()
     expect(firstMessage?.getAttribute('aria-expanded')).toBe('true')
-    expect(firstMessage?.parentElement?.querySelector('.whitespace-pre-wrap')).toBe(body)
+    expect(messageBody()).toBe(body)
     expect(messageText).toHaveBeenCalledTimes(3)
     expect(scrollRef.current).toBe(scroll)
     expect(scroll.scrollTop).toBe(300)

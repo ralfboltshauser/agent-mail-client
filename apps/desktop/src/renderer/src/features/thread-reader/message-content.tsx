@@ -1,6 +1,6 @@
 import { INLINE_IMAGE_TYPES } from '@amc/composer'
 import type { AttachmentSummary } from '@amc/protocol'
-import { useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
+import { useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { HtmlBody, HtmlBodySkeleton, TextBody } from '@/components/message-body'
 import { Skeleton } from '@/components/ui/skeleton'
 import { senderPreferenceKey } from '@/data/remote-image-preferences'
@@ -93,7 +93,15 @@ async function embedInlineImages(html: string | null, parts: AttachmentSummary[]
   })
 }
 
-export function MessageContent({ message }: { message: ReplicaThreadMessage }) {
+export function MessageContent({
+  message,
+  darkAppearance = false,
+  onHtmlAvailable,
+}: {
+  message: ReplicaThreadMessage
+  darkAppearance?: boolean
+  onHtmlAvailable?: (available: boolean) => void
+}) {
   const { id, bodyText, hasHtml } = message
   const engineUrl = useSyncField((status) => status?.engineUrl ?? null)
   const parts = hasHtml ? inlineImages(message.attachments) : []
@@ -132,10 +140,12 @@ export function MessageContent({ message }: { message: ReplicaThreadMessage }) {
   if (text !== undefined && text !== lastText) setLastText(text)
   const visibleText = text === undefined && !settled ? lastText : text
   const [reserveTextSpace] = useState(bodyText === null)
+  const htmlAvailable = hasHtml && Boolean(html.value)
+  useLayoutEffect(() => onHtmlAvailable?.(htmlAvailable), [htmlAvailable, onHtmlAvailable])
 
   if (hasHtml && html.value) {
     const senderKey = senderPreferenceKey(message.accountId, message.from?.address ?? null)
-    return <HtmlBody html={html.value} senderKey={senderKey} />
+    return <HtmlBody html={html.value} senderKey={senderKey} darkAppearance={darkAppearance} />
   }
   if ((visibleText != null && showText) || settled || (hasHtml && html.hasResult)) {
     return (

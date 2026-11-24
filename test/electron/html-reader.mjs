@@ -359,11 +359,22 @@ async function main() {
         const doc = document.querySelector('iframe').contentDocument
         const message = doc.getElementById('probe-theme')
         const card = doc.getElementById('probe-dark-card')
+        const cell = doc.getElementById('probe-light-cell')
+        const gradient = doc.getElementById('probe-gradient')
+        const variable = doc.getElementById('probe-variable')
+        const translucent = doc.getElementById('probe-translucent')
         return {
           darkMedia: doc.defaultView.matchMedia('(prefers-color-scheme: dark)').matches,
           foreground: getComputedStyle(message).color,
           canvas: getComputedStyle(doc.documentElement).backgroundColor,
           card: [getComputedStyle(card).color, getComputedStyle(card).backgroundColor],
+          cell: [
+            getComputedStyle(cell.firstElementChild).color,
+            getComputedStyle(cell).backgroundColor,
+          ],
+          gradient: [getComputedStyle(gradient).color, getComputedStyle(gradient).backgroundImage],
+          variable: [variable.getAttribute('style'), getComputedStyle(variable).backgroundColor],
+          translucent: getComputedStyle(translucent).color,
         }
       })
     const lightColors = {
@@ -371,6 +382,10 @@ async function main() {
       foreground: 'rgb(31, 31, 31)',
       canvas: 'rgb(255, 255, 255)',
       card: ['rgb(255, 255, 255)', 'rgb(34, 34, 34)'],
+      cell: ['rgb(17, 17, 17)', 'rgb(255, 255, 255)'],
+      gradient: ['rgb(34, 34, 34)', 'linear-gradient(rgb(255, 255, 255), rgb(238, 238, 238))'],
+      variable: ['--card:#fff;background:var(--card);color:#222', 'rgb(255, 255, 255)'],
+      translucent: 'rgba(0, 0, 0, 0.8)',
     }
     await waitFor(() => run(() => document.documentElement.classList.contains('dark')), 'dark UI')
     assert.deepEqual(await messageColors(), lightColors, 'message colors in dark mode')
@@ -386,6 +401,95 @@ async function main() {
       ),
       'original',
       'theme changes keep the message document',
+    )
+
+    const appearanceButton = (label) =>
+      run((name) => Boolean(document.querySelector(`button[aria-label="${name}"]`)), label)
+    await waitFor(() => appearanceButton('Try dark background'), 'message appearance button')
+    const beforeAppearance = await run(() => {
+      const button = document.querySelector('button[aria-label="Try dark background"]')
+      const frame = document.querySelector('iframe')
+      window.appearanceFrame = frame
+      window.appearanceDocument = frame.contentDocument
+      button.focus()
+      return frame.getBoundingClientRect().top
+    })
+    for (const type of ['rawKeyDown', 'keyUp']) {
+      await wc.debugger.sendCommand('Input.dispatchKeyEvent', {
+        type,
+        key: ' ',
+        code: 'Space',
+        windowsVirtualKeyCode: 32,
+      })
+    }
+    await waitFor(() => appearanceButton('Show original colors'), 'keyboard dark appearance')
+    const adjusted = await messageColors()
+    assert.equal(adjusted.darkMedia, false, 'partial sender dark style stays inactive')
+    assert.equal(adjusted.canvas, 'rgb(29, 29, 29)')
+    assert.equal(adjusted.foreground, 'rgb(226, 226, 226)')
+    assert.deepEqual(adjusted.card, lightColors.card, 'already dark colors are preserved')
+    assert.deepEqual(adjusted.cell, ['rgb(226, 226, 226)', 'rgb(33, 33, 33)'])
+    assert.equal(
+      adjusted.variable[1],
+      'rgb(33, 33, 33)',
+      'CSS variables take part in the dark palette',
+    )
+    assert.equal(adjusted.translucent, 'rgba(226, 226, 226, 0.8)', 'translucent ink stays readable')
+    assert.deepEqual(
+      adjusted.gradient,
+      lightColors.gradient,
+      'image-backed surfaces keep their colors',
+    )
+    const appearancePixel = await run(() => {
+      const rect = document.querySelector('iframe').getBoundingClientRect()
+      return { x: Math.round(rect.right - 24), y: Math.round(rect.top + 8), width: 1, height: 1 }
+    })
+    await waitFor(async () => {
+      const painted = (await wc.capturePage(appearancePixel)).toBitmap()
+      return painted[0] === 29 && painted[1] === 29 && painted[2] === 29
+    }, 'the dark canvas is painted')
+    assert.deepEqual(
+      await run(() => {
+        const button = document.querySelector('button[aria-label="Show original colors"]')
+        const frame = document.querySelector('iframe')
+        return [
+          document.activeElement === button,
+          frame === window.appearanceFrame && frame.contentDocument === window.appearanceDocument,
+          frame.getBoundingClientRect().top,
+        ]
+      }),
+      [true, true, beforeAppearance],
+      'the inline header action preserves focus, document, and body position',
+    )
+    await run(() => {
+      const rootStyle = document.querySelector('iframe').contentDocument.documentElement.style
+      rootStyle.setProperty('zoom', '1', 'important')
+      document.querySelector('button[aria-label="Show original colors"]').click()
+    })
+    assert.deepEqual(await messageColors(), lightColors, 'original colors are restored')
+    assert.deepEqual(
+      await run(() => {
+        const rootStyle = document.querySelector('iframe').contentDocument.documentElement.style
+        const zoom = [rootStyle.getPropertyValue('zoom'), rootStyle.getPropertyPriority('zoom')]
+        rootStyle.removeProperty('zoom')
+        return zoom
+      }),
+      ['1', 'important'],
+      'restoration keeps frame sizing updates made while dark appearance was active',
+    )
+    await waitFor(async () => {
+      const painted = (await wc.capturePage(appearancePixel)).toBitmap()
+      return painted[0] === 255 && painted[1] === 255 && painted[2] === 255
+    }, 'the original canvas is painted')
+    assert.equal(
+      await run(() =>
+        document
+          .querySelector('iframe')
+          .contentDocument.getElementById('probe-light-cell')
+          .style.getPropertyPriority('color'),
+      ),
+      'important',
+      'restoration keeps sender declarations and priorities',
     )
 
     await selectThread(1, 'probe-status')
@@ -522,6 +626,8 @@ async function main() {
 
     await selectThread(6, 'probe-images')
     assert.deepEqual(requests, { message: 0, parent: 0, missing: 0, held: 0 })
+    await run(() => document.querySelector('button[aria-label="Try dark background"]').click())
+    assert.deepEqual(requests, { message: 0, parent: 0, missing: 0, held: 0 })
     await run(() => {
       const image = new Image()
       image.src = '/__amc_fixture_image?source=parent'
@@ -546,6 +652,17 @@ async function main() {
         ),
       'allowed image load and failed image settle',
     )
+    assert.deepEqual(requests, { message: 1, parent: 0, missing: 1, held: 0 })
+    assert.equal(
+      await run(
+        () =>
+          getComputedStyle(document.querySelector('iframe').contentDocument.documentElement)
+            .backgroundColor,
+      ),
+      'rgb(29, 29, 29)',
+      'image consent keeps the selected appearance',
+    )
+    await run(() => document.querySelector('button[aria-label="Show original colors"]').click())
     assert.deepEqual(requests, { message: 1, parent: 0, missing: 1, held: 0 })
     await waitFor(
       async () => (await measure('probe-images')).height > beforeConsent,
@@ -662,7 +779,14 @@ async function main() {
       }),
       'promotion keeps the staged iframe and its parsed document',
     )
-    assert.deepEqual(reopenedNewsletter, firstNewsletter, 'reopened newsletter fits before release')
+    const { bottom: reopenedBottom, ...reopenedGeometry } = reopenedNewsletter
+    const { bottom: initialBottom, ...initialGeometry } = firstNewsletter
+    assert.deepEqual(reopenedGeometry, initialGeometry, 'reopened newsletter fits before release')
+    assert.ok(
+      reopenedBottom <= reopenedNewsletter.viewport &&
+        Math.abs(reopenedBottom - initialBottom) <= 1,
+      'the last line stays visible at the same position to within a CSS pixel',
+    )
     assert.equal(await run(() => window.firstNewsletterFrame.isConnected), false)
     await waitFor(() => requests.held === 2, 'held image request from reopened newsletter')
     heldImage.resolve()
@@ -736,11 +860,16 @@ async function main() {
           () =>
             !document.querySelector('iframe') &&
             document.querySelector('h1')?.textContent === 'Notes from the type review' &&
-            [...document.querySelectorAll('[aria-expanded="true"] + div')].some(
-              (body) =>
-                body.textContent.includes('The captions are set at the new size.') &&
-                body.querySelector('button')?.textContent ===
-                  'Could not load formatted email. Retry',
+            !document.querySelector('button[aria-label="Try dark background"]') &&
+            [...document.querySelectorAll('button[aria-expanded="true"][aria-controls]')].some(
+              (header) => {
+                const body = document.getElementById(header.getAttribute('aria-controls'))
+                return (
+                  body?.textContent.includes('The captions are set at the new size.') &&
+                  body.querySelector('button')?.textContent ===
+                    'Could not load formatted email. Retry'
+                )
+              },
             ),
         ),
       'selected message text replaces the outgoing reader after an HTML read fails',

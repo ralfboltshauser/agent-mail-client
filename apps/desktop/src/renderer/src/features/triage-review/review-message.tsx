@@ -35,12 +35,13 @@ export function ReviewMessage({
   useEffect(() => {
     const reader = pane.current
     const onKey = (event: Event) => {
-      if (event.target instanceof HTMLIFrameElement) {
+      if (event.target instanceof HTMLIFrameElement && reader?.contains(event.target)) {
         forwardKey((event as CustomEvent<KeyboardEvent>).detail, event.target)
       }
     }
-    reader?.addEventListener(messageKeydownEvent, onKey)
-    return () => reader?.removeEventListener(messageKeydownEvent, onKey)
+    // Feedback can intercept message shortcuts at the document before they reach the window.
+    window.addEventListener(messageKeydownEvent, onKey)
+    return () => window.removeEventListener(messageKeydownEvent, onKey)
   }, [])
 
   return (

@@ -238,6 +238,7 @@ export function createMailFixture(scenario: string) {
           revision: 1,
           threadRevision: 1,
           reason: 'Confirm the suggested bucket',
+          ...(id === 'thread-8' ? { suggestFilter: true as const } : {}),
         })),
       cursor: null,
     }),

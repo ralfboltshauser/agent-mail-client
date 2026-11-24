@@ -190,6 +190,8 @@ it('shows the full selected message and keeps Space available for reading', asyn
   expect(openAttachment).toHaveBeenCalledWith('proof', 'Print proof.pdf')
   pane.focus()
   pane.scrollTop = 180
+  const controls = decisions()
+  controls.scrollTop = 90
   await press(' ')
   expect(progress()).toBe('1/2')
 
@@ -197,11 +199,13 @@ it('shows the full selected message and keeps Space available for reading', asyn
   await tick()
   expect(within(review()).getByRole('article', { name: firstSubject })).toBe(pane)
   expect(pane.scrollTop).toBe(180)
+  expect(controls.scrollTop).toBe(90)
   expect(document.activeElement).toBe(pane)
 
   await click(within(review()).getByRole('button', { name: /Skip/ }))
   expect(progress()).toBe('2/2')
   expect(pane.scrollTop).toBe(0)
+  expect(controls.scrollTop).toBe(0)
   expect(within(pane).queryByText(/photographs came through beautifully/)).toBeNull()
 })
 
@@ -274,6 +278,38 @@ it('keeps the same triage card and focus when Escape closes feedback', async () 
   expect(review().querySelector('agentation-toolbar')).toBeNull()
   expect(within(review()).getByRole('heading', { name: firstSubject })).toBe(heading)
   expect(document.activeElement).toBe(focus)
+})
+
+it('lets feedback consume HTML message keys before triage can act', async () => {
+  const { adapter, first, smart } = await fixture()
+  const readThread = adapter.api.thread.getMockImplementation()
+  adapter.api.thread.mockImplementation(async (id) => {
+    const detail = await readThread?.(id)
+    const message = detail?.messages.find((message) => message.id === first.messageId)
+    if (message) message.hasHtml = true
+    return detail ?? null
+  })
+  adapter.api.messageHtml = async () => '<p>Formatted fixture</p>'
+  await mount(adapter)
+  await open()
+  const frame = within(review()).getByTitle('Message')
+  frame.focus()
+
+  vi.useRealTimers()
+  await act(async () => adapter.emitFeedback())
+  await waitFor(() => expect(review().querySelector('agentation-toolbar')).toBeTruthy())
+
+  const messageKey = async (key: string) => {
+    const event = new KeyboardEvent('keydown', { key, cancelable: true })
+    await act(async () => {
+      frame.dispatchEvent(new CustomEvent('amc:message-keydown', { bubbles: true, detail: event }))
+    })
+  }
+  await messageKey('2')
+  expect(smart.reviewBucket).not.toHaveBeenCalled()
+  await messageKey('Escape')
+  expect(within(review()).getByRole('heading', { name: firstSubject })).toBeTruthy()
+  expect(review().querySelector('agentation-toolbar')).toBeNull()
 })
 
 it('keeps one card, isolates cursor commits, and clears skips on exit and restart', async () => {

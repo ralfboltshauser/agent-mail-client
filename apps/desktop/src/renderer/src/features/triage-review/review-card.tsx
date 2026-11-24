@@ -1,5 +1,5 @@
 import { BUCKETS } from '@amc/protocol'
-import { type ReactNode, useId } from 'react'
+import { type ReactNode, useId, useLayoutEffect, useRef } from 'react'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import type { Preview } from './model'
@@ -27,6 +27,15 @@ export function ReviewCard({
   children: ReactNode
 }) {
   const subjectId = useId()
+  const decisions = useRef<HTMLElement>(null)
+  const accountId = card?.accountId
+  const messageId = card?.messageId
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Keep the pane mounted while resetting only for a new message.
+  useLayoutEffect(() => {
+    if (decisions.current) decisions.current.scrollTop = 0
+  }, [accountId, messageId])
+
   if (!card)
     return (
       <section className="mx-auto w-full max-w-2xl overflow-y-auto">
@@ -48,7 +57,8 @@ export function ReviewCard({
         title={unavailable}
         onClick={() => controls.run(key)}
       >
-        {label} <Kbd>{hint}</Kbd>
+        <span className="min-w-0 wrap-anywhere">{label}</span>{' '}
+        <Kbd className="shrink-0">{hint}</Kbd>
       </Button>
     )
   }
@@ -60,6 +70,7 @@ export function ReviewCard({
         onMessageKey={onMessageKey}
       />
       <aside
+        ref={decisions}
         aria-label="Triage decisions"
         className="min-w-0 space-y-3 overflow-y-auto overscroll-contain rounded-xl border bg-card p-3 sm:p-4"
       >
@@ -85,7 +96,7 @@ export function ReviewCard({
         <div className="grid items-start gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.65fr)] lg:grid-cols-1">
           <fieldset
             aria-labelledby={`${subjectId}-sender`}
-            className="grid gap-2 rounded-lg border bg-muted/40 p-3 sm:p-4"
+            className="grid min-w-0 gap-2 rounded-lg border bg-muted/40 p-3 sm:p-4"
           >
             <h3 id={`${subjectId}-sender`} className="text-sm font-semibold">
               Sender screening
@@ -106,7 +117,7 @@ export function ReviewCard({
           </fieldset>
           <fieldset
             aria-labelledby={`${subjectId}-thread`}
-            className="grid gap-3 rounded-lg border p-3 sm:p-4"
+            className="grid min-w-0 gap-3 rounded-lg border p-3 sm:p-4"
           >
             <div className="grid gap-1">
               <h3 id={`${subjectId}-thread`} className="text-sm font-semibold">
@@ -135,7 +146,7 @@ export function ReviewCard({
             )}
             <fieldset
               aria-labelledby={`${subjectId}-bucket`}
-              className="grid grid-cols-2 gap-2 border-t pt-3 sm:grid-cols-3 lg:grid-cols-2"
+              className="grid min-w-0 grid-cols-2 gap-2 border-t pt-3"
             >
               <h4 id={`${subjectId}-bucket`} className="col-span-full text-sm font-medium">
                 Keep in Inbox · Choose a bucket
