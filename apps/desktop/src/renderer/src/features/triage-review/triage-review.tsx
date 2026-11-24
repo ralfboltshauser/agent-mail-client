@@ -1,6 +1,6 @@
 import { BUCKETS, type InboxSender, imapActionError, type Label } from '@amc/protocol'
 import { Dialog } from 'radix-ui'
-import { type KeyboardEvent, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import { OrganisePicker } from '@/components/organise'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
@@ -74,7 +74,7 @@ export function TriageReview({
     if ((key === 'a' || key === 'x') && !sender) return 'This message has no eligible Sender.'
     if ((key === 'x' || key === 'f') && account.account?.imapMoves === false)
       return 'This IMAP server does not support safe moves.'
-    if (key === 'r' && !card.canReply) return 'This Thread has no reply target.'
+    if (key === 'r' && !card.replyTargetId) return 'This Thread has no reply target.'
     if (key === 's' && !snoozeEnabled) return 'Snooze is disabled on this Engine.'
     if (key === 'e' || key === 's' || key === 'x' || key === 'f') {
       if (!account.account)
@@ -219,20 +219,18 @@ export function TriageReview({
         )
     }
   }
-  const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+  const onKeyDown = (event: KeyboardEvent, target: Element | null, insideReader: boolean) => {
     if (
       picker ||
       activeReason ||
       suspended ||
       event.defaultPrevented ||
-      event.nativeEvent.isComposing ||
+      event.isComposing ||
       event.keyCode === 229 ||
       event.metaKey ||
       event.ctrlKey ||
       event.altKey ||
-      !(event.target instanceof HTMLElement) ||
-      !event.currentTarget.contains(event.target) ||
-      event.target.closest('input, textarea, select, [contenteditable="true"], [role="menu"]')
+      target?.closest?.('input, textarea, select, [contenteditable="true"], [role="menu"]')
     )
       return
     if (event.shiftKey) {
@@ -247,9 +245,10 @@ export function TriageReview({
       }
       return
     }
+    if (event.key === ' ' && insideReader) return
     if (
       (event.key === ' ' || event.key === 'Enter') &&
-      event.target.closest('button, a, summary, [role="button"]')
+      target?.closest?.('button, a, summary, [role="button"]')
     )
       return
     const key = event.key === 'Enter' && card?.suggestFilter ? 'f' : event.key
@@ -273,8 +272,18 @@ export function TriageReview({
         <Dialog.Portal>
           <Dialog.Content
             aria-describedby={undefined}
-            onKeyDown={onKeyDown}
-            className="fixed inset-0 z-40 overflow-y-auto bg-background outline-none"
+            onKeyDown={(event) => {
+              if (!(event.target instanceof Element) || !event.currentTarget.contains(event.target))
+                return
+              // Propagate cancellation back to React so other overlays can see it.
+              onKeyDown(
+                event.nativeEvent,
+                event.target,
+                !!event.target?.closest('[data-review-message]'),
+              )
+              if (event.nativeEvent.defaultPrevented) event.preventDefault()
+            }}
+            className="fixed inset-0 z-40 flex flex-col bg-background outline-none"
             onOpenAutoFocus={(event) => {
               event.preventDefault()
               focus()
@@ -287,14 +296,14 @@ export function TriageReview({
                 event.isComposing ||
                 event.keyCode === 229 ||
                 (event.target instanceof HTMLElement &&
-                  event.target.closest('[data-review-reason]'))
+                  event.target?.closest('[data-review-reason]'))
               )
                 event.preventDefault()
             }}
           >
-            <div className="app-drag h-10" />
-            <main className="mx-auto max-w-2xl px-5 pb-16">
-              <header className="mb-5 flex flex-wrap items-center gap-2">
+            <div className="app-drag h-10 shrink-0" />
+            <main className="mx-auto flex min-h-0 w-full max-w-[90rem] flex-1 flex-col px-3 pb-3 sm:px-5 sm:pb-5">
+              <header className="mb-3 flex shrink-0 flex-wrap items-center gap-2">
                 <Dialog.Title
                   ref={heading}
                   tabIndex={-1}
@@ -303,12 +312,37 @@ export function TriageReview({
                   Triage Inbox
                 </Dialog.Title>
                 <ReviewProgress store={store} />
+                <nav aria-label="Queue actions" className="flex gap-2">
+                  <Button size="sm" variant="outline" onClick={() => run(' ')}>
+                    Skip <Kbd>Space</Kbd>
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => run('u')}>
+                    Undo <Kbd>U</Kbd>
+                  </Button>
+                </nav>
                 <Button size="sm" variant="ghost" onClick={onClose}>
                   Exit <Kbd>Esc</Kbd>
                 </Button>
               </header>
               <ReviewCard
                 card={card}
+                onMessageKey={(event, frame) => {
+                  if (event.key === 'Escape') {
+                    if (
+                      !picker &&
+                      !activeReason &&
+                      !suspended &&
+                      !event.defaultPrevented &&
+                      !event.isComposing &&
+                      event.keyCode !== 229
+                    ) {
+                      event.preventDefault()
+                      if (!event.repeat) onClose()
+                    }
+                    return
+                  }
+                  onKeyDown(event, (event.target as Element) ?? frame, true)
+                }}
                 controls={{
                   accountAddress: account.account?.address ?? cardAccount ?? '',
                   run,
@@ -326,31 +360,26 @@ export function TriageReview({
                     />
                   ),
                 }}
-              />
-              <ReviewState
-                store={store}
-                message={message}
-                busy={busy}
-                error={errors}
-                onReviewSkipped={() => {
-                  focus()
-                  void store.refresh('skipped')
-                }}
-              />
-              <nav aria-label="Queue actions" className="mt-4 flex flex-wrap gap-2">
-                <Button size="sm" variant="outline" onClick={() => run(' ')}>
-                  Skip <Kbd>Space</Kbd>
-                </Button>
-                <Button size="sm" variant="outline" onClick={() => run('u')}>
-                  Undo <Kbd>U</Kbd>
-                </Button>
-              </nav>
-              <ReviewHistory
-                store={store}
-                accountId={accountId}
-                labels={labels}
-                onOutbox={onOutbox}
-              />
+                status={
+                  <ReviewState
+                    store={store}
+                    message={message}
+                    busy={busy}
+                    error={errors}
+                    onReviewSkipped={() => {
+                      focus()
+                      void store.refresh('skipped')
+                    }}
+                  />
+                }
+              >
+                <ReviewHistory
+                  store={store}
+                  accountId={accountId}
+                  labels={labels}
+                  onOutbox={onOutbox}
+                />
+              </ReviewCard>
             </main>
           </Dialog.Content>
         </Dialog.Portal>

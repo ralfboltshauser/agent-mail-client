@@ -52,7 +52,7 @@ export function ReviewState({
           </Button>
         </div>
       )}
-      <p aria-live="polite" className="mt-3 min-h-5 text-sm text-muted-foreground">
+      <p aria-live="polite" className="text-sm text-muted-foreground empty:sr-only">
         {message || (busy ? (hasCard ? 'Checking review…' : 'Loading triage queue…') : notice)}
         {storageError && ' Review progress could not be saved on this Mac.'}
       </p>

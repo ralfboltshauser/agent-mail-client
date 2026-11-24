@@ -1,12 +1,12 @@
-import { ChevronDown, FileText, Paperclip } from 'lucide-react'
+import { ChevronDown } from 'lucide-react'
 import { useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { SenderAvatar } from '@/features/sender-avatar/sender-avatar'
-import { getAmc } from '@/lib/amc'
-import { fileSize, fullDate, listDate, personName } from '@/lib/format'
+import { fullDate, listDate, personName } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import type { ReplicaThreadMessage } from '../../../../shared/api'
+import { MessageAttachments } from './message-attachments'
 import { MessageContent } from './message-content'
 
 export function Message({
@@ -22,7 +22,6 @@ export function Message({
 }) {
   const [{ open, visited }, setExpansion] = useState({ open: defaultOpen, visited: defaultOpen })
   const isDraft = m.labelIds.includes(`${m.accountId}:DRAFT`)
-  const files = m.attachments.filter((attachment) => !attachment.inline)
 
   return (
     <div
@@ -86,26 +85,7 @@ export function Message({
             Search indexes only the start of this message.
           </p>
         )}
-        {open && files.length > 0 && (
-          <div className="mt-4 flex flex-wrap gap-2">
-            {files.map((a) => (
-              <button
-                key={a.id}
-                type="button"
-                onClick={() => void getAmc().openAttachment(a.id, a.filename)}
-                className="flex max-w-64 items-center gap-2 rounded-md border bg-background px-2.5 py-1.5 text-left text-xs hover:bg-muted"
-              >
-                {a.mimeType.startsWith('image/') ? (
-                  <Paperclip className="size-3.5 shrink-0" />
-                ) : (
-                  <FileText className="size-3.5 shrink-0" />
-                )}
-                <span className="truncate">{a.filename || 'attachment'}</span>
-                <span className="shrink-0 text-muted-foreground">{fileSize(a.size)}</span>
-              </button>
-            ))}
-          </div>
-        )}
+        {open && <MessageAttachments message={m} />}
       </div>
     </div>
   )

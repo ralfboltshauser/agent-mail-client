@@ -1,30 +1,40 @@
 import { BUCKETS } from '@amc/protocol'
-import { useId } from 'react'
+import { type ReactNode, useId } from 'react'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import type { Preview } from './model'
-import { ReviewAvatar } from './review-avatar'
+import { ReviewMessage } from './review-message'
 
 export interface ReviewControls {
   accountAddress: string
   run: (key: string) => void
-  reasonInput?: React.ReactNode
+  reasonInput?: ReactNode
   senderDecision: 'accept' | 'block' | null
   unavailable: (key: string) => string | undefined
 }
 
-export function ReviewCard({ card, controls }: { card: Preview | null; controls: ReviewControls }) {
-  if (!card) return null
-  return <CardPreview card={card} controls={controls} />
-}
-
-function CardPreview({ card, controls }: { card: Preview; controls: ReviewControls }) {
+export function ReviewCard({
+  card,
+  controls,
+  onMessageKey,
+  status,
+  children,
+}: {
+  card: Preview | null
+  controls: ReviewControls
+  onMessageKey: (event: KeyboardEvent, frame: HTMLIFrameElement) => void
+  status: ReactNode
+  children: ReactNode
+}) {
   const subjectId = useId()
-  const message = card.detail.messages.find(({ id }) => id === card.messageId)
-  const from = message?.from
+  if (!card)
+    return (
+      <section className="mx-auto w-full max-w-2xl overflow-y-auto">
+        {status}
+        {children}
+      </section>
+    )
   const { thread } = card.detail
-  const address = card.sender?.address ?? from?.address
-  const sender = from?.name || address || 'Unknown sender'
   const choice = (key: string, label: string, hint = key.toUpperCase()) => {
     const unavailable = controls.unavailable(key)
     return (
@@ -43,30 +53,17 @@ function CardPreview({ card, controls }: { card: Preview; controls: ReviewContro
     )
   }
   return (
-    <article
-      aria-labelledby={subjectId}
-      className="grid max-w-2xl gap-5 rounded-xl border bg-card p-5 shadow-sm sm:p-7"
-    >
-      <div className="flex min-w-0 items-center gap-3">
-        <ReviewAvatar card={card} />
-        <div className="min-w-0 break-words">
-          <p className="text-sm font-semibold">{sender}</p>
-          {address && sender !== address && (
-            <p className="text-sm text-muted-foreground">{address}</p>
-          )}
-          <p className="text-xs text-muted-foreground">Account {controls.accountAddress}</p>
-        </div>
-      </div>
-      <section className="grid gap-2 break-words">
-        {(card.id.kind === 'sender' || !card.suggestFilter) && (
-          <p className="text-xs font-medium text-muted-foreground">
-            {card.id.kind === 'sender' ? 'New sender · Sample thread' : 'Bucket needs review'}
-          </p>
-        )}
-        <h2 id={subjectId} className="text-xl font-semibold tracking-tight">
-          {message?.subject || thread.subject || '(no subject)'}
-        </h2>
-        <p className="line-clamp-4 text-sm leading-relaxed">{message?.snippet || thread.snippet}</p>
+    <div className="grid min-h-0 flex-1 gap-3 grid-rows-[minmax(0,1fr)_minmax(0,44%)] lg:grid-cols-[minmax(0,1fr)_minmax(21rem,26rem)] lg:grid-rows-[minmax(0,1fr)]">
+      <ReviewMessage
+        card={card}
+        accountAddress={controls.accountAddress}
+        onMessageKey={onMessageKey}
+      />
+      <aside
+        aria-label="Triage decisions"
+        className="min-w-0 space-y-3 overflow-y-auto overscroll-contain rounded-xl border bg-card p-3 sm:p-4"
+      >
+        {status}
         {card.id.kind === 'thread' && !card.suggestFilter && (
           <p className="text-sm text-muted-foreground">
             {thread.bucket?.bucket} · {card.reason}
@@ -85,63 +82,71 @@ function CardPreview({ card, controls }: { card: Preview; controls: ReviewContro
             </ul>
           </details>
         )}
-      </section>
-      <fieldset
-        aria-labelledby={`${subjectId}-sender`}
-        className="grid gap-2 rounded-lg border bg-muted/40 p-3 sm:p-4"
-      >
-        <h3 id={`${subjectId}-sender`} className="text-sm font-semibold">
-          Sender screening
-        </h3>
-        <p className="text-xs text-muted-foreground">
-          Applies to current and future Inbox mail from this address in this account.
-        </p>
-        <div className="flex flex-wrap items-center gap-2">
-          {controls.senderDecision && (
-            <span className="rounded-md bg-accent px-2 py-1 text-xs font-medium text-accent-foreground">
-              {controls.senderDecision === 'accept' ? 'Accepted' : 'Blocked'}
-            </span>
-          )}
-          {controls.senderDecision !== 'accept' && choice('a', 'Accept sender')}
-          {controls.senderDecision !== 'block' &&
-            choice('x', 'Block sender · Move to Screened out')}
-        </div>
-      </fieldset>
-      <fieldset
-        aria-labelledby={`${subjectId}-thread`}
-        className="grid gap-3 rounded-lg border p-3 sm:p-4"
-      >
-        <div className="grid gap-1">
-          <h3 id={`${subjectId}-thread`} className="text-sm font-semibold">
-            This thread
-          </h3>
-          {card.suggestFilter && (
-            <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
-              <span>Suggested: Filter out</span>
-              <Kbd>Enter</Kbd>
+        <div className="grid items-start gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.65fr)] lg:grid-cols-1">
+          <fieldset
+            aria-labelledby={`${subjectId}-sender`}
+            className="grid gap-2 rounded-lg border bg-muted/40 p-3 sm:p-4"
+          >
+            <h3 id={`${subjectId}-sender`} className="text-sm font-semibold">
+              Sender screening
+            </h3>
+            <p className="text-xs text-muted-foreground">
+              Applies to current and future Inbox mail from this address in this account.
             </p>
-          )}
-          <p className="text-xs text-muted-foreground">
-            Filter out moves this thread’s incoming Inbox mail to Filtered.
-          </p>
+            <div className="flex flex-wrap items-center gap-2">
+              {controls.senderDecision && (
+                <span className="rounded-md bg-accent px-2 py-1 text-xs font-medium text-accent-foreground">
+                  {controls.senderDecision === 'accept' ? 'Accepted' : 'Blocked'}
+                </span>
+              )}
+              {controls.senderDecision !== 'accept' && choice('a', 'Accept sender')}
+              {controls.senderDecision !== 'block' &&
+                choice('x', 'Block sender · Move to Screened out')}
+            </div>
+          </fieldset>
+          <fieldset
+            aria-labelledby={`${subjectId}-thread`}
+            className="grid gap-3 rounded-lg border p-3 sm:p-4"
+          >
+            <div className="grid gap-1">
+              <h3 id={`${subjectId}-thread`} className="text-sm font-semibold">
+                This thread
+              </h3>
+              {card.suggestFilter && (
+                <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                  <span>Suggested: Filter out</span>
+                  <Kbd>Enter</Kbd>
+                </p>
+              )}
+              <p className="text-xs text-muted-foreground">
+                Filter out moves this thread’s incoming Inbox mail to Filtered.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {choice('f', 'Filter out')}
+              {choice('e', 'Archive')}
+              {choice('s', 'Snooze')}
+              {choice('r', 'Reply to thread')}
+            </div>
+            {card.replyTargetId && card.replyTargetId !== card.messageId && (
+              <p className="text-xs text-muted-foreground">
+                Reply uses the latest message in this thread.
+              </p>
+            )}
+            <fieldset
+              aria-labelledby={`${subjectId}-bucket`}
+              className="grid grid-cols-2 gap-2 border-t pt-3 sm:grid-cols-3 lg:grid-cols-2"
+            >
+              <h4 id={`${subjectId}-bucket`} className="col-span-full text-sm font-medium">
+                Keep in Inbox · Choose a bucket
+              </h4>
+              {BUCKETS.map((bucket, i) => choice(String(i + 1), bucket))}
+            </fieldset>
+          </fieldset>
         </div>
-        <div className="flex flex-wrap gap-2">
-          {choice('f', 'Filter out')}
-          {choice('e', 'Archive')}
-          {choice('s', 'Snooze')}
-          {choice('r', 'Reply')}
-        </div>
-        <fieldset
-          aria-labelledby={`${subjectId}-bucket`}
-          className="grid grid-cols-2 gap-2 border-t pt-3 sm:grid-cols-3"
-        >
-          <h4 id={`${subjectId}-bucket`} className="col-span-full text-sm font-medium">
-            Keep in Inbox · Choose a bucket
-          </h4>
-          {BUCKETS.map((bucket, i) => choice(String(i + 1), bucket))}
-        </fieldset>
-      </fieldset>
-      {controls.reasonInput}
-    </article>
+        {controls.reasonInput}
+        {children}
+      </aside>
+    </div>
   )
 }

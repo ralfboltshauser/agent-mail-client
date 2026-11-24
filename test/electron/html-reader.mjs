@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { app, BrowserWindow, nativeTheme, session } from 'electron'
 import { protectRemoteImageRequests } from '../../apps/desktop/src/main/message-image-requests.ts'
 import { requests, startReaderServer } from './html-reader-server.mjs'
+import { checkTriageReader } from './triage-reader.mjs'
 
 const profile = mkdtempSync(join(tmpdir(), 'amc-html-reader-'))
 app.setPath('userData', profile)
@@ -736,12 +737,28 @@ async function main() {
             !document.querySelector('iframe') &&
             document.querySelector('h1')?.textContent === 'Notes from the type review' &&
             [...document.querySelectorAll('[aria-expanded="true"] + div')].some(
-              (body) => body.textContent === 'The captions are set at the new size.',
+              (body) =>
+                body.textContent.includes('The captions are set at the new size.') &&
+                body.querySelector('button')?.textContent ===
+                  'Could not load formatted email. Retry',
             ),
         ),
       'selected message text replaces the outgoing reader after an HTML read fails',
     )
-    await run(() => window.restoreWorkshopBody())
+    await run(() => {
+      window.restoreWorkshopBody()
+      const retry = [...document.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Could not load formatted email. Retry',
+      )
+      retry.click()
+    })
+    await waitFor(
+      () =>
+        run(
+          () => !!document.querySelector('iframe')?.contentDocument?.getElementById('probe-theme'),
+        ),
+      'retry restores the formatted message',
+    )
     await selectThread(8, 'probe-newsletter-end')
     console.log('HTML handoff kept the white body painted with 0 empty animation-frame samples')
 
@@ -836,6 +853,7 @@ async function main() {
       'reply composer for the focused HTML message',
     )
     assert.equal(await run(() => document.activeElement.ariaLabel), 'Message body')
+    await checkTriageReader(win, { origin, run, waitFor })
   } catch (error) {
     console.error(error)
     exitCode = 1

@@ -13,7 +13,7 @@ export type Candidate = TriageQueuePage['cards'][number]
 export type Preview = Candidate & {
   detail: ThreadWithMessages
   sender: InboxSender | null
-  canReply: boolean
+  replyTargetId: string | null
 }
 export type Decision =
   | { kind: 'sender'; input: SenderDecision }

@@ -160,6 +160,7 @@ const tick = async (ms = 0) => {
   })
 }
 const review = () => screen.getByRole('dialog', { name: 'Triage Inbox' })
+const decisions = () => within(review()).getByRole('complementary', { name: 'Triage decisions' })
 const progress = () => within(review()).getByLabelText('Triage progress').textContent
 const open = async () => {
   await press('t', listbox())
@@ -175,6 +176,70 @@ async function click(element: Element) {
     fireEvent.click(element)
   })
 }
+
+it('shows the full selected message and keeps Space available for reading', async () => {
+  const { adapter } = await fixture()
+  const openAttachment = vi.fn(adapter.api.openAttachment)
+  adapter.api.openAttachment = openAttachment
+  await mount(adapter)
+  await open()
+
+  const pane = within(review()).getByRole('article', { name: firstSubject })
+  expect(within(pane).getByText(/photographs came through beautifully/)).toBeTruthy()
+  await click(within(pane).getByRole('button', { name: /Print proof.pdf/ }))
+  expect(openAttachment).toHaveBeenCalledWith('proof', 'Print proof.pdf')
+  pane.focus()
+  pane.scrollTop = 180
+  await press(' ')
+  expect(progress()).toBe('1/2')
+
+  await act(async () => adapter.emitChanged())
+  await tick()
+  expect(within(review()).getByRole('article', { name: firstSubject })).toBe(pane)
+  expect(pane.scrollTop).toBe(180)
+  expect(document.activeElement).toBe(pane)
+
+  await click(within(review()).getByRole('button', { name: /Skip/ }))
+  expect(progress()).toBe('2/2')
+  expect(pane.scrollTop).toBe(0)
+  expect(within(pane).queryByText(/photographs came through beautifully/)).toBeNull()
+})
+
+it('retries the selected HTML with text available and ignores a late reply after advancing', async () => {
+  const { adapter, first, low, setCards } = await fixture()
+  const retry = deferred<string>()
+  const readThread = adapter.api.thread.getMockImplementation()
+  const firstDetail = await adapter.api.thread(first.threadId)
+  const selected = firstDetail?.messages[0]
+  if (!firstDetail || !selected || selected.id === first.messageId)
+    throw new Error('Expected an older synthetic message in the first thread')
+  selected.hasHtml = true
+  selected.bodyText = 'Older representative full text'
+  adapter.api.thread.mockImplementation(async (id) =>
+    id === first.threadId ? structuredClone(firstDetail) : ((await readThread?.(id)) ?? null),
+  )
+  setCards({ ...first, messageId: selected.id }, low)
+  const messageHtml = vi.fn(adapter.api.messageHtml)
+  messageHtml.mockRejectedValueOnce(new Error('Offline')).mockReturnValueOnce(retry.promise)
+  adapter.api.messageHtml = messageHtml
+
+  await mount(adapter)
+  await open()
+  const pane = within(review()).getByRole('article', { name: firstSubject })
+  expect(within(pane).getByText('Older representative full text')).toBeTruthy()
+  expect(within(pane).queryByText(/approve the warm grey/)).toBeNull()
+  expect(within(review()).getByText('Reply uses the latest message in this thread.')).toBeTruthy()
+  expect(messageHtml).toHaveBeenCalledWith(selected.id)
+  await click(within(pane).getByRole('button', { name: 'Could not load formatted email. Retry' }))
+  expect(within(pane).getByRole('button', { name: 'Retrying formatted email…' })).toBeTruthy()
+  expect(messageHtml.mock.calls.filter(([id]) => id === selected.id)).toHaveLength(2)
+
+  await click(within(review()).getByRole('button', { name: /Skip/ }))
+  await act(async () => retry.resolve('<p>Late HTML for the old representative</p>'))
+  expect(progress()).toBe('2/2')
+  expect(within(pane).queryByText('Older representative full text')).toBeNull()
+  expect(within(pane).queryByTitle('Message')).toBeNull()
+})
 
 it('opens Settings from the native menu and returns to the same triage card', async () => {
   const { adapter } = await fixture()
@@ -375,7 +440,7 @@ it('appends newly eligible cards without moving focus or committing the open car
   await mount(adapter)
   await open()
   const article = within(review()).getByRole('article')
-  const focus = within(article).getByRole('button', { name: /^Filter out/ })
+  const focus = within(decisions()).getByRole('button', { name: /^Filter out/ })
   focus.focus()
   const queue = smart.triageQueue.getMockImplementation()
   if (!queue) throw new Error('Expected synthetic queue')
@@ -453,25 +518,27 @@ it('updates the Sender row on an open low-confidence card after replica sync', a
   await mount(adapter)
   await open()
   const card = within(review()).getByRole('article')
+  const controls = decisions()
   const heading = document.activeElement
-  expect(within(card).getByRole('button', { name: /^Accept sender/ })).toBeTruthy()
+  expect(within(controls).getByRole('button', { name: /^Accept sender/ })).toBeTruthy()
   Object.assign(detail.thread.inboxSender, { decision: 'accept', status: 'known', revision: 2 })
   await act(async () => adapter.emitChanged())
   await tick()
-  expect(within(card).getByText('Accepted')).toBeTruthy()
-  expect(within(card).queryByRole('button', { name: /^Accept sender/ })).toBeNull()
+  expect(within(controls).getByText('Accepted')).toBeTruthy()
+  expect(within(controls).queryByRole('button', { name: /^Accept sender/ })).toBeNull()
   expect(within(review()).getByRole('article')).toBe(card)
+  expect(decisions()).toBe(controls)
   expect(document.activeElement).toBe(heading)
 
-  const sender = within(card).getByRole('group', { name: 'Sender screening' })
-  const thread = within(card).getByRole('group', { name: 'This thread' })
+  const sender = within(controls).getByRole('group', { name: 'Sender screening' })
+  const thread = within(controls).getByRole('group', { name: 'This thread' })
   const buckets = within(thread).getByRole('group', { name: 'Keep in Inbox · Choose a bucket' })
   expect(within(sender).getByText('Accepted')).toBeTruthy()
   expect(within(sender).getByRole('button', { name: /^Block sender/ })).toBeTruthy()
   expect(within(sender).queryByRole('button', { name: /^Filter out/ })).toBeNull()
   expect(within(thread).getByText('Suggested: Filter out')).toBeTruthy()
   expect(within(thread).getByRole('button', { name: /^Filter out/ })).toBeTruthy()
-  expect(within(card).queryByText('Low confidence')).toBeNull()
+  expect(within(controls).queryByText('Low confidence')).toBeNull()
   expect(within(buckets).getByRole('button', { name: 'Newsletters 7' })).toBeTruthy()
   await press('7', within(review()).getByRole('heading', { name: 'Triage Inbox' }))
   expect(smart.reviewBucket).toHaveBeenCalledExactlyOnceWith(
@@ -879,7 +946,7 @@ it.each(['f', 'Enter'])('filters with %s, records it, and restores it with U', a
   expect(within(review()).getByRole('button', { name: 'Filter out F' })).toBeTruthy()
   if (key === 'Enter') {
     await press('Enter', undefined, { repeat: true })
-    const archive = within(article).getByRole('button', { name: 'Archive E' })
+    const archive = within(decisions()).getByRole('button', { name: 'Archive E' })
     archive.focus()
     await press('Enter')
     within(review()).getByRole('heading', { name: 'Triage Inbox' }).focus()
