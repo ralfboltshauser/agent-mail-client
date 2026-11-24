@@ -2,6 +2,7 @@ import { type Bucket, SNOOZED_LABEL } from '@amc/protocol'
 import { CircleAlert, MailOpen, Star } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { ThreadMessages } from '@/features/thread-reader/thread-messages'
+import { TriageBadge } from '@/features/triage-colors/triage-badge'
 import { fullDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import type { ThreadWithMessages } from '../../../shared/api'
@@ -45,9 +46,9 @@ function BucketCard({ bucket, reason }: { bucket: Bucket; reason: string }) {
     <div className="mb-5 space-y-3 rounded-md bg-muted/65 px-4 py-3">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <span className="text-xs font-semibold text-muted-foreground">Triage</span>
-        <Badge variant="secondary" className="text-accent-foreground">
+        <TriageBadge bucket={bucket} className="text-accent-foreground">
           {bucket}
-        </Badge>
+        </TriageBadge>
       </div>
       {structured && nextStepLabel ? (
         <dl className="space-y-3 select-text wrap-anywhere text-sm leading-relaxed">

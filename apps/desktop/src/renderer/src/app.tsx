@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react'
+import { useCallback, useEffect, useLayoutEffect } from 'react'
 import { toast } from 'sonner'
 import { getAmc } from '@/lib/amc'
 import { copyDiagnostics } from '@/lib/diagnostics'
@@ -11,6 +11,7 @@ import { Toaster } from './components/ui/sonner'
 import { TooltipProvider } from './components/ui/tooltip'
 import { FeedbackEntry } from './features/feedback/feedback-entry'
 import { MailWorkspace } from './features/mailbox/mail-workspace'
+import { restoreTriageColors } from './features/triage-colors/preferences'
 import { usePairingGate } from './hooks/use-amc'
 import { useTheme } from './hooks/use-theme'
 
@@ -18,6 +19,7 @@ export function App() {
   const gate = usePairingGate()
   const { dark, setTheme } = useTheme()
   const toggleTheme = useCallback(() => setTheme(dark ? 'light' : 'dark'), [dark, setTheme])
+  useLayoutEffect(restoreTriageColors, [])
   useEffect(() => getAmc().onCopyDiagnostics(copyDiagnostics), [])
   return (
     <TooltipProvider>
