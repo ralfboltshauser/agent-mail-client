@@ -1,12 +1,12 @@
-import { ChevronDown, FileText, Moon, Paperclip, Sun } from 'lucide-react'
+import { ChevronDown, Moon, Sun } from 'lucide-react'
 import { useId, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { SenderAvatar } from '@/features/sender-avatar/sender-avatar'
-import { getAmc } from '@/lib/amc'
-import { fileSize, fullDate, listDate, personName } from '@/lib/format'
+import { fullDate, listDate, personName } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import type { ReplicaThreadMessage } from '../../../../shared/api'
+import { MessageAttachments } from './message-attachments'
 import { MessageContent } from './message-content'
 
 export function Message({
@@ -27,7 +27,6 @@ export function Message({
   const showAppearance = open && m.hasHtml && htmlAvailable
   const appearanceAction = darkAppearance ? 'Show original colors' : 'Try dark background'
   const isDraft = m.labelIds.includes(`${m.accountId}:DRAFT`)
-  const files = m.attachments.filter((attachment) => !attachment.inline)
 
   return (
     <div
@@ -119,26 +118,7 @@ export function Message({
             Search indexes only the start of this message.
           </p>
         )}
-        {open && files.length > 0 && (
-          <div className="mt-4 flex flex-wrap gap-2">
-            {files.map((a) => (
-              <button
-                key={a.id}
-                type="button"
-                onClick={() => void getAmc().openAttachment(a.id, a.filename)}
-                className="flex max-w-64 items-center gap-2 rounded-md border bg-background px-2.5 py-1.5 text-left text-xs hover:bg-muted"
-              >
-                {a.mimeType.startsWith('image/') ? (
-                  <Paperclip className="size-3.5 shrink-0" />
-                ) : (
-                  <FileText className="size-3.5 shrink-0" />
-                )}
-                <span className="truncate">{a.filename || 'attachment'}</span>
-                <span className="shrink-0 text-muted-foreground">{fileSize(a.size)}</span>
-              </button>
-            ))}
-          </div>
-        )}
+        {open && <MessageAttachments message={m} />}
       </div>
     </div>
   )

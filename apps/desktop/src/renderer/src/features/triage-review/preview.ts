@@ -44,7 +44,7 @@ export async function loadPreview(
     ...candidate,
     detail,
     sender: reviewSender(candidate, detail.thread.inboxSender),
-    canReply: Boolean(latest?.from?.address || latest?.replyTo.length),
+    replyTargetId: latest && (latest.from?.address || latest.replyTo.length) ? latest.id : null,
   } satisfies Preview
 }
 

@@ -9,7 +9,13 @@ import {
   type OutboxItem,
   type ThreadSummary,
 } from '@amc/protocol'
-import type { AmcApi, ReplicaThreadMessage, SyncStatus, TriageStatus } from '../../../shared/api'
+import type {
+  AmcApi,
+  ReplicaThreadMessage,
+  SmartInboxApi,
+  SyncStatus,
+  TriageStatus,
+} from '../../../shared/api'
 import { createActivityFixture } from './agent-activity-fixture'
 import { htmlReaderFixture, readerImage, readerImageAttachment } from './html-reader-fixtures'
 
@@ -20,6 +26,7 @@ export function createFixture(scenario: string): AmcApi {
 
 export function createMailFixture(scenario: string) {
   const htmlReader = scenario === 'html-reader'
+  const triageReader = scenario === 'triage-reader'
   const draftReader = scenario === 'draft-reader'
   const now = Date.now()
   const activity = scenario === 'activity' ? createActivityFixture(now) : null
@@ -165,7 +172,9 @@ export function createMailFixture(scenario: string) {
       : thread.id === 'thread-1'
         ? 'Hi Jules,\n\nThe printer sent the first proof for Field Notes. The photographs came through beautifully, and the new captions sit much better on the page.\n\nCould you approve the warm grey before Thursday? I’ve attached the proof so you can compare it with the sample we looked at on Monday.\n\nThanks,\nMina'
         : thread.snippet,
-    hasHtml: htmlReader && htmlReaderFixture(`${thread.id}:${older ? 'older' : 'latest'}`) !== null,
+    hasHtml:
+      (htmlReader && htmlReaderFixture(`${thread.id}:${older ? 'older' : 'latest'}`) !== null) ||
+      (triageReader && thread.id === 'thread-8'),
     sentAt: thread.lastMessageAt - (older ? 3_600_000 : 0),
     unread: !older && thread.unreadCount > 0,
     starred: thread.starred,
@@ -200,7 +209,42 @@ export function createMailFixture(scenario: string) {
     )
   let triage: TriageStatus = { enabled: true, running: false, lastRun: null, notice: null }
   const triageListeners = new Set<(status: TriageStatus) => void>()
+  const unexpectedReviewWrite = async (): Promise<never> => {
+    throw new Error('This fixture only supports reading and skipping.')
+  }
+  const reviewFixture: SmartInboxApi = {
+    review: {
+      reviewPairing: async () => 'fixture-triage-reader',
+      reviewBucket: unexpectedReviewWrite,
+      reviewOrganise: unexpectedReviewWrite,
+      reviewOrganiseStatus: async () => null,
+    },
+    listSenders: async () => ({ rows: [], cursor: null }),
+    decideSender: unexpectedReviewWrite,
+    ownerAction: unexpectedReviewWrite,
+    undoOwnerAction: unexpectedReviewWrite,
+    adoptScreenedDestination: unexpectedReviewWrite,
+    resolveSenderAvatars: async () => ({ rows: [] }),
+    triageQueue: async ({ threadId }) => ({
+      reviewLookup: true,
+      revision: 1,
+      cards: ['thread-8', 'thread-2']
+        .filter((id) => !threadId || id === threadId)
+        .map((id) => ({
+          id: { kind: 'thread', threadId: id },
+          threadId: id,
+          accountId: account.id,
+          messageId: `${id}:latest`,
+          revision: 1,
+          threadRevision: 1,
+          reason: 'Confirm the suggested bucket',
+          ...(id === 'thread-8' ? { suggestFilter: true as const } : {}),
+        })),
+      cursor: null,
+    }),
+  }
   const api: AmcApi = {
+    ...(triageReader ? { smartInbox: reviewFixture } : {}),
     feedback: {
       onOpen: () => () => {},
       capture: async () => ({ id: 'fixture' }),
@@ -468,7 +512,16 @@ export function createMailFixture(scenario: string) {
     },
     messageText: async () => null,
     cachedMessageHtml: async () => null,
-    messageHtml: async (id) => (htmlReader ? htmlReaderFixture(id) : null),
+    messageHtml: async (id) => {
+      if (triageReader && id === 'thread-8:latest') {
+        return `<h1>Paper mill newsletter</h1>
+          <p>The spring sample books are ready. Below are the stocks available for your next proof.</p>
+          <ul>${Array.from({ length: 35 }, (_, i) => `<li>Sample ${i + 1} · uncoated paper</li>`).join('')}</ul>
+          <p id="triage-last">Order the proof by Thursday to meet the print date.</p>
+          <a id="triage-link" href="https://example.test/paper">View sample options</a>`
+      }
+      return htmlReader ? htmlReaderFixture(id) : null
+    },
     inlineAttachment: async (id) =>
       htmlReader && id === readerImageAttachment.id ? readerImage : '',
     openAttachment: async () => {},

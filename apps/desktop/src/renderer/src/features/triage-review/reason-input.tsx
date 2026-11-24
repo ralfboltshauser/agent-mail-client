@@ -17,7 +17,7 @@ export function ReasonInput({
   const submitting = useRef(false)
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<string>()
-  useEffect(() => input.current?.focus({ preventScroll: true }), [])
+  useEffect(() => input.current?.focus(), [])
   return (
     <form
       data-review-reason

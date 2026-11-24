@@ -132,11 +132,15 @@ export default function FeedbackSession({
     // Agentation listens on the document. Keep AMC's window-level hotkeys out of feedback mode.
     const stopMailHotkeys = (event: Event) => event.stopPropagation()
     document.addEventListener('keydown', stopMailHotkeys)
-    document.addEventListener(messageKeydownEvent, stopMailHotkeys)
+    const onMessageKeyDown = (event: Event) => {
+      event.stopPropagation()
+      onKeyDown((event as CustomEvent<KeyboardEvent>).detail)
+    }
+    document.addEventListener(messageKeydownEvent, onMessageKeyDown)
     return () => {
       window.removeEventListener('keydown', handleKeyDown, true)
       document.removeEventListener('keydown', stopMailHotkeys)
-      document.removeEventListener(messageKeydownEvent, stopMailHotkeys)
+      document.removeEventListener(messageKeydownEvent, onMessageKeyDown)
     }
   }, [])
 

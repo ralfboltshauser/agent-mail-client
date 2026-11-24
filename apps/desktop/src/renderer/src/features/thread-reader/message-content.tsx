@@ -56,6 +56,7 @@ function useBodyRequest(
   return {
     value: result.value,
     hasResult: result.key !== null,
+    settled,
   }
 }
 
@@ -94,12 +95,12 @@ async function embedInlineImages(html: string | null, parts: AttachmentSummary[]
 
 export function MessageContent({
   message,
-  darkAppearance,
+  darkAppearance = false,
   onHtmlAvailable,
 }: {
   message: ReplicaThreadMessage
-  darkAppearance: boolean
-  onHtmlAvailable: (available: boolean) => void
+  darkAppearance?: boolean
+  onHtmlAvailable?: (available: boolean) => void
 }) {
   const { id, bodyText, hasHtml } = message
   const engineUrl = useSyncField((status) => status?.engineUrl ?? null)
@@ -115,9 +116,10 @@ export function MessageContent({
   const rawHtml = cachedHtml.data ?? null
   const readyHtml = rawHtml && (!parts.length || !/src=["']cid:/i.test(rawHtml)) ? rawHtml : null
   const source = hasHtml ? htmlSourceKey(message) : null
+  const [htmlAttempt, setHtmlAttempt] = useState(0)
   const htmlKey = useMemo(
-    () => (source === null ? null : { id, source, rawHtml }),
-    [id, source, rawHtml],
+    () => (source === null ? null : { id, source, rawHtml, htmlAttempt }),
+    [id, source, rawHtml, htmlAttempt],
   )
   const html = useBodyRequest(
     htmlKey,
@@ -139,27 +141,41 @@ export function MessageContent({
   const visibleText = text === undefined && !settled ? lastText : text
   const [reserveTextSpace] = useState(bodyText === null)
   const htmlAvailable = hasHtml && Boolean(html.value)
-  useLayoutEffect(() => onHtmlAvailable(htmlAvailable), [htmlAvailable, onHtmlAvailable])
+  useLayoutEffect(() => onHtmlAvailable?.(htmlAvailable), [htmlAvailable, onHtmlAvailable])
 
   if (hasHtml && html.value) {
     const senderKey = senderPreferenceKey(message.accountId, message.from?.address ?? null)
     return <HtmlBody html={html.value} senderKey={senderKey} darkAppearance={darkAppearance} />
   }
-  if (visibleText != null && showText) {
+  if ((visibleText != null && showText) || settled || (hasHtml && html.hasResult)) {
     return (
       <div
         className={reserveTextSpace ? 'min-h-11' : undefined}
-        data-reader-body-pending={hasHtml && !html.hasResult ? '' : undefined}
+        data-reader-body-pending={
+          (hasHtml && !html.settled) || (needsText && !settled && visibleText == null)
+            ? ''
+            : undefined
+        }
       >
-        <TextBody text={visibleText} />
+        {hasHtml && html.hasResult && (
+          <button
+            type="button"
+            className="min-h-8 text-sm underline"
+            aria-disabled={!html.settled}
+            onClick={() => {
+              if (html.settled) setHtmlAttempt((attempt) => attempt + 1)
+            }}
+          >
+            {html.settled ? 'Could not load formatted email. Retry' : 'Retrying formatted email…'}
+          </button>
+        )}
+        {visibleText != null && showText && <TextBody text={visibleText} />}
+        {settled && visibleText == null && (
+          <button type="button" className="min-h-11 text-sm underline" onClick={refresh}>
+            Could not load message. Retry
+          </button>
+        )}
       </div>
-    )
-  }
-  if (settled) {
-    return (
-      <button type="button" className="min-h-11 text-sm underline" onClick={refresh}>
-        Could not load message. Retry
-      </button>
     )
   }
 
