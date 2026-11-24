@@ -1,8 +1,10 @@
-import { act, cleanup, fireEvent, screen, within } from '@testing-library/react'
+import type { Bucket } from '@amc/protocol'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { expect, it, vi } from 'vitest'
+import { App } from '@/app'
 import { rendererAdapter } from './adapter'
 import { commits, expectBudget } from './profile'
-import { listbox, mount, reader, selected } from './workspace'
+import { firstSubject, listbox, mount, reader, row, selected } from './workspace'
 
 it('updates triage badges in place, preserves the choice on failure, and restores it on startup', async () => {
   const replyKey = 'amc.triage-color.v1:bucket.reply'
@@ -78,4 +80,22 @@ it('updates triage badges in place, preserves the choice on failure, and restore
   expect(reopened).toHaveProperty('value', 'Default')
   expect(localStorage.getItem(replyKey)).toBeNull()
   expect(replyColor()).toBe('')
+})
+
+it('renders an unknown bucket from the replica as a neutral badge', async () => {
+  const adapter = rendererAdapter()
+  const bucket = 'New bucket from a later version of the Engine'
+  await adapter.api.setBucket({ threadId: 'thread-1', bucket: bucket as Bucket, reason: 'Sample' })
+  vi.stubGlobal('amc', adapter.api)
+  await act(async () => render(<App />))
+  await act(async () => fireEvent.click(row(firstSubject)))
+  expect(reader().isConnected).toBe(true)
+
+  const badges = Array.from(document.querySelectorAll('[data-variant="secondary"]')).filter(
+    (badge) => badge.textContent?.endsWith(bucket),
+  )
+  expect(badges).toHaveLength(2)
+  for (const badge of badges) {
+    expect(badge.hasAttribute('data-triage-bucket')).toBe(false)
+  }
 })

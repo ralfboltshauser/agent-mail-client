@@ -10,6 +10,11 @@ export function TriageBadge({
   style,
   ...props
 }: ComponentProps<'span'> & { bucket: Bucket }) {
+  // A newer Engine can return bucket names this Desktop does not recognize.
+  if (!Object.hasOwn(bucketLabels, bucket)) {
+    return <Badge {...props} variant="secondary" className={className} style={style} />
+  }
+
   return (
     <Badge
       {...props}
