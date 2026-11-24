@@ -69,6 +69,60 @@ function seed(replica: Replica, kind: 'gmail' | 'imap' = 'gmail') {
 
 const inbox = { view: { kind: 'inbox' }, accountId: null } as const
 
+it('counts Inbox work in the menu bar independently of unread status', () => {
+  const replica = new Replica(':memory:')
+  try {
+    seed(replica)
+    const reply = { bucket: 'Reply' as const, reason: 'Please respond', setAt: 2, setBy: 'owner' }
+    const replyThread = { ...THREAD, bucket: reply, unreadCount: 0, labelIds: ['account:INBOX'] }
+    replica.put('thread', replyThread)
+    replica.put('message', { ...message('1', ['account:INBOX']), rfcMessageId: 'in@example.test' })
+    replica.put('thread', {
+      ...THREAD,
+      id: 'other:action',
+      accountId: 'other',
+      bucketAssignment: {
+        bucketId: 'bucket.action',
+        reason: 'Pay the bill',
+        setAt: 2,
+        setBy: 'owner',
+      },
+    })
+    for (const bucket of [
+      'Follow-up',
+      'Update',
+      'Later',
+      'Newsletters',
+      'When I have time',
+    ] as const) {
+      replica.put('thread', { ...THREAD, id: bucket, bucket: { ...reply, bucket } })
+    }
+    replica.put('thread', { ...THREAD, id: 'unassigned' })
+    replica.put('thread', { ...THREAD, id: 'archived', inInbox: false, bucket: reply })
+    replica.put('thread', { ...THREAD, id: 'snoozed', snoozedUntil: 60_000, bucket: reply })
+
+    expect(replica.menuBarAttentionCount()).toBe(2)
+
+    const outgoing = { ...message('3', ['account:DRAFT']), inReplyTo: '<in@example.test>' }
+    replica.put('message', outgoing)
+    expect(replica.menuBarAttentionCount()).toBe(2)
+
+    replica.put('message', { ...outgoing, labelIds: ['account:SENT'] })
+    expect(replica.menuBarAttentionCount()).toBe(1)
+
+    replica.put('message', { ...message('4', ['account:INBOX']), rfcMessageId: 'new@example.test' })
+    replica.put('thread', { ...replyThread, messageCount: 4, lastMessageAt: 4 })
+    expect(replica.menuBarAttentionCount()).toBe(2)
+
+    const archive = replica.organise.enqueue({ kind: 'archive', threadId: THREAD.id })
+    expect(replica.menuBarAttentionCount()).toBe(1)
+    replica.organise.enqueue({ kind: 'undo', threadId: THREAD.id, mutationId: archive })
+    expect(replica.menuBarAttentionCount()).toBe(2)
+  } finally {
+    replica.db.close()
+  }
+})
+
 it('projects the latest sender from existing replica messages into list and search reads', () => {
   const replica = new Replica(':memory:')
   try {
