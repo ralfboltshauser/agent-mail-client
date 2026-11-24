@@ -19,6 +19,7 @@ export function HtmlBodySkeleton({ decorative = false }: { decorative?: boolean 
       style={{ minHeight: MIN_HTML_BODY_HEIGHT }}
       aria-busy={decorative ? undefined : true}
       aria-hidden={decorative ? true : undefined}
+      data-reader-body-pending={decorative ? undefined : ''}
     >
       <Skeleton className="h-3 w-3/4" />
       <Skeleton className="h-3 w-2/3" />
@@ -91,7 +92,11 @@ export const HtmlBody = memo(function HtmlBody({
           {scroll === 'horizontal' ? 'Scroll message horizontally' : 'Scroll within message'}
         </Button>
       )}
-      <div className="relative" aria-busy={!ready || undefined}>
+      <div
+        className="relative"
+        aria-busy={!ready || undefined}
+        data-reader-body-pending={ready ? undefined : ''}
+      >
         {!ready && (
           <div className="absolute inset-0">
             <HtmlBodySkeleton decorative />
@@ -101,6 +106,7 @@ export const HtmlBody = memo(function HtmlBody({
           ref={frame}
           title="Message"
           sandbox="allow-same-origin"
+          data-reader-html-ready={ready ? '' : undefined}
           className="block w-full rounded-md border border-border/70 bg-white focus-visible:outline-2 focus-visible:outline-ring"
           // Chromium uses the embedding element's scheme for the message's media queries.
           style={{ height, visibility: ready ? 'visible' : 'hidden', colorScheme: 'only light' }}

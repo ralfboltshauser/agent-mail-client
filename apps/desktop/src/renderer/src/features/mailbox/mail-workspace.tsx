@@ -417,6 +417,7 @@ export function MailWorkspace({
             reader={
               <MailReader
                 engineUrl={engineUrl}
+                scope={readerScope}
                 selectedId={readerTarget?.id}
                 selectedAccountId={readerTarget?.accountId}
                 accountId={accountId}
