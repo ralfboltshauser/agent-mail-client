@@ -1,5 +1,5 @@
 import { ImageOff } from 'lucide-react'
-import { memo, useMemo, useState } from 'react'
+import { memo, useLayoutEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
@@ -9,7 +9,7 @@ import {
 } from '@/data/remote-image-preferences'
 import { getAmc } from '@/lib/amc'
 import { messageDocument, sanitizeMessageHtml } from './html-message-document'
-
+import { applyMessageDarkAppearance, MESSAGE_DARK_CANVAS } from './message-dark-appearance'
 import { MIN_HTML_BODY_HEIGHT, useMessageFrame } from './use-message-frame'
 
 export function HtmlBodySkeleton({ decorative = false }: { decorative?: boolean }) {
@@ -34,9 +34,11 @@ export function HtmlBodySkeleton({ decorative = false }: { decorative?: boolean 
 export const HtmlBody = memo(function HtmlBody({
   html,
   senderKey,
+  darkAppearance,
 }: {
   html: string
   senderKey: string | null
+  darkAppearance: boolean
 }) {
   const [loadOnce, setLoadOnce] = useState(false)
   const permitted = useRemoteImages(senderKey)
@@ -45,6 +47,10 @@ export const HtmlBody = memo(function HtmlBody({
   const doc = useMemo(() => messageDocument(clean, remote), [clean, remote])
 
   const { frame, ready, height, scroll } = useMessageFrame(doc)
+  useLayoutEffect(() => {
+    const document = frame.current?.contentDocument
+    if (darkAppearance && ready && document?.body) return applyMessageDarkAppearance(document)
+  }, [darkAppearance, ready, frame])
 
   return (
     <div className="space-y-2">
@@ -109,7 +115,12 @@ export const HtmlBody = memo(function HtmlBody({
           data-reader-html-ready={ready ? '' : undefined}
           className="block w-full rounded-md border border-border/70 bg-white focus-visible:outline-2 focus-visible:outline-ring"
           // Chromium uses the embedding element's scheme for the message's media queries.
-          style={{ height, visibility: ready ? 'visible' : 'hidden', colorScheme: 'only light' }}
+          style={{
+            height,
+            visibility: ready ? 'visible' : 'hidden',
+            colorScheme: 'only light',
+            backgroundColor: darkAppearance ? MESSAGE_DARK_CANVAS : undefined,
+          }}
         />
       </div>
     </div>
