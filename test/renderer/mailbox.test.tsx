@@ -370,7 +370,7 @@ it('closes a notification-opened reader when Archive removes its collapsed Inbox
   narrow()
   adapter.api.threads.mockResolvedValueOnce([target])
   await act(async () => adapter.emitChanged())
-  fireEvent.click(screen.getByRole('button', { name: /^Action\/Reply/ }))
+  fireEvent.click(screen.getByRole('button', { name: /^Reply \d/ }))
   expect(screen.queryByRole('option')).toBeNull()
   await act(async () => notify?.(target))
   expect(reader()).toBeTruthy()
@@ -381,19 +381,20 @@ it('closes a notification-opened reader when Archive removes its collapsed Inbox
   expect(screen.getByText('Inbox is clear')).toBeTruthy()
 })
 
-it('applies one off-reader bucket change to the existing row', async () => {
+it('applies one off-reader Bucket reason change to the existing row', async () => {
   const adapter = await mount()
   const before = mailboxNodes()
   const changed = options()[1]
-  expect(within(changed).queryByText('Later')).toBeNull()
+  expect(within(changed).getByText('Reply')).toBeTruthy()
   await act(async () => {
     await adapter.api.setBucket({ threadId: 'thread-2', bucket: 'Reply', reason: 'Synthetic edit' })
   })
-  expect(within(changed).getByText('Reply')).toBeTruthy()
   expect(options()).toEqual(before.rows)
   expectContinuity(before)
   expectBudget({ ...idleMailbox, rows: 1 })
   expect(commitCounts().rows).toEqual({ 'thread-2': 1 })
+  await act(async () => fireEvent.click(changed))
+  expect(screen.getByText('Synthetic edit')).toBeTruthy()
 })
 
 it('updates each count at its display site without committing the surrounding mailbox', async () => {

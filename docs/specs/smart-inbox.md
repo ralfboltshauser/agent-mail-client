@@ -14,7 +14,7 @@ Reviewed against main at `8efb958`. [AMC build plan](../plan.md) describes M7's 
 - **Sender** means a single parsed From mailbox. Scope its rule and known-sender evidence to an Account. Match the normalized full address, never display name, Reply-To, or domain. Use AMC's case-insensitive address convention and normalize international domain names to ASCII. Keep plus tags, dots, and aliases distinct. Missing, invalid or ambiguous From uses display fallback and has no sender action. Exclude the owner's configured addresses from screening.
 - **Sender rule** is an explicit owner decision, accepted or blocked, with revision and action provenance. No rule is the default. **Known sender** means accepted or observed as a recipient of confirmed outbound mail from that Account, including replies. Block takes precedence over outbound evidence. Reading, starring, contact import, a draft, and Agent suggestions confer no trust.
 - **Screened out** is a recoverable destination. A Thread with both screened and unscreened messages can remain in Inbox. The sender-level move applies only to matching incoming Inbox messages.
-- **Section** is a visible Inbox partition. **Seen** means read mail with no active Reply, Action, or Follow-up assignment and no owner action on the current Inbox arrival. **Triage queue** is a review-session snapshot of sender cards and Threads. **Confidence** is a review hint from triage, associated with the exact Inbox input it classified. A **triage correction** is an owner-confirmed Bucket choice recorded as a prompt example. [Glossary](../../GLOSSARY.md)
+- **Section** is a visible Inbox partition. **Triage queue** is a review-session snapshot of sender cards and Threads. **Confidence** is a review hint from triage, associated with the exact Inbox input it classified. A **triage correction** is an owner-confirmed Bucket choice recorded as a prompt example. [Glossary](../../GLOSSARY.md)
 
 ## Engine contracts and persistence
 
@@ -75,21 +75,11 @@ The existing Organise journal is the authority for provider inverses. Do not use
 
 ### Sectioned Inbox
 
-In the unfiltered Inbox (Unified and single Account), render these exclusive sections in the order below. Membership takes the first matching predicate, with Seen evaluated immediately before the Other mail catchall. Existing search, filtered results, and other views keep the normal Thread list.
+The unfiltered Inbox for Unified and single Account views shows **New senders** first, then one section per populated Bucket in catalog order, then **Unassigned**. New sender cards group Threads by Account and address and open a scoped list when they represent multiple Threads. All remaining Threads use their assigned Bucket, including custom and archived Buckets. Search and filtered results use the flat Thread list.
 
-Show a Section from its first Thread or Sender card until its last entry leaves. Determine presence from all entries before applying collapse or the Other mail preview. A collapsed Section or a Section with zero unread entries still shows its header while it has entries. Keep its collapse preference when it disappears. An empty Inbox shows **Inbox is clear** and **New mail will appear here.**
+Bucket sections show the total Threads and the unread count when positive. Within each section sort unread first, then newest activity, then stable ID. A sender card is unread if any represented Inbox Thread is unread. Read status does not change section membership. Empty sections disappear, with collapse preferences saved by section ID and Account scope. An empty Inbox shows **Inbox is clear** and **New mail will appear here.**
 
-| Section | Membership |
-| --- | --- |
-| New senders | New Sender on the representative incoming Inbox message, grouped by Account and address. One card with count and newest Thread. Open a scoped list for that Sender when there is more than one Thread. A card carries the literal From address and Account. |
-| Action/Reply | Reply or Action Bucket, including read Threads with outstanding assignments. |
-| Follow-up | Follow-up Bucket, including read Threads with outstanding assignments. |
-| Other mail | Remaining Inbox Threads, including Update, Later, When I have time, Newsletters, unassigned, and read Threads with an owner action that remain in Inbox. Preserve original Bucket badges. |
-| Seen | Read and unactioned for the current Inbox arrival. |
-
-Within each section use unread first, then newest activity, then stable ID. A sender card is unread if any represented Inbox Thread is unread. Default Other mail to a three-row preview plus **Show all** when there are hidden rows. Other sections start expanded. Every section has a separately persisted collapse control and per-section **Mark seen**. Mark seen captures the unread Threads represented by the section's currently exposed rows, including every unread Thread represented by an exposed sender card. Collapsed sections and rows behind Show all are excluded. Standard Organise thread-level read semantics apply to each captured Thread. It does not accept Senders or clear action Buckets, so some read Threads remain where they were. Do not infer acted state from a read operation. Display Section counts including hidden rows.
-
-Use **Other mail** for the fallback section because **Update** is a specific triage Bucket. Thread row badges preserve the assigned Bucket. Their tooltip and the reader identify it as **Triage**. The section keeps its existing internal key so saved collapse preferences still apply.
+**Mark seen** marks unread Threads in the expanded section, including every unread Thread represented by a sender card. It uses the standard Organise thread-level read action and undo. Sender decisions and Bucket assignments are independent of this action.
 
 ```text
 MailWorkspace
@@ -97,7 +87,6 @@ MailWorkspace
     SectionedInbox
       SectionHeader (collapse, count, Mark seen)
       SenderCard or existing ThreadRow subscriber
-      ShowAll control (Other mail)
     existing ThreadReader
   TriageWorkspace (one active card when in review)
     Progress and status

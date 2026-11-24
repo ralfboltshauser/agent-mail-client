@@ -5,14 +5,11 @@ import { runOrganise } from '@/components/organise'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { useBucketNameById } from '@/data/buckets'
 import { replicaStoreFor } from '@/data/replica-store'
 import type { InboxSection } from '@/data/thread-queries'
 import { accountsQuery, type MailboxThreadQuery } from '@/features/mailbox/mailbox-queries'
-import {
-  type InboxItem,
-  type InboxNavigation,
-  UPDATES_PREVIEW,
-} from '@/features/mailbox/use-inbox-sections'
+import type { InboxItem, InboxNavigation } from '@/features/mailbox/use-inbox-sections'
 import { SenderAvatar } from '@/features/sender-avatar/sender-avatar'
 import { useReplicaSelector } from '@/hooks/use-amc'
 import { getAmc } from '@/lib/amc'
@@ -22,56 +19,61 @@ export const InboxSectionHeader = memo(function InboxSectionHeader({
   section,
   query,
   collapsed,
-  preview,
   onToggle,
   controls,
 }: {
   section: InboxSection
   query: MailboxThreadQuery | null
   collapsed: boolean
-  preview: boolean
   onToggle: (section: InboxSection) => void
   controls: string
 }) {
-  const count = useReplicaSelector(query, ({ data }) => data?.inbox?.sections[section].count ?? 0)
-  const hasUnread = useReplicaSelector(
+  const newSenders = section === 'New senders'
+  const bucketName = useBucketNameById(newSenders || section === 'Unassigned' ? null : section)
+  const label = newSenders || section === 'Unassigned' ? section : (bucketName ?? 'Custom Bucket')
+  const count = useReplicaSelector(
     query,
-    ({ data }) => (data?.inbox?.sections[section].unread ?? 0) > 0,
+    ({ data }) => data?.inbox?.sections.get(section)?.count ?? 0,
+  )
+  const unreadCount = useReplicaSelector(
+    query,
+    ({ data }) => data?.inbox?.sections.get(section)?.unread ?? 0,
   )
   const marking = useRef(false)
-  const canMark = !collapsed && hasUnread
+  const canMark = !collapsed && unreadCount > 0
   const markSeen = async () => {
     if (!query || !canMark || marking.current) return
     const data = replicaStoreFor(getAmc()).getQuery(query).data
-    const inbox = data?.inbox
-    if (!inbox) return
-    const { ids } = inbox.sections[section]
-    const visibleIds = preview ? ids.slice(0, UPDATES_PREVIEW) : ids
-    const threadIds =
-      section === 'New senders'
-        ? visibleIds.flatMap((id) => inbox.cards.get(id)?.threadIds ?? [])
-        : visibleIds
+    if (!data?.inbox) return
+    const { inbox } = data
+    const ids = inbox.sections.get(section)?.ids
+    if (!ids) return
+    const threadIds = newSenders ? ids.flatMap((id) => inbox.cards.get(id)?.threadIds ?? []) : ids
     const unread = threadIds.flatMap((id) => {
       const thread = data.summaries.get(id)
       return thread && thread.unreadCount > 0 ? [thread] : []
     })
     marking.current = true
     try {
-      await Promise.all(
-        unread.map((thread) =>
-          runOrganise(
-            { kind: 'read', threadId: thread.id, value: true },
-            `Marked as read · ${thread.subject || '(no subject)'}`,
-          ),
-        ),
-      )
+      // Keep the number of queued IPC calls bounded for large Buckets.
+      const batchSize = 16
+      for (let offset = 0; offset < unread.length; offset += batchSize) {
+        await Promise.all(
+          unread
+            .slice(offset, offset + batchSize)
+            .map((thread) =>
+              runOrganise(
+                { kind: 'read', threadId: thread.id, value: true },
+                `Marked as read · ${thread.subject || '(no subject)'}`,
+              ),
+            ),
+        )
+      }
     } finally {
       marking.current = false
     }
   }
   const Chevron = collapsed ? ChevronRight : ChevronDown
-  const label = section === 'Updates' ? 'Other mail' : section
-  const newSenders = section === 'New senders'
   const showHint = newSenders && !collapsed && !!getAmc().smartInbox
   const markButton = (
     <Button
@@ -101,6 +103,11 @@ export const InboxSectionHeader = memo(function InboxSectionHeader({
             <Chevron aria-hidden />
             <span className="truncate">{label}</span>
             <span className="text-xs tabular-nums text-muted-foreground">{count}</span>
+            {!newSenders && unreadCount > 0 && (
+              <span className="ml-1 shrink-0 text-xs tabular-nums text-muted-foreground">
+                {unreadCount} unread
+              </span>
+            )}
           </Button>
         </h3>
         {newSenders ? (
@@ -184,7 +191,7 @@ export function VirtualInboxChrome({
   measure,
   onFocusChange,
 }: {
-  entry: Extract<InboxItem, { kind: 'header' | 'footer' }>
+  entry: Extract<InboxItem, { kind: 'header' }>
   item: VirtualItem
   listId: string
   query: MailboxThreadQuery | null
@@ -205,22 +212,13 @@ export function VirtualInboxChrome({
         if (!event.currentTarget.contains(event.relatedTarget)) onFocusChange(null)
       }}
     >
-      {entry.kind === 'header' ? (
-        <InboxSectionHeader
-          section={entry.section}
-          query={query}
-          collapsed={!!inbox.collapsed[entry.section]}
-          preview={entry.section === 'Updates' && !inbox.showAll}
-          onToggle={inbox.toggle}
-          controls={listId}
-        />
-      ) : (
-        <div className="flex min-h-10 items-center px-2">
-          <Button variant="ghost" size="sm" onClick={inbox.toggleUpdates}>
-            {inbox.showAll ? 'Show less' : 'Show all'}
-          </Button>
-        </div>
-      )}
+      <InboxSectionHeader
+        section={entry.section}
+        query={query}
+        collapsed={!!inbox.collapsed[entry.section]}
+        onToggle={inbox.toggle}
+        controls={listId}
+      />
     </div>
   )
 }

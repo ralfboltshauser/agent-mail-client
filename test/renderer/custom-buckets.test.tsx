@@ -111,3 +111,60 @@ it('preserves concurrent edits to Bucket fields the owner did not change', async
     automatic: false,
   })
 })
+
+it('updates Inbox accordions by Bucket ID when the catalog arrives, reorders, or renames', async () => {
+  const adapter = rendererAdapter('custom-buckets')
+  const manage = adapter.api.manageBuckets
+  if (!manage) throw new Error('Expected custom Bucket fixture')
+  const receiptId = crypto.randomUUID()
+  const travelId = crypto.randomUUID()
+  const assign = (threadId: string, requestId: string) =>
+    adapter.api.setBucketById({
+      threadId,
+      bucketId: `bucket.custom.${requestId}`,
+      reason: 'Synthetic assignment',
+    })
+  const create = (name: string, requestId: string) =>
+    manage({ kind: 'create', input: { name, requestId, description: '', automatic: false } })
+  const accordion = (name: RegExp) => screen.getByRole('button', { name })
+  await assign('thread-4', receiptId)
+  await mount(adapter)
+  const disclosure = accordion(/^Custom Bucket 1/)
+  await act(async () => fireEvent.click(disclosure))
+  expect(disclosure.getAttribute('aria-expanded')).toBe('false')
+
+  await act(async () => create('Receipts', receiptId))
+  expect(accordion(/^Receipts 1/)).toBe(disclosure)
+  expect(disclosure.getAttribute('aria-expanded')).toBe('false')
+  await act(async () => create('Travel', travelId))
+  await act(async () => assign('thread-5', travelId))
+
+  const currentList = listbox()
+  const travel = accordion(/^Travel 1/)
+  act(() => disclosure.focus())
+  await act(async () =>
+    manage({
+      kind: 'reorder',
+      input: {
+        expectedRevision: 2,
+        ids: [`bucket.custom.${travelId}`, `bucket.custom.${receiptId}`],
+      },
+    }),
+  )
+  expect(accordion(/^Receipts 1/)).toBe(disclosure)
+  expect(accordion(/^Travel 1/)).toBe(travel)
+  expect(document.activeElement).toBe(disclosure)
+  await act(async () => fireEvent.keyDown(disclosure, { key: 'K', shiftKey: true }))
+  expect(document.activeElement).toBe(travel)
+
+  await act(async () =>
+    manage({
+      kind: 'update',
+      id: `bucket.custom.${receiptId}`,
+      input: { expectedRevision: 3, name: 'Purchases' },
+    }),
+  )
+  expect(accordion(/^Purchases 1/)).toBe(disclosure)
+  expect(disclosure.getAttribute('aria-expanded')).toBe('false')
+  expect(listbox()).toBe(currentList)
+})

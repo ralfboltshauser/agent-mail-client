@@ -10,7 +10,7 @@ export function deferred<T>() {
   return { promise, resolve }
 }
 
-export function rendererAdapter(scenario = 'inbox') {
+export function rendererAdapter(scenario = 'renderer-navigation') {
   const fixture = createMailFixture(scenario)
   const diagnosticsListeners = new Set<() => void>()
   const feedbackListeners = new Set<() => void>()

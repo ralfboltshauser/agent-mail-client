@@ -15,8 +15,21 @@ import { listbox, options, reader, selected } from './workspace'
 type ThreadSummary = Awaited<ReturnType<AmcApi['threads']>>[number]
 
 const inbox = { view: { kind: 'inbox' as const }, accountId: null }
-const headings = () =>
-  screen.queryAllByRole('heading', { level: 3 }).map((node) => node.textContent)
+const headingSummary = (node: HTMLElement) =>
+  [...node.querySelectorAll('span')]
+    .slice(0, 2)
+    .map((span) => span.textContent)
+    .join('')
+const headings = () => screen.queryAllByRole('heading', { level: 3 }).map(headingSummary)
+const builtInHeadings = [
+  'Reply2',
+  'Action2',
+  'Follow-up1',
+  'Update1',
+  'Later1',
+  'When I have time1',
+]
+const withoutFollowUp = builtInHeadings.filter((name) => name !== 'Follow-up1')
 const header = (name: string) => screen.getByRole('button', { name: new RegExp(`^${name} \\d+`) })
 const sectionCommits = () =>
   Object.fromEntries([...commits].filter(([id]) => id.startsWith('section:')))
@@ -27,7 +40,7 @@ async function mountSections(
   project?: (rows: ThreadSummary[]) => ThreadSummary[],
   smartInbox?: SmartInboxApi,
 ) {
-  const adapter = rendererAdapter()
+  const adapter = rendererAdapter('inbox')
   const read = adapter.api.threads.getMockImplementation()
   if (!read) throw new Error('Expected synthetic thread reads')
   if (project) {
@@ -53,35 +66,39 @@ async function mountSections(
   return { ...adapter, result, app, notify: (row: ThreadSummary) => notify(row) }
 }
 
-it('starts with three entries in Other mail and preserves collapse across account switches and restart', async () => {
+it('shows each populated Bucket and preserves collapse across account switches and restart', async () => {
   const { api, result, app } = await mountSections()
   expect(api.threads).toHaveBeenCalledWith(inbox)
-  expect(headings()).toEqual(['Action/Reply4', 'Follow-up1', 'Other mail3'])
+  expect(headings()).toEqual([
+    'Reply2',
+    'Action2',
+    'Follow-up1',
+    'Update1',
+    'Later1',
+    'When I have time1',
+  ])
   expect(byId('thread-4')?.textContent).toContain('Triage: Update')
   expect(byId('thread-6')?.textContent).toContain('Triage: When I have time')
-  // Move a fourth thread into Other mail.
   await act(async () =>
     api.setBucket({ threadId: 'thread-8', bucket: 'Newsletters', reason: 'Weekly digest' }),
   )
-  expect(header('Other mail').textContent).toBe('Other mail4')
-  expect(rowIds()).not.toContain('thread-8')
-  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Show all' })))
+  expect(header('Newsletters').textContent).toBe('Newsletters1')
   expect(byId('thread-8')?.textContent).toContain('Triage: Newsletters')
 
   const survivor = byId('thread-3')
-  await act(async () => fireEvent.click(header('Other mail')))
+  await act(async () => fireEvent.click(header('Update')))
   expect(byId('thread-3')).toBe(survivor)
-  expect(header('Other mail').getAttribute('aria-expanded')).toBe('false')
+  expect(header('Update').getAttribute('aria-expanded')).toBe('false')
   expect(rowIds()).not.toContain('thread-4')
 
   await act(async () => fireEvent.keyDown(document.body, { key: '1', metaKey: true }))
-  expect(header('Other mail').getAttribute('aria-expanded')).toBe('true')
+  expect(header('Update').getAttribute('aria-expanded')).toBe('true')
   await act(async () => fireEvent.keyDown(document.body, { key: '0', metaKey: true }))
-  expect(header('Other mail').getAttribute('aria-expanded')).toBe('false')
+  expect(header('Update').getAttribute('aria-expanded')).toBe('false')
 
   result.unmount()
   await act(async () => render(app))
-  expect(header('Other mail').getAttribute('aria-expanded')).toBe('false')
+  expect(header('Update').getAttribute('aria-expanded')).toBe('false')
 })
 
 it('shows the New senders hint, advertises the existing T binding, and hides the hint on collapse', async () => {
@@ -310,7 +327,7 @@ it('groups new Senders by Account and opens all represented Threads', async () =
     ),
   )
   expect(header('New senders').textContent).toBe('New senders1')
-  expect(header('Seen').textContent).toBe('Seen1')
+  expect(header('Later').textContent).toBe('Later1')
   await act(async () => api.organise({ kind: 'read', threadId: 'thread-4', value: false }))
   const organise = vi.spyOn(api, 'organise')
   await act(async () =>
@@ -342,22 +359,24 @@ it('navigates across section boundaries and activates disclosure with native key
   act(() => active.focus())
   expect(selected().dataset.threadId).toBe('thread-1')
   await act(async () => fireEvent.keyDown(active, { key: 'J', shiftKey: true }))
-  expect(document.activeElement).toBe(header('Follow-up'))
-  await act(async () => fireEvent.keyDown(header('Follow-up'), { key: 'K', shiftKey: true }))
-  expect(document.activeElement).toBe(header('Action/Reply'))
-  await act(async () => fireEvent.keyDown(header('Action/Reply'), { key: 'J', shiftKey: true }))
+  expect(document.activeElement).toBe(header('Action'))
+  await act(async () => fireEvent.keyDown(header('Action'), { key: 'K', shiftKey: true }))
+  expect(document.activeElement).toBe(header('Reply'))
+  await act(async () => fireEvent.keyDown(header('Reply'), { key: 'J', shiftKey: true }))
+  expect(document.activeElement).toBe(header('Action'))
+  await act(async () => fireEvent.keyDown(header('Action'), { key: 'J', shiftKey: true }))
   expect(document.activeElement).toBe(header('Follow-up'))
   expect(fireEvent.keyDown(header('Follow-up'), { key: ' ' })).toBe(true)
   await act(async () => fireEvent.click(header('Follow-up')))
   expect(header('Follow-up').getAttribute('aria-expanded')).toBe('false')
   await act(async () => fireEvent.keyDown(header('Follow-up'), { key: 'J', shiftKey: true }))
-  expect(document.activeElement).toBe(header('Other mail'))
-  await act(async () => fireEvent.keyDown(header('Other mail'), { key: 'k' }))
+  expect(document.activeElement).toBe(header('Update'))
+  await act(async () => fireEvent.keyDown(header('Update'), { key: 'k' }))
   expect(document.activeElement).toBe(active)
   expect(selected().dataset.threadId).toBe('thread-8')
   await act(async () => fireEvent.keyDown(active, { key: 'j' }))
   expect(selected().dataset.threadId).toBe('thread-4')
-  expect(headings()).toEqual(['Action/Reply4', 'Follow-up1', 'Other mail3'])
+  expect(headings()).toEqual(builtInHeadings)
   await act(async () => fireEvent.keyDown(active, { key: 't' }))
   expect(screen.queryByRole('dialog')).toBeNull()
   await act(async () => fireEvent.keyDown(active, { key: 'T', shiftKey: true }))
@@ -375,22 +394,22 @@ it('adds and removes Follow-up in place and keeps keyboard navigation on visible
           : [],
     ),
   )
-  expect(headings()).toEqual(['Action/Reply4', 'Other mail3'])
+  expect(headings()).toEqual(withoutFollowUp)
   const list = listbox()
-  const action = header('Action/Reply')
-  const updates = header('Other mail')
+  const action = header('Action')
+  const updates = header('Update')
   const rows = options()
   const current = selected()
   const heading = reader()
-  act(() => list.focus())
-  await act(async () => fireEvent.keyDown(list, { key: 'J', shiftKey: true }))
+  act(() => action.focus())
+  await act(async () => fireEvent.keyDown(action, { key: 'J', shiftKey: true }))
   expect(document.activeElement).toBe(updates)
   await act(async () => fireEvent.keyDown(updates, { key: 'K', shiftKey: true }))
   expect(document.activeElement).toBe(action)
 
   includeFollowUp = true
   await act(async () => emitChanged())
-  expect(headings()).toEqual(['Action/Reply4', 'Follow-up1', 'Other mail3'])
+  expect(headings()).toEqual(builtInHeadings)
   expect(document.activeElement).toBe(action)
   expect(
     screen.getByRole('button', { name: 'Mark Follow-up seen' }).getAttribute('aria-disabled'),
@@ -403,9 +422,11 @@ it('adds and removes Follow-up in place and keeps keyboard navigation on visible
 
   includeFollowUp = false
   await act(async () => emitChanged())
-  expect(headings()).toEqual(['Action/Reply4', 'Other mail3'])
+  expect(headings()).toEqual(withoutFollowUp)
   expect(document.activeElement).toBe(list)
   await act(async () => fireEvent.keyDown(list, { key: 'J', shiftKey: true }))
+  expect(document.activeElement).toBe(action)
+  await act(async () => fireEvent.keyDown(action, { key: 'J', shiftKey: true }))
   expect(document.activeElement).toBe(updates)
 
   includeFollowUp = true
@@ -421,8 +442,8 @@ it('adds and removes Follow-up in place and keeps keyboard navigation on visible
 it('shows the existing empty Inbox state when its last entry leaves', async () => {
   let includeThread = true
   const { emitChanged } = await mountSections((rows) => (includeThread ? rows.slice(0, 1) : []))
-  await act(async () => fireEvent.click(header('Action/Reply')))
-  expect(headings()).toEqual(['Action/Reply1'])
+  await act(async () => fireEvent.click(header('Reply')))
+  expect(headings()).toEqual(['Reply1'])
   expect(screen.queryByText('Inbox is clear')).toBeNull()
 
   includeThread = false
@@ -434,8 +455,8 @@ it('shows the existing empty Inbox state when its last entry leaves', async () =
 
   includeThread = true
   await act(async () => emitChanged())
-  expect(headings()).toEqual(['Action/Reply1'])
-  expect(header('Action/Reply').getAttribute('aria-expanded')).toBe('false')
+  expect(headings()).toEqual(['Reply1'])
+  expect(header('Reply').getAttribute('aria-expanded')).toBe('false')
   expect(screen.queryByText('Inbox is clear')).toBeNull()
 })
 
@@ -447,11 +468,11 @@ it('archives the selected Inbox Thread and restores its row via Organise Undo', 
   await act(async () => fireEvent.keyDown(active, { key: 'e' }))
   expect(organise).toHaveBeenLastCalledWith({ kind: 'archive', threadId: 'thread-1' })
   expect(byId('thread-1')).toBeUndefined()
-  expect(selected().dataset.threadId).toBe('thread-2')
+  expect(selected().dataset.threadId).toBe('thread-7')
   await act(async () => fireEvent.keyDown(active, { key: 'z' }))
   expect(organise).toHaveBeenLastCalledWith({ kind: 'undo' })
   expect(byId('thread-1')).toBeTruthy()
-  expect(selected().dataset.threadId).toBe('thread-2')
+  expect(selected().dataset.threadId).toBe('thread-7')
 })
 
 it('keeps row DOM identity and commits only the moved row and affected section headings', async () => {
@@ -478,7 +499,7 @@ it('keeps row DOM identity and commits only the moved row and affected section h
   for (const node of before) expect(options()).toContain(node)
   expectBudget({ app: 0, workspace: 0, list: 1, rows: 1, reader: 0, composer: 0 })
   expect(commitCounts().rows).toEqual({ 'thread-2': 1 })
-  expect(sectionCommits()).toEqual({ 'section:Action/Reply': 1, 'section:Follow-up': 1 })
+  expect(sectionCommits()).toEqual({ 'section:bucket.action': 1, 'section:bucket.follow_up': 1 })
 
   commits.clear()
   const release = adapter.staggerReads()
@@ -542,61 +563,49 @@ it('indexes Threads beyond the legacy replica cap while mounting a bounded windo
     })),
   )
   expect(api.threads).toHaveBeenLastCalledWith({ ...inbox, limit: -1 })
-  expect(header('Action/Reply').textContent).toBe('Action/Reply5104')
-  expect(header('Seen').textContent).toBe('Seen1')
+  expect(headingSummary(header('Reply'))).toBe('Reply5104')
+  expect(header('Unassigned').textContent).toBe('Unassigned1')
   expect(options().length).toBeLessThan(40)
   const list = listbox()
-  await act(async () => fireEvent.click(header('Action/Reply')))
+  await act(async () => fireEvent.click(header('Reply')))
   expect(selected().dataset.threadId).toBe('synthetic-5104')
   expect(listbox()).toBe(list)
 })
 
-it('marks only exposed unread threads in Other mail and undoes a specific Thread action', async () => {
+it('marks unread threads in one expanded Bucket and keeps read threads in that Bucket', async () => {
   const { api } = await mountSections()
   await act(async () => {
-    for (const threadId of ['thread-4', 'thread-5', 'thread-6', 'thread-8']) {
+    for (const threadId of ['thread-4', 'thread-5', 'thread-8']) {
       await api.organise({ kind: 'read', threadId, value: false })
     }
-    await api.setBucket({ threadId: 'thread-8', bucket: 'Later', reason: 'Update' })
+    await api.setBucket({ threadId: 'thread-8', bucket: 'Later', reason: 'Read later' })
   })
   const organise = vi.spyOn(api, 'organise')
-  const markSeen = () => screen.getByRole('button', { name: 'Mark Other mail seen' })
+  const markSeen = () => screen.getByRole('button', { name: 'Mark Later seen' })
 
-  await act(async () => fireEvent.click(header('Other mail')))
+  expect(header('Later').textContent).toContain('2 unread')
+  await act(async () => fireEvent.click(header('Later')))
   expect(markSeen().getAttribute('aria-disabled')).toBe('true')
   await act(async () => fireEvent.click(markSeen()))
   expect(organise).not.toHaveBeenCalled()
-  expect(header('Other mail').getAttribute('aria-expanded')).toBe('false')
 
-  await act(async () => fireEvent.click(header('Other mail')))
-  expect(organise).not.toHaveBeenCalled()
+  await act(async () => fireEvent.click(header('Later')))
   await act(async () => fireEvent.click(markSeen()))
-  expect(header('Other mail').getAttribute('aria-expanded')).toBe('true')
   expect(organise.mock.calls).toEqual(
-    ['thread-4', 'thread-5', 'thread-6'].map((threadId) => [
-      { kind: 'read', threadId, value: true },
-    ]),
+    ['thread-5', 'thread-8'].map((threadId) => [{ kind: 'read', threadId, value: true }]),
   )
+  expect(markSeen().getAttribute('aria-disabled')).toBe('true')
+  expect(header('Later').textContent).toBe('Later2')
   expect(byId('thread-8')).toBeTruthy()
-  const mutationId = await organise.mock.results[1].value
+  expect(header('Update').textContent).toContain('1 unread')
+
+  const mutationId = await organise.mock.results[0].value
   await act(async () => vi.advanceTimersByTimeAsync(1))
   const notice = screen.getByText('Marked as read · April launch checklist').closest('li')
   if (!notice) throw new Error('Expected a per-Thread Undo notice')
   await act(async () => fireEvent.click(within(notice).getByRole('button', { name: 'Undo' })))
   expect(organise).toHaveBeenLastCalledWith({ kind: 'undo', threadId: 'thread-5', mutationId })
-  const updates = await api.threads(inbox)
-  expect(
-    updates.filter(
-      ({ id, unreadCount }) => ['thread-5', 'thread-8'].includes(id) && unreadCount > 0,
-    ),
-  ).toHaveLength(2)
-
-  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Show all' })))
-  await act(async () => fireEvent.click(markSeen()))
-  expect(organise.mock.calls.slice(-2)).toEqual(
-    ['thread-5', 'thread-8'].map((threadId) => [{ kind: 'read', threadId, value: true }]),
-  )
-  expect(markSeen().getAttribute('aria-disabled')).toBe('true')
+  expect(header('Later').textContent).toContain('1 unread')
 })
 
 it('resolves avatars only in the visible virtual range and commits only the changed avatar', async () => {
@@ -611,6 +620,7 @@ it('resolves avatars only in the visible virtual range and commits only the chan
         const thread = index === 1 ? second : first
         return {
           ...thread,
+          bucket: first.bucket,
           id: index < 2 ? thread.id : `avatar-thread-${index}`,
           lastMessageAt: first.lastMessageAt - index,
           latestSender: { messageId: `latest-${index}`, from: thread.participants[0] },

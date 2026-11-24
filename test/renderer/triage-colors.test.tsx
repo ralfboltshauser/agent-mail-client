@@ -14,7 +14,7 @@ it('updates triage badges in place, preserves the choice on failure, and restore
   localStorage.setItem(replyKey, 'Rose')
   localStorage.setItem(actionKey, 'invalid')
 
-  const adapter = await mount()
+  const adapter = await mount(rendererAdapter('inbox'))
   const list = listbox()
   const row = selected()
   const title = reader()
@@ -70,7 +70,7 @@ it('updates triage badges in place, preserves the choice on failure, and restore
 
   cleanup()
   rootStyle.removeProperty('--triage-color-reply')
-  const restarted = await mount(rendererAdapter())
+  const restarted = await mount(rendererAdapter('inbox'))
   expect(replyColor()).toBe('var(--triage-palette-neutral)')
   await act(async () => restarted.emitOpenSettings())
   const reopened = screen.getByRole('combobox', { name: 'Reply color' })
