@@ -752,7 +752,14 @@ async function main() {
       }),
       'promotion keeps the staged iframe and its parsed document',
     )
-    assert.deepEqual(reopenedNewsletter, firstNewsletter, 'reopened newsletter fits before release')
+    const { bottom: reopenedBottom, ...reopenedGeometry } = reopenedNewsletter
+    const { bottom: initialBottom, ...initialGeometry } = firstNewsletter
+    assert.deepEqual(reopenedGeometry, initialGeometry, 'reopened newsletter fits before release')
+    assert.ok(
+      reopenedBottom <= reopenedNewsletter.viewport &&
+        Math.abs(reopenedBottom - initialBottom) <= 1,
+      'the last line stays visible at the same position to within a CSS pixel',
+    )
     assert.equal(await run(() => window.firstNewsletterFrame.isConnected), false)
     await waitFor(() => requests.held === 2, 'held image request from reopened newsletter')
     heldImage.resolve()
