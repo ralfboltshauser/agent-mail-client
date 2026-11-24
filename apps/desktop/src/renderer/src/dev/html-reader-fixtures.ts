@@ -57,7 +57,13 @@ export function htmlReaderFixture(id: string): string | null {
         @media (prefers-color-scheme: dark) { #probe-theme { color:#eee; } }
       </style>
       <p id="probe-theme">The workshop starts at 10.</p>
-      <p id="probe-dark-card" style="background:#222;color:#fff">Bring a notebook.</p>`
+      <p id="probe-dark-card" style="background:#222;color:#fff">Bring a notebook.</p>
+      <table><tr><td id="probe-light-cell" bgcolor="#fff" style="color:#111!important">
+        <a href="https://example.test/map">Workshop venue</a>
+      </td></tr></table>
+      <p id="probe-gradient" style="background-image:linear-gradient(white,#eee);color:#222">
+        Tickets at the door.
+      </p>`
     case 'thread-8:latest':
       return `<p>Paper mill newsletter</p>
         <img id="probe-held" width="120" height="120" src="${location.origin}${imagePath}?source=held">
