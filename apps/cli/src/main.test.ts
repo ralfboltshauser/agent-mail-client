@@ -265,6 +265,7 @@ it('submits a no-reply Snooze when the Engine advertises Snooze', async () => {
 
 it('dispatches legacy triage flags and the queue subcommand independently', async () => {
   const requests: string[] = []
+  const queueUrl = '/v1/triage/queue?bucketCatalogVersion=1&accountId=a&limit=7'
   const card = {
     id: { kind: 'sender', accountId: 'a', address: 'person@example.test' },
     accountId: 'a',
@@ -277,7 +278,7 @@ it('dispatches legacy triage flags and the queue subcommand independently', asyn
   const server = createServer((req, res) => {
     requests.push(req.url ?? '')
     if (req.url === '/v1/triage/lease') res.end(JSON.stringify({ granted: false }))
-    else if (req.url === '/v1/triage/queue?accountId=a&limit=7') {
+    else if (req.url === queueUrl) {
       res.end(JSON.stringify({ revision: 9, cards: [card], cursor: null }))
     } else res.writeHead(404).end('{}')
   })
@@ -290,7 +291,7 @@ it('dispatches legacy triage flags and the queue subcommand independently', asyn
     expect(
       JSON.parse((await run('triage', 'queue', '--account', 'a', '--limit', '7', '--json')).stdout),
     ).toEqual({ revision: 9, cards: [card], cursor: null })
-    expect(requests).toEqual(['/v1/triage/lease', '/v1/triage/queue?accountId=a&limit=7'])
+    expect(requests).toEqual(['/v1/triage/lease', queueUrl])
   } finally {
     server.close()
   }
