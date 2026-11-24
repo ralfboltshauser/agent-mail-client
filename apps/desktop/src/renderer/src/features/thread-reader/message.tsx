@@ -21,7 +21,7 @@ export function Message({
   draftEditingDisabled?: boolean
 }) {
   const [{ open, visited }, setExpansion] = useState({ open: defaultOpen, visited: defaultOpen })
-  const [darkAppearance, setDarkAppearance] = useState(false)
+  const [darkAppearance, setDarkAppearance] = useState(true)
   const [htmlAvailable, setHtmlAvailable] = useState(false)
   const bodyId = useId()
   const showAppearance = open && m.hasHtml && htmlAvailable

@@ -196,6 +196,7 @@ async function main() {
                   height: frame.offsetHeight,
                   viewport: doc.documentElement.clientHeight,
                   bottom: doc.getElementById(id).getBoundingClientRect().bottom,
+                  canvas: getComputedStyle(doc.documentElement).backgroundColor,
                   overflowY: getComputedStyle(doc.documentElement).overflowY,
                   imageComplete: doc.getElementById('probe-held')?.complete,
                   emptyFrames,
@@ -410,13 +411,14 @@ async function main() {
       translucent: 'rgba(0, 0, 0, 0.8)',
     }
     await waitFor(() => run(() => document.documentElement.classList.contains('dark')), 'dark UI')
-    assert.deepEqual(await messageColors(), lightColors, 'message colors in dark mode')
+    const defaultColors = await messageColors()
+    assert.equal(defaultColors.canvas, 'rgb(29, 29, 29)', 'HTML opens dark by default')
     await run(() => {
       document.querySelector('iframe').contentDocument.body.dataset.themeContinuity = 'original'
     })
     nativeTheme.themeSource = 'light'
     await waitFor(() => run(() => !document.documentElement.classList.contains('dark')), 'light UI')
-    assert.deepEqual(await messageColors(), lightColors, 'message colors in light mode')
+    assert.deepEqual(await messageColors(), defaultColors, 'message stays dark in the light UI')
     assert.equal(
       await run(
         () => document.querySelector('iframe').contentDocument.body.dataset.themeContinuity,
@@ -427,7 +429,9 @@ async function main() {
 
     const appearanceButton = (label) =>
       run((name) => Boolean(document.querySelector(`button[aria-label="${name}"]`)), label)
-    await waitFor(() => appearanceButton('Try dark background'), 'message appearance button')
+    await waitFor(() => appearanceButton('Show original colors'), 'default dark appearance button')
+    await run(() => document.querySelector('button[aria-label="Show original colors"]').click())
+    assert.deepEqual(await messageColors(), lightColors, 'original colors are available on demand')
     const beforeAppearance = await run(() => {
       const button = document.querySelector('button[aria-label="Try dark background"]')
       const frame = document.querySelector('iframe')
@@ -515,6 +519,7 @@ async function main() {
     )
 
     await selectThread(1, 'probe-status')
+    await run(() => document.querySelector('button[aria-label="Show original colors"]').click())
     const at623 = await measure('probe-status', 623)
     const at320 = await measure('probe-status', 320)
     assert.deepEqual(
@@ -647,8 +652,7 @@ async function main() {
     assert.equal((await measure('probe-feedback')).height, settled, 'height feedback stops')
 
     await selectThread(6, 'probe-images')
-    assert.deepEqual(requests, { message: 0, parent: 0, missing: 0, held: 0 })
-    await run(() => document.querySelector('button[aria-label="Try dark background"]').click())
+    assert.ok(await appearanceButton('Show original colors'), 'a new message uses the dark default')
     assert.deepEqual(requests, { message: 0, parent: 0, missing: 0, held: 0 })
     await run(() => {
       const image = new Image()
@@ -699,6 +703,7 @@ async function main() {
     })
     const firstNewsletter = await firstVisibleFrame(8, 'probe-newsletter-end', 'probe-images')
     assert.ok(firstNewsletter, 'newsletter appears with the image response held')
+    assert.equal(firstNewsletter.canvas, 'rgb(29, 29, 29)', 'the first visible newsletter is dark')
     assert.equal(firstNewsletter.emptyFrames, 0, 'an immediate HTML switch keeps a body visible')
     assert.equal(firstNewsletter.imageComplete, false)
     assert.ok(
@@ -730,7 +735,7 @@ async function main() {
     const captureBodyPixel = async () => [
       ...(await wc.capturePage(bodyPixel)).toBitmap().subarray(0, 4),
     ]
-    assert.deepEqual(await captureBodyPixel(), [255, 255, 255, 255], 'outgoing HTML paints white')
+    assert.deepEqual(await captureBodyPixel(), [29, 29, 29, 255], 'outgoing HTML paints dark')
     await run(async () => {
       const api = (await import('/src/lib/amc.ts')).getAmc()
       const load = api.messageHtml
@@ -782,7 +787,7 @@ async function main() {
     const reopenedNewsletter = await openingNewsletter
     assert.deepEqual(
       pendingPixel,
-      [255, 255, 255, 255],
+      [29, 29, 29, 255],
       'outgoing body stays painted during an HTML read',
     )
     assert.equal(
@@ -883,6 +888,7 @@ async function main() {
             !document.querySelector('iframe') &&
             document.querySelector('h1')?.textContent === 'Notes from the type review' &&
             !document.querySelector('button[aria-label="Try dark background"]') &&
+            !document.querySelector('button[aria-label="Show original colors"]') &&
             [...document.querySelectorAll('button[aria-expanded="true"][aria-controls]')].some(
               (header) => {
                 const body = document.getElementById(header.getAttribute('aria-controls'))
@@ -911,7 +917,7 @@ async function main() {
       'retry restores the formatted message',
     )
     await selectThread(8, 'probe-newsletter-end')
-    console.log('HTML handoff kept the white body painted with 0 empty animation-frame samples')
+    console.log('HTML handoff kept the dark body painted with 0 empty animation-frame samples')
 
     console.log(
       `HTML reader verified in Chromium ${process.versions.chrome}, split-view iframe ${narrowReaderWidth}px`,
