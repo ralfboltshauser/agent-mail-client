@@ -1,9 +1,10 @@
+import type { Bucket } from '@amc/protocol'
 import { Paperclip, Star } from 'lucide-react'
 import { memo } from 'react'
-import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { MailboxThreadQuery } from '@/features/mailbox/mailbox-queries'
 import { SenderAvatar } from '@/features/sender-avatar/sender-avatar'
+import { TriageBadge } from '@/features/triage-colors/triage-badge'
 import { useReplicaSelector } from '@/hooks/use-amc'
 import { listDate, participantsLine } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -77,7 +78,7 @@ interface RowProps {
   subject: string
   snippet: string
   match?: string
-  bucket?: string
+  bucket?: Bucket
   bucketReason?: string
 }
 
@@ -161,15 +162,15 @@ export const ThreadRow = memo(function ThreadRow({
           {bucket && (
             <Tooltip>
               <TooltipTrigger asChild>
-                <Badge
-                  variant="secondary"
+                <TriageBadge
+                  bucket={bucket}
                   className="h-[18px] max-w-[45%] shrink text-[10px] text-muted-foreground"
                 >
                   <span className="truncate">
                     <span className="sr-only">Triage: </span>
                     {bucket}
                   </span>
-                </Badge>
+                </TriageBadge>
               </TooltipTrigger>
               <TooltipContent className="max-w-64 break-words">
                 <div className="font-semibold">Triage: {bucket}</div>

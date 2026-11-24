@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from 'react'
 import { toast } from 'sonner'
 import { setLoadRemoteImagesAutomatically, useRemoteImages } from '@/data/remote-image-preferences'
 import { AccountAvatarSettings } from '@/features/sender-avatar/account-avatar-settings'
+import { TriageColorSettings } from '@/features/triage-colors/triage-color-settings'
 import { getAmc } from '@/lib/amc'
 import { failureText } from '@/lib/failure'
 import type { NotificationSettings } from '../../../shared/api'
@@ -40,6 +41,7 @@ export function MailSettings({
           <DialogDescription>Manage mail preferences and Mac notifications.</DialogDescription>
         </DialogHeader>
         <AccountAvatarSettings />
+        <TriageColorSettings />
         <form
           className="grid gap-4 border-t pt-4"
           onSubmit={(event) => {

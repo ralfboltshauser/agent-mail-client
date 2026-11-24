@@ -28,6 +28,15 @@
   --ring: oklch(0.6 0 0);
   --unread: oklch(0.55 0 0);
   --star: oklch(0.49 0 0);
+  --triage-border-strength: 34%;
+  --triage-palette-neutral: transparent;
+  --triage-palette-slate: oklch(0.56 0.035 255);
+  --triage-palette-blue: oklch(0.55 0.15 250);
+  --triage-palette-violet: oklch(0.56 0.16 300);
+  --triage-palette-amber: oklch(0.59 0.13 70);
+  --triage-palette-teal: oklch(0.54 0.11 195);
+  --triage-palette-green: oklch(0.54 0.12 145);
+  --triage-palette-rose: oklch(0.58 0.15 15);
 
   --sidebar: oklch(0.969 0 0);
   --sidebar-foreground: oklch(0.35 0 0);
@@ -62,6 +71,7 @@
   --ring: oklch(0.73 0 0);
   --unread: oklch(0.72 0 0);
   --star: oklch(0.81 0 0);
+  --triage-border-strength: 30%;
 
   --sidebar: oklch(0.166 0 0);
   --sidebar-foreground: oklch(0.8 0 0);
