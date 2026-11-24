@@ -25,7 +25,7 @@ export function mailLinkRoutes() {
 <script nonce="${nonce}">
   try {
     const target = decodeURIComponent(location.hash.slice(1));
-    if (/^amc:\\/\\/(?:thread\\/|search\\?)/.test(target) && target.length <= 25000) {
+    if (/^amc:\\/\\/(?:draft\\/|thread\\/|search\\?)/.test(target) && target.length <= 25000) {
       const link = document.getElementById('open');
       link.href = target;
       link.hidden = false;

@@ -8,9 +8,11 @@ import {
 } from '@amc/protocol'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
+import type { ComposerFocus } from '@/components/composer'
 import { DRAFT_POLL_INTERVAL, isMissingDraft } from '@/features/composer/draft-availability'
 import { getAmc } from '@/lib/amc'
 import { failureText } from '@/lib/failure'
+import type { MailLinkDraft } from '../../../../shared/api'
 import { showQueuedSend } from './send-undo'
 
 export function useMailCompose(
@@ -19,6 +21,7 @@ export function useMailCompose(
   onQueued?: (item: OutboxItem, elapsed: number) => (() => void) | undefined,
 ) {
   const [draft, setDraft] = useState<ComposeDraft | null>(null)
+  const composerFocus = useRef<ComposerFocus>(null)
   const [handoffThread, setHandoffThread] = useState<string | null>(null)
   const [openingComposer, setOpeningComposer] = useState(false)
   const opening = useRef(false)
@@ -75,6 +78,17 @@ export function useMailCompose(
   )
 
   const openDraft = (id: string) => loadDraft(() => getAmc().composeDraft(id), id)
+  const openLinkedDraft = ({ draftId, engineOrigin }: MailLinkDraft) => {
+    if (draft?.id === draftId) {
+      composerFocus.current?.focus()
+      return
+    }
+    if (draft || opening.current || handoffThread) {
+      toast.info('Finish or minimise the current composer, then open the draft link again.')
+      return
+    }
+    return loadDraft(() => getAmc().composeDraft(draftId, engineOrigin), draftId)
+  }
   const openDraftByMessage = useCallback(
     (messageId: string, imapRevision?: string) =>
       void loadDraft(() => getAmc().composeDraftByMessage(messageId, imapRevision)),
@@ -118,6 +132,7 @@ export function useMailCompose(
 
   return {
     draft,
+    composerFocus,
     setDraft,
     handoffThread,
     setHandoffThread,
@@ -125,6 +140,7 @@ export function useMailCompose(
     minimised,
     setMinimised,
     openDraft,
+    openLinkedDraft,
     openDraftByMessage,
     startCompose,
     queued,

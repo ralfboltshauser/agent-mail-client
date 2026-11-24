@@ -8,6 +8,7 @@ import {
   type AgentAction,
   MCP_CLI_AGENT_PATH,
   MCP_CLI_OWNER_PATH,
+  parseMailLink,
   SCOPES,
   type Scope,
 } from '@amc/protocol'
@@ -257,6 +258,7 @@ it('drives drafts and organize through the CLI with paired, scoped and handoff c
     await once(listener, 'listening')
     const address = listener.address()
     if (!address || typeof address === 'string') throw new Error('Expected a TCP address')
+    const engineOrigin = `http://127.0.0.1:${address.port}`
     const cli = (secret: string, args: string[], input?: string) =>
       new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
         const processHandle = execFile(
@@ -265,7 +267,7 @@ it('drives drafts and organize through the CLI with paired, scoped and handoff c
           {
             env: {
               ...process.env,
-              AMC_ENGINE_URL: `http://127.0.0.1:${address.port}`,
+              AMC_ENGINE_URL: engineOrigin,
               AMC_TOKEN: secret,
               AMC_DEBUG: '0',
               XDG_STATE_HOME: home,
@@ -390,6 +392,12 @@ it('drives drafts and organize through the CLI with paired, scoped and handoff c
       revision: expect.any(Number),
       status: 'applied',
       mirrorStatus: 'mirrored',
+      draftLink: expect.any(String),
+    })
+    expect(parseMailLink(receipt.draftLink)).toEqual({
+      kind: 'draft',
+      draftId: receipt.id,
+      engineOrigin,
     })
     const show = await cli(draftOnly.secret, ['--as-agent', 'draft', 'show', receipt.id])
     expect(show).toMatchObject({ code: 1, stdout: '' })
@@ -482,6 +490,11 @@ it('drives drafts and organize through the CLI with paired, scoped and handoff c
     expect(newDraft).toMatchObject({
       accountId: 'a',
       to: [{ name: 'Reader', address: 'reader@example.com' }],
+    })
+    expect(parseMailLink(newDraft.draftLink)).toEqual({
+      kind: 'draft',
+      draftId: newDraft.id,
+      engineOrigin,
     })
     for (const failure of ['lost', {}] as const) {
       draftResponseFault = { tool: 'create_draft', response: failure }

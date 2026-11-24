@@ -1,6 +1,6 @@
 import type { AccountSummary, ComposeAttachment, ComposeDraft, OutboxItem } from '@amc/protocol'
 import { Minus } from 'lucide-react'
-import { useCallback, useRef, useState } from 'react'
+import { type Ref, useCallback, useImperativeHandle, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { DRAFT_DISCARDED_ELSEWHERE } from '@/features/composer/draft-availability'
 import { DraftDetails, DraftStatus, SignatureEditor } from '@/features/composer/draft-details'
@@ -20,7 +20,10 @@ import { parseRecipientInput } from './recipient-field'
 import { Button } from './ui/button'
 import { Dialog, DialogContent, DialogTitle } from './ui/dialog'
 
+export type ComposerFocus = { focus(): void }
+
 export function Composer({
+  ref,
   draft,
   accounts,
   onMinimise,
@@ -28,6 +31,7 @@ export function Composer({
   onDiscarded,
   onKept,
 }: {
+  ref?: Ref<ComposerFocus>
   draft: ComposeDraft
   accounts: AccountSummary[]
   onMinimise: (subject: string) => void
@@ -74,6 +78,19 @@ export function Composer({
   const [sendAt, setSendAt] = useState('')
   const [signature, setSignature] = useState<string | null>(null)
   const locked = busy || confirmSend
+  const focusEditor = () => {
+    if (
+      editor &&
+      (session.fields.to.length || session.fields.cc.length || session.fields.bcc.length)
+    )
+      editor.view.focus()
+    else recipients.current?.focus('to')
+  }
+  useImperativeHandle(ref, () => ({
+    focus() {
+      if (!locked && !confirmDiscard) focusEditor()
+    },
+  }))
   const openDiscard = useCallback(() => {
     const focused = document.activeElement
     discardInvoker.current = focused instanceof HTMLElement ? focused : null
@@ -165,9 +182,7 @@ export function Composer({
         className="flex max-h-[90dvh] max-w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl"
         onOpenAutoFocus={(event) => {
           event.preventDefault()
-          if ((draft.to.length || draft.cc.length || draft.bcc.length) && editor)
-            editor.view.focus()
-          else recipients.current?.focus('to')
+          focusEditor()
         }}
         onEscapeKeyDown={(event) => {
           // Radix sees Escape before the recipient field can close its suggestions.

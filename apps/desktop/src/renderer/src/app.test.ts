@@ -98,6 +98,7 @@ async function openMailbox(api: Partial<AmcApi>) {
     askAgentRuntime: async () => 'approval-required',
     askAgent: async () => ({ opened: true }),
     onOpenMailSearch: () => () => {},
+    onOpenMailDraft: () => () => {},
     onOpenThread: (callback) => {
       openThread = callback
       return () => {

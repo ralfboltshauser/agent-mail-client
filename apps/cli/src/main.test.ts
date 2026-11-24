@@ -460,9 +460,10 @@ it('passes the search offset and generates an Engine-bound link with the same qu
   try {
     const run = await cliFor(server)
     const query = 'from:alice@example.test "annual budget"'
-    const [search, linked] = await Promise.all([
+    const [search, linked, draftLink] = await Promise.all([
       run('search', '--account', 'a', '--limit', '1', '--offset', '1', '--json', '--', query),
       run('--as-agent', 'link', 'search', '--web', '--account', 'a', '--', query),
+      run('--as-agent', 'link', 'draft', '--', 'drf_example'),
     ])
     expect(JSON.parse(search.stdout)).toEqual([])
     expect(requests).toHaveLength(1)
@@ -474,6 +475,11 @@ it('passes the search offset and generates an Engine-bound link with the same qu
       accountId: 'a',
     })
     const url = new URL(linked.stdout.trim())
+    expect(parseMailLink(draftLink.stdout.trim())).toEqual({
+      kind: 'draft',
+      draftId: 'drf_example',
+      engineOrigin: url.origin,
+    })
     expect(url.pathname).toBe('/open-mail')
     expect(parseMailLink(decodeURIComponent(url.hash.slice(1)))).toEqual({
       kind: 'search',

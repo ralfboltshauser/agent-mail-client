@@ -24,6 +24,7 @@ amc search --json --limit 50 --offset 50 -- 'from:alice@example.test'
 amc link thread -- 'account:thread'
 amc link search --account account -- 'from:alice@example.test'
 amc link search --web -- 'subject:"annual budget"'
+amc link draft -- '<draft-id>'
 ```
 
 Combine free text with `from:`, `to:`, `cc:`, `subject:`, `after:`, and
@@ -49,9 +50,13 @@ Desktop to the same release for paging and browser links.
 Use `--reply-all` to include the other thread recipients. Repeat `--to`, `--cc`,
 or `--bcc` to override a recipient field. Each takes an address or
 `'Name <address>'`. Pass an empty value by itself to
-clear that field. Draft writes return the AMC ID, revision, and current provider
-mirror status when supported. Draft-only grants receive a receipt without mail
-content. If a draft changed, inspect the new revision before editing or
+clear that field. CLI draft writes return the AMC ID, revision, current provider
+mirror status when supported, and a native `draftLink`. Give the user that link
+to open the exact reply or new draft in AMC Desktop for editing. For an MCP
+write, pass its returned ID to `amc link draft` configured for the same paired
+Engine. Use `amc link draft --web` when the user needs a browser fallback.
+Draft-only grants receive a receipt without mail content. If a draft changed,
+inspect the new revision before editing or
 discarding it. If the Engine loses the response to a write, check AMC before
 retrying. Send the reviewed draft from AMC desktop.
 

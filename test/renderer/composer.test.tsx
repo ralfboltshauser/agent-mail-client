@@ -105,6 +105,61 @@ it('focuses the message body when resuming a draft addressed only with Cc', asyn
   expect(resumed.getByRole('button', { name: 'Remove cc@example.test' })).toBeTruthy()
 })
 
+it.each(['new', 'reply'] as const)(
+  'opens, focuses and restores an exact saved %s draft from a link',
+  async (mode) => {
+    const { api, emitDraftLink } = await mount()
+    const saved = {
+      ...(await api.composeDraft('draft-1')),
+      id: `linked-${mode}`,
+      subject: `Synthetic ${mode} draft`,
+      threadId: mode === 'reply' ? 'thread-1' : null,
+      to: [{ name: null, address: 'fixture@example.test' }],
+    }
+    const open = () =>
+      emitDraftLink({
+        kind: 'draft',
+        draftId: saved.id,
+        engineOrigin: 'https://engine.example.test',
+      })
+    api.composeDraft.mockClear().mockRejectedValueOnce(new Error('Engine offline'))
+    await act(async () => open())
+    await act(async () => vi.advanceTimersByTimeAsync(1))
+    expect(screen.getAllByText('Could not open draft').length).toBeGreaterThan(0)
+    expect(screen.queryByRole('dialog', { name: 'Compose' })).toBeNull()
+    const delayed = deferred<typeof saved>()
+    api.composeDraft.mockReturnValueOnce(delayed.promise).mockResolvedValue(saved)
+    const send = vi.spyOn(api, 'sendDraft')
+    await act(async () => open())
+    expect(screen.queryByRole('dialog', { name: 'Compose' })).toBeNull()
+    await act(async () => delayed.resolve(saved))
+    const dialog = within(screen.getByRole('dialog', { name: 'Compose' }))
+    const subject = dialog.getByRole<HTMLInputElement>('textbox', { name: 'Subject' })
+    const editor = dialog.getByRole('textbox', { name: 'Message body' })
+    expect(subject.value).toBe(saved.subject)
+
+    subject.focus()
+    await act(async () => open())
+    expect(document.activeElement).toBe(editor)
+    expect(dialog.getByRole('textbox', { name: 'Subject' })).toBe(subject)
+    expect(api.composeDraft).toHaveBeenCalledTimes(2)
+
+    await act(async () =>
+      fireEvent.click(dialog.getByRole('button', { name: 'Minimise and save draft' })),
+    )
+    expect(screen.getByRole('button', { name: saved.subject })).toBeTruthy()
+    await act(async () => open())
+    expect(screen.getByRole<HTMLInputElement>('textbox', { name: 'Subject' }).value).toBe(
+      saved.subject,
+    )
+    expect(api.composeDraft.mock.calls).toEqual(
+      Array.from({ length: 3 }, () => [saved.id, 'https://engine.example.test']),
+    )
+    expect(api.startCompose).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+  },
+)
+
 it('keeps a partial address after moving to another field and pressing Escape', async () => {
   const { adapter, dialog, recipient, subject } = await openComposer()
   await act(async () => {

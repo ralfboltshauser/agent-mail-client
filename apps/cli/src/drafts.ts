@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { text } from 'node:stream/consumers'
-import type { Address, DiscardDraftResult, VersionedDraft } from '@amc/protocol'
+import { type Address, type DiscardDraftResult, mailLink, type VersionedDraft } from '@amc/protocol'
 import type { Command } from 'commander'
 import { z } from 'zod'
 import type { CliConfig } from './config.ts'
@@ -77,10 +77,12 @@ function revision(value: string) {
 
 const printJson = (value: unknown) => console.log(JSON.stringify(value, null, 2))
 
-function printReceipt(result: DraftReceipt, json?: boolean) {
-  if (json) return printJson(result)
+function printReceipt(result: DraftReceipt, engineUrl: string, json?: boolean) {
+  const draftLink = mailLink(engineUrl, { kind: 'draft', draftId: result.id })
+  if (json) return printJson({ ...result, draftLink })
   const mirror = result.mirrorStatus ?? 'unknown'
   console.log(`Saved draft ${result.id} · revision ${result.revision} · provider mirror ${mirror}`)
+  console.log(draftLink)
 }
 
 export function registerDraftCommands(
@@ -94,14 +96,15 @@ export function registerDraftCommands(
   ).option('--account <id>', 'sending Account ID, defaults to the grant’s Account')
   create.action(async (opts: DraftOptions & { account?: string }) => {
     if (opts.bodyFile === undefined) throw new Error('Pass --body-file <path> or --body-file -.')
+    const cli = config()
     const result = await mailTool<DraftReceipt>(
-      config(),
+      cli,
       agent(),
       'create_draft',
       { account_id: opts.account, ...(await fields(opts)), report_mirror: true },
       { write: true, result: DraftReceipt },
     )
-    printReceipt(result, opts.json)
+    printReceipt(result, cli.engineUrl, opts.json)
   })
 
   draftFields(program.command('reply').description('Save a threaded reply as a draft'))
@@ -109,8 +112,9 @@ export function registerDraftCommands(
     .option('--reply-all', 'include other recipients')
     .action(async (threadId: string, opts: DraftOptions & { replyAll?: boolean }) => {
       if (opts.bodyFile === undefined) throw new Error('Pass --body-file <path> or --body-file -.')
+      const cli = config()
       const result = await mailTool<DraftReceipt>(
-        config(),
+        cli,
         agent(),
         'create_draft',
         {
@@ -121,7 +125,7 @@ export function registerDraftCommands(
         },
         { write: true, result: DraftReceipt },
       )
-      printReceipt(result, opts.json)
+      printReceipt(result, cli.engineUrl, opts.json)
     })
 
   draft
@@ -159,14 +163,15 @@ export function registerDraftCommands(
       const current = revision(opts.revision)
       const patch = await fields(opts)
       if (!Object.keys(patch).length) throw new Error('Choose draft fields to update.')
+      const cli = config()
       const result = await mailTool<DraftReceipt>(
-        config(),
+        cli,
         agent(),
         'update_draft',
         { draft_id: id, ...patch, revision: current, report_mirror: true },
         { checked: true, write: true, result: DraftReceipt.refine((receipt) => receipt.id === id) },
       )
-      printReceipt(result, opts.json)
+      printReceipt(result, cli.engineUrl, opts.json)
     })
 
   draft

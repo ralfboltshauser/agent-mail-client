@@ -113,6 +113,11 @@ const api: AmcApi = {
     ipcRenderer.on('amc:openMailSearch', handler)
     return () => ipcRenderer.off('amc:openMailSearch', handler)
   },
+  onOpenMailDraft(listener) {
+    const handler = (_e: unknown, draft: Parameters<typeof listener>[0]) => listener(draft)
+    ipcRenderer.on('amc:openMailDraft', handler)
+    return () => ipcRenderer.off('amc:openMailDraft', handler)
+  },
   onOpenThread(listener) {
     const handler = (_e: unknown, thread: ThreadSummary) => listener(thread)
     ipcRenderer.on('amc:openThread', handler)

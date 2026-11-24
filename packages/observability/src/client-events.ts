@@ -33,6 +33,7 @@ const cliCommands = [
   'search',
   'link.thread',
   'link.search',
+  'link.draft',
   'archive',
   'trash',
   'read',
