@@ -69,10 +69,11 @@ export function createTray(
     ]
   }
 
-  function refresh(unread: number, paired: boolean, paused: boolean) {
-    tray.setTitle(unread ? unread.toLocaleString() : '')
+  function refresh(attentionCount: number, paired: boolean, paused: boolean) {
+    const count = attentionCount.toLocaleString()
+    tray.setTitle(attentionCount ? count : '')
     tray.setToolTip(
-      `AMC · ${unread.toLocaleString()} unread in Inbox${paused ? ' · Sync paused' : ''}`,
+      `AMC · ${count} ${attentionCount === 1 ? 'thread needs' : 'threads need'} a reply or action${paused ? ' · Sync paused' : ''}`,
     )
     tray.setContextMenu(
       Menu.buildFromTemplate([
@@ -82,7 +83,7 @@ export function createTray(
         { type: 'separator' },
         ...(paused ? [{ label: 'Sync paused', enabled: false }] : []),
         { label: paused ? 'Resume Sync' : 'Pause Sync', enabled: paired, click: toggleSync },
-        ...loginMenu(() => refresh(unread, paired, paused)),
+        ...loginMenu(() => refresh(attentionCount, paired, paused)),
         { type: 'separator' },
         { role: 'quit', label: 'Quit AMC' },
       ]),

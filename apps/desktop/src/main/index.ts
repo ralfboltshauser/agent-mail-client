@@ -215,8 +215,9 @@ function openReplica(): Replica {
 
 function refreshTray() {
   if (!tray) return
-  const unread = engine ? openReplica().counts(null).inboxUnread : 0
-  tray.refresh(unread, !!engine, !!pausedStatus)
+  const mail = engine ? openReplica() : null
+  const unread = mail?.counts(null).inboxUnread ?? 0
+  tray.refresh(mail?.menuBarAttentionCount() ?? 0, !!engine, !!pausedStatus)
   app.dock?.setBadge(unread ? unread.toLocaleString() : '')
 }
 

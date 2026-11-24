@@ -13,7 +13,7 @@ import type {
   SyncEntity,
   ThreadSummary,
 } from '@amc/protocol'
-import { RECENT_THREAD_BODIES, TRIAGE_RECENT_WINDOW_MS } from '@amc/protocol'
+import { bucketLabels, RECENT_THREAD_BODIES, TRIAGE_RECENT_WINDOW_MS } from '@amc/protocol'
 import type {
   Counts,
   DesktopThreadSummary,
@@ -28,6 +28,12 @@ import { LocalOrganise, ORGANISE_SCHEMA } from './organise'
 
 const BUCKET_KEY =
   "coalesce(json_extract(data, '$.bucketAssignment.bucketId'), json_extract(data, '$.bucket.bucket'))"
+const INCOMING_INBOX_MESSAGE = `
+  EXISTS (SELECT 1 FROM json_each(m.data, '$.labelIds') WHERE value = t.account_id || ':INBOX')
+  AND NOT EXISTS (SELECT 1 FROM json_each(m.data, '$.labelIds')
+    WHERE value IN (t.account_id || ':SENT', t.account_id || ':DRAFT',
+      t.account_id || ':SPAM', t.account_id || ':TRASH'))
+`
 const UNTRIAGED_INBOX = `in_inbox = 1 AND ${BUCKET_KEY} IS NULL`
 const RECENT_DELIVERY = `(
   SELECT MAX(json_extract(message.data, '$.deliveredAt'))
@@ -431,11 +437,7 @@ export class Replica {
     return this.db
       .prepare(`
         SELECT m.id FROM message m JOIN thread t ON t.id = m.thread_id
-        WHERE t.id = ?
-          AND EXISTS (SELECT 1 FROM json_each(m.data, '$.labelIds') WHERE value = t.account_id || ':INBOX')
-          AND NOT EXISTS (SELECT 1 FROM json_each(m.data, '$.labelIds')
-            WHERE value IN (t.account_id || ':SENT', t.account_id || ':DRAFT',
-              t.account_id || ':SPAM', t.account_id || ':TRASH'))
+        WHERE t.id = ? AND ${INCOMING_INBOX_MESSAGE}
       `)
       .all(id)
       .map(({ id }) => String(id))
@@ -482,6 +484,32 @@ export class Replica {
       const row = get.get(id) as ThreadListRow | undefined
       return row ? [readThreadListRow(row)] : []
     })
+  }
+
+  menuBarAttentionCount(): number {
+    // A sent reply resolves the current request. Replying can leave Action work outstanding.
+    const row = this.db
+      .prepare(`
+        SELECT count(*) AS n FROM effective_thread t
+        WHERE t.in_inbox = 1 AND json_extract(t.data, '$.snoozedUntil') IS NULL
+          AND CASE
+            WHEN ${BUCKET_KEY} IN (?, ?) THEN 1
+            WHEN ${BUCKET_KEY} IN (?, ?) THEN NOT EXISTS (
+              SELECT 1 FROM message sent WHERE sent.thread_id = t.id
+                AND EXISTS (SELECT 1 FROM json_each(sent.data, '$.labelIds')
+                  WHERE value = t.account_id || ':SENT')
+                AND trim(json_extract(sent.data, '$.inReplyTo'), '<>') = (
+                  SELECT trim(json_extract(m.data, '$.rfcMessageId'), '<>')
+                  FROM message m WHERE m.thread_id = t.id AND ${INCOMING_INBOX_MESSAGE}
+                  ORDER BY coalesce(json_extract(m.data, '$.deliveredAt'), m.sent_at) DESC, m.id DESC
+                  LIMIT 1
+                )
+            )
+            ELSE 0
+          END
+      `)
+      .get(bucketLabels.Action, 'Action', bucketLabels.Reply, 'Reply') as { n: number }
+    return row.n
   }
 
   counts(accountId: string | null): Counts {
