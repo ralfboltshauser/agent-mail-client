@@ -279,6 +279,7 @@ function RefreshError({
 export const MailReader = memo(function MailReader({
   engineUrl,
   scope,
+  onSwitching,
   selectedId,
   selectedAccountId,
   accountId,
@@ -291,6 +292,7 @@ export const MailReader = memo(function MailReader({
 }: {
   engineUrl: string | null
   scope: string
+  onSwitching: (switching: boolean) => void
   selectedId: string | undefined
   selectedAccountId: string | undefined
   accountId: string | null
@@ -333,6 +335,7 @@ export const MailReader = memo(function MailReader({
         key={JSON.stringify([engineUrl, scope, selectedAccountId])}
         data={data}
         selectedId={selectedId}
+        onSwitching={onSwitching}
         loading={query !== null && data === undefined && !failed}
         unavailable={query !== null && (failed || data === null)}
         onRetry={refresh}

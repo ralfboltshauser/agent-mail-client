@@ -153,11 +153,17 @@ async function main() {
             const deadline = performance.now() + 5000
             let emptyFrames = 0
             const sample = () => {
-              const visibleFrames = [...document.querySelectorAll('iframe')].filter(
-                (frame) =>
-                  frame.offsetHeight &&
-                  frame.checkVisibility({ opacityProperty: true, visibilityProperty: true }),
-              )
+              const visibleFrames = [...document.querySelectorAll('iframe')].filter((frame) => {
+                const rect = frame.getBoundingClientRect()
+                const reader = frame.closest('.overflow-y-auto')?.getBoundingClientRect()
+                return (
+                  reader &&
+                  rect.height > 0 &&
+                  rect.top < Math.min(innerHeight, reader.bottom) &&
+                  rect.bottom > Math.max(0, reader.top) &&
+                  frame.checkVisibility({ opacityProperty: true, visibilityProperty: true })
+                )
+              })
               const frame = visibleFrames.find((candidate) =>
                 candidate.contentDocument?.getElementById(id),
               )
@@ -617,10 +623,18 @@ async function main() {
     })
     const openingNewsletter = firstVisibleFrame(8, 'probe-newsletter-end', 'probe-theme')
     await waitFor(() => run(() => !!window.releaseNewsletterBody), 'incoming HTML request')
+    assert.ok(
+      await run(() => {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'r', bubbles: true }))
+        return !document.querySelector('[aria-label="Reply"]')
+      }),
+      'Reply is unavailable while the selected body is hidden',
+    )
     await run(
       () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
     )
     const pendingPixel = await captureBodyPixel()
+    assert.equal(await run(() => !!document.querySelector('[role="dialog"]')), false)
     await run(() => {
       window.restoreMessageHtml()
       window.releaseNewsletterBody()

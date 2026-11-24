@@ -54,6 +54,7 @@ export function MailWorkspace({
   onToggleTheme: () => void
 }) {
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [readerSwitching, setReaderSwitching] = useState(false)
   const [sentTarget, setSentTarget] = useState<{
     scope: string
     id: string
@@ -156,9 +157,11 @@ export function MailWorkspace({
   )
   const activeThread = selectedDetail?.thread ?? null
   const selected = listed ?? (selectedTarget && activeThread ? activeThread : undefined)
+  const actionableThread = readerSwitching ? null : activeThread
+  const actionableSelection = readerSwitching ? undefined : selected
   const actions = useThreadActions({
-    selected,
-    activeThread,
+    selected: actionableSelection,
+    activeThread: actionableThread,
     complete: selectedDetail?.complete === true,
     accountId,
     accounts,
@@ -167,10 +170,10 @@ export function MailWorkspace({
   })
   const { organise, organisePicker, canUndoOrganise, setBucketPickerId } = actions
   const getFilterActions = useFilterActions(accounts, labels)
-  const filterActions = selected ? getFilterActions(selected) : []
+  const filterActions = actionableSelection ? getFilterActions(actionableSelection) : []
   const review = useTriageReview(accountId)
   const { close: closeReview } = review
-  const compose = useMailCompose(activeThread, accountId ?? accounts[0]?.id, review.onQueued)
+  const compose = useMailCompose(actionableThread, accountId ?? accounts[0]?.id, review.onQueued)
   const { openingComposer, openDraft, startCompose, setMinimised } = compose
   const dialogs = useMailDialogs()
   const { rememberFocus, restoreDialogFocus, openSendSettings } = dialogs
@@ -279,8 +282,8 @@ export function MailWorkspace({
   }
   const { commandActions, appActions, copyReference } = useMailCommands({
     accounts,
-    selected,
-    activeThreadId: activeThread?.id,
+    selected: actionableSelection,
+    activeThreadId: actionableThread?.id,
     filterActions,
     ownView,
     snoozeEnabled,
@@ -403,8 +406,8 @@ export function MailWorkspace({
             readerRef={readerFocus.reader}
             readerToolbar={
               <ReaderToolbar
-                selected={selected}
-                activeThread={activeThread}
+                selected={actionableSelection}
+                activeThread={actionableThread}
                 actions={actions}
                 filterActions={filterActions}
                 compose={compose}
@@ -418,6 +421,7 @@ export function MailWorkspace({
               <MailReader
                 engineUrl={engineUrl}
                 scope={readerScope}
+                onSwitching={setReaderSwitching}
                 selectedId={readerTarget?.id}
                 selectedAccountId={readerTarget?.accountId}
                 accountId={accountId}

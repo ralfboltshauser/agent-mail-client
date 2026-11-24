@@ -10,11 +10,13 @@ export function ReaderPresentation({
   data,
   selectedId,
   readerRef,
+  onSwitching,
   ...view
 }: Omit<ComponentProps<typeof ThreadView>, 'data'> & {
   data: ThreadWithMessages | undefined | null
   selectedId: string | undefined
   readerRef: RefObject<HTMLDivElement | null>
+  onSwitching: (switching: boolean) => void
 }) {
   const [presented, setPresented] = useState(data ?? null)
   const [releasedId, setReleasedId] = useState<string>()
@@ -49,7 +51,11 @@ export function ReaderPresentation({
       )
       const hasPendingBody = [
         ...(incoming?.querySelectorAll('[data-reader-body-pending]') ?? []),
-      ].some((body) => !body.closest('[hidden]'))
+      ].some(
+        (body) =>
+          !body.closest('[hidden]') &&
+          body.getBoundingClientRect().top < (incoming?.getBoundingClientRect().bottom ?? 0),
+      )
       if (!hasReadyHtml || (incoming && !hasPendingBody)) setReleasedId(pendingId)
     }
     const observer = incoming ? new MutationObserver(check) : null
@@ -67,6 +73,12 @@ export function ReaderPresentation({
       observer?.disconnect()
     }
   }, [pendingId, hasIncomingData])
+
+  useLayoutEffect(() => {
+    if (!switching) return
+    onSwitching(true)
+    return () => onSwitching(false)
+  }, [switching, onSwitching])
 
   useLayoutEffect(() => {
     if (!pendingId) return
