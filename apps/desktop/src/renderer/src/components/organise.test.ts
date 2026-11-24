@@ -25,7 +25,7 @@ function Fixture({
   kind,
   snoozeEnabled = true,
 }: {
-  kind: 'labels' | 'snooze'
+  kind: 'labels' | 'snooze' | 'trash'
   snoozeEnabled?: boolean
 }) {
   const organise = useOrganise(thread, snoozeEnabled)
@@ -35,8 +35,9 @@ function Fixture({
     TooltipProvider,
     null,
     createElement('output', null, selection),
+    createElement('input', { 'aria-label': 'Filter mail' }),
     createElement(OrganiseToolbar, {
-      controls: organise.controls.filter((control) => control.name.toLowerCase() === kind),
+      controls: organise.controls.filter((control) => control.id === kind),
     }),
     organise.picker &&
       createElement(OrganisePicker, {
@@ -95,6 +96,34 @@ afterEach(async () => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.unstubAllEnvs()
+})
+
+it('moves the selected Thread to Trash with Backspace outside text fields', async () => {
+  const organise = vi.fn(async () => 'trash-mutation')
+  vi.stubGlobal('amc', { organise })
+  await act(async () => root.render(createElement(Fixture, { kind: 'trash' })))
+  const control = button('Move to Trash')
+  const input = document.querySelector('input')
+  if (!input) throw new Error('Missing filter input')
+  const press = async (target: HTMLElement, key: string) => {
+    const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })
+    await act(async () => {
+      target.focus()
+      target.dispatchEvent(event)
+    })
+    return event.defaultPrevented
+  }
+
+  expect(await press(input, 'Backspace')).toBe(false)
+  expect(await press(control, '#')).toBe(false)
+  expect(organise).not.toHaveBeenCalled()
+  expect(await press(control, 'Backspace')).toBe(true)
+  expect(organise).toHaveBeenCalledExactlyOnceWith({
+    kind: 'trash',
+    threadId: thread.id,
+    value: true,
+  })
+  expect(control.getAttribute('aria-keyshortcuts')).toBe('Backspace')
 })
 
 describe('Organise picker', () => {

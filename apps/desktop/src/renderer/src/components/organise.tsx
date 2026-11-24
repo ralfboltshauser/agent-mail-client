@@ -24,6 +24,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { getAmc } from '@/lib/amc'
 import { failureText, recordCaughtFailure } from '@/lib/failure'
+import { mailShortcuts } from '@/lib/mail-shortcuts'
 import { ToolbarButton } from './toolbar-button'
 
 type Picker = {
@@ -146,7 +147,7 @@ export function useOrganise(
       controls.push({
         name: trashed ? 'Restore from Trash' : 'Move to Trash',
         id: 'trash',
-        key: '#',
+        key: mailShortcuts.trash,
         icon: trashed ? RotateCcw : Trash2,
         run: () =>
           void run(
