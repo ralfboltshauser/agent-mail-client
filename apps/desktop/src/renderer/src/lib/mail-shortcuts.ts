@@ -8,6 +8,7 @@ export const mailShortcuts = {
   handOff: 'shift+t',
   copyThreadReference: 'mod+shift+c',
   bucket: 'b',
+  trash: 'backspace',
   filterMail: '/',
   searchMail: 'mod+f',
 } as const
@@ -24,11 +25,13 @@ export const composeFieldShortcuts = {
 
 export function shortcutLabel(binding: string): string {
   if (binding === 'escape') return 'Esc'
+  if (binding === 'backspace') return '⌫'
   return binding.replace('mod+', '⌘').replace('shift+', '⇧').toUpperCase()
 }
 
 export function ariaShortcut(binding: string): string {
   if (binding === 'escape') return 'Escape'
+  if (binding === 'backspace') return 'Backspace'
   return binding
     .replace('mod+', 'Meta+')
     .replace('shift+', 'Shift+')

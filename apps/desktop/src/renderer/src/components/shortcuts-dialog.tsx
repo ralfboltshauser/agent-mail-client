@@ -3,7 +3,7 @@ import {
   copyThreadReferenceLabel,
   copyThreadReferenceShortcut,
 } from '@/features/mailbox/thread-reference'
-import { composeFieldShortcuts, shortcutLabel } from '@/lib/mail-shortcuts'
+import { composeFieldShortcuts, mailShortcuts, shortcutLabel } from '@/lib/mail-shortcuts'
 import { feedbackShortcut } from '../../../shared/feedback'
 import { systemViews } from './app-sidebar'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
@@ -86,7 +86,7 @@ export function ShortcutsDialog({
         ['Archive', 'E'],
         ['Filter out this Thread', '! (Shift+1)'],
         ...(snoozeEnabled ? [['Snooze', 'H']] : []),
-        ['Trash', '#'],
+        ['Trash', shortcutLabel(mailShortcuts.trash)],
         ['Toggle star', 'S'],
         ['Mark read / unread', 'U / ⇧U'],
         ['Label', 'L'],

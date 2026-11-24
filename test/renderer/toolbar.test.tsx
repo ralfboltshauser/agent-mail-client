@@ -21,6 +21,10 @@ it('exposes mailbox toolbar actions and their bindings on hover and focus', asyn
   expect(copy.getAttribute('aria-keyshortcuts')).toBe('Meta+Shift+C')
   expect(copy.textContent).toBe('')
 
+  const trash = actions.getByRole('button', { name: 'Move to Trash' })
+  act(() => trash.focus())
+  expectHint(trash, 'Move to Trash', '⌫')
+
   const bucket = actions.getByRole('button', { name: 'Bucket: Reply' })
   act(() => bucket.focus())
   expectHint(bucket, 'Choose a Bucket · Current: Reply', 'B')
