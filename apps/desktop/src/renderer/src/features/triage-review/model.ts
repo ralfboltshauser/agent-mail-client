@@ -7,7 +7,6 @@ import type {
   TriageCardId,
   TriageQueuePage,
 } from '@amc/protocol'
-import type { z } from 'zod'
 import { failureText } from '@/lib/failure'
 import type { ReviewOrganiseAction, ThreadWithMessages } from '../../../../shared/api'
 
@@ -20,7 +19,7 @@ export type Preview = Candidate & {
 export type Decision =
   | { kind: 'sender'; input: SenderDecision }
   | { kind: 'filter'; input: FilterReviewInput }
-  | { kind: 'bucket'; input: BucketReviewInput | z.infer<typeof BucketByIdReviewInput> }
+  | { kind: 'bucket'; input: BucketReviewInput | BucketByIdReviewInput }
   | { kind: 'organise'; input: Exclude<ReviewOrganiseAction, { kind: 'undo' }> }
   | { kind: 'skip' }
   | { kind: 'reply'; deadline: number; draftId: string }

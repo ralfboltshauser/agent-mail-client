@@ -36,7 +36,6 @@ import type {
   TriageQueueRequest,
   VersionedDraft,
 } from '@amc/protocol'
-import type { z } from 'zod'
 import type { FailureDetails } from './failure'
 
 import type { FeedbackApi } from './feedback'
@@ -184,9 +183,7 @@ export interface DesktopSenderAvatarResults {
 
 export interface ReviewApi {
   reviewPairing(): Promise<string>
-  reviewBucket(
-    input: BucketReviewInput | z.infer<typeof BucketByIdReviewInput>,
-  ): Promise<OwnerActionStatus>
+  reviewBucket(input: BucketReviewInput | BucketByIdReviewInput): Promise<OwnerActionStatus>
   reviewOrganise(input: ReviewOrganiseAction, id: string, messageId?: string): Promise<string>
   reviewOrganiseStatus(id: string): Promise<ReviewOrganiseStatus | null>
 }
@@ -257,9 +254,9 @@ export interface AmcApi {
   status(): Promise<SyncStatus>
   syncNow(): Promise<void>
   setBucket(input: BucketInput): Promise<void>
-  setBucketById(input: z.infer<typeof BucketByIdInput>): Promise<void>
+  setBucketById(input: BucketByIdInput): Promise<void>
   bucketCatalog?(): Promise<BucketCatalog | null>
-  manageBuckets?(edit: z.infer<typeof BucketCatalogEdit>): Promise<BucketCatalog>
+  manageBuckets?(edit: BucketCatalogEdit): Promise<BucketCatalog>
   organise(action: OrganiseAction): Promise<string>
   organiseErrors(): Promise<OrganiseNotice[]>
   agentActivity(before?: number): Promise<{ actions: AgentAction[]; nextBefore: number | null }>

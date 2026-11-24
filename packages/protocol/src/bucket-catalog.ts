@@ -70,6 +70,7 @@ export const BucketByIdInput = z.strictObject({
   bucketId: BucketId.nullable(),
   reason: BucketReason,
 })
+export type BucketByIdInput = z.infer<typeof BucketByIdInput>
 export const OwnerBucketByIdInput = BucketByIdInput.extend({
   ownerReason: OwnerReason.optional(),
   clientActionId: z.uuid().optional(),
@@ -88,6 +89,7 @@ export const BucketByIdReviewInput = OwnerBucketByIdInput.extend({
     })
     .optional(),
 })
+export type BucketByIdReviewInput = z.infer<typeof BucketByIdReviewInput>
 export const BucketAssignmentById = BucketAssignment.omit({ bucket: true }).extend({
   bucketId: BucketId,
 })
@@ -97,3 +99,4 @@ export const BucketCatalogEdit = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('update'), id: CustomBucketId, input: UpdateBucket }),
   z.object({ kind: z.literal('reorder'), input: ReorderBuckets }),
 ])
+export type BucketCatalogEdit = z.infer<typeof BucketCatalogEdit>
