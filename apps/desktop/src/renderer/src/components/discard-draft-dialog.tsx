@@ -1,7 +1,6 @@
 import type { DiscardDraftResult } from '@amc/protocol'
 import { useRef, useState } from 'react'
-import { toast } from 'sonner'
-import { failureText } from '@/lib/failure'
+import { discardDraftWithFeedback } from '@/lib/discard-draft'
 import { Button } from './ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from './ui/dialog'
 
@@ -23,19 +22,7 @@ export function DiscardDraftDialog({
     submitting.current = true
     setPending(true)
     try {
-      const result = await onConfirm()
-      if ('absent' in result) {
-        toast.info('This draft is already gone. It may have been sent or discarded elsewhere.')
-      } else {
-        const message = result.providerRemoved
-          ? `Draft discarded. The matching copy is gone from ${result.providerRemoved}.`
-          : 'Draft discarded'
-        if (result.warning) toast.warning(message, { description: result.warning })
-        else toast.success(message)
-      }
-      onClose()
-    } catch (cause) {
-      toast.error('Could not discard draft', { description: failureText(cause) })
+      if (await discardDraftWithFeedback(onConfirm)) onClose()
     } finally {
       submitting.current = false
       setPending(false)

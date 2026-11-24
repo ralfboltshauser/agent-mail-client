@@ -1,9 +1,10 @@
 import { FileText, Trash2 } from 'lucide-react'
-import { memo, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { DiscardDraftDialog } from '@/components/discard-draft-dialog'
 import { MailLoading, MailState } from '@/components/mail-state'
 import { Button } from '@/components/ui/button'
 import { getAmc } from '@/lib/amc'
+import { discardDraftWithFeedback } from '@/lib/discard-draft'
 import { DeliveryView } from './delivery-view'
 import { useDeliveryPoll } from './use-delivery-poll'
 
@@ -33,6 +34,54 @@ export function DraftsView({
   const { rows, error } = useDeliveryPoll(loadDrafts, 1500)
   const [discard, setDiscard] = useState<Draft | null>(null)
   const [discarded, setDiscarded] = useState<string[]>([])
+  const draftList = useRef<HTMLDivElement>(null)
+  const discarding = useRef(new Set<string>())
+
+  useEffect(() => {
+    const list = draftList.current
+    if (!list) return
+    // This cue only changes the icon style. Keep modifier events out of the row render path.
+    const updateCommand = (event: KeyboardEvent) =>
+      list.toggleAttribute('data-command-held', event.metaKey)
+    const clearCommand = () => list.removeAttribute('data-command-held')
+    window.addEventListener('keydown', updateCommand, true)
+    window.addEventListener('keyup', updateCommand, true)
+    window.addEventListener('blur', clearCommand)
+    return () => {
+      window.removeEventListener('keydown', updateCommand, true)
+      window.removeEventListener('keyup', updateCommand, true)
+      window.removeEventListener('blur', clearCommand)
+    }
+  }, [])
+
+  const discardDraft = useCallback(
+    async (draft: Draft) => {
+      const result = await getAmc().discardDraft(draft.id, draft.revision)
+      setDiscarded((ids) => [...ids, draft.id])
+      onDiscarded(draft.id)
+      return result
+    },
+    [onDiscarded],
+  )
+
+  const requestDiscard = useCallback(
+    async (draft: Draft, immediate: boolean) => {
+      const pending = discarding.current
+      if (pending.has(draft.id)) return
+      if (!immediate) {
+        setDiscard(draft)
+        return
+      }
+      pending.add(draft.id)
+      try {
+        await discardDraftWithFeedback(() => discardDraft(draft))
+      } finally {
+        pending.delete(draft.id)
+      }
+    },
+    [discardDraft],
+  )
+
   const drafts = rows?.filter(
     (draft) => (!accountId || draft.accountId === accountId) && !discarded.includes(draft.id),
   )
@@ -45,19 +94,22 @@ export function DraftsView({
           Messages you start writing appear here.
         </MailState>
       )}
-      {drafts?.map((draft) => (
-        <DraftRow key={draft.id} draft={draft} onOpen={onOpen} onDiscard={setDiscard} />
-      ))}
+      <div
+        ref={draftList}
+        className="group/drafts"
+        onPointerEnter={(event) =>
+          event.currentTarget.toggleAttribute('data-command-held', event.metaKey)
+        }
+      >
+        {drafts?.map((draft) => (
+          <DraftRow key={draft.id} draft={draft} onOpen={onOpen} onDiscard={requestDiscard} />
+        ))}
+      </div>
       {discard && (
         <DiscardDraftDialog
           subject={discard.subject}
           onClose={() => setDiscard(null)}
-          onConfirm={async () => {
-            const result = await getAmc().discardDraft(discard.id, discard.revision)
-            setDiscarded((ids) => [...ids, discard.id])
-            onDiscarded(discard.id)
-            return result
-          }}
+          onConfirm={() => discardDraft(discard)}
         />
       )}
     </DeliveryView>
@@ -71,7 +123,7 @@ const DraftRow = memo(function DraftRow({
 }: {
   draft: Draft
   onOpen: (id: string) => void
-  onDiscard: (draft: Draft) => void
+  onDiscard: (draft: Draft, immediate: boolean) => Promise<void>
 }) {
   const subject = draft.subject || '(No subject)'
   return (
@@ -93,10 +145,10 @@ const DraftRow = memo(function DraftRow({
         size="icon-sm"
         variant="ghost"
         aria-label={`Discard draft: ${subject}`}
-        title="Discard draft"
-        onClick={() => onDiscard(draft)}
+        title="Discard draft (⌘-click to discard immediately)"
+        onClick={(event) => void onDiscard(draft, event.metaKey)}
       >
-        <Trash2 />
+        <Trash2 className="group-data-[command-held]/drafts:text-red-700 dark:group-data-[command-held]/drafts:text-red-400" />
       </Button>
     </div>
   )

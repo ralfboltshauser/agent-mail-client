@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import type { OutboxItem, VersionedDraft } from '@amc/protocol'
+import type { DiscardDraftResult, OutboxItem, VersionedDraft } from '@amc/protocol'
 import { act, createElement, Profiler, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { toast } from 'sonner'
@@ -355,6 +355,74 @@ it('retains focused draft rows and skips commits for equal replies and repeated 
   expect(container.textContent).toContain('Edited draft')
   expect(formatDate).toHaveBeenCalledTimes(1)
   expect(document.activeElement).toBe(open)
+})
+
+it('arms draft discard while Command is held without committing or replacing the rows', async () => {
+  vi.stubGlobal('amc', { composeDrafts: vi.fn().mockResolvedValue([draft]) })
+  const commits = await mount(
+    createElement(DraftsView, { accountId: null, onOpen: vi.fn(), onDiscarded: vi.fn() }),
+  )
+  const trash = container.querySelector<HTMLButtonElement>('[aria-label^="Discard draft:"]')
+  if (!trash) throw new Error('Missing draft discard button')
+  trash.focus()
+  const armed = () => trash.closest('[data-command-held]')
+  const commandDown = () =>
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Meta', metaKey: true }))
+
+  await act(async () => commandDown())
+  expect(armed()).toBeTruthy()
+  await act(async () => window.dispatchEvent(new KeyboardEvent('keyup', { key: 'Meta' })))
+  expect(armed()).toBeNull()
+  await act(async () => commandDown())
+  expect(armed()).toBeTruthy()
+  await act(async () => window.dispatchEvent(new Event('blur')))
+  expect(armed()).toBeNull()
+  expect(document.activeElement).toBe(trash)
+  expect(commits).not.toHaveBeenCalled()
+})
+
+it('discards on Command-click, preserves the row on failure, and allows retry', async () => {
+  let rejectFirst!: (reason: Error) => void
+  const first = new Promise<DiscardDraftResult>((_, reject) => {
+    rejectFirst = reject
+  })
+  const warning = { deleted: draft.id, warning: 'The provider copy could not be checked.' }
+  const discardDraft = vi.fn().mockReturnValueOnce(first).mockResolvedValueOnce(warning)
+  const composeDrafts = vi.fn().mockResolvedValue([draft])
+  vi.stubGlobal('amc', { composeDrafts, discardDraft })
+  const error = vi.spyOn(toast, 'error')
+  const warn = vi.spyOn(toast, 'warning')
+  const onDiscarded = vi.fn()
+  const onOpen = vi.fn()
+  await mount(createElement(DraftsView, { accountId: null, onOpen, onDiscarded }))
+  const trash = container.querySelector<HTMLButtonElement>('[aria-label^="Discard draft:"]')
+  if (!trash) throw new Error('Missing draft discard button')
+  const commandClick = () =>
+    trash.dispatchEvent(new MouseEvent('click', { bubbles: true, metaKey: true }))
+
+  await act(async () => {
+    commandClick()
+    commandClick()
+    trash.click()
+  })
+  expect(discardDraft).toHaveBeenCalledExactlyOnceWith(draft.id, draft.revision)
+  expect(document.querySelector('[role="dialog"]')).toBeNull()
+  expect(container.contains(trash)).toBe(true)
+  await act(async () => rejectFirst(new Error('Draft revision changed')))
+  expect(error).toHaveBeenCalledWith('Could not discard draft', expect.anything())
+  expect(onDiscarded).not.toHaveBeenCalled()
+  expect(container.contains(trash)).toBe(true)
+
+  composeDrafts.mockResolvedValueOnce([{ ...draft, revision: draft.revision + 1 }])
+  await advance(1500)
+  await act(async () => commandClick())
+  expect(discardDraft).toHaveBeenNthCalledWith(2, draft.id, draft.revision + 1)
+  expect(warn).toHaveBeenCalledWith('Draft discarded', { description: warning.warning })
+  expect(onDiscarded).toHaveBeenCalledExactlyOnceWith(draft.id)
+  expect(onOpen).not.toHaveBeenCalled()
+  expect(document.querySelector('[role="dialog"]')).toBeNull()
+  await advance(1500)
+  expect(container.textContent).toContain('No saved drafts')
 })
 
 it('waits for a slow poll and recovers from an initial failure without a false empty result', async () => {
