@@ -303,8 +303,10 @@ describe('amc triage', () => {
     const reason = 'Context: The print shop needs a decision. | Action: Approve the proof.'
     fixture({ modern: true, expectedReason: reason })
     const results = await runTriage(config, 'a', false, signal(), async ({ prompt }) => {
-      expect(prompt).toMatch(/For Update, Later, and\s+When I have time, use only `Context: …`/)
-      expect(prompt).toMatch(/For Reply, Action,\s+and Follow-up, use `Context: … \| Action: …`/)
+      expect(prompt).toMatch(
+        /For Update, Later,\s+When I have time, and Newsletters, use only `Context: …`/,
+      )
+      expect(prompt).toContain('For Reply, Action, and Follow-up, use `Context: … | Action: …`')
       expect(prompt).not.toContain('Synthetic example')
       expect(prompt).not.toContain('Synthetic owner preference')
       expect(prompt).not.toContain('"chosen":"Later"')
@@ -327,19 +329,19 @@ describe('amc triage', () => {
       const { submit, setBucket, revoke } = fixture({ decisionLog: true, dryRun })
       const outputs = {
         bucket: {
-          labelId: 'bucket.reply',
+          labelId: 'bucket.newsletters',
           confidence: 'low',
           matchedRuleRevisionId: null,
           displayReason: dryRun
             ? 'Context: The print shop confirmed the delivery date.'
-            : 'Context: The print shop needs a decision. | Action: Approve the proof.',
+            : 'Context: The weekly studio digest covers changes to the print schedule.',
         },
         filter: { labelId: 'filter.filtered', confidence: 'high', matchedRuleRevisionId: null },
         protection: 'billing',
       }
       const result = await runTriage(config, 'a', dryRun, signal(), async (request) => {
         expect(request.prompt).toMatch(
-          /For Update, Later, and\s+When I have time, use only `Context: …`/,
+          /For Update, Later, When I have time, and Newsletters, use only\s+`Context: …`/,
         )
         expect(request.prompt).toMatch(
           /For Reply, Action,\s+and Follow-up, use `Context: … \| Action: …`/,

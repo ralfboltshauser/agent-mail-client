@@ -31,6 +31,7 @@ const NEXT_STEP_LABEL: Record<Bucket, string | null> = {
   Update: null,
   Later: null,
   'When I have time': null,
+  Newsletters: null,
 }
 
 function BucketCard({ bucket, reason }: { bucket: Bucket; reason: string }) {

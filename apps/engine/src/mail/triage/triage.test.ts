@@ -289,8 +289,8 @@ it('rejects raced model writes and restores an assignment and prompt eligibility
       intent: 'review',
       threadId: tid,
       expectedRevision: current,
-      bucket: 'Reply',
-      reason: 'Owner chose Reply',
+      bucket: 'Newsletters',
+      reason: 'Owner chose Newsletters',
       clientActionId: actionId,
     }
     expect((await http('/v1/bucket', 'PUT', review)).status).toBe(409)
@@ -302,7 +302,13 @@ it('rejects raced model writes and restores an assignment and prompt eligibility
     expect(await agent.set(tid, current)).toMatchObject({ updated: false })
     const restarted = openDatabase(path)
     try {
-      expect(effective(restarted, 'a')).toEqual(['bucket.reply', 'bucket.clear'])
+      expect(queries.threadSummary(tid)?.bucket).toMatchObject({ bucket: 'Newsletters' })
+      expect(effective(restarted, 'a')).toEqual(['bucket.newsletters', 'bucket.clear'])
+      expect(
+        restarted
+          .prepare('SELECT taxonomy_version FROM triage_event WHERE action_id = ?')
+          .get(actionId),
+      ).toEqual({ taxonomy_version: 2 })
       expect(effective(restarted, 'b')).toEqual([])
       expect((await agent.list()).examples).toEqual([])
       expect(await (await http(`/v1/owner-actions/${actionId}/undo`, 'POST')).json()).toMatchObject(

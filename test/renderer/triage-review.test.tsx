@@ -435,7 +435,7 @@ it('keeps a grouped sender at the same position after a representative Bucket co
 })
 
 it('updates the Sender row on an open low-confidence card after replica sync', async () => {
-  const { adapter, low, setCards } = await fixture()
+  const { adapter, low, setCards, smart } = await fixture()
   const detail = await adapter.api.thread(low.threadId)
   if (!detail) throw new Error('Missing synthetic Thread')
   const readThread = adapter.api.thread.getMockImplementation()
@@ -462,6 +462,24 @@ it('updates the Sender row on an open low-confidence card after replica sync', a
   expect(within(card).queryByRole('button', { name: /^Accept sender/ })).toBeNull()
   expect(within(review()).getByRole('article')).toBe(card)
   expect(document.activeElement).toBe(heading)
+
+  const sender = within(card).getByRole('group', { name: 'Sender screening' })
+  const thread = within(card).getByRole('group', { name: 'This thread' })
+  const buckets = within(thread).getByRole('group', { name: 'Keep in Inbox · Choose a bucket' })
+  expect(within(sender).getByText('Accepted')).toBeTruthy()
+  expect(within(sender).getByRole('button', { name: /^Block sender/ })).toBeTruthy()
+  expect(within(sender).queryByRole('button', { name: /^Filter out/ })).toBeNull()
+  expect(within(thread).getByText('Suggested: Filter out')).toBeTruthy()
+  expect(within(thread).getByRole('button', { name: /^Filter out/ })).toBeTruthy()
+  expect(within(card).queryByText('Low confidence')).toBeNull()
+  expect(within(buckets).getByRole('button', { name: 'Newsletters 7' })).toBeTruthy()
+  await press('7', within(review()).getByRole('heading', { name: 'Triage Inbox' }))
+  expect(smart.reviewBucket).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ intent: 'review', threadId: low.threadId, bucket: 'Newsletters' }),
+  )
+  expect(smart.reviewFilter).not.toHaveBeenCalled()
+  expect(smart.decideSender).not.toHaveBeenCalled()
+  expect(within(review()).getByText('All clear')).toBeTruthy()
 })
 
 it.each(['Accept', 'Block', 'already applied', 'revision conflict'] as const)(

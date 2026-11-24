@@ -482,7 +482,10 @@ program
 program
   .command('bucket')
   .argument('<thread>', 'Thread id')
-  .argument('<bucket>', 'Reply, Action, Follow-up, Update, Later, "When I have time", or clear')
+  .argument(
+    '<bucket>',
+    'Reply, Action, Follow-up, Update, Later, "When I have time", Newsletters, or clear',
+  )
   .option('--reason <text>', 'one-line reason', 'Set manually')
   .option('--review <revision>', 'record an owner correction at this Thread revision')
   .option('--action-id <id>', 'reuse this review action UUID on retry')

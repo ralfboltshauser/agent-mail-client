@@ -60,11 +60,13 @@ it('starts with three entries in Other mail and preserves collapse across accoun
   expect(byId('thread-4')?.textContent).toContain('Triage: Update')
   expect(byId('thread-6')?.textContent).toContain('Triage: When I have time')
   // Move a fourth thread into Other mail.
-  await act(async () => api.setBucket({ threadId: 'thread-8', bucket: 'Later', reason: 'Update' }))
+  await act(async () =>
+    api.setBucket({ threadId: 'thread-8', bucket: 'Newsletters', reason: 'Weekly digest' }),
+  )
   expect(header('Other mail').textContent).toBe('Other mail4')
   expect(rowIds()).not.toContain('thread-8')
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Show all' })))
-  expect(rowIds()).toContain('thread-8')
+  expect(byId('thread-8')?.textContent).toContain('Triage: Newsletters')
 
   const survivor = byId('thread-3')
   await act(async () => fireEvent.click(header('Other mail')))

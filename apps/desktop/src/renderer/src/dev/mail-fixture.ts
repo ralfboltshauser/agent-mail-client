@@ -3,6 +3,7 @@ import {
   actionLabels,
   applyLabelPatch,
   BUCKETS,
+  type Bucket,
   type ComposeDraft,
   DRAFT_MISSING,
   type OutboxItem,
@@ -34,6 +35,14 @@ export function createMailFixture(scenario: string) {
     backfill: { phase: 'done', fetched: 8, estimatedTotal: 8 },
   }
   const self = { name: account.displayName, address: account.address }
+  const sampleBuckets: Bucket[] = [
+    'Reply',
+    'Action',
+    'Follow-up',
+    'Update',
+    'Later',
+    'When I have time',
+  ]
   const sample = [
     ['Mina Park', 'Field Notes · print proof', 'Could you approve the warm grey before Thursday?'],
     ['Noah Ellis', 'Sunday at the studio', 'I booked the north room from 10 to 12.'],
@@ -67,7 +76,7 @@ export function createMailFixture(scenario: string) {
           snoozedUntil: null,
           muted: false,
           bucket: {
-            bucket: BUCKETS[i % BUCKETS.length] ?? 'Later',
+            bucket: sampleBuckets[i % sampleBuckets.length] ?? 'Later',
             reason:
               i === 0 ? 'Mina needs your approval on the print proof before Thursday.' : snippet,
             setBy: 'Studio Agent',

@@ -44,7 +44,7 @@ plain-language instruction in a versioned **Preference policy**.
 | Axis | Stable decision labels | Scope |
 | --- | --- | --- |
 | Filter | `filter.filtered`, `filter.keep` | One incoming message. Filtered is the displayed AMC Label. Restore means Keep in Inbox. |
-| Bucket | `bucket.reply`, `bucket.action`, `bucket.follow_up`, `bucket.update`, `bucket.later`, `bucket.when_i_have_time`, `bucket.clear` | Thread judgment against its current incoming message when one exists. Map the existing protocol's Bucket names at the boundary. |
+| Bucket | `bucket.reply`, `bucket.action`, `bucket.follow_up`, `bucket.update`, `bucket.later`, `bucket.when_i_have_time`, `bucket.newsletters`, `bucket.clear` | Thread judgment against its current incoming message when one exists. Map the existing protocol's Bucket names at the boundary. |
 | Sender | `sender.accept`, `sender.block`, `sender.clear` | Normalized full Sender within one Account. Clear removes the explicit rule. Block uses Screened out. |
 | Attention, reserved | `attention.interrupt`, `attention.quiet` | One incoming message. Record no new attention decisions until [#10](https://github.com/ralfboltshauser/agent-mail-client/issues/10) defines that product contract. |
 

@@ -248,7 +248,10 @@ export function TriageReview({
       return
     }
     if (event.key === ' ' && event.target.closest('button, a, summary, [role="button"]')) return
-    if (!['a', 'x', '1', '2', '3', '4', '5', '6', 'e', 'f', 's', 'r', ' ', 'u'].includes(event.key))
+    if (
+      !(event.key.length === 1 && BUCKETS[Number(event.key) - 1]) &&
+      !['a', 'x', 'e', 'f', 's', 'r', ' ', 'u'].includes(event.key)
+    )
       return
     event.preventDefault()
     if (!event.repeat) run(event.key)

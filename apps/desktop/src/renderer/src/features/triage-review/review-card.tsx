@@ -33,7 +33,7 @@ function CardPreview({ card, controls }: { card: Preview; controls: ReviewContro
         variant="outline"
         size="sm"
         aria-disabled={!!unavailable}
-        className="justify-between aria-disabled:opacity-55"
+        className="h-auto min-h-8 max-w-full justify-between whitespace-normal py-1 text-left aria-disabled:opacity-55"
         title={unavailable}
         onClick={() => controls.run(key)}
       >
@@ -57,14 +57,15 @@ function CardPreview({ card, controls }: { card: Preview; controls: ReviewContro
         </div>
       </div>
       <section className="grid gap-2 break-words">
-        <p className="text-xs font-medium text-muted-foreground">
-          {card.id.kind === 'sender' ? 'New sender · Representative Thread' : 'Low confidence'}
-        </p>
+        {(card.id.kind === 'sender' || !card.suggestFilter) && (
+          <p className="text-xs font-medium text-muted-foreground">
+            {card.id.kind === 'sender' ? 'New sender · Sample thread' : 'Bucket needs review'}
+          </p>
+        )}
         <h2 id={subjectId} className="text-xl font-semibold tracking-tight">
           {message?.subject || thread.subject || '(no subject)'}
         </h2>
         <p className="line-clamp-4 text-sm leading-relaxed">{message?.snippet || thread.snippet}</p>
-        {card.suggestFilter && <p className="text-sm font-medium">Suggested: Filter out</p>}
         {card.id.kind === 'thread' && !card.suggestFilter && (
           <p className="text-sm text-muted-foreground">
             {thread.bucket?.bucket} · {card.reason}
@@ -84,29 +85,53 @@ function CardPreview({ card, controls }: { card: Preview; controls: ReviewContro
           </details>
         )}
       </section>
-      <fieldset className="grid gap-2">
-        <legend className="mb-2 text-sm font-medium">Sender</legend>
+      <fieldset
+        aria-labelledby={`${subjectId}-sender`}
+        className="grid gap-2 rounded-lg border bg-muted/40 p-3 sm:p-4"
+      >
+        <h3 id={`${subjectId}-sender`} className="text-sm font-semibold">
+          Sender screening
+        </h3>
+        <p className="text-xs text-muted-foreground">
+          Applies to current and future Inbox mail from this address in this account.
+        </p>
         <div className="flex flex-wrap items-center gap-2">
           {controls.senderDecision && (
-            <span className="text-sm font-medium">
+            <span className="rounded-md bg-accent px-2 py-1 text-xs font-medium text-accent-foreground">
               {controls.senderDecision === 'accept' ? 'Accepted' : 'Blocked'}
             </span>
           )}
-          {controls.senderDecision !== 'accept' && choice('a', 'Accept sender · Keep in Inbox')}
+          {controls.senderDecision !== 'accept' && choice('a', 'Accept sender')}
           {controls.senderDecision !== 'block' &&
             choice('x', 'Block sender · Move to Screened out')}
         </div>
       </fieldset>
-      <fieldset className="grid gap-2">
-        <legend className="mb-2 text-sm font-medium">This Thread</legend>
+      <fieldset
+        aria-labelledby={`${subjectId}-thread`}
+        className="grid gap-3 rounded-lg border p-3 sm:p-4"
+      >
+        <div className="grid gap-1">
+          <h3 id={`${subjectId}-thread`} className="text-sm font-semibold">
+            This thread
+          </h3>
+          {card.suggestFilter && <p className="text-sm font-medium">Suggested: Filter out</p>}
+          <p className="text-xs text-muted-foreground">
+            Filter out moves the thread’s Inbox mail to Filtered.
+          </p>
+        </div>
         <div className="flex flex-wrap gap-2">
-          {choice('e', 'Archive')}
           {choice('f', 'Filter out')}
+          {choice('e', 'Archive')}
           {choice('s', 'Snooze')}
           {choice('r', 'Reply')}
         </div>
-        <fieldset className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-          <legend className="sr-only">Choose a Bucket</legend>
+        <fieldset
+          aria-labelledby={`${subjectId}-bucket`}
+          className="grid grid-cols-2 gap-2 border-t pt-3 sm:grid-cols-3"
+        >
+          <h4 id={`${subjectId}-bucket`} className="col-span-full text-sm font-medium">
+            Keep in Inbox · Choose a bucket
+          </h4>
           {BUCKETS.map((bucket, i) => choice(String(i + 1), bucket))}
         </fieldset>
       </fieldset>

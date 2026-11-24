@@ -49,7 +49,7 @@ A Thread state in which new replies skip both the Inbox and Interrupts.
 _Avoid_: ignore, silence
 
 **Bucket**:
-The one place triage puts a Thread, named by what the Thread asks of the owner: Reply, Action, Follow-up, Update, Later, or When I have time.
+The one place triage puts a Thread based on how the owner will handle it. A Thread can go in Reply, Action, Follow-up, Update, Later, When I have time, or Newsletters.
 _Avoid_: category, priority, folder
 
 ### Agents and attention
