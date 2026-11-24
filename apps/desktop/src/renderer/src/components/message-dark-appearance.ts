@@ -5,6 +5,7 @@ type Paint = { background: RGB | null; originalInk: string; ink: string }
 const CANVAS: RGB = [29, 29, 29]
 const LIGHT_INK: RGB = [226, 226, 226]
 const BORDER_SIDES = ['top', 'right', 'bottom', 'left'] as const
+const FRAME_SIZING_STYLES = ['zoom', 'overflow-y'] as const
 
 function readColor(value: string): Color | null {
   const match = /^rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*([\d.]+))?\)$/.exec(value)
@@ -46,26 +47,27 @@ function darkSurface(rgb: RGB) {
   return channels(rgb, (value) => Math.round(value * scale))
 }
 
-function composite({ rgb, alpha }: Color, behind: RGB | null) {
-  if (alpha === 1) return rgb
-  if (!behind) return null
+function composite({ rgb, alpha }: Color, behind: RGB) {
   return channels(rgb, (value, index) => value * alpha + behind[index] * (1 - alpha))
 }
 
 function readableInk(color: Color | null, background: RGB | null) {
-  if (!color || color.alpha !== 1 || !background || contrast(color.rgb, background) >= 4.5)
-    return null
+  if (!color || color.alpha === 0 || !background) return null
+  const { alpha } = color
+  const score = (rgb: RGB) => contrast(composite({ rgb, alpha }, background), background)
+  if (score(color.rgb) >= 4.5) return null
   if (!neutral(color.rgb)) {
     const tint = channels(color.rgb, (value) => Math.round(value * 0.45 + 140))
-    if (contrast(tint, background) >= 4.5) return tint
+    if (score(tint) >= 4.5) return cssColor(tint, alpha)
   }
-  if (contrast(LIGHT_INK, background) >= 4.5) return LIGHT_INK
+  if (score(LIGHT_INK) >= 4.5) return cssColor(LIGHT_INK, alpha)
   const white: RGB = [255, 255, 255]
   const black: RGB = [0, 0, 0]
-  return contrast(white, background) >= contrast(black, background) ? white : black
+  const best = score(white) >= score(black) ? white : black
+  return score(best) >= 4.5 ? cssColor(best, alpha) : null
 }
 
-/** Recolor solid HTML surfaces in the loaded frame. Restore only properties we changed. */
+/** Recolor solid HTML surfaces in the loaded frame and restore the sender's original styles. */
 export function applyMessageDarkAppearance(doc: Document) {
   const view = doc.defaultView
   if (!view) return
@@ -91,13 +93,15 @@ export function applyMessageDarkAppearance(doc: Document) {
       if (!surface) background = null
       else if (surface.alpha > 0) {
         const rgb = darkSurface(surface.rgb)
-        background = composite({ rgb, alpha: surface.alpha }, background)
+        background =
+          surface.alpha === 1
+            ? rgb
+            : background && composite({ rgb, alpha: surface.alpha }, background)
         if (rgb !== surface.rgb) changes.set('background-color', cssColor(rgb, surface.alpha))
       }
     }
 
-    const color = readableInk(readColor(css.color), background)
-    const ink = color ? cssColor(color) : css.color
+    const ink = readableInk(readColor(css.color), background) ?? css.color
     const inheritsChangedInk =
       parent && parent.ink !== parent.originalInk && css.color === parent.originalInk
     if (ink !== css.color || inheritsChangedInk) changes.set('color', ink)
@@ -118,16 +122,26 @@ export function applyMessageDarkAppearance(doc: Document) {
   // Read the original cascade before writing styles so one element cannot skew the next sample.
   const restore = updates.map(({ element, changes }) => {
     const { style } = element
-    const hadStyle = element.hasAttribute('style')
-    const previous = Array.from(changes.keys(), (name) => ({
+    const original = element.getAttribute('style')
+    const declaration = (name: string) => ({
       name,
       value: style.getPropertyValue(name),
       priority: style.getPropertyPriority(name),
-    }))
+    })
+    const sizing = element === root ? FRAME_SIZING_STYLES.map(declaration) : []
     for (const [name, value] of changes) style.setProperty(name, value, 'important')
     return () => {
-      for (const { name, value, priority } of previous) style.setProperty(name, value, priority)
-      if (!hadStyle && style.length === 0) element.removeAttribute('style')
+      // The zoom and overflow owned by useMessageFrame may change while dark appearance is active.
+      const resized = sizing
+        .map(({ name }) => declaration(name))
+        .filter((next, index) => {
+          const before = sizing[index]
+          return next.value !== before.value || next.priority !== before.priority
+        })
+      // Preserve shorthand variables and literal matches against [style] in the sender's CSS.
+      if (original === null) element.removeAttribute('style')
+      else element.setAttribute('style', original)
+      for (const { name, value, priority } of resized) style.setProperty(name, value, priority)
     }
   })
   return () => {

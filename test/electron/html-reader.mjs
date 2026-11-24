@@ -360,6 +360,8 @@ async function main() {
         const card = doc.getElementById('probe-dark-card')
         const cell = doc.getElementById('probe-light-cell')
         const gradient = doc.getElementById('probe-gradient')
+        const variable = doc.getElementById('probe-variable')
+        const translucent = doc.getElementById('probe-translucent')
         return {
           darkMedia: doc.defaultView.matchMedia('(prefers-color-scheme: dark)').matches,
           foreground: getComputedStyle(message).color,
@@ -370,6 +372,8 @@ async function main() {
             getComputedStyle(cell).backgroundColor,
           ],
           gradient: [getComputedStyle(gradient).color, getComputedStyle(gradient).backgroundImage],
+          variable: [variable.getAttribute('style'), getComputedStyle(variable).backgroundColor],
+          translucent: getComputedStyle(translucent).color,
         }
       })
     const lightColors = {
@@ -379,6 +383,8 @@ async function main() {
       card: ['rgb(255, 255, 255)', 'rgb(34, 34, 34)'],
       cell: ['rgb(17, 17, 17)', 'rgb(255, 255, 255)'],
       gradient: ['rgb(34, 34, 34)', 'linear-gradient(rgb(255, 255, 255), rgb(238, 238, 238))'],
+      variable: ['--card:#fff;background:var(--card);color:#222', 'rgb(255, 255, 255)'],
+      translucent: 'rgba(0, 0, 0, 0.8)',
     }
     await waitFor(() => run(() => document.documentElement.classList.contains('dark')), 'dark UI')
     assert.deepEqual(await messageColors(), lightColors, 'message colors in dark mode')
@@ -422,6 +428,12 @@ async function main() {
     assert.equal(adjusted.foreground, 'rgb(226, 226, 226)')
     assert.deepEqual(adjusted.card, lightColors.card, 'already dark colors are preserved')
     assert.deepEqual(adjusted.cell, ['rgb(226, 226, 226)', 'rgb(33, 33, 33)'])
+    assert.equal(
+      adjusted.variable[1],
+      'rgb(33, 33, 33)',
+      'CSS variables take part in the dark palette',
+    )
+    assert.equal(adjusted.translucent, 'rgba(226, 226, 226, 0.8)', 'translucent ink stays readable')
     assert.deepEqual(
       adjusted.gradient,
       lightColors.gradient,
@@ -448,8 +460,22 @@ async function main() {
       [true, true, beforeAppearance],
       'the inline header action preserves focus, document, and body position',
     )
-    await run(() => document.querySelector('button[aria-label="Show original colors"]').click())
+    await run(() => {
+      const rootStyle = document.querySelector('iframe').contentDocument.documentElement.style
+      rootStyle.setProperty('zoom', '1', 'important')
+      document.querySelector('button[aria-label="Show original colors"]').click()
+    })
     assert.deepEqual(await messageColors(), lightColors, 'original colors are restored')
+    assert.deepEqual(
+      await run(() => {
+        const rootStyle = document.querySelector('iframe').contentDocument.documentElement.style
+        const zoom = [rootStyle.getPropertyValue('zoom'), rootStyle.getPropertyPriority('zoom')]
+        rootStyle.removeProperty('zoom')
+        return zoom
+      }),
+      ['1', 'important'],
+      'restoration keeps frame sizing updates made while dark appearance was active',
+    )
     await waitFor(async () => {
       const painted = (await wc.capturePage(appearancePixel)).toBitmap()
       return painted[0] === 255 && painted[1] === 255 && painted[2] === 255

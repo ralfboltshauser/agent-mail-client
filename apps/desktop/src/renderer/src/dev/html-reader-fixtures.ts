@@ -63,6 +63,12 @@ export function htmlReaderFixture(id: string): string | null {
       </td></tr></table>
       <p id="probe-gradient" style="background-image:linear-gradient(white,#eee);color:#222">
         Tickets at the door.
+      </p>
+      <p id="probe-variable" style="--card:#fff;background:var(--card);color:#222">
+        Bring your ticket.
+      </p>
+      <p id="probe-translucent" style="background:#fff;color:rgba(0,0,0,.8)">
+        Doors open at 9:45.
       </p>`
     case 'thread-8:latest':
       return `<p>Paper mill newsletter</p>
