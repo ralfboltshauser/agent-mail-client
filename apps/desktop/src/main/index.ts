@@ -25,6 +25,10 @@ import type {
 } from '@amc/protocol'
 import {
   AdoptScreenedDestination,
+  BucketByIdInput,
+  BucketByIdReviewInput,
+  BucketCatalog,
+  BucketCatalogEdit,
   BucketInput,
   BucketReviewInput,
   DRAFT_CHANGED,
@@ -623,9 +627,12 @@ function registerIpc(logDirectory: string) {
     return true
   })
   handle('amc:triageQueue', (_event, query: unknown) => {
-    return requireEngine().get(`/v1/triage/queue?${queryString(TriageQueueQuery.parse(query))}`, {
-      signal: AbortSignal.timeout(10_000),
-    })
+    return requireEngine().get(
+      `/v1/triage/queue?${queryString({ ...TriageQueueQuery.parse(query), bucketCatalogVersion: '1' })}`,
+      {
+        signal: AbortSignal.timeout(10_000),
+      },
+    )
   })
   handle('amc:reviewPairing', () => requireEngine().pairingScope)
   handle('amc:reviewBucket', async (_event, input: unknown) => {
@@ -633,7 +640,7 @@ function registerIpc(logDirectory: string) {
     const result = await requireEngine()
       .request('/v1/bucket', {
         method: 'PUT',
-        body: BucketReviewInput.parse(input),
+        body: BucketByIdReviewInput.or(BucketReviewInput).parse(input),
         signal: AbortSignal.timeout(10_000),
       })
       .catch(reportReviewRejection)
@@ -663,8 +670,35 @@ function registerIpc(logDirectory: string) {
     const result = await resolveSenderAvatars(connection, SenderAvatarResolve.parse(input), known)
     return connection === engine ? result : { rows: [] }
   })
+  handle('amc:bucketCatalog', () => openReplica().bucketCatalog)
+  handle('amc:manageBuckets', async (_event, input: unknown) => {
+    const edit = BucketCatalogEdit.parse(input)
+    const connection = requireEngine()
+    const currentReplica = openReplica()
+    const init = { signal: AbortSignal.timeout(10_000), body: edit.input }
+    const result =
+      edit.kind === 'create'
+        ? (
+            await connection.request<{ catalog: BucketCatalog }>('/v1/buckets', {
+              ...init,
+              method: 'POST',
+            })
+          ).catalog
+        : edit.kind === 'update'
+          ? await connection.request<BucketCatalog>(`/v1/buckets/${edit.id}`, {
+              ...init,
+              method: 'PATCH',
+            })
+          : await connection.request<BucketCatalog>('/v1/buckets/order', { ...init, method: 'PUT' })
+    if (connection !== engine || currentReplica !== replica)
+      throw new Error('Pairing changed while saving the Bucket.')
+    const catalog = BucketCatalog.parse(result)
+    if (currentReplica.saveBucketCatalog(catalog)) refreshMail()
+    sync?.pullInBackground()
+    return currentReplica.bucketCatalog ?? catalog
+  })
   handle('amc:setBucket', async (_event, input: unknown) => {
-    const body = BucketInput.parse(input)
+    const body = BucketByIdInput.or(BucketInput).parse(input)
     const loop = sync
     if (!loop) throw new Error('Resume sync to move Threads between Buckets')
     await requireEngine().request('/v1/bucket', {

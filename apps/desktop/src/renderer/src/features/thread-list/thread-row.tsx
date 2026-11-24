@@ -1,7 +1,7 @@
-import type { Bucket } from '@amc/protocol'
 import { Paperclip, Star } from 'lucide-react'
 import { memo } from 'react'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { threadBucketKey, useBucketName } from '@/data/buckets'
 import type { MailboxThreadQuery } from '@/features/mailbox/mailbox-queries'
 import { SenderAvatar } from '@/features/sender-avatar/sender-avatar'
 import { TriageBadge } from '@/features/triage-colors/triage-badge'
@@ -26,6 +26,7 @@ export const SubscribedThreadRow = memo(function SubscribedThreadRow({
   avatarVisible: boolean
 }) {
   const thread = useReplicaSelector(query, ({ data }) => data?.summaries.get(id) ?? fallback)
+  const bucket = useBucketName(threadBucketKey(thread))
   if (!thread) return null
   const inboxSender =
     thread.inboxSender?.accountId === thread.accountId ? thread.inboxSender : undefined
@@ -57,8 +58,8 @@ export const SubscribedThreadRow = memo(function SubscribedThreadRow({
       subject={thread.subject || '(no subject)'}
       snippet={thread.snippet}
       match={match}
-      bucket={thread.bucket?.bucket}
-      bucketReason={thread.bucket?.reason}
+      bucket={bucket}
+      bucketReason={(thread.bucketAssignment ?? thread.bucket)?.reason}
     />
   )
 })
@@ -78,7 +79,7 @@ interface RowProps {
   subject: string
   snippet: string
   match?: string
-  bucket?: Bucket
+  bucket?: string
   bucketReason?: string
 }
 

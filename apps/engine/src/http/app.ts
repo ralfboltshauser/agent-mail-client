@@ -16,6 +16,7 @@ import { latestBackup } from '../db/backups.ts'
 import { type Db, fileSize, schemaVersion } from '../db/database.ts'
 import { EngineDiagnostics } from '../db/diagnostics.ts'
 import { createLogger, type Logger } from '../log.ts'
+import { BucketError } from '../mail/bucket-catalog.ts'
 import { DraftError } from '../mail/drafts.ts'
 import type { Mutations } from '../mail/mutations.ts'
 import type { Outbox } from '../mail/outbox.ts'
@@ -91,6 +92,11 @@ export function createApp({
   )
 
   app.onError((error, c) => {
+    if (error instanceof BucketError)
+      return c.json(
+        { error: error.code, message: error.message, revision: error.revision },
+        error.status,
+      )
     if (error instanceof SenderError)
       return c.json({ error: 'sender', message: error.message }, error.status)
     if (error instanceof DraftError)
@@ -274,6 +280,7 @@ export function createApp({
         queries: mail.queries,
         drafts: mail.drafts,
         mutations,
+        ownerBucketManagement: c.req.path === MCP_CLI_OWNER_PATH,
       })
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,

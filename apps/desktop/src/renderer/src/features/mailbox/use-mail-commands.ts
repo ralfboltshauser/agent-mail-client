@@ -15,6 +15,7 @@ import {
   SquarePen,
   X,
 } from 'lucide-react'
+import { activeBuckets, bucketKey, useBucketCatalog } from '@/data/buckets'
 import { useHotkeys } from '@/hooks/use-hotkeys'
 import { copyDiagnostics } from '@/lib/diagnostics'
 import { mailShortcuts, shortcutLabel } from '@/lib/mail-shortcuts'
@@ -72,6 +73,7 @@ export function useMailCommands({
   reviewOpen: boolean
   openReview?: () => void
 }) {
+  const catalog = useBucketCatalog()
   const {
     bucketPickerOpen,
     setBucketPickerId,
@@ -165,13 +167,13 @@ export function useMailCommands({
                 },
               ]
             : []),
-          ...BUCKETS.map((bucket, index) => ({
-            name: `Move to Bucket: ${bucket}`,
+          ...activeBuckets(catalog).map((item, index) => ({
+            name: `Move to Bucket: ${item.name}`,
             icon: Layers,
-            shortcut: String(index + 1),
-            run: () => void setBucket(bucket),
+            ...(item.builtIn ? { shortcut: String(index + 1) } : {}),
+            run: () => void setBucket(bucketKey(item)),
           })),
-          ...(selected.bucket
+          ...(selected.bucket || selected.bucketAssignment
             ? [{ name: 'Clear Bucket', icon: X, run: () => void setBucket(null) }]
             : []),
         ]

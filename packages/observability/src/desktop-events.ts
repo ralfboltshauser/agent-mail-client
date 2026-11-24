@@ -125,6 +125,8 @@ const ipcChannels = [
   'amc:sendSettings',
   'amc:setAutoTriage',
   'amc:setBucket',
+  'amc:bucketCatalog',
+  'amc:manageBuckets',
   'amc:setDebugLogging',
   'amc:signature',
   'amc:stageComposeBody',

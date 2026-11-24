@@ -1,4 +1,5 @@
-import type { BucketInput, SyncChanges, SyncSnapshotPage } from '@amc/protocol'
+import { randomUUID } from 'node:crypto'
+import type { BucketCatalog, BucketInput, SyncChanges, SyncSnapshotPage } from '@amc/protocol'
 import { describe, expect, it, vi } from 'vitest'
 import { DAY_MS, issueToken, revokeToken } from '../auth/tokens.ts'
 import { BlobStore } from '../blobs.ts'
@@ -38,6 +39,87 @@ function setup() {
 }
 
 describe('sync protocol', () => {
+  it('syncs owner Bucket settings, protects old assignments, and keeps legacy cursors moving', async () => {
+    const { app, db, add, get } = setup()
+    add('custom', 1_000)
+    const owner = issueToken(db, {
+      kind: 'cli',
+      name: 'Fixture owner',
+      scopes: ['admin', 'organize', 'read'],
+    })
+    const agent = issueToken(db, {
+      kind: 'agent',
+      name: 'Fixture agent',
+      scopes: ['read', 'organize'],
+      expiresAt: Date.now() + DAY_MS,
+    })
+    const call = async (path: string, method = 'GET', body?: unknown, token = owner.secret) => {
+      const response = await app.request(path, {
+        method,
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      })
+      return { status: response.status, body: await response.json() }
+    }
+    const available = await call('/v1/buckets')
+    expect(available.body).toMatchObject({ revision: 0 })
+    expect((await call('/v1/buckets', 'GET', undefined, agent.secret)).status).toBe(403)
+    const since = (await get<{ modseq: number }>('/v1/sync/state')).body.modseq
+    const create = { name: 'Receipts', requestId: randomUUID() }
+    const created = await call('/v1/buckets', 'POST', create)
+    expect(created.status).toBe(201)
+    const {
+      definition: { id },
+      catalog,
+    } = created.body as { definition: { id: string }; catalog: BucketCatalog }
+    expect((await call('/v1/buckets', 'POST', create)).body).toEqual(created.body)
+    expect(
+      (await call('/v1/buckets', 'POST', { ...create, requestId: randomUUID(), name: 'receipts' }))
+        .status,
+    ).toBe(409)
+
+    const legacy = await get<SyncChanges>(`/v1/sync/changes?since=${since}&limit=1`)
+    expect(legacy.body).toMatchObject({ changes: [], modseq: since + 1, more: false })
+    expect(legacy.body.bucketCatalog).toBeUndefined()
+    expect(
+      (await call(`/v1/sync/changes?since=${since}&bucketRevision=0`)).body.bucketCatalog,
+    ).toEqual(catalog)
+    expect(
+      (
+        await call(
+          `/v1/sync/changes?since=${since}&bucketRevision=0`,
+          'GET',
+          undefined,
+          agent.secret,
+        )
+      ).body.bucketCatalog,
+    ).toBeUndefined()
+
+    const write = { threadId: 'a:t-custom', reason: 'Fixture receipt' }
+    expect((await call('/v1/bucket', 'PUT', { ...write, bucketId: id })).status).toBe(200)
+    const projection = await get<SyncSnapshotPage<'thread'>>('/v1/sync/snapshot?entity=thread')
+    expect(projection.body.rows[0]).toMatchObject({
+      bucket: null,
+      bucketAssignment: { bucketId: id },
+    })
+    expect((await call('/v1/bucket', 'PUT', { ...write, bucket: null })).status).toBe(409)
+    expect(
+      (await call('/v1/bucket', 'PUT', { ...write, bucket: 'Reply' }, agent.secret)).status,
+    ).toBe(409)
+    expect(
+      (await call(`/v1/buckets/${id}`, 'PATCH', { name: 'Purchases', expectedRevision: 0 })).status,
+    ).toBe(409)
+    expect(
+      (await call(`/v1/buckets/${id}`, 'PATCH', { name: 'Purchases', expectedRevision: 1 })).status,
+    ).toBe(200)
+    expect(
+      (await call(`/v1/buckets/${id}`, 'PATCH', { archived: true, expectedRevision: 2 })).status,
+    ).toBe(200)
+    expect((await call('/v1/bucket', 'PUT', { ...write, bucketId: id })).status).toBe(409)
+    expect(db.prepare("SELECT bucket FROM thread WHERE id = 'a:t-custom'").get()?.bucket).toBe(id)
+    expect((await call('/v1/bucket', 'PUT', { ...write, bucketId: null })).status).toBe(200)
+  })
+
   it('accepts an all-account mail check only from a paired owner with admin scope', async () => {
     const { app, db, checkMail } = setup()
     const post = (secret?: string) =>

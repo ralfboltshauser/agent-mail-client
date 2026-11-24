@@ -1,3 +1,4 @@
+import type { Bucket } from '@amc/protocol'
 import { act, fireEvent, screen, within } from '@testing-library/react'
 import { expect, it, vi } from 'vitest'
 import { deferred, rendererAdapter } from './adapter'
@@ -154,10 +155,8 @@ it('shows sections for the selected Bucket without replacing the Thread or messa
   const body = view.getByText(/Could you approve the warm grey/)
   const context = 'The printer sent a proof for Field Notes.'
   const action = 'Approve the warm grey by Thursday.'
-  const setBucket = (
-    bucket: Parameters<typeof adapter.api.setBucket>[0]['bucket'],
-    reason: string,
-  ) => act(async () => adapter.api.setBucket({ threadId: 'thread-1', bucket, reason }))
+  const setBucket = (bucket: Bucket | null, reason: string) =>
+    act(async () => adapter.api.setBucket({ threadId: 'thread-1', bucket, reason }))
 
   expect(
     view.getByText('Mina needs your approval on the print proof before Thursday.'),

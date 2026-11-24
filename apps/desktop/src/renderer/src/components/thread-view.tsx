@@ -1,6 +1,7 @@
-import { type Bucket, SNOOZED_LABEL } from '@amc/protocol'
+import { Bucket, SNOOZED_LABEL } from '@amc/protocol'
 import { CircleAlert, MailOpen, Star } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
+import { threadBucketKey, useBucketName } from '@/data/buckets'
 import { ThreadMessages } from '@/features/thread-reader/thread-messages'
 import { TriageBadge } from '@/features/triage-colors/triage-badge'
 import { fullDate } from '@/lib/format'
@@ -35,12 +36,13 @@ const NEXT_STEP_LABEL: Record<Bucket, string | null> = {
   Newsletters: null,
 }
 
-function BucketCard({ bucket, reason }: { bucket: Bucket; reason: string }) {
+function BucketCard({ bucket, reason }: { bucket: string; reason: string }) {
   const match = STRUCTURED_REASON.exec(reason)
   const context = match?.[1]?.trim()
   const action = match?.[2]?.trim()
   const structured = context && (match?.[2] === undefined || action)
-  const nextStepLabel = NEXT_STEP_LABEL[bucket]
+  const builtin = Bucket.safeParse(bucket)
+  const nextStepLabel = builtin.success ? NEXT_STEP_LABEL[builtin.data] : null
 
   return (
     <div className="mb-5 space-y-3 rounded-md bg-muted/65 px-4 py-3">
@@ -84,6 +86,7 @@ export function ThreadView({
   onEditDraft,
   draftEditingDisabled,
 }: Props) {
+  const bucketName = useBucketName(threadBucketKey(data?.thread))
   if (!data && unavailable) {
     return (
       <MailState icon={CircleAlert} title="Could not open this thread" error>
@@ -139,8 +142,11 @@ export function ThreadView({
             ))}
           </div>
         )}
-        {thread.bucket && (
-          <BucketCard bucket={thread.bucket.bucket} reason={thread.bucket.reason} />
+        {bucketName && (
+          <BucketCard
+            bucket={bucketName}
+            reason={(thread.bucketAssignment ?? thread.bucket)?.reason ?? ''}
+          />
         )}
         <div className="space-y-2.5">
           <ThreadMessages

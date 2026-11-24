@@ -1,9 +1,17 @@
-import { BUCKETS, type InboxSender, imapActionError, type Label } from '@amc/protocol'
+import {
+  BUCKETS,
+  bucketLabels,
+  CustomBucketId,
+  type InboxSender,
+  imapActionError,
+  type Label,
+} from '@amc/protocol'
 import { Dialog } from 'radix-ui'
 import { useRef, useState } from 'react'
 import { OrganisePicker } from '@/components/organise'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
+import { useBucketCatalog } from '@/data/buckets'
 import { useReplicaSelector, useSyncField } from '@/hooks/use-amc'
 import { accountsQuery, queryFailed, selectedThreadQuery } from '../mailbox/mailbox-queries'
 import { inboxMessageIds, type Preview, reviewError } from './model'
@@ -36,6 +44,7 @@ export function TriageReview({
   onOutbox,
   onReply,
 }: Props) {
+  const catalog = useBucketCatalog()
   const [picker, setPicker] = useState<Preview | null>(null)
   const [reasonTarget, setReasonTarget] = useState<{
     card: Preview
@@ -164,6 +173,16 @@ export function TriageReview({
     } else {
       const id = actionId
       const bucket = BUCKETS[Number(key) - 1]
+      const custom = CustomBucketId.safeParse(key)
+      const definition = custom.success
+        ? catalog?.definitions.find((item) => item.id === custom.data && !item.archived)
+        : undefined
+      const bucketId =
+        custom.success && definition
+          ? custom.data
+          : bucket && card.detail.thread.bucketAssignment
+            ? bucketLabels[bucket]
+            : undefined
       if (key === ' ') void store.decide(card, id, { kind: 'skip' }, 'Skip')
       else if (key === 'f') {
         const expectedInboxMessageIds = inboxMessageIds(card, 'filter')
@@ -196,7 +215,7 @@ export function TriageReview({
           { kind: 'organise', input: { kind: 'archive', threadId: card.threadId } },
           'Archive',
         )
-      else if (bucket)
+      else if (bucketId || bucket)
         void store.decide(
           card,
           id,
@@ -206,7 +225,7 @@ export function TriageReview({
               intent: 'review',
               ...(card.bucketPredictionId ? { predictionId: card.bucketPredictionId } : {}),
               threadId: card.threadId,
-              bucket,
+              ...(bucketId ? { bucketId } : { bucket: bucket as (typeof BUCKETS)[number] }),
               clientActionId: id,
               expectedRevision: card.threadRevision,
               reason: 'Owner triage review',
@@ -215,7 +234,7 @@ export function TriageReview({
                 : {}),
             },
           },
-          `Bucket · ${bucket}`,
+          `Bucket · ${definition?.name ?? bucket}`,
         )
     }
   }

@@ -99,7 +99,8 @@ export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
         WHERE ?7 IS NULL AND (t.sender ->> 'status' IS NOT 'new' OR (t.filter_suggestion_message_id = t.latest
             AND NOT EXISTS (SELECT 1 FROM new_senders n WHERE n.id = t.id AND n.sender_rank = 1)))
           AND t.latest IS NOT NULL AND h.message_id IS NOT t.latest
-          AND ((t.bucket_confidence = 'low' AND t.bucket_input_message_id = t.latest)
+          AND ((t.bucket_confidence = 'low' AND t.bucket_input_message_id = t.latest
+            AND (?9 = 1 OR t.bucket NOT LIKE 'bucket.custom.%'))
             OR (t.filter_suggestion_message_id = t.latest))
       )
       SELECT * FROM cards
@@ -115,6 +116,7 @@ export function triageQueue(db: Db, input: TriageQueueQuery): TriageQueuePage {
         6: input.threadId ?? null,
         7: input.senderAddress ?? null,
         8: input.omitThreads ?? '[]',
+        9: Number(input.bucketCatalogVersion === '1'),
       }) as unknown as QueueRow[]
     const page = rows.slice(0, input.limit)
     const last = page.at(-1)

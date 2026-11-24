@@ -1,13 +1,16 @@
 import { randomUUID } from 'node:crypto'
 import {
   type AgentAction,
+  type BucketByIdInput,
   type BucketInput,
   hasScope,
   type OrganiseAction,
   type VersionedDraft,
 } from '@amc/protocol'
+import type { z } from 'zod'
 import { agentGrantActive, type Principal, withinAccount } from '../auth/tokens.ts'
 import { type Db, transaction } from '../db/database.ts'
+import { assignableBucketKey, guardLegacyBucket } from './bucket-catalog.ts'
 import { DraftError } from './drafts.ts'
 import { MutationError, type Mutations } from './mutations.ts'
 import type { MailStore } from './store.ts'
@@ -67,7 +70,7 @@ function start(db: Db, agent: Principal, tool: string, threads: string[], cost: 
 export function setBucketAsAgent(
   store: MailStore,
   agent: Principal,
-  input: BucketInput,
+  input: BucketInput | z.infer<typeof BucketByIdInput>,
   onlyUntriaged = false,
 ) {
   const { db } = store
@@ -83,7 +86,13 @@ export function setBucketAsAgent(
       )
       return { updated: false, error, status: 404 as const }
     }
-    const updated = store.setBucket(input, agent.name, onlyUntriaged)
+    const idAware = 'bucketId' in input
+    if (!onlyUntriaged) {
+      const current = db.prepare('SELECT bucket FROM thread WHERE id = ?').get(input.threadId)
+      guardLegacyBucket(current?.bucket as string | null, idAware)
+    }
+    const bucket = idAware ? assignableBucketKey(db, input.bucketId) : input.bucket
+    const updated = store.setBucket({ ...input, bucket }, agent.name, onlyUntriaged)
     db.prepare('UPDATE agent_action SET status = ?, error = ? WHERE id = ?').run(
       updated ? 'applied' : 'rejected',
       updated ? null : 'Thread already has a Bucket or left the Inbox',

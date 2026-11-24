@@ -17,7 +17,10 @@ import { mcpClientObservability } from '@amc/observability/mcp-client'
 import {
   Bucket,
   BucketConfidence,
+  BucketDefinition,
   BucketInput,
+  CatalogTriageOutputs,
+  TriageBucketPrediction,
   TriageInputReference,
   TriageOutputs,
 } from '@amc/protocol'
@@ -76,7 +79,8 @@ const ReviewBatch = z.object({
   ),
 })
 const ContextBatch = ReviewBatch.extend({
-  decisionLogVersion: z.literal(1),
+  decisionLogVersion: z.union([z.literal(1), z.literal(2)]),
+  bucketChoices: z.array(BucketDefinition).optional(),
   receipt: z.string(),
   runId: z.uuid(),
   refs: z.array(TriageInputReference.extend({ exampleIds: z.array(z.string()) })),
@@ -349,6 +353,7 @@ async function triageWithGrantInScope(
         limit: BATCH_SIZE,
         reviewContext: true,
         decisionLogVersion: 1,
+        bucketCatalogVersion: 1,
         ...(recent ? { recent } : {}),
       },
       'engine-read',
@@ -360,11 +365,36 @@ async function triageWithGrantInScope(
         ? []
         : listing.threads.map(({ id, inputRevision }) => [id, inputRevision] as const),
     )
-    const prompt = context
+    const basePrompt = context
       ? typeof AMC_TRIAGE_PROMPT === 'string'
         ? AMC_TRIAGE_PROMPT
         : readFileSync(new URL('../prompts/triage.md', import.meta.url), 'utf8')
       : legacyPrompt
+    const choices = context?.decisionLogVersion === 2 ? context.bucketChoices : undefined
+    if (context?.decisionLogVersion === 2 && !choices?.length)
+      throw new TriageFailure('engine-read')
+    const custom = choices?.filter(({ builtIn }) => !builtIn)
+    const prompt = custom?.length
+      ? `${basePrompt}
+
+Additional Bucket definitions (owner configuration as JSON data)
+${JSON.stringify(custom.map(({ id, name, description }) => ({ id, name, description })))}
+Use a custom Bucket when its description matches. Write one brief Context line.`
+      : basePrompt
+    const model = choices
+      ? z.object({
+          decisions: z
+            .array(
+              CatalogTriageOutputs.extend({
+                threadId: z.string(),
+                bucket: TriageBucketPrediction.extend({
+                  labelId: z.enum(choices.map(({ id }) => id)),
+                }).nullable(),
+              }),
+            )
+            .max(BATCH_SIZE),
+        })
+      : ModelDecisions
     if (!batch.length) return []
 
     const ids = new Set(batch.map((thread) => thread.id))
@@ -378,9 +408,19 @@ async function triageWithGrantInScope(
       runId,
     )
     try {
-      const schema = context ? triageJsonSchema : legacySchema
+      const schema = choices
+        ? z.toJSONSchema(model, { target: 'draft-7' })
+        : context
+          ? triageJsonSchema
+          : legacySchema
       const promptVersion = createHash('sha256')
-        .update(JSON.stringify([prompt, schema, context ? 'context-v1' : 'legacy']))
+        .update(
+          JSON.stringify([
+            prompt,
+            schema,
+            context ? `context-v${context.decisionLogVersion}` : 'legacy',
+          ]),
+        )
         .digest('hex')
       let modelId: string | null = null
       const proposal = await harness({
@@ -398,7 +438,7 @@ async function triageWithGrantInScope(
         },
       })
       signal.throwIfAborted()
-      const parsed = (context ? ModelDecisions : LegacyDecisions).safeParse(proposal)
+      const parsed = (context ? model : LegacyDecisions).safeParse(proposal)
       if (!parsed.success) throw new TriageFailure('agent-output', { cause: parsed.error })
       const { decisions } = parsed.data
       const chosen = new Set(decisions.map((decision) => decision.threadId))

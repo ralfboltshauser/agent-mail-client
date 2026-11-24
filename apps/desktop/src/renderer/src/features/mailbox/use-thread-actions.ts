@@ -1,7 +1,8 @@
-import type { Bucket, Label, ThreadSummary } from '@amc/protocol'
+import type { BucketStorageKey, Label, ThreadSummary } from '@amc/protocol'
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import { useOrganise } from '@/components/organise'
+import { bucketSelection, threadBucketKey } from '@/data/buckets'
 import { useReplicaSelector, useSyncField } from '@/hooks/use-amc'
 import { getAmc } from '@/lib/amc'
 import { failureText } from '@/lib/failure'
@@ -27,11 +28,17 @@ export function useThreadActions({
   const selectedId = selected?.id
   const [bucketPickerId, setBucketPickerId] = useState<string | null>(null)
   const bucketPickerOpen = !!selected && bucketPickerId === selected.id
-  const setBucket = async (bucket: Bucket | null) => {
-    if (!selected || (selected.bucket?.bucket ?? null) === bucket) return
+  const setBucket = async (bucket: BucketStorageKey | null) => {
+    if (!selected || threadBucketKey(selected) === bucket) return
     setBucketPickerId(null)
     try {
-      await getAmc().setBucket({ threadId: selected.id, bucket, reason: 'Set manually' })
+      const idAware =
+        Boolean(selected.bucketAssignment) || bucket?.startsWith('bucket.custom.') === true
+      await getAmc().setBucket({
+        threadId: selected.id,
+        ...bucketSelection(bucket, idAware),
+        reason: 'Set manually',
+      })
     } catch (error) {
       toast.error('Could not move Thread', { description: failureText(error) })
     }

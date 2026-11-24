@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { BucketDecisionLabel, FilterDecisionLabel } from './decision-labels.ts'
+import { BucketDecisionLabel, BucketId, FilterDecisionLabel } from './decision-labels.ts'
 import { OwnerReason } from './smart-inbox.ts'
 
 export const BUCKETS = [
@@ -81,6 +81,11 @@ const prediction = {
   confidence: BucketConfidence,
   matchedRuleRevisionId: z.null(),
 }
+export const TriageBucketPrediction = z.strictObject({
+  ...prediction,
+  labelId: BucketId,
+  displayReason: BucketReason,
+})
 export const TriageOutputs = z.strictObject({
   bucket: z
     .strictObject({
@@ -91,6 +96,9 @@ export const TriageOutputs = z.strictObject({
     .nullable(),
   filter: z.strictObject({ ...prediction, labelId: FilterDecisionLabel }).nullable(),
   protection: TriageProtection,
+})
+export const CatalogTriageOutputs = TriageOutputs.extend({
+  bucket: TriageBucketPrediction.nullable(),
 })
 export const TriageInputReference = z.strictObject({
   threadId: z.string().min(1).max(512),
@@ -110,7 +118,7 @@ export const SubmitTriagePrediction = z.strictObject({
     adapterVersion: producerField,
     promptVersion: producerField,
   }),
-  outputs: TriageOutputs,
+  outputs: CatalogTriageOutputs,
 })
 export type SubmitTriagePrediction = z.infer<typeof SubmitTriagePrediction>
 

@@ -2,6 +2,7 @@ import { BUCKETS } from '@amc/protocol'
 import { type ReactNode, useId, useLayoutEffect, useRef } from 'react'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
+import { activeBuckets, threadBucketKey, useBucketCatalog, useBucketName } from '@/data/buckets'
 import type { Preview } from './model'
 import { ReviewMessage } from './review-message'
 
@@ -30,6 +31,9 @@ export function ReviewCard({
   const decisions = useRef<HTMLElement>(null)
   const accountId = card?.accountId
   const messageId = card?.messageId
+  const catalog = useBucketCatalog()
+  const bucketName = useBucketName(threadBucketKey(card?.detail.thread))
+  const custom = activeBuckets(catalog).filter((item) => !item.builtIn)
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: Keep the pane mounted while resetting only for a new message.
   useLayoutEffect(() => {
@@ -43,7 +47,6 @@ export function ReviewCard({
         {children}
       </section>
     )
-  const { thread } = card.detail
   const choice = (key: string, label: string, hint = key.toUpperCase()) => {
     const unavailable = controls.unavailable(key)
     return (
@@ -57,8 +60,8 @@ export function ReviewCard({
         title={unavailable}
         onClick={() => controls.run(key)}
       >
-        <span className="min-w-0 wrap-anywhere">{label}</span>{' '}
-        <Kbd className="shrink-0">{hint}</Kbd>
+        <span className="min-w-0 wrap-anywhere">{label}</span>
+        {hint && <Kbd className="shrink-0">{hint}</Kbd>}
       </Button>
     )
   }
@@ -77,7 +80,7 @@ export function ReviewCard({
         {status}
         {card.id.kind === 'thread' && !card.suggestFilter && (
           <p className="text-sm text-muted-foreground">
-            {thread.bucket?.bucket} · {card.reason}
+            {bucketName} · {card.reason}
           </p>
         )}
         {!!card.suggestions?.length && (
@@ -152,6 +155,14 @@ export function ReviewCard({
                 Keep in Inbox · Choose a bucket
               </h4>
               {BUCKETS.map((bucket, i) => choice(String(i + 1), bucket))}
+              {custom.length > 0 && (
+                <details className="col-span-full">
+                  <summary className="cursor-pointer text-sm">Custom Buckets</summary>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {custom.map(({ id, name }) => choice(id, name, ''))}
+                  </div>
+                </details>
+              )}
             </fieldset>
           </fieldset>
         </div>

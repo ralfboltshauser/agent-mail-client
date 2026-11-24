@@ -1,4 +1,9 @@
-import { type AccountSummary, BUCKETS, type Label, SCREENED_OUT_LABEL } from '@amc/protocol'
+import {
+  type AccountSummary,
+  type BucketStorageKey,
+  type Label,
+  SCREENED_OUT_LABEL,
+} from '@amc/protocol'
 import {
   Activity,
   Archive,
@@ -41,13 +46,14 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from '@/components/ui/sidebar'
+import { activeBuckets, bucketKey, useBucketCatalog } from '@/data/buckets'
 import { shareReply } from '@/data/share-reply'
 import { accountsQuery, countsQuery, labelsQuery } from '@/features/mailbox/mailbox-queries'
 import { avatarShapes, useAccountAvatarShape } from '@/features/sender-avatar/account-avatar-shape'
 import { useReplicaSelector } from '@/hooks/use-amc'
 import { mailShortcuts, shortcutLabel } from '@/lib/mail-shortcuts'
 import { cn } from '@/lib/utils'
-import type { Counts, View } from '../../../shared/api'
+import type { View } from '../../../shared/api'
 import { SidebarDisclosure } from './sidebar-disclosure'
 import { SyncIndicator } from './sync-indicator'
 import { SidebarTriage } from './triage-status'
@@ -153,6 +159,7 @@ export function AppSidebar({
   snoozeEnabled,
   obscured = false,
 }: Props) {
+  const catalog = useBucketCatalog()
   const { open } = useSidebar()
   const accounts = useReplicaSelector(
     accountsQuery(),
@@ -266,7 +273,8 @@ export function AppSidebar({
           <SidebarTriage accountId={accountId} />
           <SidebarGroupContent>
             <SidebarMenu className="gap-0.5">
-              {BUCKETS.map((bucket) => {
+              {activeBuckets(catalog).map((item) => {
+                const bucket = bucketKey(item)
                 const next: View = { kind: 'bucket', bucket }
                 return (
                   <SidebarMenuItem key={bucket}>
@@ -276,7 +284,7 @@ export function AppSidebar({
                       onClick={() => onView(next)}
                     >
                       <Layers className="text-muted-foreground" />
-                      <span>{bucket}</span>
+                      <span>{item.name}</span>
                     </SidebarMenuButton>
                     <BucketCountBadge accountId={accountId} bucket={bucket} />
                   </SidebarMenuItem>
@@ -355,7 +363,7 @@ function BucketCountBadge({
   bucket,
 }: {
   accountId: string | null
-  bucket: keyof Counts['buckets']
+  bucket: BucketStorageKey
 }) {
   const count = useReplicaSelector(countsQuery(accountId), ({ data }) => data?.buckets[bucket])
   return <SidebarMenuBadge className="tabular-nums">{count?.toLocaleString()}</SidebarMenuBadge>

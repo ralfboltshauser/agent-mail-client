@@ -11,6 +11,7 @@ import { streamSSE } from 'hono/streaming'
 import { agentGrantActive } from '../auth/tokens.ts'
 import type { Db } from '../db/database.ts'
 import type { Logger } from '../log.ts'
+import { catalogRevision, readCatalog } from '../mail/bucket-catalog.ts'
 import type { Drafts } from '../mail/drafts.ts'
 import type { Mutations } from '../mail/mutations.ts'
 import type { MailQueries } from '../mail/queries.ts'
@@ -112,7 +113,7 @@ export function syncRoutes(
     const since = Number(c.req.query('since') ?? 0)
     const limit = Math.min(Number(c.req.query('limit')) || 1000, 5000)
     const state = syncState(db)
-    if (since > 0 && since < state.oldestModseq - 1) {
+    if (since > state.modseq || (since > 0 && since < state.oldestModseq - 1)) {
       return c.json({ error: 'resync_required', message: 'Too far behind; bootstrap again' }, 410)
     }
     const rows = db
@@ -121,7 +122,7 @@ export function syncRoutes(
       )
       .all(since, limit + 1) as {
       modseq: number
-      entity: SyncEntity
+      entity: SyncEntity | 'bucket_catalog'
       entity_id: string
       op: 'upsert' | 'delete'
     }[]
@@ -132,6 +133,7 @@ export function syncRoutes(
     for (const row of window) latest.set(`${row.entity}:${row.entity_id}`, row)
     const changes: SyncChange[] = []
     for (const row of latest.values()) {
+      if (row.entity === 'bucket_catalog') continue
       const data = row.op === 'upsert' ? load(deps, row.entity, row.entity_id) : null
       changes.push(
         data
@@ -148,6 +150,14 @@ export function syncRoutes(
     changes.sort((a, b) => a.modseq - b.modseq)
     const body: SyncChanges = { changes, modseq: window.at(-1)?.modseq ?? since, more }
     const principal = c.get('principal')
+    const revision = c.req.query('bucketRevision')
+    if (
+      revision !== undefined &&
+      (principal.kind === 'cli' || principal.kind === 'desktop') &&
+      hasScope(principal.scopes, 'admin') &&
+      revision !== String(catalogRevision(db))
+    )
+      body.bucketCatalog = readCatalog(db)
     if (queue && principal.kind === 'desktop' && hasScope(principal.scopes, 'organize')) {
       const failures = queue.internalFailures(since, body.modseq)
       if (failures.length) body.organiseFailures = failures

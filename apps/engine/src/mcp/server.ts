@@ -1,13 +1,18 @@
 import type { EventFields } from '@amc/observability'
 import {
+  BucketByIdInput,
   BucketInput,
+  CreateBucket,
+  CustomBucketId,
   hasScope,
   type OrganiseAction,
+  ReorderBuckets,
   type Scope,
   SubmitTriagePrediction,
   TRIAGE_RECENT_WINDOW_MS,
   TriageBucketResult,
   UntriagedLimit,
+  UpdateBucket,
 } from '@amc/protocol'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
@@ -22,9 +27,17 @@ import {
   setBucketAsAgent,
   threadAccount,
 } from '../mail/agent-actions.ts'
+import {
+  BucketError,
+  createBucket,
+  readCatalog,
+  reorderBuckets,
+  updateBucket,
+} from '../mail/bucket-catalog.ts'
 import { DraftError, DraftRevisionConflict, type Drafts, searchContacts } from '../mail/drafts.ts'
 import type { Mutations } from '../mail/mutations.ts'
 import type { MailQueries } from '../mail/queries.ts'
+import { assertOwner, SenderError } from '../mail/senders/actions.ts'
 import { suggestSenderRule } from '../mail/senders/suggestions.ts'
 import type { MailStore } from '../mail/store.ts'
 import { threadInput } from '../mail/triage/input.ts'
@@ -44,6 +57,7 @@ export interface McpDeps {
   queries: MailQueries
   drafts: Drafts
   mutations?: Mutations | undefined
+  ownerBucketManagement?: boolean
 }
 
 const AddressInput = z.object({
@@ -76,6 +90,20 @@ function draftFailure(error: DraftError, read: boolean) {
     },
     error,
   )
+}
+
+function bucketResult(run: () => unknown) {
+  try {
+    return json(run())
+  } catch (error) {
+    if (error instanceof BucketError)
+      return {
+        ...json({ error: error.code, message: error.message, revision: error.revision }),
+        isError: true,
+      }
+    if (error instanceof SenderError) return failure(error.message)
+    throw error
+  }
 }
 
 function failure(message: string) {
@@ -150,7 +178,80 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
     )
   }
 
+  const managesBuckets =
+    deps.ownerBucketManagement &&
+    (principal.kind === 'cli' || principal.kind === 'desktop') &&
+    !principal.accountId &&
+    can('admin')
+  if (can('read')) {
+    registerTool(
+      'list_buckets',
+      {
+        description: 'List the Buckets available for Thread assignment.',
+        annotations: { readOnlyHint: true },
+      },
+      () =>
+        bucketResult(() => {
+          const catalog = readCatalog(db)
+          if (managesBuckets) {
+            assertOwner(db, principal)
+            return catalog
+          }
+          return {
+            revision: catalog.revision,
+            definitions: catalog.definitions
+              .filter(({ archived }) => !archived)
+              .map(({ id, name }) => ({ id, name })),
+          }
+        }),
+    )
+  }
+  if (managesBuckets) {
+    registerTool(
+      'create_bucket',
+      { description: 'Create a custom Bucket.', inputSchema: CreateBucket },
+      (input) => bucketResult(() => createBucket(deps.store, principal, input)),
+    )
+    registerTool(
+      'update_bucket',
+      {
+        description: 'Edit, archive, or restore a custom Bucket.',
+        inputSchema: UpdateBucket.extend({ id: CustomBucketId }),
+      },
+      ({ id, ...input }) => bucketResult(() => updateBucket(deps.store, principal, id, input)),
+    )
+    registerTool(
+      'reorder_buckets',
+      {
+        description: 'Set the order of active custom Buckets.',
+        inputSchema: ReorderBuckets,
+      },
+      (input) => bucketResult(() => reorderBuckets(deps.store, principal, input)),
+    )
+  }
+
   if (agent && can('organize')) {
+    registerTool(
+      'set_bucket_by_id',
+      {
+        description: 'Assign a Bucket ID or clear a Thread’s Bucket with null.',
+        inputSchema: BucketByIdInput.extend({ onlyUntriaged: z.boolean().optional() }),
+        annotations: { destructiveHint: false },
+      },
+      ({ onlyUntriaged, ...input }) => {
+        try {
+          const result = onlyUntriaged
+            ? setLegacyUntriagedBucket(deps.store, agent, input)
+            : setBucketAsAgent(deps.store, agent, input)
+          return 'error' in result && typeof result.error === 'string'
+            ? failure(result.error)
+            : json({ updated: result.updated })
+        } catch (error) {
+          if (error instanceof BucketError) return failure(error.message)
+          throw error
+        }
+      },
+    )
     registerTool(
       'set_bucket',
       {
@@ -166,12 +267,17 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
       },
       async ({ onlyUntriaged, triage, ...input }) => {
         if (!triage) {
-          const result = onlyUntriaged
-            ? setLegacyUntriagedBucket(deps.store, agent, input)
-            : setBucketAsAgent(deps.store, agent, input)
-          return 'error' in result && typeof result.error === 'string'
-            ? failure(result.error)
-            : json({ updated: result.updated })
+          try {
+            const result = onlyUntriaged
+              ? setLegacyUntriagedBucket(deps.store, agent, input)
+              : setBucketAsAgent(deps.store, agent, input)
+            return 'error' in result && typeof result.error === 'string'
+              ? failure(result.error)
+              : json({ updated: result.updated })
+          } catch (error) {
+            if (error instanceof BucketError) return failure(error.message)
+            throw error
+          }
         }
         const result = setModelBucket(deps.store, agent, input, triage)
         return 'error' in result && typeof result.error === 'string'
@@ -208,6 +314,7 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
           limit: UntriagedLimit,
           reviewContext: z.boolean().optional(),
           decisionLogVersion: z.number().int().optional(),
+          bucketCatalogVersion: z.literal(1).optional(),
           account_id: z.string().optional(),
           recent: z
             .boolean()
@@ -216,7 +323,14 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
         },
         annotations: { readOnlyHint: true },
       },
-      async ({ limit, account_id, recent, reviewContext, decisionLogVersion }) => {
+      async ({
+        limit,
+        account_id,
+        recent,
+        reviewContext,
+        decisionLogVersion,
+        bucketCatalogVersion,
+      }) => {
         const target = account_id ?? accountId
         if (!withinAccount(principal, target)) return failure('Account unavailable to this Agent')
         const list = () =>
@@ -235,7 +349,13 @@ export function buildMcpServer(principal: Principal, deps: McpDeps): McpServer {
           transaction(db, () => {
             const threads = list()
             if (decisionLogVersion === 1) {
-              const context = prepareContext(db, agent, target, threads)
+              const context = prepareContext(
+                db,
+                agent,
+                target,
+                threads,
+                bucketCatalogVersion === 1 ? 2 : 1,
+              )
               const available = new Set(context.refs.map(({ threadId }) => threadId))
               return { threads: threads.filter(({ id }) => available.has(id)), ...context }
             }

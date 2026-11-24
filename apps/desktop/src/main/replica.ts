@@ -3,7 +3,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { newRunId } from '@amc/observability'
 import type {
   AccountSummary,
-  Bucket,
+  BucketCatalog,
+  BucketStorageKey,
   Draft,
   Label,
   MessageDetail,
@@ -25,7 +26,9 @@ import { LocalDraftUpdates } from './draft-updates'
 import { mainLog, operationFailure } from './observability'
 import { LocalOrganise, ORGANISE_SCHEMA } from './organise'
 
-const UNTRIAGED_INBOX = "in_inbox = 1 AND json_extract(data, '$.bucket.bucket') IS NULL"
+const BUCKET_KEY =
+  "coalesce(json_extract(data, '$.bucketAssignment.bucketId'), json_extract(data, '$.bucket.bucket'))"
+const UNTRIAGED_INBOX = `in_inbox = 1 AND ${BUCKET_KEY} IS NULL`
 const RECENT_DELIVERY = `(
   SELECT MAX(json_extract(message.data, '$.deliveredAt'))
   FROM message WHERE message.thread_id = thread.id
@@ -159,6 +162,19 @@ export class Replica {
     setImmediate(step).unref()
   }
 
+  get bucketCatalog(): BucketCatalog | null {
+    const row = this.db.prepare("SELECT value FROM meta WHERE key = 'bucket_catalog'").get()
+    return typeof row?.value === 'string' ? JSON.parse(row.value) : null
+  }
+
+  saveBucketCatalog(catalog: BucketCatalog): boolean {
+    if ((this.bucketCatalog?.revision ?? -1) >= catalog.revision) return false
+    this.db
+      .prepare("INSERT OR REPLACE INTO meta VALUES ('bucket_catalog', ?)")
+      .run(JSON.stringify(catalog))
+    return true
+  }
+
   get modseq(): number | null {
     const row = this.db.prepare("SELECT value FROM meta WHERE key = 'modseq'").get() as
       | { value: string }
@@ -284,7 +300,12 @@ export class Replica {
     const previous = this.db.prepare('SELECT last_message_at FROM thread WHERE id = ?')
     for (const change of changes) {
       if (change.entity === 'thread') {
-        if (change.op === 'upsert' && change.data.inInbox && !change.data.bucket) {
+        if (
+          change.op === 'upsert' &&
+          change.data.inInbox &&
+          !change.data.bucket &&
+          !change.data.bucketAssignment
+        ) {
           const old = previous.get(change.id)
           if (!old || Number(old.last_message_at) < change.data.lastMessageAt)
             arrivals.set(change.id, change.data.accountId)
@@ -384,7 +405,7 @@ export class Replica {
         hasLabel('DRAFT')
         break
       case 'bucket':
-        where.push("json_extract(data, '$.bucket.bucket') = ?")
+        where.push(`${BUCKET_KEY} = ?`)
         params.push(query.view.bucket)
         break
       case 'label':
@@ -485,12 +506,12 @@ export class Replica {
       .get(accountId) as { n: number }
     const buckets = this.db
       .prepare(`
-      SELECT json_extract(data, '$.bucket.bucket') AS bucket, count(*) AS n
+      SELECT ${BUCKET_KEY} AS bucket, count(*) AS n
       FROM effective_thread
-      WHERE (?1 IS NULL OR account_id = ?1) AND json_extract(data, '$.bucket.bucket') IS NOT NULL
+      WHERE (?1 IS NULL OR account_id = ?1) AND ${BUCKET_KEY} IS NOT NULL
       GROUP BY bucket
     `)
-      .all(accountId) as { bucket: Bucket; n: number }[]
+      .all(accountId) as { bucket: BucketStorageKey; n: number }[]
     const filtered = this.db
       .prepare(`
       SELECT l.id, (SELECT count(*) FROM effective_thread t

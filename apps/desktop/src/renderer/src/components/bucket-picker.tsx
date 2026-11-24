@@ -1,4 +1,4 @@
-import { BUCKETS, type Bucket } from '@amc/protocol'
+import { BUCKETS, type BucketStorageKey } from '@amc/protocol'
 import { Layers } from 'lucide-react'
 import { ActionHint } from '@/components/action-hint'
 import { Button } from '@/components/ui/button'
@@ -11,6 +11,7 @@ import {
   DropdownMenuShortcut,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { activeBuckets, bucketKey, useBucketCatalog, useBucketName } from '@/data/buckets'
 import { mailShortcuts } from '@/lib/mail-shortcuts'
 
 export function BucketPicker({
@@ -19,15 +20,17 @@ export function BucketPicker({
   onOpenChange,
   onSelect,
 }: {
-  current: Bucket | null
+  current: BucketStorageKey | null
   open: boolean
   onOpenChange: (open: boolean) => void
-  onSelect: (bucket: Bucket | null) => void
+  onSelect: (bucket: BucketStorageKey | null) => void
 }) {
+  const catalog = useBucketCatalog()
+  const currentName = useBucketName(current)
   return (
     <DropdownMenu open={open} onOpenChange={onOpenChange}>
       <ActionHint
-        label={current ? `Choose a Bucket · Current: ${current}` : 'Choose a Bucket'}
+        label={current ? `Choose a Bucket · Current: ${currentName}` : 'Choose a Bucket'}
         shortcuts={[mailShortcuts.bucket]}
       >
         <DropdownMenuTrigger asChild>
@@ -35,7 +38,7 @@ export function BucketPicker({
             variant="ghost"
             size="icon-sm"
             className="app-no-drag text-muted-foreground"
-            aria-label={current ? `Bucket: ${current}` : 'Bucket'}
+            aria-label={current ? `Bucket: ${currentName}` : 'Bucket'}
           >
             <Layers />
           </Button>
@@ -54,12 +57,15 @@ export function BucketPicker({
         }}
       >
         <DropdownMenuRadioGroup value={current ?? 'none'}>
-          {BUCKETS.map((bucket, index) => (
-            <DropdownMenuRadioItem key={bucket} value={bucket} onSelect={() => onSelect(bucket)}>
-              {bucket}
-              <DropdownMenuShortcut>{index + 1}</DropdownMenuShortcut>
-            </DropdownMenuRadioItem>
-          ))}
+          {activeBuckets(catalog).map((item, index) => {
+            const key = bucketKey(item)
+            return (
+              <DropdownMenuRadioItem key={item.id} value={key} onSelect={() => onSelect(key)}>
+                {item.name}
+                {item.builtIn && <DropdownMenuShortcut>{index + 1}</DropdownMenuShortcut>}
+              </DropdownMenuRadioItem>
+            )
+          })}
           <DropdownMenuSeparator />
           <DropdownMenuRadioItem value="none" onSelect={() => onSelect(null)}>
             Clear Bucket

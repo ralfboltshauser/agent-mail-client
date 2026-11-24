@@ -140,6 +140,8 @@ const api: AmcApi = {
   unpair: invoke('unpair') as AmcApi['unpair'],
   status: invoke('status') as AmcApi['status'],
   syncNow: invoke('syncNow') as AmcApi['syncNow'],
+  bucketCatalog: invoke('bucketCatalog') as NonNullable<AmcApi['bucketCatalog']>,
+  manageBuckets: invoke('manageBuckets') as NonNullable<AmcApi['manageBuckets']>,
   setBucket: invoke('setBucket') as AmcApi['setBucket'],
   organise: invoke('organise') as AmcApi['organise'],
   organiseErrors: invoke('organiseErrors') as AmcApi['organiseErrors'],

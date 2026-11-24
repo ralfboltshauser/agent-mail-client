@@ -1,4 +1,5 @@
 import { MAIL_SEARCH_PAGE_SIZE, type SearchHit } from '@amc/protocol'
+import { threadBucketKey } from '@/data/buckets'
 import type { ReplicaQuery } from '@/data/query-cache'
 import { shareReply } from '@/data/share-reply'
 import type { ThreadIndex } from '@/data/thread-queries'
@@ -32,7 +33,7 @@ export function filterQuery(
     load: async (previous) => {
       const rows = await getAmc().filter(text, accountId)
       return indexRows(
-        bucket ? rows.filter((row) => row.bucket?.bucket === bucket) : rows,
+        bucket ? rows.filter((row) => threadBucketKey(row) === bucket) : rows,
         previous,
       )
     },

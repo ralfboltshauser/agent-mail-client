@@ -11,6 +11,7 @@ export function readEffective(
     arrival: string
     features: Features
   },
+  bucketIds: readonly string[] = [],
 ) {
   return db
     .prepare(`
@@ -18,6 +19,7 @@ export function readEffective(
     FROM triage_event e
     WHERE e.account_id = ?1 AND e.account_generation = ?2 AND e.kind = 'decision'
       AND e.axis IN ('bucket', 'filter') AND e.arrival_key IS NOT NULL AND e.arrival_key != ?3
+      AND (e.label_id NOT LIKE 'bucket.custom.%' OR e.label_id IN (SELECT value FROM json_each(?9)))
       AND (e.features_json ->> 'senderHash' = ?4 OR e.features_json ->> 'listId' = ?5
         OR e.features_json ->> 'domain' = ?6)
       AND NOT EXISTS (
@@ -45,6 +47,7 @@ export function readEffective(
       6: input.features.domain,
       7: Date.now(),
       8: input.features.category,
+      9: JSON.stringify(bucketIds),
     }) as { id: string; axis: string; labelId: string; features: string }[]
 }
 
@@ -57,13 +60,20 @@ export function retrieveExamples(
     features: Features
     threadId: string
   }[],
+  bucketIds?: readonly string[],
 ) {
   const targets: Record<string, string[]> = Object.create(null)
   const examples: { id: string; axis: string; labelId: string; features: Features }[] = []
   for (const input of inputs) {
     const selected: string[] = []
     targets[input.threadId] = selected
-    for (const { features, ...example } of readEffective(db, accountId, generation, input)) {
+    for (const { features, ...example } of readEffective(
+      db,
+      accountId,
+      generation,
+      input,
+      bucketIds,
+    )) {
       const fresh = !examples.some(({ id }) => id === example.id)
       if (fresh && examples.length === 12) continue
       if (fresh) examples.push({ ...example, features: JSON.parse(features) })

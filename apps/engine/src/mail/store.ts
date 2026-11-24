@@ -1,5 +1,11 @@
 import { EventEmitter } from 'node:events'
-import { type Address, applyLabelPatch, type BucketInput, type LabelPatch } from '@amc/protocol'
+import {
+  type Address,
+  applyLabelPatch,
+  type BucketInput,
+  type BucketStorageKey,
+  type LabelPatch,
+} from '@amc/protocol'
 import type { BlobStore } from '../blobs.ts'
 import { type Db, transaction } from '../db/database.ts'
 import type { BodyParts } from './body-blobs.ts'
@@ -95,19 +101,23 @@ export class MailStore extends EventEmitter<{ change: [] }> {
     this.#now = now
   }
 
-  recordChange(entity: Entity, id: string, op: 'upsert' | 'delete'): number {
+  recordChange(entity: Entity | 'bucket_catalog', id: string, op: 'upsert' | 'delete'): number {
     const { lastInsertRowid } = this.db
       .prepare('INSERT INTO change_log (entity, entity_id, op, at) VALUES (?, ?, ?, ?)')
       .run(entity, id, op, this.#now())
     const modseq = Number(lastInsertRowid)
     this.emit('change')
-    if (op === 'upsert') {
+    if (op === 'upsert' && entity !== 'bucket_catalog') {
       this.db.prepare(`UPDATE ${entity} SET modseq = ? WHERE id = ?`).run(modseq, id)
     }
     return modseq
   }
 
-  setBucket({ threadId, bucket, reason }: BucketInput, setBy: string, onlyUntriaged = false) {
+  setBucket(
+    { threadId, bucket, reason }: Omit<BucketInput, 'bucket'> & { bucket: BucketStorageKey | null },
+    setBy: string,
+    onlyUntriaged = false,
+  ) {
     return transaction(this.db, () => {
       const updated = this.db
         .prepare(`

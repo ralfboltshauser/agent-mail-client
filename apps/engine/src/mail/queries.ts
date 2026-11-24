@@ -2,8 +2,8 @@ import type {
   AccountSummary,
   Address,
   AttachmentSummary,
-  Bucket,
   BucketConfidence,
+  BucketStorageKey,
   InboxSender,
   Label,
   MessageDetail,
@@ -12,7 +12,7 @@ import type {
   ThreadList,
   ThreadSummary,
 } from '@amc/protocol'
-import { RECENT_THREAD_BODIES } from '@amc/protocol'
+import { Bucket, bucketIdForKey, RECENT_THREAD_BODIES } from '@amc/protocol'
 import type { BlobStore } from '../blobs.ts'
 import type { Db } from '../db/database.ts'
 import { imapDraftRevisionSql } from '../providers/imap/locations.ts'
@@ -36,7 +36,7 @@ interface ThreadRow {
   last_message_at: number
   snoozed_until: number | null
   muted: number
-  bucket: Bucket | null
+  bucket: BucketStorageKey | null
   bucket_confidence: BucketConfidence | null
   bucket_reason: string
   bucket_set_by: string
@@ -92,6 +92,15 @@ function parseCursor(cursor: string | null): [number | null, string | null] {
 }
 
 function toThread(row: ThreadRow): ThreadSummary {
+  const legacy = Bucket.safeParse(row.bucket)
+  const assignment = row.bucket
+    ? {
+        reason: row.bucket_reason,
+        setBy: row.bucket_set_by,
+        setAt: row.bucket_set_at,
+        ...(row.bucket_confidence ? { confidence: row.bucket_confidence } : {}),
+      }
+    : null
   return {
     id: row.id,
     accountId: row.account_id,
@@ -109,15 +118,10 @@ function toThread(row: ThreadRow): ThreadSummary {
     muted: row.muted === 1,
     ...(row.inbox_sender ? { inboxSender: JSON.parse(row.inbox_sender) as InboxSender } : {}),
     ownerHandledMessageId: row.owner_handled_message_id,
-    bucket: row.bucket
-      ? {
-          bucket: row.bucket,
-          reason: row.bucket_reason,
-          setBy: row.bucket_set_by,
-          setAt: row.bucket_set_at,
-          ...(row.bucket_confidence ? { confidence: row.bucket_confidence } : {}),
-        }
-      : null,
+    bucket: assignment && legacy.success ? { ...assignment, bucket: legacy.data } : null,
+    ...(assignment && row.bucket && !legacy.success
+      ? { bucketAssignment: { ...assignment, bucketId: bucketIdForKey(row.bucket) } }
+      : {}),
   }
 }
 

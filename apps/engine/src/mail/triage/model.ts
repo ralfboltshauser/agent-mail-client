@@ -1,16 +1,20 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto'
 import {
-  type Bucket,
+  type BucketByIdInput,
+  type BucketId,
   type BucketInput,
   bucketLabels,
+  CustomBucketId,
   type SubmitTriagePrediction,
   TRIAGE_RECENT_WINDOW_MS,
   type TriageBucketResult,
   type TriageInputReference,
 } from '@amc/protocol'
+import type { z } from 'zod'
 import { agentGrantActive, type Principal, withinAccount } from '../../auth/tokens.ts'
 import { type Db, transaction } from '../../db/database.ts'
 import { setBucketAsAgent } from '../agent-actions.ts'
+import { readCatalog } from '../bucket-catalog.ts'
 import { isOwnerAddress } from '../senders/index.ts'
 import type { MailStore } from '../store.ts'
 import {
@@ -112,7 +116,11 @@ export function setModelBucket(
 
 // Older triage Clients only sent the untriaged condition. Preserve an explicit Clear
 // on the current arrival even though its stored Bucket is null.
-export function setLegacyUntriagedBucket(store: MailStore, agent: Principal, input: BucketInput) {
+export function setLegacyUntriagedBucket(
+  store: MailStore,
+  agent: Principal,
+  input: BucketInput | z.infer<typeof BucketByIdInput>,
+) {
   const { db } = store
   return transaction(db, () => {
     const thread = threadInput(db, input.threadId)
@@ -133,7 +141,8 @@ interface ReceiptTarget extends TriageInputReference {
 }
 
 interface ContextReceipt {
-  version: 1
+  version: 1 | 2
+  bucketChoices?: Partial<Record<z.infer<typeof BucketId>, number>>
   mode: 'live'
   tokenId: string
   runId: string
@@ -154,6 +163,7 @@ export function prepareContext(
   agent: Principal,
   accountId: string,
   inputs: { id: string }[],
+  version: 1 | 2 = 1,
 ) {
   const lease = db
     .prepare('SELECT expires_at FROM triage_lease WHERE slot = 1 AND holder = ?')
@@ -175,10 +185,26 @@ export function prepareContext(
       },
     ]
   })
-  const { targets, examples } = retrieveExamples(db, accountId, accountGeneration, refs)
+  const choices =
+    version === 2
+      ? readCatalog(db).definitions.filter(({ archived, automatic }) => !archived && automatic)
+      : undefined
+  const bucketChoices =
+    choices &&
+    Object.fromEntries(
+      choices.map(({ id, classificationRevision }) => [id, classificationRevision]),
+    )
+  const { targets, examples } = retrieveExamples(
+    db,
+    accountId,
+    accountGeneration,
+    refs,
+    choices?.map(({ id }) => id),
+  )
   const runId = randomUUID()
   const context: ContextReceipt = {
-    version: 1,
+    version,
+    ...(bucketChoices ? { bucketChoices } : {}),
     mode: 'live',
     tokenId: agent.tokenId,
     runId,
@@ -194,7 +220,8 @@ export function prepareContext(
   const payload = Buffer.from(JSON.stringify(context)).toString('base64url')
   const receipt = `${payload}.${privateDigest(db, 'triage context', payload)}`
   return {
-    decisionLogVersion: 1 as const,
+    decisionLogVersion: version,
+    ...(choices ? { bucketChoices: choices } : {}),
     runId,
     receipt,
     examples: { targets, examples },
@@ -267,7 +294,7 @@ export function submitPrediction(
     const target = context?.inputs.find((ref) => ref.threadId === input.threadId)
     if (
       !context ||
-      context.version !== 1 ||
+      (context.version !== 1 && context.version !== 2) ||
       context.erasureEpoch !== erasureEpoch(db) ||
       !target ||
       context.runId !== runId ||
@@ -280,6 +307,12 @@ export function submitPrediction(
       target.inputRevision !== input.inputRevision
     )
       return { error: 'The triage context is invalid or expired' }
+
+    const bucket = outputs.bucket
+    const custom = bucket && CustomBucketId.safeParse(bucket.labelId).success
+    const classificationRevision = bucket ? context.bucketChoices?.[bucket.labelId] : undefined
+    if (custom && (context.version !== 2 || classificationRevision === undefined))
+      return { error: 'The Bucket was not eligible in the captured triage context' }
 
     const { accountId, accountGeneration } = context
     const key = JSON.stringify(['prediction', runId, target.arrivalKey])
@@ -309,20 +342,23 @@ export function submitPrediction(
       state.handled_id === target.messageId ||
       state.bucket !== null
     const local = stale ? ['stale'] : localProtection(store, target.messageId)
-    const bucket = outputs.bucket
-    const bucketName = (Object.keys(bucketLabels) as Bucket[]).find(
-      (name) => bucketLabels[name] === bucket?.labelId,
-    )
+    const choice = custom && readCatalog(db).definitions.find(({ id }) => id === bucket?.labelId)
+    const definitionStale =
+      custom &&
+      (!choice ||
+        choice.archived ||
+        !choice.automatic ||
+        choice.classificationRevision !== classificationRevision)
     const bucketApplied =
       !stale &&
       bucket &&
-      bucketName &&
+      !definitionStale &&
       setBucketAsAgent(
         store,
         agent,
         {
           threadId: target.threadId,
-          bucket: bucketName,
+          bucketId: bucket.labelId,
           reason: bucket.displayReason,
         },
         true,
@@ -367,6 +403,9 @@ export function submitPrediction(
             matchedRule: 'no_match',
             exampleIds: target.exampleIds,
             ...(axis === 'filter' ? { execution: 'suggestion_only' } : {}),
+            ...(axis === 'bucket' && classificationRevision !== undefined
+              ? { classificationRevision }
+              : {}),
           },
         },
       )

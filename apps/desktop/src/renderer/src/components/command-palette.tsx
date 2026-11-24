@@ -1,4 +1,4 @@
-import { type AccountSummary, BUCKETS, type Label } from '@amc/protocol'
+import type { AccountSummary, Label } from '@amc/protocol'
 import { defaultFilter } from 'cmdk'
 import {
   Layers,
@@ -23,6 +23,7 @@ import {
   CommandList,
   CommandShortcut,
 } from '@/components/ui/command'
+import { activeBuckets, bucketKey, useBucketCatalog } from '@/data/buckets'
 import { getAmc } from '@/lib/amc'
 import { failureText, recordCaughtFailure } from '@/lib/failure'
 import type { AskAgentRuntime, View } from '../../../shared/api'
@@ -82,6 +83,7 @@ export function CommandPalette({
   onCloseAutoFocus,
   undo,
 }: Props) {
+  const catalog = useBucketCatalog()
   const [query, setQuery] = useState('')
   const [runtime, setRuntime] = useState<AskAgentRuntime>('unknown')
   useEffect(() => {
@@ -197,14 +199,14 @@ export function CommandPalette({
           ))}
         </CommandGroup>
         <CommandGroup heading="Buckets">
-          {BUCKETS.map((bucket) => (
+          {activeBuckets(catalog).map((item) => (
             <CommandItem
-              key={bucket}
-              value={`go to bucket ${bucket}`}
-              onSelect={run(() => onView({ kind: 'bucket', bucket }))}
+              key={item.id}
+              value={`go to bucket ${item.name}`}
+              onSelect={run(() => onView({ kind: 'bucket', bucket: bucketKey(item) }))}
             >
               <Layers />
-              {bucket}
+              {item.name}
             </CommandItem>
           ))}
         </CommandGroup>
