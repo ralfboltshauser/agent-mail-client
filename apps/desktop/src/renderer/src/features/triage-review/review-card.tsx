@@ -33,6 +33,7 @@ function CardPreview({ card, controls }: { card: Preview; controls: ReviewContro
         variant="outline"
         size="sm"
         aria-disabled={!!unavailable}
+        aria-keyshortcuts={key === 'f' && card.suggestFilter ? 'F Enter' : undefined}
         className="h-auto min-h-8 max-w-full justify-between whitespace-normal py-1 text-left aria-disabled:opacity-55"
         title={unavailable}
         onClick={() => controls.run(key)}
@@ -114,7 +115,12 @@ function CardPreview({ card, controls }: { card: Preview; controls: ReviewContro
           <h3 id={`${subjectId}-thread`} className="text-sm font-semibold">
             This thread
           </h3>
-          {card.suggestFilter && <p className="text-sm font-medium">Suggested: Filter out</p>}
+          {card.suggestFilter && (
+            <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
+              <span>Suggested: Filter out</span>
+              <Kbd>Enter</Kbd>
+            </p>
+          )}
           <p className="text-xs text-muted-foreground">
             Filter out moves this thread’s incoming Inbox mail to Filtered.
           </p>

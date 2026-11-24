@@ -868,16 +868,30 @@ it('restarts invalidated pagination and revisits only skipped cards still in the
   expect(within(review()).getByRole('heading', { name: firstSubject })).toBeTruthy()
 })
 
-it('filters with F, records it in action history, and restores its position with U', async () => {
-  const { adapter, smart, first } = await fixture()
+it.each(['f', 'Enter'])('filters with %s, records it, and restores it with U', async (key) => {
+  const { adapter, smart, first, low, setCards } = await fixture()
+  const card = key === 'Enter' ? low : first
+  setCards(card)
   await mount(adapter)
   await open()
+  const article = within(review()).getByRole('article')
+  const subject = within(article).getByRole('heading', { level: 2 }).textContent
   expect(within(review()).getByRole('button', { name: 'Filter out F' })).toBeTruthy()
-  await press('f')
+  if (key === 'Enter') {
+    await press('Enter', undefined, { repeat: true })
+    const archive = within(article).getByRole('button', { name: 'Archive E' })
+    archive.focus()
+    await press('Enter')
+    within(review()).getByRole('heading', { name: 'Triage Inbox' }).focus()
+  } else {
+    await press('Enter')
+  }
+  expect(smart.reviewFilter).not.toHaveBeenCalled()
+  await press(key)
   expect(smart.reviewFilter).toHaveBeenCalledExactlyOnceWith({
-    threadId: first.threadId,
-    expectedRevision: first.threadRevision,
-    expectedInboxMessageIds: [first.messageId],
+    threadId: card.threadId,
+    expectedRevision: card.threadRevision,
+    expectedInboxMessageIds: [card.messageId],
     decision: 'filter.filtered',
     clientActionId: expect.any(String),
     source: 'triage-key',
@@ -888,7 +902,7 @@ it('filters with F, records it in action history, and restores its position with
   expect(smart.undoOwnerAction).toHaveBeenCalledWith(
     smart.reviewFilter.mock.calls[0][0].clientActionId,
   )
-  expect(within(review()).getByRole('heading', { name: firstSubject })).toBeTruthy()
+  expect(within(review()).getByRole('heading', { level: 2, name: subject ?? '' })).toBeTruthy()
 })
 
 it('keeps Shift+F and Shift+X inactive when private reasons are disabled', async () => {

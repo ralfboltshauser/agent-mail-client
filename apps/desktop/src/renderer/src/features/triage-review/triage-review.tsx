@@ -247,14 +247,19 @@ export function TriageReview({
       }
       return
     }
-    if (event.key === ' ' && event.target.closest('button, a, summary, [role="button"]')) return
     if (
-      !(event.key.length === 1 && BUCKETS[Number(event.key) - 1]) &&
-      !['a', 'x', 'e', 'f', 's', 'r', ' ', 'u'].includes(event.key)
+      (event.key === ' ' || event.key === 'Enter') &&
+      event.target.closest('button, a, summary, [role="button"]')
+    )
+      return
+    const key = event.key === 'Enter' && card?.suggestFilter ? 'f' : event.key
+    if (
+      !(key.length === 1 && BUCKETS[Number(key) - 1]) &&
+      !['a', 'x', 'e', 'f', 's', 'r', ' ', 'u'].includes(key)
     )
       return
     event.preventDefault()
-    if (!event.repeat) run(event.key)
+    if (!event.repeat) run(key)
   }
 
   return (
