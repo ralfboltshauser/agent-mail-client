@@ -92,4 +92,30 @@ describe('fromGmail', () => {
     })
     expect(m.bodyText).toBe('Grüezi\nWelt & mehr')
   })
+
+  it('decodes UTF-8 parts even when Gmail retains a legacy MIME charset', () => {
+    const plain = 'Here’s a café in Zürich.'
+    const html = `<p>${plain}</p>`
+    const m = fromGmail({
+      id: 'm3',
+      threadId: 't3',
+      payload: {
+        mimeType: 'multipart/alternative',
+        parts: [
+          {
+            mimeType: 'text/plain',
+            headers: [{ name: 'Content-Type', value: 'text/plain; charset="Windows-1252"' }],
+            body: { size: plain.length, data: b64(plain) },
+          },
+          {
+            mimeType: 'text/html',
+            headers: [{ name: 'Content-Type', value: 'text/html; charset="Windows-1252"' }],
+            body: { size: html.length, data: b64(html) },
+          },
+        ],
+      },
+    })
+    expect(m.bodyText).toBe(plain)
+    expect(m.bodyHtml).toBe(html)
+  })
 })
