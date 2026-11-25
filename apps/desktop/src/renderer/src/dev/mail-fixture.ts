@@ -165,9 +165,18 @@ export function createMailFixture(scenario: string) {
     inReplyTo: null,
     from: older ? self : (thread.participants[0] ?? self),
     to: older ? thread.participants : [self],
-    cc: [],
-    bcc: [],
-    replyTo: [],
+    cc:
+      htmlReader && thread.id === 'thread-7' && !older
+        ? [{ name: 'Copy Recipient', address: 'cc@example.test' }]
+        : [],
+    bcc:
+      htmlReader && thread.id === 'thread-7' && !older
+        ? [{ name: null, address: 'bcc@example.test' }]
+        : [],
+    replyTo:
+      htmlReader && thread.id === 'thread-7' && !older
+        ? [{ name: null, address: 'reply@example.test' }]
+        : [],
     subject: thread.subject,
     snippet: older ? 'Sending over the updated layout.' : thread.snippet,
     bodyText: older
