@@ -1,8 +1,11 @@
+import { isUtf8 } from 'node:buffer'
 import { cleanMessageId, parseAddressList } from '../../mail/addresses.ts'
 import { senderMailbox } from '../../mail/senders/identity.ts'
 import type { IncomingAttachment, IncomingMessage } from '../../mail/store.ts'
 import { decodeEntities, htmlToText, normalizeWhitespace } from '../../mail/text.ts'
 import type { GmailHeader, GmailMessage, GmailPart } from './types.ts'
+
+const utf8 = new TextDecoder()
 
 function header(headers: GmailHeader[] | undefined, name: string): string | null {
   const lower = name.toLowerCase()
@@ -23,11 +26,13 @@ function decodeBody(part: GmailPart): string {
   const data = part.body?.data
   if (!data) return ''
   const bytes = Buffer.from(data, 'base64url')
+  // Gmail's parsed payload can contain UTF-8 while retaining the original MIME charset.
+  if (isUtf8(bytes)) return utf8.decode(bytes)
   try {
-    return new TextDecoder(charsetOf(part), { fatal: false }).decode(bytes)
+    return new TextDecoder(charsetOf(part)).decode(bytes)
   } catch {
     // An unsupported MIME charset uses the documented UTF-8 fallback.
-    return new TextDecoder('utf-8').decode(bytes)
+    return utf8.decode(bytes)
   }
 }
 
