@@ -26,7 +26,6 @@ import type {
   GmailMessage,
   GmailMessageState,
 } from '../providers/gmail/types.ts'
-import { imapMoveSupport } from '../providers/imap/client.ts'
 import type { MessageLocation } from '../providers/imap/locations.ts'
 import { mapFolders } from '../providers/imap/mapping.ts'
 import {
@@ -301,6 +300,7 @@ export class Mutations {
   readonly #actionLog = new AsyncLocalStorage<Logger>()
   readonly #runningRetries = new Map<string, { id: string; log: Logger }>()
   readonly #imap: ImapMutationRunner | undefined
+  readonly #imapScreeningCapability: ((accountId: string) => boolean | undefined) | undefined
   readonly #now: () => number
   readonly snoozeEnabled: boolean
   readonly #running = new Map<string, Promise<void>>()
@@ -314,16 +314,19 @@ export class Mutations {
       now = Date.now,
       snoozeEnabled = false,
       imap,
+      imapScreeningCapability,
     }: {
       now?: () => number
       snoozeEnabled?: boolean
       imap?: ImapMutationRunner
+      imapScreeningCapability?: (accountId: string) => boolean | undefined
     } = {},
   ) {
     this.#store = store
     this.#api = api
     this.#log = log
     this.#imap = imap
+    this.#imapScreeningCapability = imapScreeningCapability
     this.#now = now
     this.snoozeEnabled = snoozeEnabled
   }
@@ -1151,16 +1154,14 @@ export class Mutations {
     }
   }
 
-  async verifyScreeningCapability(accountId: string, clientActionId: string) {
+  verifyScreeningCapability(accountId: string, clientActionId: string) {
     if (this.#db.prepare('SELECT 1 FROM owner_action WHERE id = ?').get(clientActionId)) return
     const account = this.#db.prepare('SELECT kind, cursor FROM account WHERE id = ?').get(accountId)
     if (account?.kind !== 'imap') return
     const unsupported = () => new SenderError('This IMAP Account does not support safe moves')
-    if (!JSON.parse(String(account.cursor)).imapMoves) throw unsupported()
-    const verified = await this.#imap?.(accountId, async ({ client }) => {
-      if (!imapMoveSupport(client).available) throw unsupported()
-    })
-    if (!verified)
+    const capability = this.#imapScreeningCapability?.(accountId)
+    if (!JSON.parse(String(account.cursor)).imapMoves || capability === false) throw unsupported()
+    if (capability === undefined)
       throw new SenderError(
         'Cannot verify safe IMAP moves. Retry when the Account is connected.',
         503,

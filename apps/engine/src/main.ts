@@ -260,6 +260,7 @@ async function main(argv: string[]) {
         const mutations = new Mutations(store, (accountId) => sync.gmailApi(accountId), log, {
           snoozeEnabled,
           imap: (accountId, work) => sync.organiseImap(accountId, work),
+          imapScreeningCapability: (accountId) => sync.imapScreeningCapability(accountId),
         })
         const stopping = new AbortController()
         setMaxListeners(0, stopping.signal)

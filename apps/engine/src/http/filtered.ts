@@ -53,7 +53,7 @@ export function filteredRoutes(store: MailStore, queue: Mutations) {
       return c.json({ error: 'bad_request', message: 'Invalid filter decision' }, 400)
     checkOwnerReason(input.data.reason)
     const thread = threadInput(store.db, input.data.threadId)
-    if (thread) await queue.verifyScreeningCapability(thread.account_id, input.data.clientActionId)
+    if (thread) queue.verifyScreeningCapability(thread.account_id, input.data.clientActionId)
     const action = reviewFilter(store, c.get('principal'), input.data)
     queue.kick()
     return c.json(action, action.status === 'pending' ? 202 : 200)

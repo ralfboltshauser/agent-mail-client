@@ -31,6 +31,7 @@ import {
   ImapAuthError,
   type ImapClientFactory,
   type ImapCredentials,
+  imapMoveSupport,
 } from '../providers/imap/client.ts'
 import { ImapProvider } from '../providers/imap/provider.ts'
 import { ImapAccountSync, ImapIdleFailure, ImapSyncFailure } from '../providers/imap/sync.ts'
@@ -308,6 +309,12 @@ export class SyncManager extends EventEmitter<{ change: [] }> {
         throw err
       }
     })
+  }
+
+  imapScreeningCapability(accountId: string): boolean | undefined {
+    const client = this.#runners.get(accountId)?.imap?.()?.client
+    // Capability is connection metadata. Reading it needs no queued IMAP command.
+    return client?.usable ? imapMoveSupport(client).available : undefined
   }
 
   imapProvider(accountId: string): ImapProvider | null {
