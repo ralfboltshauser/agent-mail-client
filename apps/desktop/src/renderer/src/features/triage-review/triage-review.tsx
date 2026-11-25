@@ -81,6 +81,10 @@ export function TriageReview({
     if (busy) return 'Wait for the current review operation.'
     if (errors) return 'Refresh the card before making a decision.'
     if ((key === 'a' || key === 'x') && !sender) return 'This message has no eligible Sender.'
+    if (key === 'a' && senderDecisionState === 'accept')
+      return 'Sender already accepted. Choose a thread action or skip this card.'
+    if (key === 'x' && senderDecisionState === 'block')
+      return 'Sender already blocked. Choose a thread action or skip this card.'
     if ((key === 'x' || key === 'f') && account.account?.imapMoves === false)
       return 'This IMAP server does not support safe moves.'
     if (key === 'r' && !card.replyTargetId) return 'This Thread has no reply target.'

@@ -576,6 +576,13 @@ it('updates the Sender row on an open low-confidence card after replica sync', a
   expect(within(thread).getByRole('button', { name: /^Filter out/ })).toBeTruthy()
   expect(within(controls).queryByText('Low confidence')).toBeNull()
   expect(within(buckets).getByRole('button', { name: 'Newsletters 7' })).toBeTruthy()
+  await press('a')
+  await press('a')
+  expect(smart.decideSender).not.toHaveBeenCalled()
+  expect(within(review()).getByText(/Sender already accepted/)).toBeTruthy()
+  expect(within(review()).queryByText(/Action history/)).toBeNull()
+  expect(within(review()).getByRole('article')).toBe(card)
+  expect(document.activeElement).toBe(heading)
   await press('7', within(review()).getByRole('heading', { name: 'Triage Inbox' }))
   expect(smart.reviewBucket).toHaveBeenCalledExactlyOnceWith(
     expect.objectContaining({ intent: 'review', threadId: low.threadId, bucket: 'Newsletters' }),
