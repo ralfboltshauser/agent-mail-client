@@ -30,6 +30,7 @@ import {
 } from '@amc/protocol'
 import { Command, CommanderError } from 'commander'
 import { z } from 'zod'
+import { downloadAttachment } from './attachments.ts'
 import { agentBucketCatalog, ownerBucketCatalog, registerBucketCommands } from './buckets.ts'
 import { authed, request } from './client.ts'
 import { readConfig, writeConfig } from './config.ts'
@@ -53,6 +54,7 @@ const scopedCommands = new Set([
   'threads',
   'thread',
   'message',
+  'attachment.download',
   'search',
   'link.thread',
   'link.search',
@@ -353,10 +355,26 @@ program
       console.log(`To:   ${m.to.map((a) => a.address).join(', ')}`)
       console.log(`Date: ${new Date(m.sentAt).toLocaleString()}`)
       for (const a of m.attachments.filter((x) => !x.inline))
-        console.log(`📎    ${a.filename} (${formatBytes(a.size)})`)
+        console.log(`📎    ${a.filename} (${formatBytes(a.size)}) · ${a.id}`)
       console.log(`\n${m.bodyText}\n\n${'─'.repeat(60)}\n`)
     }
     if (opts.json) printJson(t)
+  })
+
+program
+  .command('attachment')
+  .description('Work with mail attachments')
+  .command('download')
+  .description('Save an attachment to a new local file')
+  .argument('<id>', 'Attachment id from amc thread')
+  .requiredOption('-o, --output <path>', 'destination file path')
+  .action(async (id: string, { output }: { output: string }) => {
+    const config = requireConfig()
+    // The shared download endpoint also accepts paired tokens. In agent mode,
+    // verify this credential on the agent-only route before requesting bytes.
+    if (agentMode()) await mailTool(config, true, 'whoami')
+    await downloadAttachment(config, id, output)
+    console.log(`Saved ${output}`)
   })
 
 program

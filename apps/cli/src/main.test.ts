@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -168,13 +168,18 @@ it('fetches deferred bodies before printing a thread', async () => {
     requests.push(req.url ?? '')
     res.setHeader('Content-Type', 'application/json')
     if (req.url === '/v1/threads/a%3At?deferBodies=1') {
-      const header = { from: null, to: [], sentAt: 0, attachments: [] }
+      const header = { from: null, to: [], sentAt: 0 }
       res.end(
         JSON.stringify({
           subject: 'Test thread',
           messages: [
-            { ...header, id: 'a:old', bodyText: null },
-            { ...header, id: 'a:new', bodyText: 'Newest reply' },
+            { ...header, id: 'a:old', bodyText: null, attachments: [] },
+            {
+              ...header,
+              id: 'a:new',
+              bodyText: 'Newest reply',
+              attachments: [{ id: 'fixture-attachment', filename: 'fixture.zip', size: 4 }],
+            },
           ],
         }),
       )
@@ -203,6 +208,7 @@ it('fetches deferred bodies before printing a thread', async () => {
     )
     expect(requests).toEqual(['/v1/threads/a%3At?deferBodies=1', '/v1/messages/a%3Aold'])
     expect(stdout).toMatch(/Older reply[\s\S]*Newest reply/)
+    expect(stdout).toContain('fixture.zip (4 B) · fixture-attachment')
     expect(stdout).not.toContain('null')
   } finally {
     server.close()
@@ -448,6 +454,55 @@ async function cliFor(server: ReturnType<typeof createServer>, env: NodeJS.Proce
       },
     )
 }
+
+it('downloads attachment bytes and preserves an existing destination', async () => {
+  const bytes = Buffer.from([0x50, 0x4b, 0, 0xff])
+  const requests: unknown[] = []
+  const server = createServer((req, res) => {
+    requests.push([req.method, req.url, req.headers.authorization])
+    res.setHeader('Content-Type', 'application/zip')
+    res.end(bytes)
+  })
+  server.listen(0, '127.0.0.1')
+  try {
+    const run = await cliFor(server)
+    const output = join(logHome, 'fixture.zip')
+    const args = ['attachment', 'download', 'fixture:id', '--output', output]
+    await run(...args)
+    expect(requests[0]).toEqual(['GET', '/v1/attachments/fixture%3Aid', 'Bearer fixture'])
+    expect(await readFile(output)).toEqual(bytes)
+    await expect(run(...args)).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining('already exists'),
+    })
+    expect(await readFile(output)).toEqual(bytes)
+  } finally {
+    server.close()
+  }
+})
+
+it('leaves no destination or temporary file after a broken attachment transfer', async () => {
+  const requests: string[] = []
+  const server = createServer((req, res) => {
+    requests.push(req.url ?? '')
+    res.writeHead(200, { 'Content-Length': '10' })
+    res.end('abc')
+    res.socket?.destroySoon()
+  })
+  server.listen(0, '127.0.0.1')
+  try {
+    const run = await cliFor(server)
+    const destination = join(logHome, 'downloads')
+    await mkdir(destination)
+    await expect(
+      run('attachment', 'download', 'fixture', '--output', join(destination, 'fixture.zip')),
+    ).rejects.toMatchObject({ code: 1 })
+    expect(requests).toEqual(['/v1/attachments/fixture'])
+    expect(await readdir(destination)).toEqual([])
+  } finally {
+    server.close()
+  }
+})
 
 it('passes the search offset and generates an Engine-bound link with the same query', async () => {
   const requests: URL[] = []
