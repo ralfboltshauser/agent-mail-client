@@ -47,6 +47,21 @@ T3 Code CLI, an active AMC project pointing at an AMC checkout, and the
 current AMC CLI installed via `pnpm cli:install`. Update the Engine and
 Desktop to the same release for paging and browser links.
 
+## Download an attachment
+
+Get the attachment ID from `amc thread <thread-id>` or the message's
+`attachments` array in its JSON output. Choose a new local file path.
+
+```sh
+amc attachment download <attachment-id> --output ./archive.zip
+```
+
+With an agent Read grant, add `--as-agent` before `attachment`. The Engine
+enforces the grant's Account scope. Thread-specific Handoff grants are
+limited to the Handoff commands below.
+
+## Draft and organize mail
+
 Use `--reply-all` to include the other thread recipients. Repeat `--to`, `--cc`,
 or `--bcc` to override a recipient field. Each takes an address or
 `'Name <address>'`. Pass an empty value by itself to
@@ -68,6 +83,7 @@ For agent batches, add up to 19 more distinct thread IDs with repeatable
 | --- | --- |
 | Grant, accounts, labels | `whoami`, `accounts`, `labels` |
 | Mail and contacts | `threads`, `thread`, `message`, `search`, `contacts` |
+| Attachments | `attachment download` |
 | Drafts | `draft create`, `reply`, `draft list`, `draft show`, `draft update`, `draft discard` |
 | Organize and check writeback | `archive`, `read`, `unread`, `star [--remove]`, `mute`, `label [--remove]`, `agent status` |
 | Agent triage and suggestions | `triage untriaged`, `bucket`, `senders suggest` |
@@ -85,6 +101,7 @@ flowchart LR
   Client[MCP client] --> MCP[Engine MCP tools]
   CLI -->|Scoped grant and draft commands| MCP
   CLI -->|Existing paired commands| HTTP[Engine mail HTTP API]
+  CLI -->|Attachment download with verified grant| HTTP
   MCP --> State[Engine mail store and agent audit]
   HTTP --> State
   State --> Provider[Gmail or IMAP]

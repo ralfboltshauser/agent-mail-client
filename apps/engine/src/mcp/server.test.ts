@@ -1,7 +1,8 @@
 import { execFile } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
-import { rm } from 'node:fs/promises'
+import { readFile, rm } from 'node:fs/promises'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isCorrelationId, newRequestId, REQUEST_ID_HEADER } from '@amc/observability'
 import {
@@ -176,8 +177,23 @@ it('drives drafts and organize through the CLI with paired, scoped and handoff c
   db.exec(
     "INSERT INTO account (id, kind, address, credentials, created_at) VALUES ('b', 'gmail', 'other@example.com', x'00', 0)",
   )
-  store.putMessage('a', [], fromGmail(gmail.add('m2')))
-  store.putMessage('b', [], fromGmail(gmail.add('outside')))
+  const archive = Uint8Array.of(0x50, 0x4b, 0, 0xff)
+  for (const [account, message] of [
+    ['a', 'm2'],
+    ['b', 'outside'],
+  ] as const) {
+    const incoming = fromGmail(gmail.add(message))
+    incoming.attachments.push({
+      filename: 'fixture.zip',
+      mimeType: 'application/zip',
+      providerAttachmentId: null,
+      contentId: null,
+      inline: false,
+      size: archive.length,
+      data: archive,
+    })
+    store.putMessage(account, [], incoming)
+  }
   const owner = issueToken(db, {
     kind: 'cli',
     name: 'mac',
@@ -463,6 +479,26 @@ it('drives drafts and organize through the CLI with paired, scoped and handoff c
     expect(
       JSON.parse((await cli(scoped.secret, ['--as-agent', 'message', 'a:m1', '--json'])).stdout),
     ).toMatchObject({ id: 'a:m1', bodyText: 'Friday works?' })
+    const attachmentId = (message: string) =>
+      db.prepare('SELECT id FROM attachment WHERE message_id = ?').get(message)?.id as string
+    const output = join(home, 'fixture.zip')
+    const download = (secret: string, message: string) =>
+      cli(secret, ['--as-agent', 'attachment', 'download', attachmentId(message), '-o', output])
+    expect(await download(owner.secret, 'a:m2')).toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining('requires a valid scoped token'),
+    })
+    expect(await download(draftOnly.secret, 'a:m2')).toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining('lacks the read scope'),
+    })
+    expect(await download(scoped.secret, 'b:outside')).toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining('No such attachment'),
+    })
+    await expect(readFile(output)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await download(scoped.secret, 'a:m2')).toMatchObject({ code: 0 })
+    expect(await readFile(output)).toEqual(Buffer.from(archive))
     expect(
       JSON.parse(
         (await cli(scoped.secret, ['--as-agent', 'threads', '--all', '--account', 'b', '--json']))

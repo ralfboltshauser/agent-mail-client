@@ -23,6 +23,7 @@ const cliCommands = [
   'threads',
   'thread',
   'message',
+  'attachment.download',
   'labels',
   'reply',
   'draft.create',
