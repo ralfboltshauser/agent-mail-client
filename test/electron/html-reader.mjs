@@ -24,6 +24,88 @@ const waitFor = async (probe, description) => {
   throw new Error(`Timed out waiting for ${description}`)
 }
 
+async function checkMessageDetails(wc, run) {
+  const trigger = 'button[aria-label="Show message details"]'
+  const popup = '[role="dialog"][aria-label="Message details"]'
+  const target = await run((selector) => {
+    const button = document.querySelector(selector)
+    if (!button) return null
+    const { x, y, width, height } = button.getBoundingClientRect()
+    return { x: Math.round(x + width / 2), y: Math.round(y + height / 2) }
+  }, trigger)
+  assert.ok(target, 'the address line opens message details')
+  const frame = await run(() => {
+    window.messageDetailsFrame = document.querySelector('iframe')
+    return Boolean(window.messageDetailsFrame)
+  })
+  assert.ok(frame)
+  for (const type of ['mousePressed', 'mouseReleased']) {
+    await wc.debugger.sendCommand('Input.dispatchMouseEvent', {
+      type,
+      ...target,
+      button: 'left',
+      clickCount: 1,
+    })
+  }
+  await waitFor(
+    () => run((selector) => !!document.querySelector(selector), popup),
+    'message details',
+  )
+  const details = await run((selector) => {
+    const panel = document.querySelector(selector)
+    const rect = panel.getBoundingClientRect()
+    return {
+      fields: Object.fromEntries(
+        [...panel.querySelectorAll('dt')].map((term) => [
+          term.textContent,
+          term.nextElementSibling.textContent,
+        ]),
+      ),
+      fits:
+        rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight,
+    }
+  }, popup)
+  assert.deepEqual(Object.keys(details.fields), ['From', 'To', 'Cc', 'Bcc', 'Reply-To'])
+  assert.match(details.fields.From, /@/)
+  assert.match(details.fields.To, /@/)
+  assert.equal(details.fields.Cc, 'Copy Recipient cc@example.test')
+  assert.equal(details.fields.Bcc, 'bcc@example.test')
+  assert.equal(details.fields['Reply-To'], 'reply@example.test')
+  assert.ok(details.fits, 'message details fit in the compact reader')
+
+  const press = async (key, code, windowsVirtualKeyCode) => {
+    for (const type of ['rawKeyDown', 'keyUp']) {
+      await wc.debugger.sendCommand('Input.dispatchKeyEvent', {
+        type,
+        key,
+        code,
+        windowsVirtualKeyCode,
+      })
+    }
+  }
+  await press('Escape', 'Escape', 27)
+  await waitFor(
+    () => run((selector) => document.activeElement === document.querySelector(selector), trigger),
+    'focus to return to the address line',
+  )
+  await press(' ', 'Space', 32)
+  await waitFor(() => run((selector) => !!document.querySelector(selector), popup), 'keyboard open')
+  await press('Escape', 'Escape', 27)
+  await waitFor(
+    () => run((selector) => !document.querySelector(selector), popup),
+    'details to close',
+  )
+  assert.ok(
+    await run(
+      () =>
+        document.querySelector('iframe') === window.messageDetailsFrame &&
+        window.messageDetailsFrame.checkVisibility(),
+    ),
+    'opening and closing details keeps the original message body visible',
+  )
+  console.log('Message details passed with native mouse and keyboard input')
+}
+
 async function checkComposerKeyboard(wc, run) {
   const press = async (key, windowsVirtualKeyCode, modifiers = 0) => {
     for (const type of ['rawKeyDown', 'keyUp']) {
@@ -298,6 +380,7 @@ async function main() {
       'the list uses all mailbox space at the narrow window width',
     )
     await selectThread(7, 'probe-theme')
+    await checkMessageDetails(wc, run)
     await waitFor(
       () => run(() => document.querySelector('[aria-label="Back to mailbox"]')?.offsetWidth > 0),
       'compact reader Back button',

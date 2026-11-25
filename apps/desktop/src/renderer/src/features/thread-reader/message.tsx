@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils'
 import type { ReplicaThreadMessage } from '../../../../shared/api'
 import { MessageAttachments } from './message-attachments'
 import { MessageContent } from './message-content'
+import { MessageDetails } from './message-details'
 
 export function Message({
   message: m,
@@ -36,15 +37,23 @@ export function Message({
         isDraft && onEditDraft && 'grid grid-cols-[minmax(0,1fr)_auto] items-start',
       )}
     >
-      <div className="relative">
+      <div className={cn('relative', open && 'pb-3.5')}>
         <button
           type="button"
-          className="flex w-full items-start gap-3 rounded-lg px-4 py-3.5 text-left hover:bg-muted/45"
+          className={cn(
+            'flex w-full items-start gap-3 rounded-lg py-3.5 pr-4 pl-[3.75rem] text-left hover:bg-muted/45',
+            open && 'pb-0',
+          )}
           aria-expanded={open}
           aria-controls={bodyId}
           onClick={() => setExpansion((current) => ({ open: !current.open, visited: true }))}
         >
-          <SenderAvatar accountId={m.accountId} address={m.from?.address} name={m.from?.name} />
+          <SenderAvatar
+            className="absolute top-3.5 left-4"
+            accountId={m.accountId}
+            address={m.from?.address}
+            name={m.from?.name}
+          />
           <div className="min-w-0 flex-1">
             <div className="flex items-baseline gap-2">
               <span className="truncate text-sm font-semibold">{personName(m.from)}</span>
@@ -57,15 +66,7 @@ export function Message({
                 {open ? fullDate(m.sentAt) : listDate(m.sentAt)}
               </time>
             </div>
-            {open ? (
-              <div className="truncate text-xs text-muted-foreground" title={m.from?.address}>
-                {m.from && <>{m.from.address} · </>}to{' '}
-                {[...m.to, ...m.cc].map((a) => personName(a)).join(', ') ||
-                  'undisclosed recipients'}
-              </div>
-            ) : (
-              <div className="truncate text-[13px] text-muted-foreground">{m.snippet}</div>
-            )}
+            {!open && <div className="truncate text-[13px] text-muted-foreground">{m.snippet}</div>}
           </div>
           <ChevronDown
             aria-hidden
@@ -76,6 +77,11 @@ export function Message({
             )}
           />
         </button>
+        {open && (
+          <div className={cn('mr-[2.625rem] ml-[3.75rem]', showAppearance && 'mr-[4.625rem]')}>
+            <MessageDetails message={m} />
+          </div>
+        )}
         {showAppearance && (
           <Button
             type="button"
