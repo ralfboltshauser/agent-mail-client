@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { SCREENED_OUT_LABEL } from '@amc/protocol'
+import { Hono } from 'hono'
 import { expect, it, vi } from 'vitest'
 import { DbAccountState } from '../../accounts.ts'
 import { authenticate, issueToken } from '../../auth/tokens.ts'
@@ -9,6 +10,8 @@ import { BlobStore } from '../../blobs.ts'
 import { Sealer } from '../../crypto.ts'
 import { migrate, openDatabase, schemaVersion } from '../../db/database.ts'
 import { MIGRATIONS } from '../../db/migrations.ts'
+import type { AppEnv } from '../../http/app.ts'
+import { ownerActionRoutes, senderRoutes } from '../../http/senders.ts'
 import { FakeGmail } from '../../providers/gmail/fake.ts'
 import { GmailAccountSync } from '../../providers/gmail/sync.ts'
 import { FakeImap } from '../../providers/imap/fake.ts'
@@ -64,6 +67,82 @@ async function gmailFixture() {
   while (await sync.backfillStep()) {}
   return { db, store, gmail, sync, principal: owner(db), queries: new MailQueries(db) }
 }
+
+it('records an IMAP block while the connection is busy with earlier work', async () => {
+  const db = testDb()
+  const store = new MailStore(db, new BlobStore(tempDir()))
+  const sealer = new Sealer(randomBytes(32))
+  const imap = new FakeImap()
+  imap.capabilities.set('MOVE', true)
+  const uid = imap.add('INBOX', 'Message-ID: <screen-me@example.com>')
+  db.prepare(
+    "INSERT INTO account (id, kind, address, credentials, created_at) VALUES ('a', 'imap', ?, ?, 0)",
+  ).run(mailbox, sealer.seal({}))
+  const sync = new SyncManager({
+    db,
+    store,
+    sealer,
+    log: silentLog,
+    imapClient: () => imap.client,
+    oauthClient: () => ({ clientId: '', clientSecret: '' }),
+  })
+  const queue = new Mutations(store, () => null, silentLog, {
+    imap: (account, work) => sync.organiseImap(account, work),
+    imapScreeningCapability: (account) => sync.imapScreeningCapability(account),
+  })
+  const principal = owner(db)
+  const app = new Hono<AppEnv>()
+  app.use('*', async (c, next) => {
+    c.set('principal', principal)
+    await next()
+  })
+  app.route('/senders', senderRoutes(store, queue))
+  app.route('/owner-actions', ownerActionRoutes(store, queue))
+  let release!: () => void
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let workStarted!: () => void
+  const started = new Promise<void>((resolve) => {
+    workStarted = resolve
+  })
+  const input = request('sender@example.com')
+  let earlierWork: Promise<boolean> | undefined
+  let decision: Promise<Response> | undefined
+  sync.start()
+  try {
+    await vi.waitFor(() => expect(new MailQueries(db).account('a')?.status).toBe('ready'))
+    earlierWork = sync.organiseImap('a', async () => {
+      workStarted()
+      await held
+    })
+    await started
+    decision = Promise.resolve(
+      app.request('/senders/decisions', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    )
+    await vi.waitFor(
+      async () =>
+        expect((await app.request(`/owner-actions/${input.clientActionId}`)).status).toBe(200),
+      { timeout: 300 },
+    )
+    expect((await decision).status).toBe(202)
+    expect(imap.folder('INBOX').messages.has(uid)).toBe(true)
+    release()
+    await earlierWork
+    await queue.stop()
+    await ticks(queue, 4)
+    expect(imap.folder('INBOX').messages.has(uid)).toBe(false)
+    expect(senderActionStatus(db, input.clientActionId).status).toBe('applied')
+  } finally {
+    release()
+    await Promise.all([earlierWork, decision])
+    await Promise.all([sync.stop(), queue.stop()])
+    db.close()
+  }
+})
 
 it('acknowledges an already accepted sender under the new action ID', async () => {
   const { db, store, principal } = await gmailFixture()
@@ -333,6 +412,7 @@ it.each([
     })
     const queue = new Mutations(store, () => null, silentLog, {
       imap: (account, work) => sync.organiseImap(account, work),
+      imapScreeningCapability: (account) => sync.imapScreeningCapability(account),
     })
     sync.start()
     try {
@@ -344,13 +424,13 @@ it.each([
         db.exec(
           "UPDATE account SET cursor = json_set(cursor, '$.imapMoves', json('true')) WHERE id = 'a'",
         )
-        await expect(queue.verifyScreeningCapability('a', input.clientActionId)).rejects.toThrow(
+        expect(() => queue.verifyScreeningCapability('a', input.clientActionId)).toThrow(
           /safe moves/,
         )
         expect(db.prepare('SELECT 1 FROM sender_rule').get()).toBeUndefined()
         return
       }
-      await queue.verifyScreeningCapability('a', input.clientActionId)
+      queue.verifyScreeningCapability('a', input.clientActionId)
       const { actionId } = decideSender(store, principal, input)
       if (replaceFolder) {
         const copy = imap.messageCopy.bind(imap)

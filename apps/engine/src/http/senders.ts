@@ -49,7 +49,7 @@ export function senderRoutes(store: MailStore, queue: Mutations) {
       action = decideSender(store, principal, parsed.data, true)
     } catch (error) {
       if (!(error instanceof SenderBlockVerificationRequired)) throw error
-      await queue.verifyScreeningCapability(parsed.data.accountId, parsed.data.clientActionId)
+      queue.verifyScreeningCapability(parsed.data.accountId, parsed.data.clientActionId)
       action = decideSender(store, principal, parsed.data)
     }
     queue.kick()
